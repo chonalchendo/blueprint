@@ -1,0 +1,16 @@
+[package]
+name = "bp-check"
+description = "Check runner: parse the owner's check blocks, run them at a commit, write run records."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bp-vault.workspace = true
+bp-change.workspace = true

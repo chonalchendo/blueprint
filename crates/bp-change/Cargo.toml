@@ -1,0 +1,15 @@
+[package]
+name = "bp-change"
+description = "Change domain: milestone, issue, check rows, run, claim, review, disposition, waiver; the Intents function."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bp-vault.workspace = true
