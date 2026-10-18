@@ -10,8 +10,9 @@ use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::{Id, Kind, Refusal};
 
-/// The closed set of link fields on nodes (12, the kind schemas). Every value is a path id.
-pub const LINKS: [&str; 7] = ["cites", "answers", "targets", "authorizes", "supersedes", "carries", "depends"];
+/// The closed set of link fields on nodes (12, the kind schemas). Every value is a path id. `carries` is not one:
+/// it is derived from sidecars and check blocks, never stored (13).
+pub const LINKS: [&str; 6] = ["cites", "answers", "targets", "authorizes", "supersedes", "depends"];
 
 /// Names a verb's result uses at the top level beside the header's fields, so no header may use them. The five
 /// envelope names are among them: an agent tells a refusal from a result by `code`.
