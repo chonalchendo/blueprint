@@ -109,6 +109,7 @@ name = "bp-change"
 version = "0.0.1"
 dependencies = [
  "bp-vault",
+ "serde",
 ]
 
 [[package]]
@@ -131,6 +132,9 @@ name = "bp-forge"
 version = "0.0.1"
 dependencies = [
  "bp-vault",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
