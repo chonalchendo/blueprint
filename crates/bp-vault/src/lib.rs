@@ -137,6 +137,8 @@ pub struct Counts {
     pub nodes: BTreeMap<String, usize>,
     /// Records per kind.
     pub records: BTreeMap<String, usize>,
+    /// Fenced `check` blocks across every body.
+    pub check_blocks: usize,
 }
 
 #[cfg(test)]

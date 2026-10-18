@@ -8,6 +8,7 @@
 //! an in-place edit, and a record added or removed by hand under a node. The census (`list --count-only`) hashes
 //! every file whatever the fingerprint says, so it is the read that reconciles them.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -20,7 +21,7 @@ use crate::{Counts, File, Kind, Refusal, Vault};
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
 /// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
 /// bump to the same number still differ.
-const SCHEMA: i64 = 3;
+const SCHEMA: i64 = 4;
 
 fn schema() -> String {
     format!("{SCHEMA}-{}", &blake3::hash(TABLES.as_bytes()).to_hex()[..12])
@@ -39,6 +40,10 @@ create table unresolved (src text not null, field text not null, text text not n
 create index unresolved_src on unresolved (src);
 create table aliases (alias text not null, id text not null);
 create index aliases_alias on aliases (alias);
+create table checks (src text not null, runner text not null, name text);
+create index checks_src on checks (src);
+create table findings (src text not null, kind text not null, detail text not null);
+create index findings_src on findings (src);
 create index links_src on links (src);
 create index links_dst on links (dst);
 create virtual table fts using fts5 (id, title, body, tokenize = 'unicode61');
@@ -188,6 +193,7 @@ impl Index {
             let mut c = Counts {
                 files: self.conn.query_row("select count(*) from files", [], count)?,
                 no_header: self.conn.query_row("select count(*) from files where class = 'asset'", [], count)?,
+                check_blocks: self.conn.query_row("select count(*) from checks", [], count)?,
                 ..Counts::default()
             };
             for (table, into) in [("nodes", &mut c.nodes), ("records", &mut c.records)] {
@@ -207,6 +213,15 @@ impl Index {
         let run = || -> rusqlite::Result<Vec<(String, Option<String>, usize)>> {
             let mut st = self.conn.prepare("select kind, status, count(*) from nodes group by kind, status")?;
             st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, count_at(r, 2)?)))?.collect()
+        };
+        run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
+    }
+
+    /// Body findings per kind: `unclosed_fence`, `duplicate_heading`, `check_unnamed`.
+    pub fn body_findings(&self) -> Result<BTreeMap<String, usize>, Refusal> {
+        let run = || -> rusqlite::Result<BTreeMap<String, usize>> {
+            let mut st = self.conn.prepare("select kind, count(*) from findings group by kind")?;
+            st.query_map([], |r| Ok((r.get(0)?, count_at(r, 1)?)))?.collect()
         };
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
@@ -354,6 +369,14 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     for text in &file.body.unresolved {
         st.execute(params![id, "body", text])?;
     }
+    let mut st = tx.prepare_cached("insert into checks values (?1, ?2, ?3)")?;
+    for c in &file.body.checks {
+        st.execute(params![id, c.runner, c.attrs.get("name")])?;
+    }
+    let mut st = tx.prepare_cached("insert into findings values (?1, ?2, ?3)")?;
+    for f in &file.body.findings {
+        st.execute(params![id, f.kind, f.detail])?;
+    }
     Ok(())
 }
 
@@ -363,7 +386,9 @@ fn remove(tx: &rusqlite::Transaction, id: &str) -> rusqlite::Result<()> {
         tx.execute(&format!("delete from {table} where id = ?1"), [id])?;
     }
     tx.execute("delete from links where src = ?1", [id])?;
-    tx.execute("delete from unresolved where src = ?1", [id])?;
+    for table in ["unresolved", "checks", "findings"] {
+        tx.execute(&format!("delete from {table} where src = ?1"), [id])?;
+    }
     tx.execute("delete from aliases where id = ?1", [id])?;
     Ok(())
 }
