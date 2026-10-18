@@ -15,3 +15,7 @@ workspace = true
 bp-vault.workspace = true
 bp-operation.workspace = true
 bp-forge.workspace = true
+
+# The edge is declared ahead of its first use, so the crate rule holds it from the start.
+[package.metadata.cargo-machete]
+ignored = ["bp-vault", "bp-operation", "bp-forge"]

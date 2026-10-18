@@ -150,10 +150,10 @@ mod tests {
         }
     }
 
-    fn append(dir: &Path, rel: &str, text: &str) {
+    /// Adds a line under `[dependencies]`: appending would land in whatever table ends the manifest.
+    fn insert_dependency(dir: &Path, rel: &str, line: &str) {
         let p = dir.join(rel);
-        let mut s = std::fs::read_to_string(&p).unwrap();
-        s.push_str(text);
+        let s = std::fs::read_to_string(&p).unwrap().replace("[dependencies]\n", &format!("[dependencies]\n{line}\n"));
         std::fs::write(&p, s).unwrap();
     }
 
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn deps_refuses_an_edge_outside_the_rule() {
         let dir = copy_workspace();
-        append(dir.path(), "crates/bp-view/Cargo.toml", "bp-check.workspace = true\n");
+        insert_dependency(dir.path(), "crates/bp-view/Cargo.toml", "bp-check.workspace = true");
         let violations = deps(dir.path()).unwrap();
         assert_eq!(violations, vec!["edge outside the rule: bp-view -> bp-check".to_string()]);
     }
@@ -186,10 +186,7 @@ mod tests {
     #[test]
     fn deps_refuses_a_reserved_external_dependency() {
         let dir = copy_workspace();
-        // Under [dependencies], not appended after [dev-dependencies], which the rule exempts.
-        let p = dir.path().join("crates/bp-vault/Cargo.toml");
-        let s = std::fs::read_to_string(&p).unwrap().replace("[dependencies]\n", "[dependencies]\ntokio = \"1\"\n");
-        std::fs::write(&p, s).unwrap();
+        insert_dependency(dir.path(), "crates/bp-vault/Cargo.toml", "tokio = \"1\"");
         let violations = deps(dir.path()).unwrap();
         assert_eq!(violations, vec!["external dependency reserved for bp-view: bp-vault -> tokio".to_string()]);
     }

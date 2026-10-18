@@ -1,7 +1,4 @@
-//! One markdown file of the vault: its id, content hash, header and body. A node or a record by path shape; a
-//! file without a header is an asset.
-
-use std::path::Path;
+//! One markdown file of the vault: its id, content hash, header and body. A file without a header is an asset.
 
 use crate::{Body, Header, Id, Refusal};
 
@@ -12,94 +9,105 @@ pub struct File {
     pub id: Id,
     /// The blake3 hash of the bytes on disk, hex.
     pub hash: String,
-    /// The header, when the file starts with `---`.
+    /// The header, when the file starts with a `---` line.
     pub header: Option<Header>,
     /// The body: everything after the header.
     pub body: Body,
 }
 
 impl File {
-    /// Reads and parses the file this id names under `root`. Refuses `no_node` when it is not there.
-    pub fn read(root: &Path, id: &Id) -> Result<Self, Refusal> {
-        let path = id.path(root);
-        let bytes = std::fs::read(&path).map_err(|_| {
-            Refusal::new("no_node", id.as_str(), "an id names a markdown file under the vault root", "bp list <kind>")
-        })?;
-        let text = String::from_utf8_lossy(&bytes);
-        let mut file = Self::parse(id.clone(), &text)?;
-        file.hash = blake3::hash(&bytes).to_hex().to_string();
-        Ok(file)
-    }
-
-    /// Parses the text of a file. The hash is of the text; `read` replaces it with the hash of the bytes.
-    pub fn parse(id: Id, text: &str) -> Result<Self, Refusal> {
-        let (header, body) = match text.strip_prefix("---\n") {
-            Some(rest) => {
-                let end = rest.find("\n---\n").or_else(|| rest.strip_suffix("\n---").map(str::len));
-                let Some(end) = end else {
-                    return Err(Refusal::new(
-                        "bad_header",
-                        id.as_str(),
-                        "a header is a YAML map between --- lines with a kind",
-                        "fix the header: the closing --- is missing",
-                    ));
-                };
-                let yaml = &rest[..end];
-                let body = rest.get(end + 5..).unwrap_or("");
-                (Some(Header::parse(yaml, id.as_str())?), body)
-            }
-            None => (None, text),
+    /// Parses a file's bytes. Refuses non-UTF-8, an unclosed header, a header outside its kind's schema, a path that
+    /// does not fit the kind, and a record whose `under` is not the parent its path names.
+    pub fn from_bytes(id: Id, bytes: &[u8]) -> Result<Self, Refusal> {
+        let hash = blake3::hash(bytes).to_hex().to_string();
+        let text = std::str::from_utf8(bytes).map_err(|e| Refusal::schema(id.as_str(), format!("not UTF-8: {e}")))?;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n");
+        let Some(rest) = text.strip_prefix("---\n") else {
+            return Ok(Self { id, hash, header: None, body: Body::parse(&text) });
         };
-        Ok(Self { hash: blake3::hash(text.as_bytes()).to_hex().to_string(), id, header, body: Body::parse(body) })
-    }
-
-    /// A record: a headed file at a record path.
-    pub fn is_record(&self) -> bool {
-        self.header.is_some() && self.id.is_record()
-    }
-
-    /// A node: a headed file at a node path.
-    pub fn is_node(&self) -> bool {
-        self.header.is_some() && !self.id.is_record()
+        // The header closes at the first line that is exactly `---`.
+        let mut offset = 0;
+        let mut close = None;
+        for line in rest.split_inclusive('\n') {
+            if line.trim_end_matches('\n') == "---" {
+                close = Some((offset, offset + line.len()));
+                break;
+            }
+            offset += line.len();
+        }
+        let Some((end, body_at)) = close else {
+            return Err(Refusal::schema(id.as_str(), "the closing --- is missing"));
+        };
+        let header = Header::parse(&rest[..end], id.as_str())?;
+        if !header.kind.fits(&id) {
+            return Err(Refusal::schema(id.as_str(), format!("the path does not fit the kind `{}`", header.kind)));
+        }
+        let parent = header.kind.parent(&id);
+        if header.kind.is_record() && header.under != parent {
+            let want = parent.as_ref().map_or("no parent", Id::as_str);
+            return Err(Refusal::schema(id.as_str(), format!("a {} record names `under: {want}`", header.kind)));
+        }
+        Ok(Self { id, hash, header: Some(header), body: Body::parse(&rest[body_at..]) })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Code, Kind};
+
+    fn parse(id: &str, text: &str) -> Result<File, Refusal> {
+        File::from_bytes(Id::parse(id).unwrap(), text.as_bytes())
+    }
 
     #[test]
     fn splits_header_and_body() {
-        let f =
-            File::parse(Id::new("projects/bp/issues/x"), "---\nkind: issue\ntitle: T\n---\n\nLead.\n\n## A\n\nText.\n")
-                .unwrap();
-        assert_eq!(f.header.as_ref().unwrap().kind, "issue");
+        let f = parse("projects/bp/issues/x", "---\nkind: issue\ntitle: T\n---\n\nLead.\n\n## A\n\nText.\n").unwrap();
+        assert_eq!(f.header.as_ref().unwrap().kind, Kind::Issue);
         assert_eq!(f.body.lead, "Lead.");
-        assert!(f.is_node());
         assert_eq!(f.hash.len(), 64);
     }
 
     #[test]
+    fn crlf_and_bom_read_like_lf() {
+        let f = parse("projects/bp/issues/x", "\u{feff}---\r\nkind: issue\r\n---\r\n\r\nLead.\r\n").unwrap();
+        assert_eq!(f.body.lead, "Lead.");
+    }
+
+    #[test]
     fn a_file_without_a_header_is_an_asset() {
-        let f = File::parse(Id::new("shared/assets/glossary"), "# Glossary\n").unwrap();
-        assert!(f.header.is_none());
-        assert!(!f.is_node() && !f.is_record());
+        assert!(parse("shared/assets/glossary", "# Glossary\n").unwrap().header.is_none());
     }
 
     #[test]
-    fn a_header_only_record_parses() {
-        let f = File::parse(
-            Id::new("projects/bp/issues/x/claims/s"),
-            "---\nkind: claim\nunder: projects/bp/issues/x\n---\n",
-        )
-        .unwrap();
-        assert!(f.is_record());
+    fn a_record_names_its_parent() {
+        let f = parse("projects/bp/issues/x/claims/s", "---\nkind: claim\nunder: projects/bp/issues/x\n---\n").unwrap();
         assert_eq!(f.body.text, "");
+        let e =
+            parse("projects/bp/issues/x/claims/s", "---\nkind: claim\nunder: projects/bp/issues/y\n---\n").unwrap_err();
+        assert!(e.fix.contains("projects/bp/issues/x"), "{}", e.fix);
+        assert!(parse("projects/bp/handoffs/h", "---\nkind: handoff\nunder: projects/bp/project\n---\n").is_ok());
     }
 
     #[test]
-    fn refuses_an_unclosed_header() {
-        let e = File::parse(Id::new("projects/bp/issues/x"), "---\nkind: issue\n").unwrap_err();
-        assert_eq!(e.code, "bad_header");
+    fn refuses_what_breaks_the_schema() {
+        for (id, text) in [
+            ("projects/bp/issues/x", "---\nkind: issue\n"),
+            ("projects/bp/issues/x", "---\n---\n"),
+            ("projects/bp/milestones/x", "---\nkind: issue\n---\n"),
+            ("projects/bp/issues/x/runs/r", "---\nkind: claim\nunder: projects/bp/issues/x\n---\n"),
+        ] {
+            assert_eq!(parse(id, text).unwrap_err().code, Code::SchemaInvalid, "{text}");
+        }
+        let e = File::from_bytes(Id::parse("projects/bp/issues/x").unwrap(), b"---\nkind: \xff\n---\n").unwrap_err();
+        assert!(e.fix.contains("UTF-8"));
+    }
+
+    #[test]
+    fn a_body_line_of_dashes_is_not_the_header_close() {
+        let f =
+            parse("projects/bp/issues/x", "---\nkind: issue\ntitle: a --- b\n---\nLead.\n\n---\n\nMore.\n").unwrap();
+        assert_eq!(f.header.unwrap().title.as_deref(), Some("a --- b"));
+        assert!(f.body.text.contains("More."));
     }
 }

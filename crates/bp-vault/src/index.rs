@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{Counts, File, Id, Refusal, Vault};
+use crate::{Counts, File, Refusal, Vault};
 
 /// Bump on any change to the tables or to what the parser puts in them; a mismatch rebuilds from nothing.
 const SCHEMA: i64 = 2;
@@ -29,6 +29,8 @@ create index nodes_kind on nodes (kind, project, status);
 create table records (id text primary key, kind text not null, project text, under text, header text not null);
 create index records_under on records (under, kind);
 create table links (src text not null, type text not null, dst text not null);
+create table unresolved (src text not null, field text not null, text text not null);
+create index unresolved_src on unresolved (src);
 create index links_src on links (src);
 create index links_dst on links (dst);
 create virtual table fts using fts5 (id, title, body, tokenize = 'unicode61');
@@ -73,10 +75,10 @@ pub struct Hit {
 }
 
 /// The filters of `list`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Filter<'a> {
-    /// The kind; required.
-    pub kind: &'a str,
+    /// The kind.
+    pub kind: crate::Kind,
     /// Exact status.
     pub status: Option<&'a str>,
     /// The project segment of the id.
@@ -162,9 +164,7 @@ impl Index {
                 continue;
             }
             remove(&tx, id.as_str())?;
-            let mut file = File::parse(id, &String::from_utf8_lossy(&bytes))?;
-            file.hash = hash;
-            insert(&tx, &file)?;
+            insert(&tx, &File::from_bytes(id, &bytes)?)?;
         }
         for gone in known.keys() {
             remove(&tx, gone)?;
@@ -194,13 +194,28 @@ impl Index {
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
+    /// Nodes per kind and status, for the census's status check.
+    pub fn statuses(&self) -> Result<Vec<(String, Option<String>, usize)>, Refusal> {
+        let run = || -> rusqlite::Result<Vec<(String, Option<String>, usize)>> {
+            let mut st = self.conn.prepare("select kind, status, count(*) from nodes group by kind, status")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, count_at(r, 2)?)))?.collect()
+        };
+        run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
+    }
+
+    /// Link targets that are not path ids, across headers and bodies.
+    pub fn unresolved(&self) -> Result<usize, Refusal> {
+        self.conn
+            .query_row("select count(*) from unresolved", [], count)
+            .map_err(|e| failed(Path::new(".bp/index.db"), &e))
+    }
+
     /// Rows of one kind, ordered by id, at most `limit`, and the total before the limit. One read transaction, so
     /// the total and the rows come from the same refresh.
     pub fn list(&self, f: &Filter) -> Result<(Vec<Row>, usize), Refusal> {
         let run = || -> rusqlite::Result<(Vec<Row>, usize)> {
             let tx = self.conn.unchecked_transaction()?;
-            let is_record: bool =
-                tx.query_row("select exists (select 1 from records where kind = ?1)", [f.kind], |r| r.get(0))?;
+            let is_record = f.kind.is_record();
             let (from, cols) = if is_record {
                 ("records", "id, kind, null, null, under")
             } else {
@@ -210,16 +225,16 @@ impl Index {
             let status = if is_record { "?2 is null" } else { "(?2 is null or status = ?2)" };
             let filter =
                 format!("where kind = ?1 and {status} and (?3 is null or project = ?3) and (?4 is null or under = ?4)");
-            let under = f.under.map(|u| Id::new(u).as_str().to_string());
+            let under = f.under;
             let limit = i64::try_from(f.limit).unwrap_or(i64::MAX);
             let total = tx.query_row(
                 &format!("select count(*) from {from} {filter}"),
-                params![f.kind, f.status, f.project, under],
+                params![f.kind.as_str(), f.status, f.project, under],
                 count,
             )?;
             let mut st = tx.prepare(&format!("select {cols} from {from} {filter} order by id limit ?5"))?;
             let rows = st
-                .query_map(params![f.kind, f.status, f.project, under, limit], |r| {
+                .query_map(params![f.kind.as_str(), f.status, f.project, under, limit], |r| {
                     Ok(Row { id: r.get(0)?, kind: r.get(1)?, title: r.get(2)?, status: r.get(3)?, under: r.get(4)? })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
@@ -238,13 +253,7 @@ impl Index {
     ) -> Result<Vec<Hit>, Refusal> {
         let quoted: Vec<String> = tokens(terms).map(|t| format!("\"{t}\"")).collect();
         if quoted.is_empty() {
-            return Err(Refusal {
-                code: "usage",
-                subject: terms.join(" "),
-                rule: "a search names at least one word",
-                fix: "bp search <words>".into(),
-                exit: 4,
-            });
+            return Err(Refusal::usage("a search names at least one word"));
         }
         let run = |query: &str| -> rusqlite::Result<Vec<Hit>> {
             // Rank and limit first: SQLite evaluates a select list for every row it sorts, and a snippet is the
@@ -293,18 +302,19 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
         return Ok(());
     };
     let json = Value::Object(header.to_json()).to_string();
-    let under = header.under.as_ref().map(Id::as_str);
-    if file.id.is_record() {
+    let under = header.under.as_ref().map(crate::Id::as_str);
+    let kind = header.kind.as_str();
+    if header.kind.is_record() {
         tx.execute("insert into files values (?1, ?2, 'record')", params![id, file.hash])?;
         tx.execute(
             "insert into records values (?1, ?2, ?3, ?4, ?5)",
-            params![id, header.kind, file.id.project(), under, json],
+            params![id, kind, file.id.project(), under, json],
         )?;
     } else {
         tx.execute("insert into files values (?1, ?2, 'node')", params![id, file.hash])?;
         tx.execute(
             "insert into nodes (id, kind, title, status, project, under, header) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, header.kind, header.title, header.status, file.id.project(), under, json],
+            params![id, kind, header.title, header.status, file.id.project(), under, json],
         )?;
         tx.execute(
             "insert into fts (rowid, id, title, body) values (last_insert_rowid(), ?1, ?2, ?3)",
@@ -323,6 +333,13 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     for d in &file.body.links {
         st.execute(params![id, "body", d.as_str()])?;
     }
+    let mut st = tx.prepare_cached("insert into unresolved values (?1, ?2, ?3)")?;
+    for u in &header.unresolved {
+        st.execute(params![id, u.field, u.text])?;
+    }
+    for text in &file.body.unresolved {
+        st.execute(params![id, "body", text])?;
+    }
     Ok(())
 }
 
@@ -332,6 +349,7 @@ fn remove(tx: &rusqlite::Transaction, id: &str) -> rusqlite::Result<()> {
         tx.execute(&format!("delete from {table} where id = ?1"), [id])?;
     }
     tx.execute("delete from links where src = ?1", [id])?;
+    tx.execute("delete from unresolved where src = ?1", [id])?;
     Ok(())
 }
 
@@ -392,7 +410,7 @@ fn head(root: &Path) -> Option<String> {
 }
 
 fn failed(subject: &Path, e: &dyn std::fmt::Display) -> Refusal {
-    Refusal::failed("could_not_run", subject.display().to_string(), format!("{e}; delete .bp/index.db and rerun"))
+    Refusal::failed(subject.display().to_string(), format!("{e}; delete .bp/index.db and rerun"))
 }
 
 #[cfg(test)]
@@ -400,7 +418,7 @@ mod tests {
     use super::*;
 
     fn write(root: &Path, id: &str, text: &str) {
-        let path = Id::new(id).path(root);
+        let path = crate::Id::parse(id).unwrap().path(root);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
@@ -423,8 +441,8 @@ mod tests {
         (dir, v)
     }
 
-    fn all(kind: &str) -> Filter<'_> {
-        Filter { kind, limit: 50, ..Filter::default() }
+    fn all(kind: &str) -> Filter<'static> {
+        Filter { kind: kind.parse().unwrap(), status: None, project: None, under: None, limit: 50 }
     }
 
     #[test]
@@ -438,7 +456,7 @@ mod tests {
         assert_eq!(rows[0].title.as_deref(), Some("Walk budget"));
         let (rows, total) = index.list(&Filter { limit: 1, ..all("issue") }).unwrap();
         assert_eq!((rows.len(), total), (1, 3));
-        let (rows, _) = index.list(&Filter { under: Some("[[projects/bp/issues/0001.a]]"), ..all("claim") }).unwrap();
+        let (rows, _) = index.list(&Filter { under: Some("projects/bp/issues/0001.a"), ..all("claim") }).unwrap();
         assert_eq!(rows[0].under.as_deref(), Some("projects/bp/issues/0001.a"));
         assert!(index.list(&Filter { status: Some("open"), ..all("claim") }).unwrap().0.is_empty());
         let c = index.counts().unwrap();
@@ -468,7 +486,7 @@ mod tests {
         assert_eq!(count(&v), 3);
         write(&v.root, "projects/bp/issues/0003.d", &issue("New", "open"));
         assert_eq!(count(&v), 4);
-        std::fs::remove_file(Id::new("projects/bp/issues/0002.b").path(&v.root)).unwrap();
+        std::fs::remove_file(crate::Id::parse("projects/bp/issues/0002.b").unwrap().path(&v.root)).unwrap();
         assert_eq!(count(&v), 3);
         // An in-place edit is seen when the head moves, as every tool write commits.
         std::fs::create_dir_all(v.root.join(".git")).unwrap();
@@ -486,7 +504,7 @@ mod tests {
         let (_d, v) = vault();
         let claims = |v: &Vault| Index::open(v).unwrap().list(&all("claim")).unwrap().1;
         assert_eq!(claims(&v), 1);
-        std::fs::remove_file(Id::new("projects/bp/issues/0001.a/claims/s1").path(&v.root)).unwrap();
+        std::fs::remove_file(crate::Id::parse("projects/bp/issues/0001.a/claims/s1").unwrap().path(&v.root)).unwrap();
         assert_eq!(claims(&v), 1, "a record removed by hand stays until a commit or the census");
         let mut index = Index::open(&v).unwrap();
         index.reconcile(&v).unwrap();
@@ -510,7 +528,7 @@ mod tests {
         let (_d, v) = vault();
         Index::open(&v).unwrap();
         write(&v.root, "projects/bp/issues/0003.d", &issue("New", "open"));
-        std::fs::remove_file(Id::new("projects/bp/issues/0002.b").path(&v.root)).unwrap();
+        std::fs::remove_file(crate::Id::parse("projects/bp/issues/0002.b").unwrap().path(&v.root)).unwrap();
         let refreshed = dump(&Index::open(&v).unwrap());
         std::fs::remove_file(v.root.join(".bp/index.db")).unwrap();
         assert_eq!(refreshed, dump(&Index::open(&v).unwrap()));
@@ -541,7 +559,7 @@ mod tests {
         let (_d, v) = vault();
         write(&v.root, "projects/bp/issues/0009.bad", "---\ntitle: no kind\n---\n");
         let e = Index::open(&v).err().unwrap();
-        assert_eq!((e.code, e.exit), ("bad_header", 2));
+        assert_eq!((e.code, e.exit), (crate::Code::SchemaInvalid, 2));
     }
 
     #[test]
