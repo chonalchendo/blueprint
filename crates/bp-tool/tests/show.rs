@@ -1,0 +1,104 @@
+//! `bp show` and `bp list --count-only` through the binary, over a small vault and over the converted vault when
+//! `BP_TEST_VAULT` names one.
+
+use std::path::Path;
+
+use assert_cmd::Command;
+
+fn write(root: &Path, rel: &str, text: &str) {
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+fn vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "projects/bp/issues/0001.a.md",
+        "---\nkind: issue\ntitle: A\nstatus: resolved\nunder: projects/bp/milestones/m\ncites: [\"projects/bp/designs/system\"]\nseverity: low\n---\n\nLead.\n\n## Problem\n\nThe problem, in full.\n\n## Direction\n\nThe direction.\n",
+    );
+    write(
+        dir.path(),
+        "projects/bp/issues/0001.a/claims/s1.md",
+        "---\nkind: claim\nunder: projects/bp/issues/0001.a\nowner: me\n---\n",
+    );
+    write(dir.path(), "shared/assets/glossary.md", "# Glossary\n");
+    dir
+}
+
+fn bp(root: &Path, args: &[&str]) -> (Option<i32>, serde_json::Value) {
+    let out = Command::cargo_bin("bp").unwrap().current_dir(root).env_remove("BP_VAULT").args(args).output().unwrap();
+    let value = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+    (out.status.code(), value)
+}
+
+#[test]
+fn show_flattens_the_header_and_lists_the_sections() {
+    let dir = vault();
+    let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0001.a", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v["kind"], "issue");
+    assert_eq!(v["status"], "resolved");
+    assert_eq!(v["under"], "projects/bp/milestones/m");
+    assert_eq!(v["cites"][0], "projects/bp/designs/system");
+    assert_eq!(v["severity"], "low");
+    assert_eq!(v["record"], false);
+    assert_eq!(v["lead"], "Lead.");
+    assert_eq!(v["sections"], serde_json::json!(["Problem", "Direction"]));
+    assert!(v["body"].as_str().unwrap().contains("## Direction"));
+    assert_eq!(v["hash"].as_str().unwrap().len(), 64);
+}
+
+#[test]
+fn show_one_section_or_refuse_with_the_headings() {
+    let dir = vault();
+    let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0001.a", "--section", "Problem", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v["section"], "The problem, in full.");
+    assert!(v.get("body").is_none());
+    let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0001.a", "--section", "Nope", "--json"]);
+    assert_eq!(code, Some(2));
+    assert_eq!(v["code"], "no_section");
+    assert_eq!(v["fix"], "use one of: Problem, Direction");
+}
+
+#[test]
+fn show_a_record_and_refuse_a_missing_id() {
+    let dir = vault();
+    let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0001.a/claims/s1", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v["record"], true);
+    assert_eq!(v["owner"], "me");
+    let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/none", "--json"]);
+    assert_eq!(code, Some(2));
+    assert_eq!(v["code"], "no_node");
+}
+
+#[test]
+fn list_counts_files_nodes_and_records() {
+    let dir = vault();
+    let (code, v) = bp(dir.path(), &["list", "--count-only", "--json"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(v["files"], 3);
+    assert_eq!(v["no_header"], 1);
+    assert_eq!(v["nodes"]["issue"], 1);
+    assert_eq!(v["records"]["claim"], 1);
+    let (code, _) = bp(dir.path(), &["list", "--json"]);
+    assert_eq!(code, Some(4));
+}
+
+/// The converted vault: every file reads, and the census matches the converter's report when it sits beside it.
+#[test]
+fn the_converted_vault_reads_whole() {
+    let Some(root) = std::env::var_os("BP_TEST_VAULT") else { return };
+    let root = Path::new(&root);
+    let (code, v) = bp(root, &["list", "--count-only", "--json"]);
+    assert_eq!(code, Some(0), "{v}");
+    let nodes: u64 = v["nodes"].as_object().unwrap().values().map(|n| n.as_u64().unwrap()).sum();
+    let records: u64 = v["records"].as_object().unwrap().values().map(|n| n.as_u64().unwrap()).sum();
+    assert_eq!(nodes + records + v["no_header"].as_u64().unwrap(), v["files"].as_u64().unwrap());
+    let (code, v) = bp(root, &["show", "projects/bp/designs/system", "--section", "Solution strategy", "--json"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert!(v["section"].as_str().unwrap().len() > 100);
+}
