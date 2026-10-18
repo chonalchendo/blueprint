@@ -60,7 +60,7 @@ fn show_one_section_or_refuse_with_the_headings() {
     let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0001.a", "--section", "Nope", "--json"]);
     assert_eq!(code, Some(2));
     assert_eq!(v["code"], "no_section");
-    assert_eq!(v["fix"], "use one of: Problem, Direction");
+    assert_eq!(v["fix"], "bp show projects/bp/issues/0001.a --no-body; the headings are: Problem, Direction");
 }
 
 #[test]
@@ -184,5 +184,8 @@ fn a_duplicate_heading_is_a_finding_and_its_section_refuses() {
     let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0003.c", "--section", "Check", "--json"]);
     assert_eq!(code, Some(2), "{v}");
     assert_eq!(v["code"], "no_section");
-    assert!(v["fix"].as_str().unwrap().contains("more than once"));
+    assert_eq!(v["fix"], "bp show projects/bp/issues/0003.c --json");
+    let (_, v) = bp(dir.path(), &["show", "projects/bp/issues/0003.c", "--json"]);
+    let kinds: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["duplicate_heading", "unclosed_fence"]);
 }

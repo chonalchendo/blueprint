@@ -16,7 +16,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{Counts, File, Kind, Refusal, Vault};
+use crate::{Counts, File, FindingKind, Kind, Refusal, Vault};
 
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
 /// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
@@ -40,9 +40,9 @@ create table unresolved (src text not null, field text not null, text text not n
 create index unresolved_src on unresolved (src);
 create table aliases (alias text not null, id text not null);
 create index aliases_alias on aliases (alias);
-create table checks (src text not null, runner text not null, name text);
+create table checks (src text not null);
 create index checks_src on checks (src);
-create table findings (src text not null, kind text not null, detail text not null);
+create table findings (src text not null, kind text not null);
 create index findings_src on findings (src);
 create index links_src on links (src);
 create index links_dst on links (dst);
@@ -217,13 +217,22 @@ impl Index {
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
-    /// Body findings per kind: `unclosed_fence`, `duplicate_heading`, `check_unnamed`.
-    pub fn body_findings(&self) -> Result<BTreeMap<String, usize>, Refusal> {
-        let run = || -> rusqlite::Result<BTreeMap<String, usize>> {
+    /// Body findings per kind, every kind present, zero or not.
+    ///
+    /// # Panics
+    ///
+    /// Never: the index stores only kinds of the closed set.
+    pub fn body_findings(&self) -> Result<BTreeMap<&'static str, usize>, Refusal> {
+        let mut counts: BTreeMap<&'static str, usize> = FindingKind::ALL.iter().map(|k| (k.as_str(), 0)).collect();
+        let run = || -> rusqlite::Result<Vec<(String, usize)>> {
             let mut st = self.conn.prepare("select kind, count(*) from findings group by kind")?;
             st.query_map([], |r| Ok((r.get(0)?, count_at(r, 1)?)))?.collect()
         };
-        run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
+        for (kind, n) in run().map_err(|e| failed(Path::new(".bp/index.db"), &e))? {
+            let kind: FindingKind = kind.parse().expect("the index stores closed finding kinds");
+            counts.insert(kind.as_str(), n);
+        }
+        Ok(counts)
     }
 
     /// Links that resolve to no file and no alias (contract code `unresolved_link`): targets that are not path ids,
@@ -369,13 +378,13 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     for text in &file.body.unresolved {
         st.execute(params![id, "body", text])?;
     }
-    let mut st = tx.prepare_cached("insert into checks values (?1, ?2, ?3)")?;
-    for c in &file.body.checks {
-        st.execute(params![id, c.runner, c.attrs.get("name")])?;
+    let mut st = tx.prepare_cached("insert into checks values (?1)")?;
+    for _ in &file.body.checks {
+        st.execute([id])?;
     }
-    let mut st = tx.prepare_cached("insert into findings values (?1, ?2, ?3)")?;
+    let mut st = tx.prepare_cached("insert into findings values (?1, ?2)")?;
     for f in &file.body.findings {
-        st.execute(params![id, f.kind, f.detail])?;
+        st.execute([id, f.kind.as_str()])?;
     }
     Ok(())
 }
@@ -581,6 +590,8 @@ mod tests {
         let (_d, v) = vault();
         Index::open(&v).unwrap();
         write(&v.root, "projects/bp/issues/0003.d", &issue("New", "open"));
+        let body = "---\nkind: issue\ntitle: E\nstatus: open\naliases: [old.e]\ncites: ['[[x.y]]']\n---\n\n## A\n\n```check shell {name=one}\ntrue\n```\n\n## A\n";
+        write(&v.root, "projects/bp/issues/0004.e", body);
         std::fs::remove_file(crate::Id::parse("projects/bp/issues/0002.b").unwrap().path(&v.root)).unwrap();
         let refreshed = dump(&Index::open(&v).unwrap());
         std::fs::remove_file(v.root.join(".bp/index.db")).unwrap();
@@ -594,10 +605,14 @@ mod tests {
             ("records", "id, kind, project, under, header"),
             ("links", "src, type, dst"),
             ("fts", "id, title, body"),
+            ("unresolved", "src, field, text"),
+            ("aliases", "alias, id"),
+            ("checks", "src"),
+            ("findings", "src, kind"),
         ];
         let mut out = Vec::new();
         for (table, cols) in tables {
-            let mut st = index.conn.prepare(&format!("select {cols} from {table} order by 1, 2, 3")).unwrap();
+            let mut st = index.conn.prepare(&format!("select {cols} from {table} order by {cols}")).unwrap();
             let n = st.column_count();
             let rows = st
                 .query_map([], |r| (0..n).map(|i| r.get::<_, Option<String>>(i)).collect::<rusqlite::Result<Vec<_>>>())

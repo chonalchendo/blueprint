@@ -161,20 +161,32 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     m.insert("hash".into(), file.hash.clone().into());
     m.extend(header.to_json());
     m.insert("lead".into(), file.body.lead.clone().into());
+    if !file.body.findings.is_empty() {
+        m.insert("findings".into(), serde_json::to_value(&file.body.findings).expect("a plain struct serialises"));
+    }
     let headings: Vec<&str> = file.body.sections.iter().map(|s| s.heading.as_str()).collect();
     if let Some(heading) = &show.section {
         let refuse = |fix: String| {
             Refusal::new(
                 Code::NoSection,
                 format!("{id}#{heading}"),
-                "a section is one `## ` heading of the body, matched exactly",
+                "a section is one top-level `## ` heading of the body, matched as written",
                 fix,
             )
         };
         let section = match file.body.sections_named(heading)[..] {
             [one] => one,
-            [] => return Err(refuse(format!("use one of: {}", headings.join(", ")))),
-            _ => return Err(refuse("the heading appears more than once; rename one, or read the whole body".into())),
+            [] => {
+                let mut unique: Vec<&str> = Vec::new();
+                for h in &headings {
+                    if !unique.contains(h) {
+                        unique.push(h);
+                    }
+                }
+                return Err(refuse(format!("bp show {id} --no-body; the headings are: {}", unique.join(", "))));
+            }
+            // Two sections share the heading: the whole body is the only read that holds both.
+            _ => return Err(refuse(format!("bp show {id} --json"))),
         };
         m.insert("section".into(), section.text.clone().into());
     } else {
