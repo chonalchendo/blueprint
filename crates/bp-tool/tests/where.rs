@@ -21,7 +21,7 @@ fn where_inside_a_project() {
     assert!(out.status.success());
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["project"], "bp");
-    assert_eq!(v["contract"], 1);
+    assert_eq!(v["contract_version"], 1);
     // The process reports its canonical working directory; macOS puts temp dirs behind a symlink.
     let reported = std::fs::canonicalize(v["vault"].as_str().unwrap()).unwrap();
     assert_eq!(reported, std::fs::canonicalize(dir.path()).unwrap());

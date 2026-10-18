@@ -5,6 +5,7 @@ mod body;
 mod file;
 mod header;
 mod id;
+mod index;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ pub use body::{Body, Check, Section};
 pub use file::File;
 pub use header::{Header, LINKS};
 pub use id::Id;
+pub use index::{Filter, Hit, Index, Row};
 
 /// The contract version every `--json` result carries. A breaking change to a verb's result bumps it.
 pub const CONTRACT: u32 = 1;
@@ -39,6 +41,11 @@ impl Refusal {
     /// Builds a refusal with exit code 2.
     pub fn new(code: &'static str, subject: impl Into<String>, rule: &'static str, fix: impl Into<String>) -> Self {
         Self { code, subject: subject.into(), rule, fix: fix.into(), exit: 2 }
+    }
+
+    /// Builds the envelope for exit code 1: the tool could not run, and no rule refused.
+    pub fn failed(code: &'static str, subject: impl Into<String>, fix: impl Into<String>) -> Self {
+        Self { code, subject: subject.into(), rule: "the tool could not run", fix: fix.into(), exit: 1 }
     }
 }
 
