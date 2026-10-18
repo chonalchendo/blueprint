@@ -5,7 +5,14 @@ use std::process::ExitCode;
 use clap::Parser;
 
 fn main() -> ExitCode {
-    let cli = bp_tool::Cli::parse();
+    // Clap exits 2 on a usage error; the contract reserves 2 for a refusal and gives usage 4.
+    let cli = match bp_tool::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            return ExitCode::from(if e.use_stderr() { 4 } else { 0 });
+        }
+    };
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
