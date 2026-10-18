@@ -162,11 +162,11 @@ impl Loaded {
         let mut counts =
             Counts { files: self.nodes.len() + self.records.len() + self.assets.len(), ..Counts::default() };
         counts.no_header = self.assets.len();
-        for f in &self.nodes {
-            *counts.nodes.entry(f.header.as_ref().expect("a node has a header").kind.clone()).or_default() += 1;
+        for h in self.nodes.iter().filter_map(|f| f.header.as_ref()) {
+            *counts.nodes.entry(h.kind.clone()).or_default() += 1;
         }
-        for f in &self.records {
-            *counts.records.entry(f.header.as_ref().expect("a record has a header").kind.clone()).or_default() += 1;
+        for h in self.records.iter().filter_map(|f| f.header.as_ref()) {
+            *counts.records.entry(h.kind.clone()).or_default() += 1;
         }
         counts
     }

@@ -43,10 +43,7 @@ impl Header {
             )
         };
         let docs = YamlLoader::load_from_str(yaml).map_err(|e| bad(&e.to_string()))?;
-        let map = match docs.first() {
-            Some(Yaml::Hash(map)) => map,
-            _ => return Err(bad("not a map")),
-        };
+        let Some(Yaml::Hash(map)) = docs.first() else { return Err(bad("not a map")) };
         let mut header = Self {
             kind: String::new(),
             title: None,

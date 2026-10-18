@@ -35,7 +35,7 @@ impl File {
     pub fn parse(id: Id, text: &str) -> Result<Self, Refusal> {
         let (header, body) = match text.strip_prefix("---\n") {
             Some(rest) => {
-                let end = rest.find("\n---\n").or_else(|| rest.strip_suffix("\n---").map(|s| s.len()));
+                let end = rest.find("\n---\n").or_else(|| rest.strip_suffix("\n---").map(str::len));
                 let Some(end) = end else {
                     return Err(Refusal::new(
                         "bad_header",

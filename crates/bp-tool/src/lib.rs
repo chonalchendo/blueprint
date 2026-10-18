@@ -118,22 +118,19 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     }
     m.insert("lead".into(), file.body.lead.clone().into());
     let headings: Vec<&str> = file.body.sections.iter().map(|s| s.heading.as_str()).collect();
-    match &show.section {
-        Some(heading) => {
-            let section = file.body.section(heading).ok_or_else(|| {
-                Refusal::new(
-                    "no_section",
-                    format!("{id}#{heading}"),
-                    "a section is one `## ` heading of the body, matched exactly",
-                    format!("use one of: {}", headings.join(", ")),
-                )
-            })?;
-            m.insert("section".into(), section.text.clone().into());
-        }
-        None => {
-            m.insert("sections".into(), headings.into());
-            m.insert("body".into(), file.body.text.clone().into());
-        }
+    if let Some(heading) = &show.section {
+        let section = file.body.section(heading).ok_or_else(|| {
+            Refusal::new(
+                "no_section",
+                format!("{id}#{heading}"),
+                "a section is one `## ` heading of the body, matched exactly",
+                format!("use one of: {}", headings.join(", ")),
+            )
+        })?;
+        m.insert("section".into(), section.text.clone().into());
+    } else {
+        m.insert("sections".into(), headings.into());
+        m.insert("body".into(), file.body.text.clone().into());
     }
     Ok(Value::Object(m))
 }
