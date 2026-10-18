@@ -16,8 +16,10 @@ pub struct Body {
     pub lead: String,
     /// The `## ` sections, in order.
     pub sections: Vec<Section>,
-    /// Every wikilink outside a fence, first occurrence only, in order.
+    /// Every wikilink outside a fence that is a path id, first occurrence only, in order.
     pub links: Vec<Id>,
+    /// Every wikilink target outside a fence that is not a path id.
+    pub unresolved: Vec<String>,
     /// Every ```` ```check ```` block, in order.
     pub checks: Vec<Check>,
 }
@@ -77,9 +79,11 @@ impl Body {
                 continue;
             }
             if fence.is_none() {
-                for link in wikilinks(line) {
-                    if !body.links.contains(&link) {
-                        body.links.push(link);
+                for target in wikilinks(line) {
+                    match Id::parse(target) {
+                        Ok(id) if !body.links.contains(&id) => body.links.push(id),
+                        Ok(_) => {}
+                        Err(_) => body.unresolved.push(target.to_string()),
                     }
                 }
             }
@@ -113,13 +117,13 @@ fn check_header(rest: &str) -> Check {
     Check { runner: runner.trim().to_string(), attrs, text: String::new() }
 }
 
-/// Every `[[target]]`, `[[target|label]]` or `[[target#section]]` in one line, as ids.
-fn wikilinks(line: &str) -> impl Iterator<Item = Id> + '_ {
+/// Every `[[target]]`, `[[target|label]]` or `[[target#section]]` in one line, as written.
+fn wikilinks(line: &str) -> impl Iterator<Item = &str> + '_ {
     line.match_indices("[[").filter_map(move |(start, _)| {
         let inner = &line[start + 2..];
         let end = inner.find("]]")?;
         let target = inner[..end].split(['|', '#']).next()?.trim();
-        (!target.is_empty()).then(|| Id::new(target))
+        (!target.is_empty()).then_some(target)
     })
 }
 
@@ -127,19 +131,20 @@ fn wikilinks(line: &str) -> impl Iterator<Item = Id> + '_ {
 mod tests {
     use super::*;
 
-    const TEXT: &str = "Lead with [[a/b|label]] and [[a/c#part]].\n\n## One\n\nText one [[a/b]].\n\n```check shell {name=x expect=0}\n## not a heading [[not/a/link]]\nbp where\n```\n\n## Two\n\n### Sub\n\nText two.\n";
+    const TEXT: &str = "Lead with [[shared/a/b|label]] and [[shared/a/c#part]] and [[old.style]].\n\n## One\n\nText one [[shared/a/b]].\n\n```check shell {name=x expect=0}\n## not a heading [[not/a/link]]\nbp where\n```\n\n## Two\n\n### Sub\n\nText two.\n";
 
     #[test]
     fn scans_lead_sections_links_and_checks() {
         let b = Body::parse(TEXT);
-        assert_eq!(b.lead, "Lead with [[a/b|label]] and [[a/c#part]].");
+        assert_eq!(b.lead, "Lead with [[shared/a/b|label]] and [[shared/a/c#part]] and [[old.style]].");
         let headings: Vec<&str> = b.sections.iter().map(|s| s.heading.as_str()).collect();
         assert_eq!(headings, ["One", "Two"]);
         assert!(b.section("One").unwrap().text.starts_with("Text one"));
         assert!(b.section("One").unwrap().text.ends_with("```"));
         assert_eq!(b.section("Two").unwrap().text, "### Sub\n\nText two.");
         let links: Vec<&str> = b.links.iter().map(Id::as_str).collect();
-        assert_eq!(links, ["a/b", "a/c"]);
+        assert_eq!(links, ["shared/a/b", "shared/a/c"]);
+        assert_eq!(b.unresolved, ["old.style"]);
         assert_eq!(b.checks.len(), 1);
         assert_eq!(b.checks[0].runner, "shell");
         assert_eq!(b.checks[0].attrs["name"], "x");

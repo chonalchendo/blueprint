@@ -132,3 +132,38 @@ fn the_converted_vault_reads_whole() {
     assert_eq!(code, Some(0), "{v}");
     assert!(v["section"].as_str().unwrap().len() > 100);
 }
+
+#[test]
+fn refusals_carry_closed_codes() {
+    let dir = vault();
+    let cases: [(&[&str], i32, &str); 6] = [
+        (&["show", "/etc/passwd"], 2, "no_node"),
+        (&["show", "projects/../../etc/passwd"], 2, "no_node"),
+        (&["show", "shared/assets/glossary"], 2, "no_node"),
+        (&["list", "issues"], 2, "unknown_value"),
+        (&["list", "milestone", "--status", "in-progress"], 2, "unknown_value"),
+        (&["list", "--limit", "x"], 4, "usage"),
+    ];
+    for (args, exit, code) in cases {
+        let mut all = args.to_vec();
+        all.push("--json");
+        let (got, v) = bp(dir.path(), &all);
+        assert_eq!((got, v["code"].as_str()), (Some(exit), Some(code)), "{args:?}: {v}");
+        assert!(v.get("contract_version").is_none(), "a refusal carries the five envelope fields only");
+    }
+}
+
+#[test]
+fn the_census_reports_findings() {
+    let dir = vault();
+    write(
+        dir.path(),
+        "projects/bp/issues/0002.b.md",
+        "---\nkind: issue\ntitle: B\nstatus: escalated\nunder: '[[milestone.anvil.x]]'\n---\n",
+    );
+    let (code, v) = bp(dir.path(), &["list", "--count-only", "--json"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["findings"]["status_outside_set"], 1);
+    // The legacy `under` text, plus 0001.a's milestone and design, which no file holds.
+    assert_eq!(v["findings"]["unresolved_link"], 3);
+}

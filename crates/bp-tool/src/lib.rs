@@ -1,22 +1,26 @@
-//! The tool: the 18 verbs, the write path composition, the envelope. This milestone ships the read verbs over the
-//! files; `list` and `search` grow the index with their issue. Every verb prints one JSON object on stdout with `--json`; diagnostics go to stderr.
+//! The tool: the 18 verbs, the write path composition, the envelope. This milestone ships the read verbs. Every verb
+//! prints one JSON object on stdout with `--json`; diagnostics go to stderr.
 
-// The permitted edges of the crate rule, re-exported so the dependency graph is real before the verbs use them.
-pub use bp_change;
-pub use bp_check;
-pub use bp_design;
-pub use bp_forge;
-pub use bp_install;
-pub use bp_operation;
-pub use bp_reasoning;
+mod schema;
 
 use std::path::Path;
 use std::process::ExitCode;
 
-use bp_vault::{CONTRACT, Filter, Id, Index, Refusal, Vault};
+use bp_vault::{Code, Filter, Id, Index, Kind, Refusal, Vault};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
+
+/// The contract version every `--json` result carries (15). A breaking change to a result bumps it.
+pub const CONTRACT: u32 = 1;
+
+/// Every successful result: the verb's own fields and the contract version.
+#[derive(Serialize)]
+struct Envelope<T: Serialize> {
+    #[serde(flatten)]
+    result: T,
+    contract_version: u32,
+}
 
 /// Blueprint: one evolving blueprint per project. The agent's hands.
 #[derive(Parser)]
@@ -102,65 +106,66 @@ pub struct Where {
     pub project: Option<String>,
     /// The git worktree, once the repo verbs land.
     pub worktree: Option<String>,
-    /// The contract version.
-    pub contract_version: u32,
     /// The binary version.
     pub version: &'static str,
 }
 
 /// Runs one verb from `cwd` and returns the exit code: 0 ok, 1 error, 2 refused, 3 no-op, 4 usage.
 pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
-    let result = match &cli.verb {
-        Verb::Where => where_(cwd),
-        Verb::Show(show) => show_(cwd, show),
-        Verb::List(list) => list_(cwd, list),
-        Verb::Search(search) => search_(cwd, search),
-    };
+    match &cli.verb {
+        Verb::Where => finish(where_(cwd), cli.json, out),
+        Verb::Show(show) => finish(show_(cwd, show), cli.json, out),
+        Verb::List(list) => finish(list_(cwd, list), cli.json, out),
+        Verb::Search(search) => finish(search_(cwd, search), cli.json, out),
+    }
+}
+
+fn finish<T: Serialize>(result: Result<T, Refusal>, json: bool, out: &mut impl std::io::Write) -> ExitCode {
     match result {
-        Ok(mut value) => {
-            // The contract (15): `contract_version` appears in every --json result.
-            if let Value::Object(m) = &mut value {
-                m.insert("contract_version".into(), CONTRACT.into());
-            }
-            emit(out, &value, cli.json);
+        Ok(result) => {
+            emit(out, &Envelope { result, contract_version: CONTRACT }, json);
             ExitCode::SUCCESS
         }
         Err(refusal) => {
-            emit(out, &refusal, cli.json);
+            emit(out, &refusal, json);
             ExitCode::from(refusal.exit)
         }
     }
 }
 
-fn where_(cwd: &Path) -> Result<serde_json::Value, Refusal> {
+fn where_(cwd: &Path) -> Result<Where, Refusal> {
     let vault = Vault::discover(cwd)?;
-    let w = Where {
+    Ok(Where {
         project: vault.project_of(cwd),
         vault: vault.root.display().to_string(),
         worktree: None,
-        contract_version: CONTRACT,
         version: env!("CARGO_PKG_VERSION"),
-    };
-    Ok(serde_json::to_value(w).expect("a plain struct serialises"))
+    })
 }
 
 fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     let vault = Vault::discover(cwd)?;
-    let id = Id::new(&show.id);
+    let id = node_id(&show.id)?;
     let file = vault.read(&id)?;
+    let Some(header) = &file.header else {
+        return Err(Refusal::new(
+            Code::NoNode,
+            id.as_str(),
+            "an id names a node or record: a file with a header",
+            format!("the file has no header: it is an asset; cat {}", id.path(&vault.root).display()),
+        ));
+    };
     let mut m = serde_json::Map::new();
     m.insert("id".into(), id.as_str().into());
-    m.insert("record".into(), file.is_record().into());
+    m.insert("record".into(), header.kind.is_record().into());
     m.insert("hash".into(), file.hash.clone().into());
-    if let Some(header) = &file.header {
-        m.extend(header.to_json());
-    }
+    m.extend(header.to_json());
     m.insert("lead".into(), file.body.lead.clone().into());
     let headings: Vec<&str> = file.body.sections.iter().map(|s| s.heading.as_str()).collect();
     if let Some(heading) = &show.section {
         let section = file.body.section(heading).ok_or_else(|| {
             Refusal::new(
-                "no_section",
+                Code::NoSection,
                 format!("{id}#{heading}"),
                 "a section is one `## ` heading of the body, matched exactly",
                 format!("use one of: {}", headings.join(", ")),
@@ -174,27 +179,73 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     Ok(Value::Object(m))
 }
 
+/// An id argument. Anything that is not a path id under the vault names no node.
+fn node_id(text: &str) -> Result<Id, Refusal> {
+    Id::parse(text).map_err(|why| {
+        Refusal::new(
+            Code::NoNode,
+            text,
+            "an id is a path under projects/ or shared/, without .md",
+            format!("{why}; bp search {}", text.rsplit('/').next().unwrap_or(text).replace(['-', '.', '_'], " ")),
+        )
+    })
+}
+
 fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     let vault = Vault::discover(cwd)?;
     let mut index = Index::open(&vault)?;
     let Some(kind) = &list.kind else {
         index.reconcile(&vault)?;
-        return Ok(serde_json::to_value(index.counts()?).expect("a plain struct serialises"));
+        return census(&index);
     };
+    let under = list.under.as_deref().map(node_id).transpose()?;
+    let kind_value = kind_arg(kind)?;
+    if let Some(status) = &list.status
+        && !schema::status_in_set(kind, Some(status))
+    {
+        return Err(unknown("status", status, format!("bp list {kind}")));
+    }
     let filter = Filter {
-        kind,
+        kind: kind_value,
         status: list.status.as_deref(),
         project: list.project.as_deref(),
-        under: list.under.as_deref(),
+        under: under.as_ref().map(Id::as_str),
         limit: list.limit,
     };
     let (rows, total) = index.list(&filter)?;
     Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }))
 }
 
+/// A kind argument, from the closed set.
+fn kind_arg(text: &str) -> Result<Kind, Refusal> {
+    text.parse().map_err(|_| {
+        let kinds: Vec<&str> = Kind::ALL.iter().map(|k| k.as_str()).collect();
+        unknown("kind", text, format!("use one of: {}", kinds.join(", ")))
+    })
+}
+
+fn unknown(what: &str, value: &str, fix: String) -> Refusal {
+    Refusal::new(Code::UnknownValue, format!("{what} {value}"), "a kind and a status come from closed sets (13)", fix)
+}
+
+/// The counts, and the findings the reader keeps instead of ignoring: statuses outside their kind's set and link
+/// targets that are not ids.
+fn census(index: &Index) -> Result<Value, Refusal> {
+    let mut v = serde_json::to_value(index.counts()?).expect("a plain struct serialises");
+    let outside: usize = index
+        .statuses()?
+        .iter()
+        .filter(|(kind, status, _)| !schema::status_in_set(kind, status.as_deref()))
+        .map(|(_, _, n)| n)
+        .sum();
+    v["findings"] = serde_json::json!({ "status_outside_set": outside, "unresolved_link": index.unresolved()? });
+    Ok(v)
+}
+
 fn search_(cwd: &Path, search: &Search) -> Result<Value, Refusal> {
+    let kind = search.kind.as_deref().map(kind_arg).transpose()?;
     let index = Index::open(&Vault::discover(cwd)?)?;
-    let rows = index.search(&search.terms, search.kind.as_deref(), search.project.as_deref(), search.limit)?;
+    let rows = index.search(&search.terms, kind, search.project.as_deref(), search.limit)?;
     Ok(serde_json::json!({ "rows": rows }))
 }
 

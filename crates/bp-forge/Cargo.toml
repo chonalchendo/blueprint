@@ -16,3 +16,7 @@ bp-vault.workspace = true
 
 [features]
 write = []
+
+# The edge is declared ahead of its first use, so the crate rule holds it from the start.
+[package.metadata.cargo-machete]
+ignored = ["bp-vault"]
