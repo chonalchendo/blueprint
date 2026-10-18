@@ -1,0 +1,15 @@
+[package]
+name = "bp-design"
+description = "Design domain: project, design, design kinds, concern answers, terms, diagrams, deltas, blueprint versions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bp-vault.workspace = true

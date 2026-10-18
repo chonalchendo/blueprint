@@ -1,0 +1,33 @@
+[package]
+name = "bp-tool"
+description = "The tool: the 18 verbs, the write path composition, the envelope. Builds the bp binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "bp"
+path = "src/main.rs"
+
+[dependencies]
+bp-vault.workspace = true
+bp-design.workspace = true
+bp-change.workspace = true
+bp-reasoning.workspace = true
+bp-operation.workspace = true
+bp-check.workspace = true
+bp-forge = { workspace = true, features = ["write"] }
+bp-install.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "bp-install"
+description = "Installer: harness dialects, the embedded bundle, version comparison, precondition tests."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bp-vault.workspace = true
+bp-operation.workspace = true
+bp-forge.workspace = true

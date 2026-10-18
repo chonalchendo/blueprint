@@ -1,0 +1,18 @@
+[package]
+name = "bp-forge"
+description = "Forge adapter: pull request, reviews, check runs, branch base; the write calls sit behind the write feature."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bp-vault.workspace = true
+
+[features]
+write = []
