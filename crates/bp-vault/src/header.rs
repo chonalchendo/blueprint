@@ -16,8 +16,9 @@ pub const LINKS: [&str; 6] = ["cites", "answers", "targets", "authorizes", "supe
 
 /// Names a verb's result uses at the top level beside the header's fields, so no header may use them. The five
 /// envelope names are among them: an agent tells a refusal from a result by `code`.
-pub const RESERVED: [&str; 14] = [
+pub const RESERVED: [&str; 15] = [
     "id",
+    "findings",
     "hash",
     "record",
     "lead",

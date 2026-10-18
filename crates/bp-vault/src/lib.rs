@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-pub use body::{Body, Check, Section};
+pub use body::{Body, Check, Finding, FindingKind, Section};
 pub use closed::OutsideSet;
 pub use file::File;
 pub use header::{Header, LINKS, RESERVED, Unresolved};
@@ -137,6 +137,8 @@ pub struct Counts {
     pub nodes: BTreeMap<String, usize>,
     /// Records per kind.
     pub records: BTreeMap<String, usize>,
+    /// Fenced `check` blocks across every body.
+    pub check_blocks: usize,
 }
 
 #[cfg(test)]

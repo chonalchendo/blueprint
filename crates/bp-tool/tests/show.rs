@@ -60,7 +60,7 @@ fn show_one_section_or_refuse_with_the_headings() {
     let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0001.a", "--section", "Nope", "--json"]);
     assert_eq!(code, Some(2));
     assert_eq!(v["code"], "no_section");
-    assert_eq!(v["fix"], "use one of: Problem, Direction");
+    assert_eq!(v["fix"], "bp show projects/bp/issues/0001.a --no-body; the headings are: Problem, Direction");
 }
 
 #[test]
@@ -166,4 +166,26 @@ fn the_census_reports_findings() {
     assert_eq!(v["findings"]["status_outside_set"], 1);
     // The legacy `under` text, plus 0001.a's milestone and design, which no file holds.
     assert_eq!(v["findings"]["unresolved_link"], 3);
+}
+
+#[test]
+fn a_duplicate_heading_is_a_finding_and_its_section_refuses() {
+    let dir = vault();
+    write(
+        dir.path(),
+        "projects/bp/issues/0003.c.md",
+        "---\nkind: issue\ntitle: C\nstatus: open\n---\n\n## Check\n\n```check shell {name=one expect=0}\ntrue\n```\n\n## Check\n\n```bash\nnever closed\n",
+    );
+    let (code, v) = bp(dir.path(), &["list", "--count-only", "--json"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["check_blocks"], 1);
+    assert_eq!(v["findings"]["duplicate_heading"], 1);
+    assert_eq!(v["findings"]["unclosed_fence"], 1);
+    let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0003.c", "--section", "Check", "--json"]);
+    assert_eq!(code, Some(2), "{v}");
+    assert_eq!(v["code"], "no_section");
+    assert_eq!(v["fix"], "bp show projects/bp/issues/0003.c --json");
+    let (_, v) = bp(dir.path(), &["show", "projects/bp/issues/0003.c", "--json"]);
+    let kinds: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["duplicate_heading", "unclosed_fence"]);
 }

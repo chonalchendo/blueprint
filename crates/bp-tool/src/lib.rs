@@ -161,16 +161,33 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     m.insert("hash".into(), file.hash.clone().into());
     m.extend(header.to_json());
     m.insert("lead".into(), file.body.lead.clone().into());
+    if !file.body.findings.is_empty() {
+        m.insert("findings".into(), serde_json::to_value(&file.body.findings).expect("a plain struct serialises"));
+    }
     let headings: Vec<&str> = file.body.sections.iter().map(|s| s.heading.as_str()).collect();
     if let Some(heading) = &show.section {
-        let section = file.body.section(heading).ok_or_else(|| {
+        let refuse = |fix: String| {
             Refusal::new(
                 Code::NoSection,
                 format!("{id}#{heading}"),
-                "a section is one `## ` heading of the body, matched exactly",
-                format!("use one of: {}", headings.join(", ")),
+                "a section is one top-level `## ` heading of the body, matched as written",
+                fix,
             )
-        })?;
+        };
+        let section = match file.body.sections_named(heading)[..] {
+            [one] => one,
+            [] => {
+                let mut unique: Vec<&str> = Vec::new();
+                for h in &headings {
+                    if !unique.contains(h) {
+                        unique.push(h);
+                    }
+                }
+                return Err(refuse(format!("bp show {id} --no-body; the headings are: {}", unique.join(", "))));
+            }
+            // Two sections share the heading: the whole body is the only read that holds both.
+            _ => return Err(refuse(format!("bp show {id} --json"))),
+        };
         m.insert("section".into(), section.text.clone().into());
     } else {
         m.insert("sections".into(), headings.into());
@@ -228,8 +245,8 @@ fn unknown(what: &str, value: &str, fix: String) -> Refusal {
     Refusal::new(Code::UnknownValue, format!("{what} {value}"), "a kind and a status come from closed sets (13)", fix)
 }
 
-/// The counts, and the findings the reader keeps instead of ignoring: statuses outside their kind's set and link
-/// targets that are not ids.
+/// The counts, and the findings the reader keeps instead of ignoring: statuses outside their kind's set, link
+/// targets that are not ids, and the body findings.
 fn census(index: &Index) -> Result<Value, Refusal> {
     let mut v = serde_json::to_value(index.counts()?).expect("a plain struct serialises");
     let outside: usize = index
@@ -238,7 +255,11 @@ fn census(index: &Index) -> Result<Value, Refusal> {
         .filter(|(kind, status, _)| !schema::status_in_set(kind, status.as_deref()))
         .map(|(_, _, n)| n)
         .sum();
-    v["findings"] = serde_json::json!({ "status_outside_set": outside, "unresolved_link": index.unresolved()? });
+    let mut findings = serde_json::json!({ "status_outside_set": outside, "unresolved_link": index.unresolved()? });
+    for (kind, n) in index.body_findings()? {
+        findings[kind] = n.into();
+    }
+    v["findings"] = findings;
     Ok(v)
 }
 

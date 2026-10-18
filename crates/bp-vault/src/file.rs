@@ -21,7 +21,7 @@ impl File {
     pub fn from_bytes(id: Id, bytes: &[u8]) -> Result<Self, Refusal> {
         let hash = blake3::hash(bytes).to_hex().to_string();
         let text = std::str::from_utf8(bytes).map_err(|e| Refusal::schema(id.as_str(), format!("not UTF-8: {e}")))?;
-        let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n");
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n").replace('\r', "\n");
         let Some(rest) = text.strip_prefix("---\n") else {
             if !is_asset(&id) {
                 return Err(Refusal::schema(
