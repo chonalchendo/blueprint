@@ -4,6 +4,7 @@
 mod body;
 mod closed;
 mod file;
+pub mod git;
 mod header;
 mod id;
 mod index;
@@ -78,6 +79,38 @@ impl Vault {
         File::from_bytes(id.clone(), &bytes)
     }
 
+    /// Reads one file as it was at a commit, branch or blueprint tag, through `git show`. Refuses `no_node` when
+    /// the file did not exist there and `unknown_value` when git does not know the ref.
+    pub fn read_at(&self, id: &Id, at: &str) -> Result<File, Refusal> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(["show", &format!("{at}:./{}.md", id.as_str())])
+            .output()
+            .map_err(|e| Refusal::failed("git", format!("{e}; install git, or drop --at")))?;
+        if out.status.success() {
+            return File::from_bytes(id.clone(), &out.stdout);
+        }
+        let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if why.contains("does not exist in") || why.contains("exists on disk, but not in") {
+            return Err(Refusal::new(
+                Code::NoNode,
+                format!("{id}@{at}"),
+                "an id names a markdown file under the vault root at that commit",
+                format!("git -C {} log --oneline -- {id}.md", self.root.display()),
+            ));
+        }
+        if why.contains("invalid object name") || why.contains("not a valid object name") {
+            return Err(Refusal::new(
+                Code::UnknownValue,
+                format!("--at {at}"),
+                "--at names a commit, branch or tag of the vault repository",
+                format!("git -C {} tag --list 'bp/*'", self.root.display()),
+            ));
+        }
+        Err(Refusal::failed(format!("git show {at}"), why))
+    }
+
     /// Every markdown file under `projects/` and `shared/`, sorted by id. Dot directories (`.bp`, `.git`) are skipped.
     /// Refuses `schema_invalid` on a markdown file whose path is not an id: it would be neither read nor counted.
     pub fn ids(&self) -> Result<Vec<Id>, Refusal> {
@@ -90,6 +123,22 @@ impl Vault {
         }
         ids.sort();
         Ok(ids)
+    }
+
+    /// The project for a working directory: the one whose directory holds it, else the one whose `repository` is
+    /// the directory's `origin` remote (15, `where`).
+    pub fn project_for(&self, cwd: &Path) -> Option<String> {
+        if let Some(p) = self.project_of(cwd) {
+            return Some(p);
+        }
+        let origin = git::Repo::find(cwd)?.origin()?;
+        let projects = std::fs::read_dir(self.root.join("projects")).ok()?;
+        projects.flatten().find_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let file = self.read(&Id::from_trusted(format!("projects/{name}/project"))).ok()?;
+            let repository = file.header?.fields.get("repository")?.as_str()?.to_string();
+            git::same_repository(&repository, &origin).then_some(name)
+        })
     }
 
     /// The project `path` sits under, when it is inside `projects/<project>/`.

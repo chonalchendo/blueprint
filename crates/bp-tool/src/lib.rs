@@ -47,14 +47,20 @@ pub enum Verb {
     Search(Search),
 }
 
-/// `bp show <id> [--section <heading>]`.
+/// `bp show <id> [--section <heading>] [--no-body] [--at <ref>]`.
 #[derive(Args)]
 pub struct Show {
     /// The path id, for example `projects/bp/issues/0411.pair-each-data-model-level-with-its`.
     pub id: String,
     /// One `## ` section by its heading, instead of the whole body.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_body")]
     pub section: Option<String>,
+    /// The header, the lead and the section headings, without the body.
+    #[arg(long)]
+    pub no_body: bool,
+    /// The file as it was at a commit, branch or blueprint tag.
+    #[arg(long)]
+    pub at: Option<String>,
 }
 
 /// `bp list <kind> [filters]` or `bp list --count-only`.
@@ -104,7 +110,7 @@ pub struct Where {
     pub vault: String,
     /// The project the working directory sits under, if any.
     pub project: Option<String>,
-    /// The git worktree, once the repo verbs land.
+    /// The git worktree that holds the working directory, if any.
     pub worktree: Option<String>,
     /// The binary version.
     pub version: &'static str,
@@ -136,9 +142,9 @@ fn finish<T: Serialize>(result: Result<T, Refusal>, json: bool, out: &mut impl s
 fn where_(cwd: &Path) -> Result<Where, Refusal> {
     let vault = Vault::discover(cwd)?;
     Ok(Where {
-        project: vault.project_of(cwd),
+        project: vault.project_for(cwd),
         vault: vault.root.display().to_string(),
-        worktree: None,
+        worktree: bp_vault::git::Repo::find(cwd).map(|r| r.top.display().to_string()),
         version: env!("CARGO_PKG_VERSION"),
     })
 }
@@ -146,7 +152,10 @@ fn where_(cwd: &Path) -> Result<Where, Refusal> {
 fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     let vault = Vault::discover(cwd)?;
     let id = node_id(&show.id)?;
-    let file = vault.read(&id)?;
+    let file = match &show.at {
+        Some(at) => vault.read_at(&id, at)?,
+        None => vault.read(&id)?,
+    };
     let Some(header) = &file.header else {
         return Err(Refusal::new(
             Code::NoNode,
@@ -191,7 +200,9 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
         m.insert("section".into(), section.text.clone().into());
     } else {
         m.insert("sections".into(), headings.into());
-        m.insert("body".into(), file.body.text.clone().into());
+        if !show.no_body {
+            m.insert("body".into(), file.body.text.clone().into());
+        }
     }
     Ok(Value::Object(m))
 }

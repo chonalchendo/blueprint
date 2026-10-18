@@ -42,3 +42,30 @@ fn where_refuses_outside_a_vault_with_exit_2() {
     assert_eq!(v["code"], "no_vault");
     assert!(v["fix"].as_str().unwrap().contains("BP_VAULT"));
 }
+
+#[test]
+fn where_from_a_code_repository_finds_the_project_by_its_remote() {
+    let vault = vault();
+    std::fs::write(
+        vault.path().join("projects/bp/project.md"),
+        "---\nkind: project\ntitle: Blueprint\nstatus: active\nrepository: https://github.com/o/blueprint\n---\n",
+    )
+    .unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+    std::fs::write(repo.path().join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:o/blueprint.git\n")
+        .unwrap();
+    std::fs::create_dir_all(repo.path().join("src")).unwrap();
+    let out = Command::cargo_bin("bp")
+        .unwrap()
+        .current_dir(repo.path().join("src"))
+        .env("BP_VAULT", vault.path())
+        .args(["where", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["project"], "bp");
+    let worktree = std::fs::canonicalize(v["worktree"].as_str().unwrap()).unwrap();
+    assert_eq!(worktree, std::fs::canonicalize(repo.path()).unwrap());
+}
