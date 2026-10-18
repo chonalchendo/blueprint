@@ -13,7 +13,7 @@ pub use bp_reasoning;
 use std::path::Path;
 use std::process::ExitCode;
 
-use bp_vault::{CONTRACT, Id, Refusal, Vault};
+use bp_vault::{CONTRACT, Filter, Id, Index, Refusal, Vault};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
@@ -37,8 +37,10 @@ pub enum Verb {
     Where,
     /// One node or record by id: its header, lead, section headings and body, or one section.
     Show(Show),
-    /// Nodes and records. This milestone counts them; filters land with the index.
+    /// Rows of one kind from the index, with a default limit and `truncated`.
     List(List),
+    /// BM25 over ids, titles and bodies; each row has id, kind, rank and one snippet.
+    Search(Search),
 }
 
 /// `bp show <id> [--section <heading>]`.
@@ -51,12 +53,44 @@ pub struct Show {
     pub section: Option<String>,
 }
 
-/// `bp list --count-only`.
+/// `bp list <kind> [filters]` or `bp list --count-only`.
 #[derive(Args)]
 pub struct List {
-    /// Files, nodes per kind and records per kind, read from the files.
-    #[arg(long, required = true)]
+    /// The kind, for example `issue`, `milestone`, `claim`.
+    #[arg(required_unless_present = "count_only")]
+    pub kind: Option<String>,
+    /// Exact status.
+    #[arg(long)]
+    pub status: Option<String>,
+    /// The project segment of the id.
+    #[arg(long)]
+    pub project: Option<String>,
+    /// The parent id.
+    #[arg(long)]
+    pub under: Option<String>,
+    /// At most this many rows.
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
+    /// Files, nodes per kind and records per kind, instead of rows.
+    #[arg(long, conflicts_with_all = ["kind", "status", "project", "under"])]
     pub count_only: bool,
+}
+
+/// `bp search <terms...>`.
+#[derive(Args)]
+pub struct Search {
+    /// The terms; every term must match, or any term when none matches all.
+    #[arg(required = true)]
+    pub terms: Vec<String>,
+    /// Only this kind.
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// Only this project.
+    #[arg(long)]
+    pub project: Option<String>,
+    /// At most this many rows.
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
 }
 
 /// The result of `where`.
@@ -69,7 +103,7 @@ pub struct Where {
     /// The git worktree, once the repo verbs land.
     pub worktree: Option<String>,
     /// The contract version.
-    pub contract: u32,
+    pub contract_version: u32,
     /// The binary version.
     pub version: &'static str,
 }
@@ -79,10 +113,15 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
     let result = match &cli.verb {
         Verb::Where => where_(cwd),
         Verb::Show(show) => show_(cwd, show),
-        Verb::List(_) => list_(cwd),
+        Verb::List(list) => list_(cwd, list),
+        Verb::Search(search) => search_(cwd, search),
     };
     match result {
-        Ok(value) => {
+        Ok(mut value) => {
+            // The contract (15): `contract_version` appears in every --json result.
+            if let Value::Object(m) = &mut value {
+                m.insert("contract_version".into(), CONTRACT.into());
+            }
             emit(out, &value, cli.json);
             ExitCode::SUCCESS
         }
@@ -99,7 +138,7 @@ fn where_(cwd: &Path) -> Result<serde_json::Value, Refusal> {
         project: vault.project_of(cwd),
         vault: vault.root.display().to_string(),
         worktree: None,
-        contract: CONTRACT,
+        contract_version: CONTRACT,
         version: env!("CARGO_PKG_VERSION"),
     };
     Ok(serde_json::to_value(w).expect("a plain struct serialises"))
@@ -135,10 +174,26 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     Ok(Value::Object(m))
 }
 
-fn list_(cwd: &Path) -> Result<Value, Refusal> {
-    let vault = Vault::discover(cwd)?;
-    let counts = vault.load()?.counts();
-    Ok(serde_json::to_value(counts).expect("a plain struct serialises"))
+fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
+    let index = Index::open(&Vault::discover(cwd)?)?;
+    let Some(kind) = &list.kind else {
+        return Ok(serde_json::to_value(index.counts()?).expect("a plain struct serialises"));
+    };
+    let filter = Filter {
+        kind,
+        status: list.status.as_deref(),
+        project: list.project.as_deref(),
+        under: list.under.as_deref(),
+        limit: list.limit,
+    };
+    let (rows, total) = index.list(&filter)?;
+    Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }))
+}
+
+fn search_(cwd: &Path, search: &Search) -> Result<Value, Refusal> {
+    let index = Index::open(&Vault::discover(cwd)?)?;
+    let rows = index.search(&search.terms, search.kind.as_deref(), search.project.as_deref(), search.limit)?;
+    Ok(serde_json::json!({ "rows": rows }))
 }
 
 fn emit(out: &mut impl std::io::Write, value: &impl Serialize, json: bool) {

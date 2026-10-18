@@ -88,6 +88,33 @@ fn list_counts_files_nodes_and_records() {
     assert_eq!(code, Some(4));
 }
 
+#[test]
+fn list_rows_carry_total_truncated_and_the_contract_version() {
+    let dir = vault();
+    let (code, v) = bp(dir.path(), &["list", "issue", "--project", "bp", "--limit", "1", "--json"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["rows"][0]["id"], "projects/bp/issues/0001.a");
+    assert_eq!(v["rows"][0]["status"], "resolved");
+    assert_eq!((v["total"].as_u64(), v["truncated"].as_bool()), (Some(1), Some(false)));
+    assert_eq!(v["contract_version"], 1);
+    let (code, _) = bp(dir.path(), &["list", "issue", "--count-only", "--json"]);
+    assert_eq!(code, Some(4));
+}
+
+#[test]
+fn search_returns_id_kind_rank_and_snippet() {
+    let dir = vault();
+    let (code, v) = bp(dir.path(), &["search", "problem", "--json"]);
+    assert_eq!(code, Some(0), "{v}");
+    let row = &v["rows"][0];
+    assert_eq!(row["id"], "projects/bp/issues/0001.a");
+    assert_eq!(row["kind"], "issue");
+    assert!(row["rank"].as_f64().unwrap() > 0.0);
+    assert!(row["snippet"].as_str().unwrap().contains("[problem]"));
+    let (code, _) = bp(dir.path(), &["search", "--json"]);
+    assert_eq!(code, Some(4));
+}
+
 /// The converted vault: every file reads, and the census matches the converter's report when it sits beside it.
 #[test]
 fn the_converted_vault_reads_whole() {
@@ -95,6 +122,9 @@ fn the_converted_vault_reads_whole() {
     let root = Path::new(&root);
     let (code, v) = bp(root, &["list", "--count-only", "--json"]);
     assert_eq!(code, Some(0), "{v}");
+    let (code, s) = bp(root, &["search", "walk budget", "--json"]);
+    assert_eq!(code, Some(0), "{s}");
+    assert!(s["rows"][0]["snippet"].is_string());
     let nodes: u64 = v["nodes"].as_object().unwrap().values().map(|n| n.as_u64().unwrap()).sum();
     let records: u64 = v["records"].as_object().unwrap().values().map(|n| n.as_u64().unwrap()).sum();
     assert_eq!(nodes + records + v["no_header"].as_u64().unwrap(), v["files"].as_u64().unwrap());
