@@ -175,8 +175,10 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
 }
 
 fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
-    let index = Index::open(&Vault::discover(cwd)?)?;
+    let vault = Vault::discover(cwd)?;
+    let mut index = Index::open(&vault)?;
     let Some(kind) = &list.kind else {
+        index.reconcile(&vault)?;
         return Ok(serde_json::to_value(index.counts()?).expect("a plain struct serialises"));
     };
     let filter = Filter {

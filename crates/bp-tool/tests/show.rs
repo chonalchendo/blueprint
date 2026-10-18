@@ -110,7 +110,7 @@ fn search_returns_id_kind_rank_and_snippet() {
     assert_eq!(row["id"], "projects/bp/issues/0001.a");
     assert_eq!(row["kind"], "issue");
     assert!(row["rank"].as_f64().unwrap() > 0.0);
-    assert!(row["snippet"].as_str().unwrap().contains("[problem]"));
+    assert!(row["snippet"].as_str().unwrap().contains("«problem»"));
     let (code, _) = bp(dir.path(), &["search", "--json"]);
     assert_eq!(code, Some(4));
 }
