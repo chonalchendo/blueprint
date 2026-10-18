@@ -164,5 +164,6 @@ fn the_census_reports_findings() {
     let (code, v) = bp(dir.path(), &["list", "--count-only", "--json"]);
     assert_eq!(code, Some(0), "{v}");
     assert_eq!(v["findings"]["status_outside_set"], 1);
-    assert_eq!(v["findings"]["unresolved_link"], 1);
+    // The legacy `under` text, plus 0001.a's milestone and design, which no file holds.
+    assert_eq!(v["findings"]["unresolved_link"], 3);
 }

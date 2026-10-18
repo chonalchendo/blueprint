@@ -15,10 +15,16 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{Counts, File, Refusal, Vault};
+use crate::{Counts, File, Kind, Refusal, Vault};
 
-/// Bump on any change to the tables or to what the parser puts in them; a mismatch rebuilds from nothing.
-const SCHEMA: i64 = 2;
+/// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
+/// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
+/// bump to the same number still differ.
+const SCHEMA: i64 = 3;
+
+fn schema() -> String {
+    format!("{SCHEMA}-{}", &blake3::hash(TABLES.as_bytes()).to_hex()[..12])
+}
 
 const TABLES: &str = "
 create table meta (key text primary key, value text not null);
@@ -31,6 +37,8 @@ create index records_under on records (under, kind);
 create table links (src text not null, type text not null, dst text not null);
 create table unresolved (src text not null, field text not null, text text not null);
 create index unresolved_src on unresolved (src);
+create table aliases (alias text not null, id text not null);
+create index aliases_alias on aliases (alias);
 create index links_src on links (src);
 create index links_dst on links (dst);
 create virtual table fts using fts5 (id, title, body, tokenize = 'unicode61');
@@ -142,7 +150,7 @@ impl Index {
         }
         let schema: Option<String> =
             tx.query_row("select value from meta where key = 'schema'", [], |r| r.get(0)).optional().unwrap_or(None);
-        if schema != Some(SCHEMA.to_string()) {
+        if schema != Some(self::schema()) {
             let names: Vec<String> = tx
                 .prepare("select name from sqlite_master where type in ('table', 'view') and name not like 'fts_%'")?
                 .query_map([], |r| r.get(0))?
@@ -151,7 +159,7 @@ impl Index {
                 tx.execute_batch(&format!("drop table if exists \"{name}\""))?;
             }
             tx.execute_batch(TABLES)?;
-            tx.execute("insert into meta values ('schema', ?1)", [SCHEMA.to_string()])?;
+            tx.execute("insert into meta values ('schema', ?1)", [self::schema()])?;
         }
         let mut known: std::collections::HashMap<String, String> = tx
             .prepare("select id, hash from files")?
@@ -203,11 +211,12 @@ impl Index {
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
-    /// Link targets that are not path ids, across headers and bodies.
+    /// Links that resolve to no file and no alias (contract code `unresolved_link`): targets that are not path ids,
+    /// and path ids that name nothing.
     pub fn unresolved(&self) -> Result<usize, Refusal> {
-        self.conn
-            .query_row("select count(*) from unresolved", [], count)
-            .map_err(|e| failed(Path::new(".bp/index.db"), &e))
+        let sql = "select (select count(*) from unresolved) + (select count(*) from links l where not exists \
+                   (select 1 from files f where f.id = l.dst) and not exists (select 1 from aliases a where a.alias = l.dst))";
+        self.conn.query_row(sql, [], count).map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
     /// Rows of one kind, ordered by id, at most `limit`, and the total before the limit. One read transaction, so
@@ -247,13 +256,13 @@ impl Index {
     pub fn search(
         &self,
         terms: &[String],
-        kind: Option<&str>,
+        kind: Option<Kind>,
         project: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Hit>, Refusal> {
         let quoted: Vec<String> = tokens(terms).map(|t| format!("\"{t}\"")).collect();
         if quoted.is_empty() {
-            return Err(Refusal::usage("a search names at least one word"));
+            return Err(Refusal::usage("a search with no words", "bp search <word> [<word>...]"));
         }
         let run = |query: &str| -> rusqlite::Result<Vec<Hit>> {
             // Rank and limit first: SQLite evaluates a select list for every row it sorts, and a snippet is the
@@ -267,9 +276,10 @@ impl Index {
                  from top join fts on fts.rowid = top.id join nodes n on n.rowid = top.id
                  where fts match ?1 order by top.r desc",
             )?;
-            st.query_map(params![query, kind, project, i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
-                Ok(Hit { id: r.get(0)?, kind: r.get(1)?, title: r.get(2)?, rank: r.get(3)?, snippet: r.get(4)? })
-            })?
+            st.query_map(
+                params![query, kind.map(Kind::as_str), project, i64::try_from(limit).unwrap_or(i64::MAX)],
+                |r| Ok(Hit { id: r.get(0)?, kind: r.get(1)?, title: r.get(2)?, rank: r.get(3)?, snippet: r.get(4)? }),
+            )?
             .collect()
         };
         let all = run(&quoted.join(" ")).map_err(|e| failed(Path::new(".bp/index.db"), &e))?;
@@ -333,6 +343,10 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     for d in &file.body.links {
         st.execute(params![id, "body", d.as_str()])?;
     }
+    let mut st = tx.prepare_cached("insert into aliases values (?1, ?2)")?;
+    for a in &header.aliases {
+        st.execute(params![a, id])?;
+    }
     let mut st = tx.prepare_cached("insert into unresolved values (?1, ?2, ?3)")?;
     for u in &header.unresolved {
         st.execute(params![id, u.field, u.text])?;
@@ -350,12 +364,14 @@ fn remove(tx: &rusqlite::Transaction, id: &str) -> rusqlite::Result<()> {
     }
     tx.execute("delete from links where src = ?1", [id])?;
     tx.execute("delete from unresolved where src = ?1", [id])?;
+    tx.execute("delete from aliases where id = ?1", [id])?;
     Ok(())
 }
 
-/// The git head and the modification time of `projects/`, `shared/`, every project and every kind directory.
+/// The schema, the git head and the modification time of `projects/`, `shared/`, every project and every kind directory.
 fn fingerprint(root: &Path) -> String {
-    let mut print = head(root).unwrap_or_default();
+    // The schema leads, so a binary with another schema never takes this index as fresh.
+    let mut print = format!("schema={}\n{}", schema(), head(root).unwrap_or_default());
     if let Ok(m) = std::fs::metadata(git_dir(root).join("index")) {
         let nanos = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
         let _ = write!(print, "\nindex={}:{}", nanos.unwrap_or_default(), m.len());
@@ -477,6 +493,18 @@ mod tests {
         assert_eq!(index.search(&[" ".into()], None, None, 10).err().map(|e| e.exit), Some(4));
         assert_eq!(index.search(&["walk nothingmatches".into()], None, None, 10).unwrap().len(), 3);
         assert!(index.search(&["\"(AND".into()], None, None, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_index_from_another_schema_is_rebuilt() {
+        let (_d, v) = vault();
+        drop(Index::open(&v).unwrap());
+        let db = Connection::open(v.root.join(".bp/index.db")).unwrap();
+        db.execute_batch("update meta set value = '2' where key = 'schema'; update meta set value = 'no schema line' where key = 'fingerprint'; drop table aliases;").unwrap();
+        drop(db);
+        let index = Index::open(&v).unwrap();
+        assert!(index.unresolved().is_ok(), "the aliases table is back");
+        assert_eq!(index.list(&all("issue")).unwrap().1, 3);
     }
 
     #[test]

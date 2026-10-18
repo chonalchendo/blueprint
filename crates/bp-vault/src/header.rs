@@ -13,8 +13,24 @@ use crate::{Id, Kind, Refusal};
 /// The closed set of link fields on nodes (12, the kind schemas). Every value is a path id.
 pub const LINKS: [&str; 7] = ["cites", "answers", "targets", "authorizes", "supersedes", "carries", "depends"];
 
-/// Names a verb's result uses at the top level beside the header's fields, so no header may use them.
-pub const RESERVED: [&str; 8] = ["id", "hash", "record", "lead", "body", "sections", "section", "contract_version"];
+/// Names a verb's result uses at the top level beside the header's fields, so no header may use them. The five
+/// envelope names are among them: an agent tells a refusal from a result by `code`.
+pub const RESERVED: [&str; 14] = [
+    "id",
+    "hash",
+    "record",
+    "lead",
+    "body",
+    "sections",
+    "section",
+    "contract_version",
+    "unresolved",
+    "code",
+    "subject",
+    "rule",
+    "fix",
+    "exit",
+];
 
 /// A link target that is not a path id: a legacy link text, a placeholder, a typo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -52,9 +68,10 @@ impl Header {
         let bad = |why: String| Refusal::schema(subject, why);
         let docs = YamlLoader::load_from_str(yaml).map_err(|e| bad(e.to_string()))?;
         let Some(Yaml::Hash(map)) = docs.first() else { return Err(bad("the header is not a map".into())) };
-        let mut kind = None;
+        let kind = map.get(&Yaml::String("kind".into())).ok_or_else(|| bad("`kind` is missing".into()))?;
+        let kind = kind.as_str().ok_or_else(|| bad("`kind` is not text".into()))?;
         let mut header = Self {
-            kind: Kind::Issue,
+            kind: kind.parse::<Kind>().map_err(|e| bad(e.to_string()))?,
             title: None,
             status: None,
             under: None,
@@ -67,7 +84,7 @@ impl Header {
             let Some(key) = key.as_str() else { return Err(bad(format!("the key {key:?} is not text"))) };
             let text = || value.as_str().map(str::to_string).ok_or_else(|| bad(format!("`{key}` is not text")));
             match key {
-                "kind" => kind = Some(text()?.parse::<Kind>().map_err(|e| bad(e.to_string()))?),
+                "kind" => {}
                 "title" => header.title = Some(text()?),
                 "status" => header.status = Some(text()?),
                 "under" => match Id::parse(&text()?) {
@@ -93,8 +110,14 @@ impl Header {
                 }
             }
         }
-        header.kind = kind.ok_or_else(|| bad("`kind` is missing".into()))?;
-        Ok(header)
+        // A node is named and has a state; a record is evidence about its parent and has neither (13, rule 4).
+        match (header.kind.is_record(), &header.title, &header.status) {
+            (false, None, _) => Err(bad(format!("`kind: {}` is a node: it needs a `title`", header.kind))),
+            (true, Some(_), _) | (true, _, Some(_)) => {
+                Err(bad(format!("`kind: {}` is a record: it has no `title` or `status`", header.kind)))
+            }
+            _ => Ok(header),
+        }
     }
 
     /// The header as one flat JSON object: the universal fields, each link field, the unresolved links, then every
@@ -179,7 +202,7 @@ mod tests {
 
     #[test]
     fn a_legacy_under_is_unresolved_not_an_id() {
-        let h = Header::parse("kind: issue\nunder: '[[milestone.anvil.x]]'\n", "f").unwrap();
+        let h = Header::parse("kind: issue\ntitle: T\nunder: '[[milestone.anvil.x]]'\n", "f").unwrap();
         assert_eq!(h.under, None);
         assert_eq!(h.unresolved[0].field, "under");
     }

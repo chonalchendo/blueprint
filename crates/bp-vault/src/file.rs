@@ -1,6 +1,6 @@
 //! One markdown file of the vault: its id, content hash, header and body. A file without a header is an asset.
 
-use crate::{Body, Header, Id, Refusal};
+use crate::{Body, Header, Id, Kind, Refusal};
 
 /// One file, parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,13 @@ impl File {
         let text = std::str::from_utf8(bytes).map_err(|e| Refusal::schema(id.as_str(), format!("not UTF-8: {e}")))?;
         let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n");
         let Some(rest) = text.strip_prefix("---\n") else {
+            if !is_asset(&id) {
+                return Err(Refusal::schema(
+                    id.as_str(),
+                    "no header: the first line is not `---`, and a file without a header belongs in shared/assets/ \
+                     or a node's own directory",
+                ));
+            }
             return Ok(Self { id, hash, header: None, body: Body::parse(&text) });
         };
         // The header closes at the first line that is exactly `---`.
@@ -51,10 +58,20 @@ impl File {
     }
 }
 
+/// A file without a header may sit in `shared/assets/` or in a node's own directory, beside its diagrams (12).
+fn is_asset(id: &Id) -> bool {
+    let p: Vec<&str> = id.as_str().split('/').collect();
+    p[..2] == ["shared", "assets"]
+        || (3..p.len()).any(|n| {
+            let prefix = Id::from_trusted(p[..n].join("/"));
+            Kind::ALL.iter().any(|k| !k.is_record() && k.fits(&prefix))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Code, Kind};
+    use crate::Code;
 
     fn parse(id: &str, text: &str) -> Result<File, Refusal> {
         File::from_bytes(Id::parse(id).unwrap(), text.as_bytes())
@@ -70,7 +87,8 @@ mod tests {
 
     #[test]
     fn crlf_and_bom_read_like_lf() {
-        let f = parse("projects/bp/issues/x", "\u{feff}---\r\nkind: issue\r\n---\r\n\r\nLead.\r\n").unwrap();
+        let f =
+            parse("projects/bp/issues/x", "\u{feff}---\r\nkind: issue\r\ntitle: T\r\n---\r\n\r\nLead.\r\n").unwrap();
         assert_eq!(f.body.lead, "Lead.");
     }
 
@@ -109,5 +127,22 @@ mod tests {
             parse("projects/bp/issues/x", "---\nkind: issue\ntitle: a --- b\n---\nLead.\n\n---\n\nMore.\n").unwrap();
         assert_eq!(f.header.unwrap().title.as_deref(), Some("a --- b"));
         assert!(f.body.text.contains("More."));
+    }
+
+    #[test]
+    fn a_file_without_a_header_is_an_asset_only_where_assets_live() {
+        assert!(parse("shared/assets/glossary", "# Glossary\n").unwrap().header.is_none());
+        assert!(parse("projects/bp/designs/system/diagrams/notes", "notes\n").unwrap().header.is_none());
+        for id in ["projects/bp/issues/c", "shared/notes/n"] {
+            let e = parse(id, "\n---\nkind: issue\ntitle: T\n---\n").err().unwrap();
+            assert_eq!(e.code, Code::SchemaInvalid, "{id}");
+        }
+    }
+
+    #[test]
+    fn a_node_has_a_title_and_a_record_has_none() {
+        assert!(parse("projects/bp/issues/x", "---\nkind: issue\n---\n").is_err());
+        let claim = "---\nkind: claim\nunder: projects/bp/issues/x\nstatus: open\n---\n";
+        assert!(parse("projects/bp/issues/x/claims/c", claim).is_err());
     }
 }

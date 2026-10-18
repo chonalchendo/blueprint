@@ -79,13 +79,13 @@ impl Vault {
     }
 
     /// Every markdown file under `projects/` and `shared/`, sorted by id. Dot directories (`.bp`, `.git`) are skipped.
+    /// Refuses `schema_invalid` on a markdown file whose path is not an id: it would be neither read nor counted.
     pub fn ids(&self) -> Result<Vec<Id>, Refusal> {
         let mut ids = Vec::new();
         for top in ["projects", "shared"] {
             let dir = self.root.join(top);
             if dir.is_dir() {
-                collect(&self.root, &dir, &mut ids)
-                    .map_err(|e| Refusal::failed(dir.display().to_string(), e.to_string()))?;
+                collect(&self.root, &dir, &mut ids)?;
             }
         }
         ids.sort();
@@ -105,16 +105,21 @@ impl Vault {
     }
 }
 
-fn collect(root: &Path, dir: &Path, ids: &mut Vec<Id>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
+fn collect(root: &Path, dir: &Path, ids: &mut Vec<Id>) -> Result<(), Refusal> {
+    let io = |e: std::io::Error| Refusal::failed(dir.display().to_string(), e.to_string());
+    for entry in std::fs::read_dir(dir).map_err(io)? {
+        let path = entry.map_err(io)?.path();
         let hidden = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
         if hidden {
             continue;
         }
         if path.is_dir() {
             collect(root, &path, ids)?;
-        } else if let Some(id) = Id::of_path(root, &path) {
+        } else if path.extension().is_some_and(|e| e == "md") {
+            let id = Id::of_path(root, &path).ok_or_else(|| {
+                let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+                Refusal::schema(rel, "the path is not an id: projects/<project>/<kind>/<slug> or shared/<kind>/<slug>")
+            })?;
             ids.push(id);
         }
     }

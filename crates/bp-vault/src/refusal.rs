@@ -67,13 +67,13 @@ impl Refusal {
         }
     }
 
-    /// The command line does not parse: exit 4.
-    pub fn usage(message: impl Into<String>) -> Self {
+    /// The command line does not parse: exit 4. The subject names the bad argument; the fix is the verb's help.
+    pub fn usage(subject: impl Into<String>, fix: impl Into<String>) -> Self {
         Self {
             code: Code::Usage,
-            subject: message.into(),
-            rule: "the verb, its arguments and its flags are as `bp --help` lists them",
-            fix: "bp --help".into(),
+            subject: subject.into(),
+            rule: "the verb, its arguments and its flags are as `bp <verb> --help` lists them",
+            fix: fix.into(),
             exit: 4,
         }
     }

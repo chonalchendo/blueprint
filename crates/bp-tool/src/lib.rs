@@ -112,33 +112,35 @@ pub struct Where {
 
 /// Runs one verb from `cwd` and returns the exit code: 0 ok, 1 error, 2 refused, 3 no-op, 4 usage.
 pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
-    let result = match &cli.verb {
-        Verb::Where => where_(cwd),
-        Verb::Show(show) => show_(cwd, show),
-        Verb::List(list) => list_(cwd, list),
-        Verb::Search(search) => search_(cwd, search),
-    };
+    match &cli.verb {
+        Verb::Where => finish(where_(cwd), cli.json, out),
+        Verb::Show(show) => finish(show_(cwd, show), cli.json, out),
+        Verb::List(list) => finish(list_(cwd, list), cli.json, out),
+        Verb::Search(search) => finish(search_(cwd, search), cli.json, out),
+    }
+}
+
+fn finish<T: Serialize>(result: Result<T, Refusal>, json: bool, out: &mut impl std::io::Write) -> ExitCode {
     match result {
         Ok(result) => {
-            emit(out, &Envelope { result, contract_version: CONTRACT }, cli.json);
+            emit(out, &Envelope { result, contract_version: CONTRACT }, json);
             ExitCode::SUCCESS
         }
         Err(refusal) => {
-            emit(out, &refusal, cli.json);
+            emit(out, &refusal, json);
             ExitCode::from(refusal.exit)
         }
     }
 }
 
-fn where_(cwd: &Path) -> Result<serde_json::Value, Refusal> {
+fn where_(cwd: &Path) -> Result<Where, Refusal> {
     let vault = Vault::discover(cwd)?;
-    let w = Where {
+    Ok(Where {
         project: vault.project_of(cwd),
         vault: vault.root.display().to_string(),
         worktree: None,
         version: env!("CARGO_PKG_VERSION"),
-    };
-    Ok(serde_json::to_value(w).expect("a plain struct serialises"))
+    })
 }
 
 fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
@@ -150,7 +152,7 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
             Code::NoNode,
             id.as_str(),
             "an id names a node or record: a file with a header",
-            "the file has no header: it is an asset; read it as a file",
+            format!("the file has no header: it is an asset; cat {}", id.path(&vault.root).display()),
         ));
     };
     let mut m = serde_json::Map::new();
@@ -184,7 +186,7 @@ fn node_id(text: &str) -> Result<Id, Refusal> {
             Code::NoNode,
             text,
             "an id is a path under projects/ or shared/, without .md",
-            format!("{why}; bp search <words>"),
+            format!("{why}; bp search {}", text.rsplit('/').next().unwrap_or(text).replace(['-', '.', '_'], " ")),
         )
     })
 }
@@ -197,22 +199,11 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
         return census(&index);
     };
     let under = list.under.as_deref().map(node_id).transpose()?;
-    let unknown = |what: &str, value: &str, fix: String| {
-        Refusal::new(
-            Code::UnknownValue,
-            format!("{what} {value}"),
-            "a kind and a status come from closed sets (13)",
-            fix,
-        )
-    };
-    let kind_value: Kind = kind.parse().map_err(|_| {
-        let kinds: Vec<&str> = Kind::ALL.iter().map(|k| k.as_str()).collect();
-        unknown("kind", kind, format!("use one of: {}", kinds.join(", ")))
-    })?;
+    let kind_value = kind_arg(kind)?;
     if let Some(status) = &list.status
         && !schema::status_in_set(kind, Some(status))
     {
-        return Err(unknown("status", status, format!("bp list {kind} without --status lists every status")));
+        return Err(unknown("status", status, format!("bp list {kind}")));
     }
     let filter = Filter {
         kind: kind_value,
@@ -223,6 +214,18 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     };
     let (rows, total) = index.list(&filter)?;
     Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }))
+}
+
+/// A kind argument, from the closed set.
+fn kind_arg(text: &str) -> Result<Kind, Refusal> {
+    text.parse().map_err(|_| {
+        let kinds: Vec<&str> = Kind::ALL.iter().map(|k| k.as_str()).collect();
+        unknown("kind", text, format!("use one of: {}", kinds.join(", ")))
+    })
+}
+
+fn unknown(what: &str, value: &str, fix: String) -> Refusal {
+    Refusal::new(Code::UnknownValue, format!("{what} {value}"), "a kind and a status come from closed sets (13)", fix)
 }
 
 /// The counts, and the findings the reader keeps instead of ignoring: statuses outside their kind's set and link
@@ -240,8 +243,9 @@ fn census(index: &Index) -> Result<Value, Refusal> {
 }
 
 fn search_(cwd: &Path, search: &Search) -> Result<Value, Refusal> {
+    let kind = search.kind.as_deref().map(kind_arg).transpose()?;
     let index = Index::open(&Vault::discover(cwd)?)?;
-    let rows = index.search(&search.terms, search.kind.as_deref(), search.project.as_deref(), search.limit)?;
+    let rows = index.search(&search.terms, kind, search.project.as_deref(), search.limit)?;
     Ok(serde_json::json!({ "rows": rows }))
 }
 

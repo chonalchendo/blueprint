@@ -83,16 +83,24 @@ impl Kind {
         }
     }
 
-    /// The path fits this kind's pattern.
+    /// The path fits this kind's pattern. A record nested under a node names that node's kind (13): a claim and a
+    /// review under an issue, a run under a check's owner, a delta under a design, a waiver under a milestone,
+    /// evidence under a learning, a disposition under a review.
     pub fn fits(self, id: &Id) -> bool {
         let p: Vec<&str> = id.as_str().split('/').collect();
         let project = |len: usize| p.len() == len && p[0] == "projects";
         let shared = |len: usize| p.len() == len && p[0] == "shared";
         let dir = self.dir();
+        // Every id has at least three segments, so the split leaves a parent of at least one.
+        let (parent, tail) = p.split_at(p.len() - 2);
+        let under = |kinds: &[Self]| {
+            let parent = Id::from_trusted(parent.join("/"));
+            tail[0] == dir && kinds.iter().any(|k| k.fits(&parent))
+        };
         match self {
             Self::Project => project(3) && p[2] == dir,
             Self::Design => {
-                (project(4) && p[2] == dir)
+                (project(4) && p[2] == dir && SPINE.contains(&p[3]))
                     || (project(5) && p[2] == dir && matches!(p[3], "containers" | "components"))
             }
             Self::Issue | Self::Milestone | Self::ConcernAnswer | Self::BlueprintVersion => project(4) && p[2] == dir,
@@ -100,16 +108,18 @@ impl Kind {
                 (project(4) && p[2] == dir) || (shared(3) && p[1] == dir)
             }
             Self::Convention | Self::Learning => shared(3) && p[1] == dir,
-            Self::Disposition => {
-                p.len() > 2 && p[p.len() - 2] == dir && Self::Review.fits(&Id::from_trusted(p[..p.len() - 2].join("/")))
-            }
-            _ => {
-                let parent = Id::from_trusted(p[..p.len().saturating_sub(2)].join("/"));
-                p.len() > 2 && p[p.len() - 2] == dir && Self::ALL.iter().any(|k| !k.is_record() && k.fits(&parent))
-            }
+            Self::Claim | Self::Review => under(&[Self::Issue]),
+            Self::Run => under(&[Self::Design, Self::Issue, Self::Milestone]),
+            Self::Delta => under(&[Self::Design]),
+            Self::Waiver => under(&[Self::Milestone]),
+            Self::Evidence => under(&[Self::Learning]),
+            Self::Disposition => under(&[Self::Review]),
         }
     }
 }
+
+/// The spine designs, named by level (12, Identity; 13 adds the glossary).
+const SPINE: [&str; 4] = ["product", "system", "data-model", "glossary"];
 
 #[cfg(test)]
 mod tests {
@@ -127,6 +137,8 @@ mod tests {
         assert!(fits(Kind::Design, "projects/bp/designs/system"));
         assert!(fits(Kind::Design, "projects/bp/designs/components/walk"));
         assert!(!fits(Kind::Design, "projects/bp/designs/other/walk"));
+        assert!(fits(Kind::Design, "projects/bp/designs/glossary"));
+        assert!(!fits(Kind::Design, "projects/bp/designs/containers"), "a spine design is named by level");
         assert!(fits(Kind::Decision, "shared/decisions/d") && fits(Kind::Decision, "projects/bp/decisions/d"));
         assert!(fits(Kind::Learning, "shared/learnings/l") && !fits(Kind::Learning, "projects/bp/learnings/l"));
         assert!(!fits(Kind::Issue, "projects/bp/milestones/m"), "the directory names the kind");
@@ -139,6 +151,14 @@ mod tests {
         assert!(!fits(Kind::Claim, "projects/bp/issues/0411.x/runs/s"));
         assert!(!fits(Kind::Claim, "projects/bp/issues/claims/s"), "the parent must be a node");
         assert!(fits(Kind::Disposition, "projects/bp/issues/0411.x/reviews/h/dispositions/1"));
+        assert!(!fits(Kind::Disposition, "projects/bp/designs/system/reviews/h/dispositions/1"));
+        assert!(!fits(Kind::Claim, "projects/bp/designs/system/claims/c"), "a claim sits under an issue");
+        assert!(!fits(Kind::Claim, "projects/bp/project/claims/c"));
+        assert!(!fits(Kind::Claim, "shared/inbox/i/claims/c"));
+        assert!(!fits(Kind::Delta, "projects/bp/issues/x/deltas/d"), "a delta sits under a design");
+        assert!(!fits(Kind::Waiver, "projects/bp/issues/x/waivers/w"), "a waiver sits under a milestone");
+        assert!(fits(Kind::Waiver, "projects/bp/milestones/m/waivers/w"));
+        assert!(fits(Kind::Evidence, "shared/learnings/l/evidence/e"));
         assert!(fits(Kind::Handoff, "projects/bp/handoffs/2026-05-31-7c08a6ac"));
         assert!(fits(Kind::Handoff, "shared/handoffs/2026-05-31-7c08a6ac"));
         let claim = Id::parse("projects/bp/issues/0411.x/claims/s").unwrap();
