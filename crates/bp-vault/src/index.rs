@@ -15,7 +15,7 @@ use crate::{Counts, File, FindingKind, Kind, Refusal, Vault};
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
 /// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
 /// bump to the same number still differ.
-const SCHEMA: i64 = 4;
+const SCHEMA: i64 = 5;
 
 pub(crate) fn schema() -> String {
     format!("{SCHEMA}-{}", &blake3::hash(TABLES.as_bytes()).to_hex()[..12])
@@ -25,7 +25,7 @@ const TABLES: &str = "
 create table meta (key text primary key, value text not null);
 create table files (id text primary key, hash text not null, class text not null);
 create table nodes (rowid integer primary key, id text unique not null, kind text not null, title text,
-  status text, project text, under text, header text not null, tokens integer not null);
+  status text, project text, under text, header text not null, tokens integer not null, design_kind text, scope text);
 create index nodes_kind on nodes (kind, project, status);
 create table records (id text primary key, kind text not null, project text, under text, header text not null,
   body text not null);
@@ -72,6 +72,12 @@ pub struct Row {
     /// The parent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub under: Option<String>,
+    /// A design's kind, from its path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub design_kind: Option<String>,
+    /// A design's scope, from its path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// One row of `search`.
@@ -259,9 +265,9 @@ impl Index {
             let tx = self.conn.unchecked_transaction()?;
             let is_record = f.kind.is_record();
             let (from, cols) = if is_record {
-                ("records", "id, kind, null, null, under")
+                ("records", "id, kind, null, null, under, null, null")
             } else {
-                ("nodes", "id, kind, title, status, under")
+                ("nodes", "id, kind, title, status, under, design_kind, scope")
             };
             // Records carry no status, so a status filter on a record kind matches nothing.
             let status = if is_record { "?2 is null" } else { "(?2 is null or status = ?2)" };
@@ -277,7 +283,15 @@ impl Index {
             let mut st = tx.prepare(&format!("select {cols} from {from} {filter} order by id limit ?5"))?;
             let rows = st
                 .query_map(params![f.kind.as_str(), f.status, f.project, under, limit], |r| {
-                    Ok(Row { id: r.get(0)?, kind: r.get(1)?, title: r.get(2)?, status: r.get(3)?, under: r.get(4)? })
+                    Ok(Row {
+                        id: r.get(0)?,
+                        kind: r.get(1)?,
+                        title: r.get(2)?,
+                        status: r.get(3)?,
+                        under: r.get(4)?,
+                        design_kind: r.get(5)?,
+                        scope: r.get(6)?,
+                    })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
             Ok((rows, total))
@@ -398,7 +412,7 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
         tx.execute("insert into files values (?1, ?2, 'asset')", params![id, file.hash])?;
         return Ok(());
     };
-    let json = Value::Object(header.to_json()).to_string();
+    let json = Value::Object(header.to_json(&file.id)).to_string();
     let under = header.under.as_ref().map(crate::Id::as_str);
     let kind = header.kind.as_str();
     if header.kind.is_record() {
@@ -409,11 +423,13 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
         )?;
     } else {
         tx.execute("insert into files values (?1, ?2, 'node')", params![id, file.hash])?;
+        let level = crate::DesignLevel::of(&file.id);
         tx.execute(
-            "insert into nodes (id, kind, title, status, project, under, header, tokens)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) on conflict (id) do update set kind = excluded.kind,
+            "insert into nodes (id, kind, title, status, project, under, header, tokens, design_kind, scope)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) on conflict (id) do update set kind = excluded.kind,
              title = excluded.title, status = excluded.status, project = excluded.project, under = excluded.under,
-             header = excluded.header, tokens = excluded.tokens",
+             header = excluded.header, tokens = excluded.tokens, design_kind = excluded.design_kind,
+             scope = excluded.scope",
             params![
                 id,
                 kind,
@@ -422,7 +438,9 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
                 file.id.project(),
                 under,
                 json,
-                body_tokens(&file.body.text)
+                body_tokens(&file.body.text),
+                level.map(|l| l.design_kind),
+                level.map(|l| l.scope)
             ],
         )?;
         tx.execute(
@@ -597,7 +615,9 @@ mod tests {
         index.reconcile(&v).unwrap();
         assert_eq!(index.list(&all("claim")).unwrap().1, 0, "the census reconciles");
         write(&v.root, "projects/bp/designs/components/walk", "---\nkind: design\ntitle: Walk\nstatus: active\n---\n");
-        assert_eq!(Index::open(&v).unwrap().list(&all("design")).unwrap().1, 1);
+        let (rows, total) = Index::open(&v).unwrap().list(&all("design")).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!((rows[0].design_kind.as_deref(), rows[0].scope.as_deref()), (Some("component"), Some("component")));
         // A new project moves `projects/`, which every fingerprint names, so the fast path sees it too.
         write(&v.root, "projects/zz/issues/0001.z", &issue("New project", "open"));
         assert_eq!(Index::open(&v).unwrap().list(&all("issue")).unwrap().1, 4);

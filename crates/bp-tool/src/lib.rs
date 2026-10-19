@@ -189,7 +189,7 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     m.insert("id".into(), id.as_str().into());
     m.insert("record".into(), header.kind.is_record().into());
     m.insert("hash".into(), file.hash.clone().into());
-    m.extend(header.to_json());
+    m.extend(header.to_json(&id));
     m.insert("lead".into(), file.body.lead.clone().into());
     if !file.body.findings.is_empty() {
         m.insert("findings".into(), serde_json::to_value(&file.body.findings).expect("a plain struct serialises"));

@@ -8,7 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 use yaml_rust2::{Yaml, YamlLoader};
 
-use crate::{Id, Kind, Refusal};
+use crate::{DesignLevel, Id, Kind, Refusal};
 
 /// The closed set of link fields on nodes (12, the kind schemas). Every value is a path id. `carries` is not one:
 /// it is derived from sidecars and check blocks, never stored (13).
@@ -33,6 +33,10 @@ pub const RESERVED: [&str; 15] = [
     "fix",
     "exit",
 ];
+
+/// Fields the reader derives from a design's path (12, Layout). No header stores them: a stored copy could contradict
+/// the path.
+const DERIVED: [&str; 2] = ["design_kind", "scope"];
 
 /// A link target that is not a path id: a legacy link text, a placeholder, a typo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -107,6 +111,9 @@ impl Header {
                     header.links.insert(k.into(), ids);
                 }
                 k if RESERVED.contains(&k) => return Err(bad(format!("`{k}` is a reserved name"))),
+                k if DERIVED.contains(&k) => {
+                    return Err(bad(format!("`{k}` comes from the path, not the header; delete the line")));
+                }
                 k => {
                     header.fields.insert(k.into(), json(value));
                 }
@@ -122,9 +129,9 @@ impl Header {
         }
     }
 
-    /// The header as one flat JSON object: the universal fields, each link field, the unresolved links, then every
-    /// other field.
-    pub fn to_json(&self) -> serde_json::Map<String, Value> {
+    /// The header of the file at `id` as one flat JSON object: the universal fields, each link field, the unresolved
+    /// links, every other field, then a design's kind and scope, which come from its path.
+    pub fn to_json(&self, id: &Id) -> serde_json::Map<String, Value> {
         let mut m = serde_json::Map::new();
         m.insert("kind".into(), self.kind.as_str().into());
         if let Some(t) = &self.title {
@@ -149,6 +156,10 @@ impl Header {
         }
         for (k, v) in &self.fields {
             m.insert(k.clone(), v.clone());
+        }
+        if let Some(level) = DesignLevel::of(id) {
+            m.insert("design_kind".into(), level.design_kind.into());
+            m.insert("scope".into(), level.scope.into());
         }
         m
     }
@@ -197,9 +208,17 @@ mod tests {
         assert_eq!(h.unresolved, [Unresolved { field: "cites".into(), text: "[[milestone.anvil.x]]".into() }]);
         assert_eq!(h.links["depends"][0].as_str(), "projects/a/issues/e");
         assert_eq!(h.fields["cost_diff"], 53);
-        let j = h.to_json();
+        let j = h.to_json(&Id::parse("projects/bp/issues/x").unwrap());
         assert_eq!(j["tags"][0], "domain/x");
         assert_eq!(j["unresolved"][0]["field"], "cites");
+        assert!(!j.contains_key("design_kind"));
+    }
+
+    #[test]
+    fn a_design_reads_its_kind_and_scope_from_its_path() {
+        let h = Header::parse("kind: design\ntitle: T\nstatus: draft\n", "f").unwrap();
+        let j = h.to_json(&Id::parse("projects/bp/designs/data-model").unwrap());
+        assert_eq!((j["design_kind"].as_str(), j["scope"].as_str()), (Some("data-model"), Some("system")));
     }
 
     #[test]
@@ -218,6 +237,8 @@ mod tests {
             ("kind: issue\nstatus: 1\n", "`status` is not text"),
             ("kind: issue\ncites: [1]\n", "non-text item"),
             ("kind: issue\nbody: x\n", "reserved"),
+            ("kind: design\ntitle: T\ndesign_kind: system\n", "comes from the path"),
+            ("kind: design\ntitle: T\nscope: system\n", "comes from the path"),
         ] {
             let e = Header::parse(yaml, "f").unwrap_err();
             assert_eq!(e.code, crate::Code::SchemaInvalid, "{yaml}");

@@ -121,6 +121,34 @@ impl Kind {
 /// The spine designs, named by level (12, Identity; 13 adds the glossary).
 const SPINE: [&str; 4] = ["product", "system", "data-model", "glossary"];
 
+/// A design's kind and scope (13, Design). Both come from the path, so the header stores neither (12, Layout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesignLevel {
+    /// The level of the spine the design answers.
+    pub design_kind: &'static str,
+    /// The C4 level it covers.
+    pub scope: &'static str,
+}
+
+impl DesignLevel {
+    /// The level a design's path names; `None` for a path that is not a design's.
+    pub fn of(id: &Id) -> Option<Self> {
+        if !Kind::Design.fits(id) {
+            return None;
+        }
+        let (design_kind, scope) = match id.as_str().split('/').nth(3)? {
+            "product" => ("product", "product"),
+            "system" => ("system", "system"),
+            "data-model" => ("data-model", "system"),
+            "glossary" => ("glossary", "system"),
+            "containers" => ("container", "container"),
+            "components" => ("component", "component"),
+            _ => return None,
+        };
+        Some(Self { design_kind, scope })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +195,19 @@ mod tests {
         assert_eq!(Kind::Handoff.parent(&handoff).unwrap().as_str(), "projects/bp/project");
         assert_eq!(Kind::Handoff.parent(&Id::parse("shared/handoffs/h").unwrap()), None);
         assert_eq!(Kind::Issue.parent(&Id::parse("projects/bp/issues/x").unwrap()), None);
+    }
+
+    #[test]
+    fn a_design_path_names_its_kind_and_scope() {
+        let level = |id: &str| DesignLevel::of(&Id::parse(id).unwrap()).map(|l| (l.design_kind, l.scope));
+        assert_eq!(level("projects/bp/designs/product"), Some(("product", "product")));
+        assert_eq!(level("projects/bp/designs/system"), Some(("system", "system")));
+        assert_eq!(level("projects/bp/designs/data-model"), Some(("data-model", "system")));
+        assert_eq!(level("projects/bp/designs/glossary"), Some(("glossary", "system")));
+        assert_eq!(level("projects/bp/designs/containers/vault"), Some(("container", "container")));
+        assert_eq!(level("projects/bp/designs/components/walk"), Some(("component", "component")));
+        assert_eq!(level("projects/bp/issues/system"), None);
+        assert_eq!(level("projects/bp/designs/system/runs/r"), None, "a record under a design is not a design");
     }
 
     #[test]

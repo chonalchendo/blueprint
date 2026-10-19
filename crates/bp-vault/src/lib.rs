@@ -28,7 +28,7 @@ pub use file::File;
 pub use header::{Header, LINKS, RESERVED, Unresolved};
 pub use id::Id;
 pub use index::{Filter, Hit, Index, Reading, Record, Row};
-pub use kind::Kind;
+pub use kind::{DesignLevel, Kind};
 pub use refusal::{Code, Refusal};
 pub use walk::{Fill, Reached, fill};
 pub use write::{Held, Writer, Written};
