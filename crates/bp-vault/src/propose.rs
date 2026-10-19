@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use rusqlite::OptionalExtension;
+
 use crate::fingerprint::fingerprint;
 use crate::index::{failed, replace};
 use crate::write::Held;
@@ -43,6 +45,9 @@ impl Index {
                         "every check block has a name (15, the check grammar)",
                         format!("add name=<slug> to the block `{}`", new.text),
                     ));
+                }
+                if let Some(refusal) = check_rule(id, new) {
+                    return Err(refusal);
                 }
             }
             all.extend(now);
@@ -89,7 +94,26 @@ impl Index {
             }
         }
         out.extend(file.body.findings.iter().map(|f| held(f.kind.as_str(), "body", &f.detail)));
+        out.extend(file.body.empty_checks.iter().map(|s| held(Code::CheckEmpty.as_str(), "body", s)));
+        let names: Vec<&String> = file.body.checks.iter().filter_map(|c| c.attrs.get("name")).collect();
+        for (i, name) in names.iter().enumerate() {
+            // A shared name is one finding, at its second block.
+            if names[..i].iter().filter(|n| *n == name).count() == 1 {
+                out.push(held(Code::CheckDuplicate.as_str(), "body", name));
+            }
+        }
         Ok(out)
+    }
+
+    /// The node whose live alias is `id`, when one is: a rename keeps the old id resolving, so no new node takes it
+    /// (13, rule 1).
+    pub fn aliased(&self, id: &Id) -> Result<Option<Id>, Refusal> {
+        let holder: Option<String> = self
+            .conn
+            .query_row("select id from aliases where alias = ?1 order by id limit 1", [id.as_str()], |r| r.get(0))
+            .optional()
+            .map_err(|e| failed(Path::new(".bp/index.db"), &e))?;
+        Ok(holder.map(Id::from_trusted))
     }
 
     /// Takes the committed files and the fingerprint after the commit, in one transaction.
@@ -102,4 +126,22 @@ impl Index {
         tx.execute("insert or replace into meta values ('fingerprint', ?1)", [fingerprint(root)])?;
         tx.commit()
     }
+}
+
+/// The refusal for a check finding a write adds: a check section with no block, or two blocks that share a name.
+fn check_rule(id: &Id, new: &Held) -> Option<Refusal> {
+    let (code, rule, fix) = match new.code.parse() {
+        Ok(Code::CheckEmpty) => (
+            Code::CheckEmpty,
+            "a check section, and each of its subsections, holds a check block (15, the check grammar)",
+            format!("add a fenced check block under `{}`, or move its prose to another section", new.text),
+        ),
+        Ok(Code::CheckDuplicate) => (
+            Code::CheckDuplicate,
+            "the check blocks of one owner have distinct names (25, design change 2)",
+            format!("rename one of the blocks named `{}`", new.text),
+        ),
+        _ => return None,
+    };
+    Some(Refusal::new(code, id.as_str(), rule, fix))
 }

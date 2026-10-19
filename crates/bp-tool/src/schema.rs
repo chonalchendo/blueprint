@@ -23,6 +23,61 @@ pub fn status_in_set(kind: &str, status: Option<&str>) -> bool {
     }
 }
 
+/// The first status of a node kind's machine, which `create` writes (13). Each status set declares it first.
+pub fn first_status(kind: Kind) -> Option<&'static str> {
+    Some(match kind {
+        Kind::Project => ProjectStatus::ALL[0].as_str(),
+        Kind::Design => DesignStatus::ALL[0].as_str(),
+        Kind::Milestone => MilestoneStatus::ALL[0].as_str(),
+        Kind::Issue => IssueStatus::ALL[0].as_str(),
+        Kind::Thread => ThreadStatus::ALL[0].as_str(),
+        Kind::Decision => DecisionStatus::ALL[0].as_str(),
+        Kind::Convention => ConventionStatus::ALL[0].as_str(),
+        Kind::Learning => LearningStatus::ALL[0].as_str(),
+        Kind::Inbox => InboxStatus::ALL[0].as_str(),
+        _ => return None,
+    })
+}
+
+/// What one link type of a kind names (13, each kind's table).
+pub struct Link {
+    /// The kinds a target may be.
+    pub targets: &'static [Kind],
+    /// More than one target; else zero or one.
+    pub many: bool,
+}
+
+/// The link types of a node kind; `None` for a type the kind does not hold. A record holds none: its references are
+/// its own fields, written once by `record` (13, rule 4).
+pub fn link(kind: Kind, field: &str) -> Option<Link> {
+    use Kind::{Convention, Decision, Delta, Design, Issue, Learning, Thread};
+    let (targets, many): (&'static [Kind], bool) = match (kind, field) {
+        (Design, "cites") => (&[Design, Decision, Convention], true),
+        (Issue, "cites") => (&[Design, Convention, Learning], true),
+        (Issue, "depends") => (&[Issue], true),
+        (Thread, "cites") => (&[Design, Decision, Learning], true),
+        (Decision, "answers") => (&[Thread], false),
+        (Decision, "supersedes") => (&[Decision], false),
+        (Decision, "authorizes") => (&[Delta], true),
+        (Learning, "cites") => (&[Design, Issue], true),
+        (Kind::Inbox, "targets") => (&[Thread, Issue, Learning], false),
+        _ => return None,
+    };
+    Some(Link { targets, many })
+}
+
+/// The kinds a node of `kind` may sit under; it needs one when any is named (13): the spine runs product under
+/// project, system under product, and so down; a milestone sits under the design it moves; an issue under its
+/// milestone.
+pub fn parents(kind: Kind) -> &'static [Kind] {
+    match kind {
+        Kind::Design => &[Kind::Design, Kind::Project],
+        Kind::Milestone => &[Kind::Design],
+        Kind::Issue => &[Kind::Milestone],
+        _ => &[],
+    }
+}
+
 /// Every label field of any kind, for the fix that lists one kind's.
 const LABELS: [&str; 9] =
     ["title", "tags", "applies", "class", "repository", "forge", "cue", "severity", "walkthrough"];
@@ -164,5 +219,15 @@ mod tests {
         assert!(!status_in_set("learning", Some("stale")));
         assert!(!status_in_set("issue", None));
         assert!(!status_in_set("claim", Some("open")));
+    }
+
+    #[test]
+    fn a_node_is_born_in_its_machine_s_first_status() {
+        let first: Vec<_> = [Kind::Project, Kind::Design, Kind::Milestone, Kind::Issue, Kind::Decision, Kind::Inbox]
+            .into_iter()
+            .map(first_status)
+            .collect();
+        assert_eq!(first, ["active", "draft", "planned", "open", "proposed", "raw"].map(Some));
+        assert_eq!(first_status(Kind::Claim), None);
     }
 }

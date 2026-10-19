@@ -2,14 +2,13 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::ExitCode;
 
 use bp_operation::Role;
 use bp_vault::{Code, Index, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
-use crate::{CONTRACT, Envelope, emit, finish, node_id, schema};
+use crate::{Wrote, node_id, schema};
 
 /// `bp set <id> <field> <value> [--dry-run]`.
 #[derive(Args)]
@@ -25,25 +24,7 @@ pub struct Set {
     pub dry_run: bool,
 }
 
-/// A write verb's result: what it wrote (exit 0), or the id of what the vault already held (exit 3).
-enum Wrote {
-    Changed(Value),
-    Already(Value),
-}
-
-/// Runs `set` and prints its result: exit 0 for a commit or a dry run, 3 when the vault already holds the value.
-pub(crate) fn run(cwd: &Path, set: &Set, json: bool, out: &mut impl std::io::Write) -> ExitCode {
-    match self::set(cwd, set) {
-        Ok(Wrote::Already(v)) => {
-            emit(out, &Envelope { result: v, contract_version: CONTRACT }, json);
-            ExitCode::from(3)
-        }
-        Ok(Wrote::Changed(v)) => finish(Ok(v), json, out),
-        Err(refusal) => finish::<Value>(Err(refusal), json, out),
-    }
-}
-
-fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
+pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     let id = node_id(&set.id)?;
     let vault = Vault::discover(cwd)?;
     let role = role()?;
@@ -88,7 +69,7 @@ fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
 
 /// The `Bp-Role` of this process's commits: `BP_ROLE`, `human` when unset or empty (25, design change 7). A value
 /// outside the set is an environment value that does not parse: `usage`, as for `BP_NOW`.
-fn role() -> Result<Role, Refusal> {
+pub(crate) fn role() -> Result<Role, Refusal> {
     let text = std::env::var_os("BP_ROLE").unwrap_or_default();
     let text = text.to_string_lossy();
     if text.is_empty() {

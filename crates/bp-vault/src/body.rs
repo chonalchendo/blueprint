@@ -27,7 +27,13 @@ pub struct Body {
     pub checks: Vec<Check>,
     /// What the body does that CommonMark allows but the vault should not: kept, not refused.
     pub findings: Vec<Finding>,
+    /// Each check section, or `### ` subsection of one, that holds no check block, as `Check` or `Check / Direct`.
+    /// A write refuses one it adds (`check_empty`); the conversion left 199 issues with one (15).
+    pub empty_checks: Vec<String>,
 }
+
+/// The sections that hold check blocks (13): an issue's `## Check`, a milestone's `## Finish line`, and `## Checks`.
+const CHECK_SECTIONS: [&str; 3] = ["Check", "Checks", "Finish line"];
 
 /// One `## ` section.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -81,6 +87,8 @@ impl Body {
         let mut body = Self { text: text.trim().to_string(), ..Self::default() };
         let line = |at: usize| text[..at].matches('\n').count() + 1;
         let mut headings: Vec<(String, Range<usize>)> = Vec::new();
+        let mut subheadings: Vec<(String, usize)> = Vec::new();
+        let mut blocks: Vec<usize> = Vec::new();
         let mut code: Vec<Range<usize>> = Vec::new();
         let mut check: Option<(Check, usize)> = None;
         // Block quotes and lists nest; a heading inside one is part of it, not a section.
@@ -95,6 +103,11 @@ impl Body {
                     if depth == 0 && !text[range.clone()].trim_end().contains('\n') =>
                 {
                     headings.push((atx_text(&text[range.clone()]), range));
+                }
+                Event::Start(Tag::Heading { level: HeadingLevel::H3, .. })
+                    if depth == 0 && !text[range.clone()].trim_end().contains('\n') =>
+                {
+                    subheadings.push((atx_text(&text[range.clone()]), range.start));
                 }
                 Event::Code(_) | Event::Html(_) | Event::InlineHtml(_) => code.push(range),
                 Event::Start(Tag::CodeBlock(kind)) => {
@@ -127,6 +140,7 @@ impl Body {
                             body.findings.push(Finding { kind: FindingKind::CheckUnnamed, line: line(at), detail });
                         }
                         body.checks.push(c);
+                        blocks.push(at);
                     }
                 }
                 _ => {}
@@ -141,6 +155,9 @@ impl Body {
                 body.findings.push(finding);
             }
             body.sections.push(Section { heading: h.clone(), text: text[range.end..end].trim().to_string() });
+            if CHECK_SECTIONS.contains(&h.as_str()) {
+                body.empty_checks.extend(empty_checks(h, range.start..end, &subheadings, &blocks));
+            }
         }
         body.findings.sort_by_key(|f| f.line);
         for (target, at) in wikilinks(text) {
@@ -160,6 +177,24 @@ impl Body {
     pub fn sections_named(&self, heading: &str) -> Vec<&Section> {
         self.sections.iter().filter(|s| s.heading == heading).collect()
     }
+}
+
+/// The parts of one check section that hold no block: the section itself, or each `### ` subsection when it has
+/// any. Text before the first subsection is prose about the checks and needs none.
+fn empty_checks(
+    heading: &str,
+    section: Range<usize>,
+    subheadings: &[(String, usize)],
+    blocks: &[usize],
+) -> Vec<String> {
+    let subs: Vec<&(String, usize)> = subheadings.iter().filter(|(_, at)| section.contains(at)).collect();
+    let parts: Vec<(String, Range<usize>)> = if subs.is_empty() {
+        vec![(heading.to_string(), section)]
+    } else {
+        let end = |j: usize| subs.get(j + 1).map_or(section.end, |next| next.1);
+        subs.iter().enumerate().map(|(j, (sub, at))| (format!("{heading} / {sub}"), *at..end(j))).collect()
+    };
+    parts.into_iter().filter(|(_, span)| !blocks.iter().any(|b| span.contains(b))).map(|(name, _)| name).collect()
 }
 
 /// `check` alone or followed by whitespace: `checklist` and `checkout` are other languages.
@@ -305,6 +340,18 @@ mod tests {
         let b = Body::parse("```check shell {name=x}trailing\n```\n\n```check {name=a name=b \"q\"}\n```\n");
         let kinds: Vec<FindingKind> = b.findings.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, [FindingKind::CheckMalformed; 4], "{:?}", b.findings);
+    }
+
+    #[test]
+    fn a_check_section_and_each_subsection_hold_a_block() {
+        let block = "```check shell {name=a}\ntrue\n```\n";
+        assert!(Body::parse(&format!("## Check\n\n{block}")).empty_checks.is_empty());
+        assert_eq!(Body::parse("## Check\n\nProse only.\n\n## Other\n").empty_checks, ["Check"]);
+        let b = Body::parse(&format!("## Check\n\nIntro.\n\n### Direct\n\n{block}\n### Indirect\n\nBy hand.\n"));
+        assert_eq!(b.empty_checks, ["Check / Indirect"]);
+        let b = Body::parse("## Check\n\n```check shell {name=a}\n### a shell comment\n```\n");
+        assert!(b.empty_checks.is_empty(), "a heading inside a fence is not a subsection");
+        assert!(Body::parse("## Problem\n\nProse.\n").empty_checks.is_empty());
     }
 
     #[test]

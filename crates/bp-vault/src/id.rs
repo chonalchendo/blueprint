@@ -51,6 +51,36 @@ impl Id {
     }
 }
 
+/// The longest slug (12, Identity).
+pub const SLUG_MAX: usize = 80;
+
+/// The slug a title mints (13, rule 1): lowercase ASCII letters and digits, every other run a single `-`, at most
+/// `max` characters, cut at a word boundary. Today's slugs cut mid-word ("four-crates-and-an"), which a cold reader
+/// flagged (12). A first word longer than `max` is the one cut inside a word. Empty when the title holds no letter or
+/// digit.
+pub fn slug(title: &str, max: usize) -> String {
+    let words: Vec<String> = title
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let mut out = String::new();
+    for w in words {
+        let sep = usize::from(!out.is_empty());
+        if out.len() + sep + w.len() > max {
+            if out.is_empty() {
+                out = w[..max].to_string();
+            }
+            break;
+        }
+        if sep == 1 {
+            out.push('-');
+        }
+        out.push_str(&w);
+    }
+    out
+}
+
 impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -86,6 +116,18 @@ mod tests {
         ] {
             assert!(Id::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_slug_is_cut_at_a_word_boundary() {
+        assert_eq!(slug("Round trip quokka", SLUG_MAX), "round-trip-quokka");
+        assert_eq!(slug("  `set` --body-file: a design's body!", SLUG_MAX), "set-body-file-a-design-s-body");
+        assert_eq!(slug("four crates and another", 18), "four-crates-and");
+        assert_eq!(slug("four crates and another", 19), "four-crates-and");
+        assert_eq!(slug("abcdefghij", 4), "abcd");
+        assert_eq!(slug("--- !!", SLUG_MAX), "");
+        let long = slug(&"word ".repeat(40), SLUG_MAX);
+        assert!(long.len() <= SLUG_MAX && !long.ends_with('-'), "{long}");
     }
 
     #[test]

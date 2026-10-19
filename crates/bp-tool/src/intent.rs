@@ -17,14 +17,7 @@ pub struct World {
 impl World {
     /// Reads `BP_NOW` and `BP_FORGE_SNAPSHOT`. The live forge read lands with the repo verbs.
     pub fn read() -> Result<Self, Refusal> {
-        let now = if let Ok(s) = std::env::var("BP_NOW") {
-            intents::timestamp(&s).ok_or_else(|| {
-                Refusal::usage(format!("BP_NOW={s}"), "set BP_NOW to YYYY-MM-DDTHH:MM:SSZ, or unset it")
-            })?
-        } else {
-            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-            i64::try_from(since.expect("the clock is past 1970").as_secs()).expect("the clock fits i64")
-        };
+        let now = now()?;
         let forge = match std::env::var_os("BP_FORGE_SNAPSHOT") {
             Some(dir) => Some(Snapshot::from_dir(std::path::Path::new(&dir)).map_err(|(path, e)| {
                 Refusal::failed(
@@ -40,6 +33,16 @@ impl World {
     fn pr(&self, id: &str) -> Option<&bp_forge::PullRequest> {
         self.forge.as_ref()?.open_for(id.rsplit('/').next()?)
     }
+}
+
+/// The clock in Unix seconds: `BP_NOW` when set, so parity runs and replays see the clock the reference saw.
+pub fn now() -> Result<i64, Refusal> {
+    if let Ok(s) = std::env::var("BP_NOW") {
+        return intents::timestamp(&s)
+            .ok_or_else(|| Refusal::usage(format!("BP_NOW={s}"), "set BP_NOW to YYYY-MM-DDTHH:MM:SSZ, or unset it"));
+    }
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+    Ok(i64::try_from(since.expect("the clock is past 1970").as_secs()).expect("the clock fits i64"))
 }
 
 /// The intent of one issue or milestone. A milestone's intent reads only its status, so the clock and the forge

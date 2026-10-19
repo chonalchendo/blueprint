@@ -26,7 +26,7 @@ pub use closed::OutsideSet;
 pub use emit::set_field;
 pub use file::File;
 pub use header::{Header, LINKS, RESERVED, Unresolved};
-pub use id::Id;
+pub use id::{Id, SLUG_MAX, slug};
 pub use index::{Filter, Hit, Index, Reading, Record, Row};
 pub use kind::{DesignLevel, Kind};
 pub use refusal::{Code, Refusal};
