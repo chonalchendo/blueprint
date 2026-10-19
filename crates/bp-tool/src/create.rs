@@ -46,11 +46,7 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     };
     schema::title(&format!("create {kind} title"), &create.title)?;
     let under = create.under.as_deref().map(node_id).transpose()?;
-    let body = match &create.body_file {
-        Some(path) => std::fs::read_to_string(path)
-            .map_err(|e| Refusal::failed(path.display().to_string(), format!("{e}; pass a readable UTF-8 file")))?,
-        None => String::new(),
-    };
+    let body = create.body_file.as_deref().map(body_file).transpose()?.unwrap_or_default();
     let vault = Vault::discover(cwd)?;
     let id = home(kind, create)?;
     let role = set::role()?;
@@ -201,9 +197,15 @@ fn dated(slug: &str) -> bool {
             .all(|(i, c)| if matches!(i, 4 | 7 | 10) { *c == b'-' } else { c.is_ascii_digit() })
 }
 
+/// The text of a `--body-file`, which `create` and `set` read.
+pub(crate) fn body_file(path: &Path) -> Result<String, Refusal> {
+    std::fs::read_to_string(path)
+        .map_err(|e| Refusal::failed(path.display().to_string(), format!("{e}; pass a readable UTF-8 file")))
+}
+
 /// The body as stored: no BOM, LF line endings, no leading blank lines and no trailing whitespace. The first line
 /// keeps its indentation, so a body that opens with an indented code block stays one.
-fn stored(body: &str) -> String {
+pub(crate) fn stored(body: &str) -> String {
     let body = body.strip_prefix('\u{feff}').unwrap_or(body).replace("\r\n", "\n");
     let mut rest = body.as_str();
     while let Some((line, after)) = rest.split_once('\n')

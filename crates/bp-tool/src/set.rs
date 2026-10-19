@@ -1,30 +1,40 @@
-//! `bp set <id> <field> <value>`: one header label, one changed line, one commit (15, set).
+//! `bp set <id> <field> <value>`: one header label, one changed line, one commit (15, set). `bp set <id> --body-file
+//! <f>`: the body replaced, the header byte for byte (25, design change 2).
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use bp_design::DesignStatus;
 use bp_operation::Role;
-use bp_vault::{Code, Index, Refusal, Vault};
+use bp_vault::{Code, Header, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
+use crate::create::{body_file, stored};
 use crate::{Wrote, node_id, schema};
 
-/// `bp set <id> <field> <value> [--dry-run]`.
+/// `bp set <id> <field> <value> [--dry-run]` or `bp set <id> --body-file <f> [--dry-run]`.
 #[derive(Args)]
 pub struct Set {
     /// The node, for example `projects/bp/issues/0412.define-the-per-project-minimum-design`.
     pub id: String,
     /// The label, for example `severity`, `tags`, `title`.
-    pub field: String,
+    #[arg(required_unless_present = "body_file", conflicts_with = "body_file")]
+    pub field: Option<String>,
     /// The value; a list label takes comma-separated values.
-    pub value: String,
+    #[arg(required_unless_present = "body_file", conflicts_with = "body_file")]
+    pub value: Option<String>,
+    /// The new body, read from this file, instead of a label. The header stays byte for byte; a design past `draft`
+    /// changes through `bp record delta`.
+    #[arg(long)]
+    pub body_file: Option<PathBuf>,
     /// Validate and print what would change; write nothing.
     #[arg(long)]
     pub dry_run: bool,
 }
 
 pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
+    let body = set.body_file.as_deref().map(body_file).transpose()?;
     let id = node_id(&set.id)?;
     let vault = Vault::discover(cwd)?;
     let role = role()?;
@@ -44,27 +54,76 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
             format!("the file has no header: it is an asset; edit {}", id.path(&vault.root).display()),
         ));
     };
-    let value = schema::label(header.kind, &id, &set.field, &set.value)?;
-    let was = match set.field.as_str() {
-        "title" => header.title.clone().map(Value::from),
-        f => header.fields.get(f).cloned(),
+    let (new, mut result, field) = if let Some(body) = body {
+        let Some(new) = with_body(&id, header, &text, &body)? else {
+            return Ok(Wrote::Already(serde_json::json!({ "id": id })));
+        };
+        (new, serde_json::json!({ "id": id, "field": "body" }), "body")
+    } else {
+        let (Some(field), Some(value)) = (&set.field, &set.value) else {
+            unreachable!("clap requires a field and a value without --body-file")
+        };
+        let value = schema::label(header.kind, &id, field, value)?;
+        let was = match field.as_str() {
+            "title" => header.title.clone().map(Value::from),
+            f => header.fields.get(f).cloned(),
+        };
+        if was.as_ref() == Some(&value) {
+            return Ok(Wrote::Already(serde_json::json!({ "id": id })));
+        }
+        let new = bp_vault::set_field(&text, field, &value);
+        (new, serde_json::json!({ "id": id, "field": field, "value": value, "was": was }), field.as_str())
     };
-    if was.as_ref() == Some(&value) {
-        return Ok(Wrote::Already(serde_json::json!({ "id": id })));
-    }
-    let changes = BTreeMap::from([(id.clone(), bp_vault::set_field(&text, &set.field, &value))]);
-    let mut result =
-        serde_json::json!({ "id": id, "field": set.field, "value": value, "was": was.unwrap_or(Value::Null) });
+    let changes = BTreeMap::from([(id.clone(), new)]);
     let Some(writer) = writer else {
         let (_, findings) = Index::open(&vault)?.propose(&vault, &changes)?;
         result["findings"] = serde_json::to_value(findings).expect("a plain struct serialises");
         result["dry_run"] = true.into();
         return Ok(Wrote::Changed(result));
     };
-    let written = writer.commit("set", role.as_str(), &format!("set {id} {}", set.field), &changes)?;
+    let written = writer.commit("set", role.as_str(), &format!("set {id} {field}"), &changes)?;
     result["commit"] = written.commit.into();
     result["findings"] = serde_json::to_value(written.findings).expect("a plain struct serialises");
     Ok(Wrote::Changed(result))
+}
+
+/// The file with its body replaced: the header's bytes as they were, then the body as `create` stores it. `None`
+/// when the stored body is already that one. A record is append-only, and a design past `draft` changes only through
+/// an accepted delta (13, Design history).
+fn with_body(id: &Id, header: &Header, text: &str, body: &str) -> Result<Option<String>, Refusal> {
+    if let Some(fix) = schema::owner(header.kind, id, "body").filter(|_| header.kind.is_record()) {
+        return Err(Refusal::new(
+            Code::NotALabel,
+            format!("{id} body"),
+            "set writes a node's label or body; a record is append-only (13, rule 6)",
+            fix,
+        ));
+    }
+    if header.kind == Kind::Design && header.status.as_deref() != Some(DesignStatus::Draft.as_str()) {
+        return Err(Refusal::new(
+            Code::DesignNotDelta,
+            id.as_str(),
+            "a design past draft changes only through a delta record; its file is rewritten when the delta is \
+             accepted (13, Design history)",
+            format!("bp record delta {id} --field milestone=<milestone> --body-file <f>"),
+        ));
+    }
+    // The header ends at its closing `---` line, terminator included, after any BOM.
+    let mut end = text.strip_prefix('\u{feff}').map_or(0, |_| '\u{feff}'.len_utf8());
+    for (n, line) in text[end..].split_inclusive('\n').enumerate() {
+        end += line.len();
+        if n > 0 && line.trim_end_matches(['\n', '\r']) == "---" {
+            break;
+        }
+    }
+    let (head, old) = text.split_at(end);
+    let body = stored(body);
+    if stored(old) == body {
+        return Ok(None);
+    }
+    // A header closed at end of file gains the line end the body needs; every header byte stays.
+    let eol = if head.ends_with('\n') { "" } else { "\n" };
+    Ok(Some(if body.is_empty() { format!("{head}{eol}") } else { format!("{head}{eol}\n{body}\n") }))
 }
 
 /// The `Bp-Role` of this process's commits: `BP_ROLE`, `human` when unset or empty (25, design change 7). A value

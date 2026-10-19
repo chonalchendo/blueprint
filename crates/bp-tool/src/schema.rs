@@ -112,7 +112,7 @@ fn vocab(kind: Kind, field: &str) -> Option<Vocab> {
 
 /// The verb that owns a field `set` must not write: a status, a link, `under`, `aliases`, a derived field, a field
 /// another verb writes, or any field of a record (25, design change 2). `None` for a field outside the schema.
-fn owner(kind: Kind, id: &Id, field: &str) -> Option<String> {
+pub fn owner(kind: Kind, id: &Id, field: &str) -> Option<String> {
     if kind.is_record() {
         let parent = kind.parent(id).map_or_else(|| "<parent>".into(), |p| p.to_string());
         let verb = match kind {
