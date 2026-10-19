@@ -1,7 +1,9 @@
 //! `cargo xtask <check>`. `deps`, the crate rule: exit 0 when the rule holds, 2 with one line per violation.
-//! `bench`, the call budget: prints the largest ratio last.
+//! `bench`, the call budget: prints the largest ratio last. `scratch`, a writable copy of `$BP_VAULT`: prints its
+//! directory.
 
 mod bench;
+mod scratch;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -23,8 +25,22 @@ fn main() -> ExitCode {
                 }
             };
         }
+        Some("scratch") => {
+            return match scratch::run() {
+                Ok(dir) => {
+                    println!("{}", dir.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("xtask: {e:#}");
+                    ExitCode::from(1)
+                }
+            };
+        }
         _ => {
-            eprintln!("usage: cargo xtask deps | cargo xtask bench <runs> <plain> <label=command>...");
+            eprintln!(
+                "usage: cargo xtask deps | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch"
+            );
             return ExitCode::from(4);
         }
     }

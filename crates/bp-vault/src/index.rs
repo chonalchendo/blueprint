@@ -116,14 +116,7 @@ pub struct Filter<'a> {
 impl Index {
     /// Opens `.bp/index.db` under the vault, creating or refreshing it first when the fingerprint moved.
     pub fn open(vault: &Vault) -> Result<Self, Refusal> {
-        let dir = vault.root.join(".bp");
-        std::fs::create_dir_all(&dir).map_err(|e| failed(&dir, &e))?;
-        // `.bp/` holds derived state only; ignoring it here keeps the vault's own .gitignore untouched.
-        let ignore = dir.join(".gitignore");
-        if !ignore.exists() {
-            std::fs::write(&ignore, "*\n").map_err(|e| failed(&ignore, &e))?;
-        }
-        let path = dir.join("index.db");
+        let path = crate::write::bp_dir(&vault.root)?.join("index.db");
         let conn = Connection::open(&path).map_err(|e| failed(&path, &e))?;
         conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(|e| failed(&path, &e))?;
         let mut index = Self { conn };
@@ -189,12 +182,11 @@ impl Index {
                 continue;
             }
             changed = true;
-            remove(&tx, id.as_str())?;
-            insert(&tx, &File::from_bytes(id, &bytes)?)?;
+            replace(&tx, &File::from_bytes(id, &bytes)?)?;
         }
         for gone in known.keys() {
             changed = true;
-            remove(&tx, gone)?;
+            remove(&tx, gone, false)?;
         }
         if changed {
             crate::walk::rebuild_graph(&tx)?;
@@ -393,6 +385,13 @@ fn tokens(terms: &[String]) -> impl Iterator<Item = &str> {
     terms.iter().flat_map(|t| t.split(|c: char| !(c.is_alphanumeric() || c == '_'))).filter(|w| !w.is_empty())
 }
 
+/// Puts a changed file's rows in place of its old ones. A node keeps its rowid, so the graph and a walk's float sums
+/// are those a rebuild from nothing gives.
+pub(crate) fn replace(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
+    remove(tx, file.id.as_str(), file.header.as_ref().is_some_and(|h| !h.kind.is_record()))?;
+    insert(tx, file)
+}
+
 fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     let id = file.id.as_str();
     let Some(header) = &file.header else {
@@ -412,7 +411,9 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
         tx.execute("insert into files values (?1, ?2, 'node')", params![id, file.hash])?;
         tx.execute(
             "insert into nodes (id, kind, title, status, project, under, header, tokens)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) on conflict (id) do update set kind = excluded.kind,
+             title = excluded.title, status = excluded.status, project = excluded.project, under = excluded.under,
+             header = excluded.header, tokens = excluded.tokens",
             params![
                 id,
                 kind,
@@ -425,7 +426,7 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
             ],
         )?;
         tx.execute(
-            "insert into fts (rowid, id, title, body) values (last_insert_rowid(), ?1, ?2, ?3)",
+            "insert into fts (rowid, id, title, body) values ((select rowid from nodes where id = ?1), ?1, ?2, ?3)",
             params![id, header.title, file.body.text],
         )?;
     }
@@ -463,9 +464,11 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn remove(tx: &rusqlite::Transaction, id: &str) -> rusqlite::Result<()> {
+/// Deletes a file's rows; the node row stays when `keep_node`, for `replace` to update.
+fn remove(tx: &rusqlite::Transaction, id: &str, keep_node: bool) -> rusqlite::Result<()> {
     tx.execute("delete from fts where rowid = (select rowid from nodes where id = ?1)", [id])?;
-    for table in ["files", "nodes", "records"] {
+    let tables: &[&str] = if keep_node { &["files", "records"] } else { &["files", "nodes", "records"] };
+    for table in tables {
         tx.execute(&format!("delete from {table} where id = ?1"), [id])?;
     }
     tx.execute("delete from links where src = ?1", [id])?;

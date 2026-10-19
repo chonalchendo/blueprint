@@ -1,8 +1,9 @@
-//! The substrate: node files, headers, bodies, links, ids, the closed kind set, the index, search, the refusal. The
-//! graph, the lock, the proposed tree and the commit land with their milestones.
+//! The substrate: node files, headers, bodies, links, ids, the closed kind set, the index, search, the refusal, and
+//! the write path: the lock, the proposed tree and the commit.
 
 mod body;
 mod closed;
+mod emit;
 mod file;
 mod fingerprint;
 pub mod git;
@@ -10,8 +11,10 @@ mod header;
 mod id;
 mod index;
 mod kind;
+mod propose;
 mod refusal;
 mod walk;
+mod write;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +23,7 @@ use serde::Serialize;
 
 pub use body::{Body, Check, Finding, FindingKind, Section};
 pub use closed::OutsideSet;
+pub use emit::set_field;
 pub use file::File;
 pub use header::{Header, LINKS, RESERVED, Unresolved};
 pub use id::Id;
@@ -27,6 +31,7 @@ pub use index::{Filter, Hit, Index, Reading, Record, Row};
 pub use kind::Kind;
 pub use refusal::{Code, Refusal};
 pub use walk::{Fill, Reached, fill};
+pub use write::{Held, Writer, Written};
 // The macro's expansion names serde through this crate, so a domain crate needs no serde dependency of its own.
 #[doc(hidden)]
 pub use serde;
@@ -56,6 +61,11 @@ impl Vault {
                 "unset BP_VAULT, or point it at the vault root",
             ));
         }
+        Self::search(from)
+    }
+
+    /// The ancestor search alone, so a test reads the same rule whatever `BP_VAULT` its runner set.
+    fn search(from: &Path) -> Result<Self, Refusal> {
         // Both top directories: a home directory with a `projects/` of code checkouts is not a vault.
         for dir in from.ancestors() {
             if dir.join("projects").is_dir() && dir.join("shared").is_dir() {
@@ -72,6 +82,12 @@ impl Vault {
 
     /// Reads and parses one file by id. Refuses `no_node` when no file has that id.
     pub fn read(&self, id: &Id) -> Result<File, Refusal> {
+        File::from_bytes(id.clone(), self.text(id)?.as_bytes())
+    }
+
+    /// One file's text as it is on disk, for a writer that changes some lines and keeps the rest. Refuses `no_node`
+    /// when no file has that id, and `schema_invalid` when the file is not UTF-8.
+    pub fn text(&self, id: &Id) -> Result<String, Refusal> {
         let bytes = std::fs::read(id.path(&self.root)).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Refusal::new(
                 Code::NoNode,
@@ -81,7 +97,7 @@ impl Vault {
             ),
             _ => Refusal::failed(id.as_str(), e.to_string()),
         })?;
-        File::from_bytes(id.clone(), &bytes)
+        String::from_utf8(bytes).map_err(|e| Refusal::schema(id.as_str(), format!("not UTF-8: {e}")))
     }
 
     /// Reads one file as it was at a commit, branch or blueprint tag. Refuses `unknown_value` when git does not know
@@ -250,7 +266,7 @@ mod tests {
         let root = dir.path().join("vault");
         std::fs::create_dir_all(root.join("projects/bp/issues")).unwrap();
         std::fs::create_dir_all(root.join("shared")).unwrap();
-        let v = Vault::discover(&root.join("projects/bp/issues")).unwrap();
+        let v = Vault::search(&root.join("projects/bp/issues")).unwrap();
         assert_eq!(v.root, root);
         assert_eq!(v.project_of(&root.join("projects/bp/issues")), Some("bp".into()));
         assert_eq!(v.project_of(&root), None);
@@ -259,7 +275,7 @@ mod tests {
     #[test]
     fn refuses_outside_a_vault() {
         let dir = tempfile::tempdir().unwrap();
-        let err = Vault::discover(dir.path()).unwrap_err();
+        let err = Vault::search(dir.path()).unwrap_err();
         assert_eq!(err.code, Code::NoVault);
         assert_eq!(err.exit, 2);
     }
