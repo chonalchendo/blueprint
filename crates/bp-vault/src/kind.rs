@@ -99,10 +99,7 @@ impl Kind {
         };
         match self {
             Self::Project => project(3) && p[2] == dir,
-            Self::Design => {
-                (project(4) && p[2] == dir && SPINE.contains(&p[3]))
-                    || (project(5) && p[2] == dir && matches!(p[3], "containers" | "components"))
-            }
+            Self::Design => DesignLevel::of(id).is_some(),
             Self::Issue | Self::Milestone | Self::ConcernAnswer | Self::BlueprintVersion => project(4) && p[2] == dir,
             Self::Decision | Self::Thread | Self::Inbox | Self::Handoff => {
                 (project(4) && p[2] == dir) || (shared(3) && p[1] == dir)
@@ -118,8 +115,35 @@ impl Kind {
     }
 }
 
-/// The spine designs, named by level (12, Identity; 13 adds the glossary).
-const SPINE: [&str; 4] = ["product", "system", "data-model", "glossary"];
+/// A design's kind and scope (13, Design). Both come from the path, so the header stores neither (12, Layout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesignLevel {
+    /// The level of the spine the design answers.
+    pub design_kind: &'static str,
+    /// The C4 level it covers.
+    pub scope: &'static str,
+}
+
+/// Every design path form (12, Layout): the segment after `designs/`, the id's length in segments, and the level the
+/// path names. A spine design is the segment itself; a container or component sits one directory down. This one
+/// table decides both whether a path is a design's and which level it is, so the two cannot disagree.
+const LEVELS: [(&str, usize, DesignLevel); 6] = [
+    ("product", 4, DesignLevel { design_kind: "product", scope: "product" }),
+    ("system", 4, DesignLevel { design_kind: "system", scope: "system" }),
+    ("data-model", 4, DesignLevel { design_kind: "data-model", scope: "system" }),
+    ("glossary", 4, DesignLevel { design_kind: "glossary", scope: "system" }),
+    ("containers", 5, DesignLevel { design_kind: "container", scope: "container" }),
+    ("components", 5, DesignLevel { design_kind: "component", scope: "component" }),
+];
+
+impl DesignLevel {
+    /// The level a design's path names; `None` for a path that is not a design's.
+    pub fn of(id: &Id) -> Option<Self> {
+        let p: Vec<&str> = id.as_str().split('/').collect();
+        let designs = p.len() >= 4 && p[0] == "projects" && p[2] == Kind::Design.dir();
+        LEVELS.iter().find(|(seg, len, _)| designs && p.len() == *len && p[3] == *seg).map(|(_, _, level)| *level)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -167,6 +191,19 @@ mod tests {
         assert_eq!(Kind::Handoff.parent(&handoff).unwrap().as_str(), "projects/bp/project");
         assert_eq!(Kind::Handoff.parent(&Id::parse("shared/handoffs/h").unwrap()), None);
         assert_eq!(Kind::Issue.parent(&Id::parse("projects/bp/issues/x").unwrap()), None);
+    }
+
+    #[test]
+    fn a_design_path_names_its_kind_and_scope() {
+        let level = |id: &str| DesignLevel::of(&Id::parse(id).unwrap()).map(|l| (l.design_kind, l.scope));
+        assert_eq!(level("projects/bp/designs/product"), Some(("product", "product")));
+        assert_eq!(level("projects/bp/designs/system"), Some(("system", "system")));
+        assert_eq!(level("projects/bp/designs/data-model"), Some(("data-model", "system")));
+        assert_eq!(level("projects/bp/designs/glossary"), Some(("glossary", "system")));
+        assert_eq!(level("projects/bp/designs/containers/vault"), Some(("container", "container")));
+        assert_eq!(level("projects/bp/designs/components/walk"), Some(("component", "component")));
+        assert_eq!(level("projects/bp/issues/system"), None);
+        assert_eq!(level("projects/bp/designs/system/runs/r"), None, "a record under a design is not a design");
     }
 
     #[test]

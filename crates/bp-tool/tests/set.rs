@@ -26,10 +26,7 @@ fn vault() -> tempfile::TempDir {
             "projects/bp/issues/0001.a/claims/s1.md",
             "---\nkind: claim\nunder: projects/bp/issues/0001.a\nowner: me\n---\n",
         ),
-        (
-            "projects/bp/designs/system.md",
-            "---\nkind: design\ntitle: S\nstatus: active\nscope: system\ndesign_kind: system\n---\n",
-        ),
+        ("projects/bp/designs/system.md", "---\nkind: design\ntitle: S\nstatus: active\n---\n"),
         ("shared/.keep", ""),
         (".bp/.gitignore", "*\n"),
     ] {

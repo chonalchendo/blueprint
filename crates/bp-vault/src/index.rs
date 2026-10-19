@@ -12,10 +12,14 @@ use serde_json::{Map, Value};
 use crate::fingerprint::{fingerprint, still};
 use crate::{Counts, File, FindingKind, Kind, Refusal, Vault};
 
+mod insert;
+use insert::remove;
+pub(crate) use insert::replace;
+
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
 /// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
 /// bump to the same number still differ.
-const SCHEMA: i64 = 4;
+const SCHEMA: i64 = 5;
 
 pub(crate) fn schema() -> String {
     format!("{SCHEMA}-{}", &blake3::hash(TABLES.as_bytes()).to_hex()[..12])
@@ -25,7 +29,7 @@ const TABLES: &str = "
 create table meta (key text primary key, value text not null);
 create table files (id text primary key, hash text not null, class text not null);
 create table nodes (rowid integer primary key, id text unique not null, kind text not null, title text,
-  status text, project text, under text, header text not null, tokens integer not null);
+  status text, project text, under text, header text not null, tokens integer not null, design_kind text, scope text);
 create index nodes_kind on nodes (kind, project, status);
 create table records (id text primary key, kind text not null, project text, under text, header text not null,
   body text not null);
@@ -72,6 +76,12 @@ pub struct Row {
     /// The parent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub under: Option<String>,
+    /// A design's kind, from its path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub design_kind: Option<String>,
+    /// A design's scope, from its path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// One row of `search`.
@@ -259,9 +269,9 @@ impl Index {
             let tx = self.conn.unchecked_transaction()?;
             let is_record = f.kind.is_record();
             let (from, cols) = if is_record {
-                ("records", "id, kind, null, null, under")
+                ("records", "id, kind, null, null, under, null, null")
             } else {
-                ("nodes", "id, kind, title, status, under")
+                ("nodes", "id, kind, title, status, under, design_kind, scope")
             };
             // Records carry no status, so a status filter on a record kind matches nothing.
             let status = if is_record { "?2 is null" } else { "(?2 is null or status = ?2)" };
@@ -277,7 +287,15 @@ impl Index {
             let mut st = tx.prepare(&format!("select {cols} from {from} {filter} order by id limit ?5"))?;
             let rows = st
                 .query_map(params![f.kind.as_str(), f.status, f.project, under, limit], |r| {
-                    Ok(Row { id: r.get(0)?, kind: r.get(1)?, title: r.get(2)?, status: r.get(3)?, under: r.get(4)? })
+                    Ok(Row {
+                        id: r.get(0)?,
+                        kind: r.get(1)?,
+                        title: r.get(2)?,
+                        status: r.get(3)?,
+                        under: r.get(4)?,
+                        design_kind: r.get(5)?,
+                        scope: r.get(6)?,
+                    })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
             Ok((rows, total))
@@ -369,12 +387,6 @@ pub(crate) fn count_at(r: &rusqlite::Row, i: usize) -> rusqlite::Result<usize> {
     Ok(usize::try_from(r.get::<_, i64>(i)?).expect("a count is never negative"))
 }
 
-/// A body's cost in the walk's budget: four characters a token over the trimmed body, rounded up, so an empty
-/// body costs nothing and any other at least one.
-fn body_tokens(body: &str) -> i64 {
-    i64::try_from(body.trim().len().div_ceil(4)).expect("a body is far below i64::MAX bytes")
-}
-
 fn count(r: &rusqlite::Row) -> rusqlite::Result<usize> {
     count_at(r, 0)
 }
@@ -383,100 +395,6 @@ fn count(r: &rusqlite::Row) -> rusqlite::Result<usize> {
 /// literal, so operators and punctuation in agent input cannot break the query.
 fn tokens(terms: &[String]) -> impl Iterator<Item = &str> {
     terms.iter().flat_map(|t| t.split(|c: char| !(c.is_alphanumeric() || c == '_'))).filter(|w| !w.is_empty())
-}
-
-/// Puts a changed file's rows in place of its old ones. A node keeps its rowid, so the graph and a walk's float sums
-/// are those a rebuild from nothing gives.
-pub(crate) fn replace(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
-    remove(tx, file.id.as_str(), file.header.as_ref().is_some_and(|h| !h.kind.is_record()))?;
-    insert(tx, file)
-}
-
-fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
-    let id = file.id.as_str();
-    let Some(header) = &file.header else {
-        tx.execute("insert into files values (?1, ?2, 'asset')", params![id, file.hash])?;
-        return Ok(());
-    };
-    let json = Value::Object(header.to_json()).to_string();
-    let under = header.under.as_ref().map(crate::Id::as_str);
-    let kind = header.kind.as_str();
-    if header.kind.is_record() {
-        tx.execute("insert into files values (?1, ?2, 'record')", params![id, file.hash])?;
-        tx.execute(
-            "insert into records values (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![id, kind, file.id.project(), under, json, file.body.text],
-        )?;
-    } else {
-        tx.execute("insert into files values (?1, ?2, 'node')", params![id, file.hash])?;
-        tx.execute(
-            "insert into nodes (id, kind, title, status, project, under, header, tokens)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) on conflict (id) do update set kind = excluded.kind,
-             title = excluded.title, status = excluded.status, project = excluded.project, under = excluded.under,
-             header = excluded.header, tokens = excluded.tokens",
-            params![
-                id,
-                kind,
-                header.title,
-                header.status,
-                file.id.project(),
-                under,
-                json,
-                body_tokens(&file.body.text)
-            ],
-        )?;
-        tx.execute(
-            "insert into fts (rowid, id, title, body) values ((select rowid from nodes where id = ?1), ?1, ?2, ?3)",
-            params![id, header.title, file.body.text],
-        )?;
-    }
-    let mut st = tx.prepare_cached("insert into links values (?1, ?2, ?3)")?;
-    if let Some(u) = under {
-        st.execute(params![id, "under", u])?;
-    }
-    for (kind, dsts) in &header.links {
-        for d in dsts {
-            st.execute(params![id, kind, d.as_str()])?;
-        }
-    }
-    for d in &file.body.links {
-        st.execute(params![id, "body", d.as_str()])?;
-    }
-    let mut st = tx.prepare_cached("insert into aliases values (?1, ?2)")?;
-    for a in &header.aliases {
-        st.execute(params![a, id])?;
-    }
-    let mut st = tx.prepare_cached("insert into unresolved values (?1, ?2, ?3)")?;
-    for u in &header.unresolved {
-        st.execute(params![id, u.field, u.text])?;
-    }
-    for text in &file.body.unresolved {
-        st.execute(params![id, "body", text])?;
-    }
-    let mut st = tx.prepare_cached("insert into checks values (?1)")?;
-    for _ in &file.body.checks {
-        st.execute([id])?;
-    }
-    let mut st = tx.prepare_cached("insert into findings values (?1, ?2)")?;
-    for f in &file.body.findings {
-        st.execute([id, f.kind.as_str()])?;
-    }
-    Ok(())
-}
-
-/// Deletes a file's rows; the node row stays when `keep_node`, for `replace` to update.
-fn remove(tx: &rusqlite::Transaction, id: &str, keep_node: bool) -> rusqlite::Result<()> {
-    tx.execute("delete from fts where rowid = (select rowid from nodes where id = ?1)", [id])?;
-    let tables: &[&str] = if keep_node { &["files", "records"] } else { &["files", "nodes", "records"] };
-    for table in tables {
-        tx.execute(&format!("delete from {table} where id = ?1"), [id])?;
-    }
-    tx.execute("delete from links where src = ?1", [id])?;
-    for table in ["unresolved", "checks", "findings"] {
-        tx.execute(&format!("delete from {table} where src = ?1"), [id])?;
-    }
-    tx.execute("delete from aliases where id = ?1", [id])?;
-    Ok(())
 }
 
 /// A stored header: the index wrote it from a JSON object, so it reads back as one.
@@ -597,7 +515,9 @@ mod tests {
         index.reconcile(&v).unwrap();
         assert_eq!(index.list(&all("claim")).unwrap().1, 0, "the census reconciles");
         write(&v.root, "projects/bp/designs/components/walk", "---\nkind: design\ntitle: Walk\nstatus: active\n---\n");
-        assert_eq!(Index::open(&v).unwrap().list(&all("design")).unwrap().1, 1);
+        let (rows, total) = Index::open(&v).unwrap().list(&all("design")).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!((rows[0].design_kind.as_deref(), rows[0].scope.as_deref()), (Some("component"), Some("component")));
         // A new project moves `projects/`, which every fingerprint names, so the fast path sees it too.
         write(&v.root, "projects/zz/issues/0001.z", &issue("New project", "open"));
         assert_eq!(Index::open(&v).unwrap().list(&all("issue")).unwrap().1, 4);
