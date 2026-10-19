@@ -130,6 +130,19 @@ impl Vault {
         File::from_bytes(id.clone(), &blob.stdout)
     }
 
+    /// The commit time of the last commit that touched one file, Unix seconds: its processing time (13). `None`
+    /// when git cannot say, as for a file never committed or a vault outside git.
+    pub fn last_commit(&self, id: &Id) -> Option<i64> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .env("LC_ALL", "C")
+            .args(["log", "-1", "--format=%ct", "--", &format!("./{id}.md")])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+
     /// Every markdown file under `projects/` and `shared/`, sorted by id. Dot directories (`.bp`, `.git`) are skipped.
     /// Refuses `schema_invalid` on a markdown file whose path is not an id: it would be neither read nor counted.
     pub fn ids(&self) -> Result<Vec<Id>, Refusal> {

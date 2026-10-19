@@ -246,7 +246,13 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     {
         return Err(unknown("status", status, format!("bp list {kind}")));
     }
-    let ready = list.ready && kind_value == Kind::Issue;
+    if list.ready && kind_value != Kind::Issue {
+        return Err(Refusal::usage(
+            "--ready",
+            format!("--ready lists issues only; bp list issue --ready, or bp list {kind}"),
+        ));
+    }
+    let ready = list.ready;
     let filter = Filter {
         kind: kind_value,
         // `--ready` reads every open issue, then limits after the intent filter.
@@ -259,10 +265,15 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     if !matches!(kind_value, Kind::Issue | Kind::Milestone) {
         return Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }));
     }
-    let world = intent::World::read()?;
+    // A milestone's intent reads only its status; the clock and the forge are read for issues alone.
+    let world = if kind_value == Kind::Issue { Some(intent::World::read()?) } else { None };
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let verdict = intent::of(&index, &world, kind_value, &row.id, row.status.as_deref())?;
+        let status = row.status.as_deref().unwrap_or_default();
+        let verdict = match &world {
+            Some(w) => intent::of(&vault, &index, w, &row.id, status)?,
+            None => bp_change::intents::milestone(status),
+        };
         if ready && verdict.intent != Some(bp_change::intents::Intent::Ready) {
             continue;
         }
@@ -275,8 +286,11 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     }
     let total = if ready { out.len() } else { total };
     out.truncate(list.limit);
-    let forge = if world.forge.is_some() { "snapshot" } else { "not read" };
-    Ok(serde_json::json!({ "rows": out, "total": total, "truncated": total > out.len(), "forge": forge }))
+    let mut result = serde_json::json!({ "rows": out, "total": total, "truncated": total > out.len() });
+    if let Some(w) = world {
+        result["forge"] = if w.forge.is_some() { "snapshot" } else { "not read" }.into();
+    }
+    Ok(result)
 }
 
 /// A kind argument, from the closed set.

@@ -17,6 +17,7 @@ fn issue(status: &str, depends: &str) -> String {
 fn vault() -> tempfile::TempDir {
     let d = tempfile::tempdir().unwrap();
     let r = d.path();
+    std::fs::create_dir(r.join("shared")).unwrap();
     write(r, "projects/bp/issues/0001.ready.md", &issue("open", ""));
     write(r, "projects/bp/issues/0002.waits.md", &issue("open", "\"projects/bp/issues/0003.held\""));
     write(r, "projects/bp/issues/0003.held.md", &issue("in-progress", ""));
@@ -36,8 +37,36 @@ fn vault() -> tempfile::TempDir {
     write(r, "projects/bp/issues/0005.dropped/claims/c.md", &claim("projects/bp/issues/0005.dropped", "dropped"));
     write(r, "projects/bp/issues/0006.escalated.md", &issue("open", ""));
     write(r, "projects/bp/issues/0006.escalated/claims/c.md", &claim("projects/bp/issues/0006.escalated", "escalated"));
+    // A re-review whose head sorts first, an approval of an older head, and two checks at one head.
+    let pr7 = "projects/bp/issues/0007.reviewed";
+    write(r, &format!("{pr7}.md"), &issue("in-progress", ""));
+    for head in ["aaaa", "ffff"] {
+        write(r, &format!("{pr7}/reviews/{head}.md"), &format!("---\nkind: review\nunder: {pr7}\nhead: {head}\n---\n"));
+    }
+    let pr8 = "projects/bp/issues/0008.twochecks";
+    write(r, &format!("{pr8}.md"), &issue("in-progress", ""));
+    write(r, &format!("{pr8}/reviews/bbbb.md"), &format!("---\nkind: review\nunder: {pr8}\nhead: bbbb\n---\n"));
+    for (name, at, verdict) in [("direct-1", "06", "fail"), ("direct-2", "07", "pass")] {
+        write(
+            r,
+            &format!("{pr8}/runs/{name}-bbbb-1.md"),
+            &format!(
+                "---\nkind: run\nunder: {pr8}\ncheck: {pr8}/{name}\ncommit: bbbb\nattempt: 1\nat: 2026-10-17T{at}:00:00Z\nverdict: {verdict}\n---\n"
+            ),
+        );
+    }
     write(r, "projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n");
-    write(r, "forge/open-prs.json", r#"[{"number":9,"headRefName":"bp/0003.held","headRefOid":"h"}]"#);
+    let green = r#""statusCheckRollup":[{"conclusion":"SUCCESS"}]"#;
+    let old_approval = r#""reviews":[{"state":"APPROVED","commit":{"oid":"old0"}}]"#;
+    write(
+        r,
+        "forge/open-prs.json",
+        &format!(
+            r#"[{{"number":9,"headRefName":"bp/0003.held","headRefOid":"h"}},
+{{"number":10,"headRefName":"bp/0007.reviewed","headRefOid":"aaaa",{green},{old_approval}}},
+{{"number":11,"headRefName":"bp/0008.twochecks","headRefOid":"bbbb",{green},"reviews":[{{"state":"APPROVED","commit":{{"oid":"bbbb"}}}}]}}]"#
+        ),
+    );
     d
 }
 
@@ -83,6 +112,12 @@ fn the_forge_snapshot_moves_the_review_path_and_unblocks_dependents() {
         ("ready", ""),
         "an open pull request on the target is enough"
     );
+    assert_eq!(
+        intent(&v, "projects/bp/issues/0007.reviewed"),
+        ("needs-approval", ""),
+        "an old approval needs renewing"
+    );
+    assert_eq!(intent(&v, "projects/bp/issues/0008.twochecks"), ("blocked", "run failed at head"));
 }
 
 #[test]
@@ -96,26 +131,32 @@ fn ready_filters_before_the_limit() {
     assert_eq!((v["total"].as_u64(), v["truncated"].as_bool()), (Some(3), Some(true)));
 }
 
+fn bp(root: &Path, envs: &[(&str, &Path)], args: &[&str]) -> (Option<i32>, serde_json::Value) {
+    let mut cmd = Command::cargo_bin("bp").unwrap();
+    cmd.current_dir(root).env_remove("BP_VAULT").env_remove("BP_NOW").env_remove("BP_FORGE_SNAPSHOT");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.args(args).arg("--json").output().unwrap();
+    (out.status.code(), serde_json::from_slice(&out.stdout).unwrap())
+}
+
 #[test]
-fn a_bad_clock_or_snapshot_cannot_run() {
+fn ready_lists_issues_only() {
     let d = vault();
-    let out = Command::cargo_bin("bp")
-        .unwrap()
-        .current_dir(d.path())
-        .env("BP_NOW", "yesterday")
-        .args(["list", "issue", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["code"], "could_not_run");
-    let out = Command::cargo_bin("bp")
-        .unwrap()
-        .current_dir(d.path())
-        .env_remove("BP_NOW")
-        .env("BP_FORGE_SNAPSHOT", d.path().join("none"))
-        .args(["list", "issue", "--json"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    let (code, v) = bp(d.path(), &[], &["list", "milestone", "--ready"]);
+    assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")));
+}
+
+#[test]
+fn a_bad_clock_is_usage_and_a_bad_snapshot_names_its_file() {
+    let d = vault();
+    let (code, v) = bp(d.path(), &[("BP_NOW", Path::new("yesterday"))], &["list", "issue"]);
+    assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")));
+    let none = d.path().join("none");
+    let (code, v) = bp(d.path(), &[("BP_FORGE_SNAPSHOT", &none)], &["list", "issue"]);
+    assert_eq!((code, v["code"].as_str()), (Some(1), Some("could_not_run")));
+    assert!(v["subject"].as_str().unwrap().ends_with("open-prs.json"), "{v}");
+    let (code, _) = bp(d.path(), &[("BP_FORGE_SNAPSHOT", &none)], &["list", "milestone"]);
+    assert_eq!(code, Some(0), "a milestone list never reads the forge");
 }

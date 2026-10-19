@@ -3,7 +3,7 @@
 //! This milestone holds the snapshot: the forge state the `Intents` function reads, loaded from a directory of
 //! `gh` JSON (`open-prs.json` plus `pr-<n>.json`). The live `gh` reads land with the repo verbs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -33,6 +33,16 @@ pub struct PullRequest {
 pub struct Review {
     /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`.
     pub state: String,
+    /// The commit the review was left on.
+    #[serde(default)]
+    pub commit: Option<Commit>,
+}
+
+/// A commit as `gh` writes it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Commit {
+    /// The full sha.
+    pub oid: String,
 }
 
 /// One check run (`conclusion`) or status context (`state`).
@@ -61,9 +71,9 @@ impl PullRequest {
                 .all(|c| c.conclusion.as_deref().or(c.state.as_deref()) == Some("SUCCESS"))
     }
 
-    /// Some review approved.
-    pub fn is_approved(&self) -> bool {
-        self.reviews.iter().any(|r| r.state == "APPROVED")
+    /// Some review approved `head` (21: an approval is for one head; a push needs a new one).
+    pub fn is_approved(&self, head: &str) -> bool {
+        self.reviews.iter().any(|r| r.state == "APPROVED" && r.commit.as_ref().is_some_and(|c| c.oid == head))
     }
 }
 
@@ -75,10 +85,19 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Reads `open-prs.json` and every `pr-<n>.json` in `dir`. The open list wins on a shared number.
-    pub fn from_dir(dir: &Path) -> std::io::Result<Self> {
-        let mut prs: Vec<PullRequest> = serde_json::from_slice(&std::fs::read(dir.join("open-prs.json"))?)?;
-        let mut cached: Vec<_> = std::fs::read_dir(dir)?
+    /// Reads `open-prs.json` and every `pr-<n>.json` in `dir`. The open list wins on a shared number. An error
+    /// names the file it came from.
+    pub fn from_dir(dir: &Path) -> Result<Self, (PathBuf, String)> {
+        fn parse<T: serde::de::DeserializeOwned>(path: PathBuf) -> Result<T, (PathBuf, String)> {
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => return Err((path, e.to_string())),
+            };
+            serde_json::from_slice(&bytes).map_err(|e| (path, e.to_string()))
+        }
+        let mut prs: Vec<PullRequest> = parse(dir.join("open-prs.json"))?;
+        let mut cached: Vec<_> = std::fs::read_dir(dir)
+            .map_err(|e| (dir.to_path_buf(), e.to_string()))?
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
@@ -88,7 +107,7 @@ impl Snapshot {
             .collect();
         cached.sort();
         for path in cached {
-            let pr: PullRequest = serde_json::from_slice(&std::fs::read(path)?)?;
+            let pr: PullRequest = parse(path)?;
             if !prs.iter().any(|p| p.number == pr.number) {
                 prs.push(pr);
             }
@@ -96,7 +115,7 @@ impl Snapshot {
         Ok(Self { prs })
     }
 
-    /// The open pull request whose head branch ends in the issue's slug.
+    /// The open pull request whose head branch's last segment is the issue's slug (15).
     pub fn open_for(&self, slug: &str) -> Option<&PullRequest> {
         self.prs.iter().find(|p| p.is_open() && p.head_ref_name.rsplit('/').next() == Some(slug))
     }
@@ -111,7 +130,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("open-prs.json"),
-            r#"[{"number":2,"headRefName":"bp/0002.b","headRefOid":"h2","reviews":[{"state":"APPROVED"}],"statusCheckRollup":[{"conclusion":"SUCCESS"},{"state":"SUCCESS"}]}]"#,
+            r#"[{"number":2,"headRefName":"bp/0002.b","headRefOid":"h2","reviews":[{"state":"APPROVED","commit":{"oid":"h2"}},{"state":"APPROVED","commit":{"oid":"old"}}],"statusCheckRollup":[{"conclusion":"SUCCESS"},{"state":"SUCCESS"}]}]"#,
         )
         .unwrap();
         std::fs::write(
@@ -129,8 +148,10 @@ mod tests {
         assert!(s.open_for("0001.a").is_none(), "a merged pull request is not open");
         let pr = s.open_for("0002.b").unwrap();
         assert_eq!(pr.head_ref_oid, "h2");
-        assert!(pr.is_green() && pr.is_approved());
-        assert!(Snapshot::from_dir(&dir.path().join("none")).is_err());
+        assert!(pr.is_green() && pr.is_approved("h2"));
+        assert!(!pr.is_approved("h3"), "an approval of another head does not count");
+        let (path, _) = Snapshot::from_dir(&dir.path().join("none")).unwrap_err();
+        assert!(path.ends_with("none/open-prs.json"), "the error names the file");
     }
 
     #[test]
@@ -141,6 +162,6 @@ mod tests {
         .unwrap();
         assert!(!pr.is_green());
         let pr: PullRequest = serde_json::from_str(r#"{"number":1,"headRefName":"x","headRefOid":"h"}"#).unwrap();
-        assert!(!pr.is_green() && !pr.is_approved() && pr.is_open());
+        assert!(!pr.is_green() && !pr.is_approved("h") && pr.is_open());
     }
 }
