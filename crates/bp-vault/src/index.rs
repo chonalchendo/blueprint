@@ -116,14 +116,7 @@ pub struct Filter<'a> {
 impl Index {
     /// Opens `.bp/index.db` under the vault, creating or refreshing it first when the fingerprint moved.
     pub fn open(vault: &Vault) -> Result<Self, Refusal> {
-        let dir = vault.root.join(".bp");
-        std::fs::create_dir_all(&dir).map_err(|e| failed(&dir, &e))?;
-        // `.bp/` holds derived state only; ignoring it here keeps the vault's own .gitignore untouched.
-        let ignore = dir.join(".gitignore");
-        if !ignore.exists() {
-            std::fs::write(&ignore, "*\n").map_err(|e| failed(&ignore, &e))?;
-        }
-        let path = dir.join("index.db");
+        let path = bp_dir(&vault.root)?.join("index.db");
         let conn = Connection::open(&path).map_err(|e| failed(&path, &e))?;
         conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(|e| failed(&path, &e))?;
         let mut index = Self { conn };
@@ -373,6 +366,18 @@ impl Index {
 }
 
 /// rusqlite reads no `usize`; a `count(*)` is never negative.
+/// `.bp/`, made on first use with a `.gitignore` of its own.
+pub(crate) fn bp_dir(root: &Path) -> Result<std::path::PathBuf, Refusal> {
+    let dir = root.join(".bp");
+    std::fs::create_dir_all(&dir).map_err(|e| failed(&dir, &e))?;
+    // `.bp/` holds derived state only; ignoring it here keeps the vault's own .gitignore untouched.
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, "*\n").map_err(|e| failed(&ignore, &e))?;
+    }
+    Ok(dir)
+}
+
 pub(crate) fn count_at(r: &rusqlite::Row, i: usize) -> rusqlite::Result<usize> {
     Ok(usize::try_from(r.get::<_, i64>(i)?).expect("a count is never negative"))
 }
@@ -393,7 +398,7 @@ fn tokens(terms: &[String]) -> impl Iterator<Item = &str> {
     terms.iter().flat_map(|t| t.split(|c: char| !(c.is_alphanumeric() || c == '_'))).filter(|w| !w.is_empty())
 }
 
-fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
+pub(crate) fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     let id = file.id.as_str();
     let Some(header) = &file.header else {
         tx.execute("insert into files values (?1, ?2, 'asset')", params![id, file.hash])?;
@@ -463,7 +468,7 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn remove(tx: &rusqlite::Transaction, id: &str) -> rusqlite::Result<()> {
+pub(crate) fn remove(tx: &rusqlite::Transaction, id: &str) -> rusqlite::Result<()> {
     tx.execute("delete from fts where rowid = (select rowid from nodes where id = ?1)", [id])?;
     for table in ["files", "nodes", "records"] {
         tx.execute(&format!("delete from {table} where id = ?1"), [id])?;

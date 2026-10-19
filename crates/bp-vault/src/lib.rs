@@ -1,8 +1,9 @@
-//! The substrate: node files, headers, bodies, links, ids, the closed kind set, the index, search, the refusal. The
-//! graph, the lock, the proposed tree and the commit land with their milestones.
+//! The substrate: node files, headers, bodies, links, ids, the closed kind set, the index, search, the refusal, and
+//! the write path: the lock, the proposed tree and the commit.
 
 mod body;
 mod closed;
+mod emit;
 mod file;
 mod fingerprint;
 pub mod git;
@@ -12,6 +13,7 @@ mod index;
 mod kind;
 mod refusal;
 mod walk;
+mod write;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +22,7 @@ use serde::Serialize;
 
 pub use body::{Body, Check, Finding, FindingKind, Section};
 pub use closed::OutsideSet;
+pub use emit::set_field;
 pub use file::File;
 pub use header::{Header, LINKS, RESERVED, Unresolved};
 pub use id::Id;
@@ -27,6 +30,7 @@ pub use index::{Filter, Hit, Index, Reading, Record, Row};
 pub use kind::Kind;
 pub use refusal::{Code, Refusal};
 pub use walk::{Fill, Reached, fill};
+pub use write::{Held, Writer, Written};
 // The macro's expansion names serde through this crate, so a domain crate needs no serde dependency of its own.
 #[doc(hidden)]
 pub use serde;
@@ -72,6 +76,12 @@ impl Vault {
 
     /// Reads and parses one file by id. Refuses `no_node` when no file has that id.
     pub fn read(&self, id: &Id) -> Result<File, Refusal> {
+        File::from_bytes(id.clone(), self.text(id)?.as_bytes())
+    }
+
+    /// One file's text as it is on disk, for a writer that changes some lines and keeps the rest. Refuses `no_node`
+    /// when no file has that id, and `schema_invalid` when the file is not UTF-8.
+    pub fn text(&self, id: &Id) -> Result<String, Refusal> {
         let bytes = std::fs::read(id.path(&self.root)).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Refusal::new(
                 Code::NoNode,
@@ -81,7 +91,7 @@ impl Vault {
             ),
             _ => Refusal::failed(id.as_str(), e.to_string()),
         })?;
-        File::from_bytes(id.clone(), &bytes)
+        String::from_utf8(bytes).map_err(|e| Refusal::schema(id.as_str(), format!("not UTF-8: {e}")))
     }
 
     /// Reads one file as it was at a commit, branch or blueprint tag. Refuses `unknown_value` when git does not know

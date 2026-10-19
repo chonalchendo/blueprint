@@ -31,6 +31,7 @@ crate::closed_enum! {
         ContextIncomplete = "context_incomplete",
         CouldNotRun = "could_not_run",
         Usage = "usage",
+        NotALabel = "not_a_label",
     }
 }
 

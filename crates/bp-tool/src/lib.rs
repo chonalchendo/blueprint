@@ -1,8 +1,9 @@
-//! The tool: the 18 verbs, the write path composition, the envelope. This milestone ships the read verbs. Every verb
-//! prints one JSON object on stdout with `--json`; diagnostics go to stderr.
+//! The tool: the 18 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
+//! `--json`; diagnostics go to stderr.
 
 mod intent;
 mod schema;
+mod set;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -49,6 +50,8 @@ pub enum Verb {
     Search(Search),
     /// The ranked slice an action needs, under its budget, with the scope's intents.
     Walk(Walk),
+    /// One header label of one node: one changed line, one commit.
+    Set(set::Set),
 }
 
 /// `bp walk <id> --for <action> [--budget <tokens>] [--depth <hops>] [--ids]`.
@@ -151,7 +154,21 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::List(list) => finish(list_(cwd, list), cli.json, out),
         Verb::Search(search) => finish(search_(cwd, search), cli.json, out),
         Verb::Walk(walk) => finish(walk_(cwd, walk), cli.json, out),
+        Verb::Set(s) => match set::set(cwd, s) {
+            Ok(Wrote::Already(v)) => {
+                emit(out, &Envelope { result: v, contract_version: CONTRACT }, cli.json);
+                ExitCode::from(3)
+            }
+            Ok(Wrote::Changed(v)) => finish(Ok(v), cli.json, out),
+            Err(refusal) => finish::<Value>(Err(refusal), cli.json, out),
+        },
     }
+}
+
+/// A write verb's result: what it wrote (exit 0), or the id of what the vault already held (exit 3).
+enum Wrote {
+    Changed(Value),
+    Already(Value),
 }
 
 fn finish<T: Serialize>(result: Result<T, Refusal>, json: bool, out: &mut impl std::io::Write) -> ExitCode {

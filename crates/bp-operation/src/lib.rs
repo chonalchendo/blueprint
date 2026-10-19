@@ -1,5 +1,5 @@
 //! Operation domain: role, skill, dispatch template, handoff; the bundle's metadata. This milestone holds the
-//! actions an agent runs and what each one's walk returns (21, the action rows).
+//! actions an agent runs, what each one's walk returns (21, the action rows), and the roles a commit names.
 
 use bp_vault::Kind;
 
@@ -16,6 +16,17 @@ bp_vault::closed_enum! {
         Distil = "distil",
         Capture = "capture",
         Research = "research",
+    }
+}
+
+bp_vault::closed_enum! {
+    /// Who made a commit: the `Bp-Role` trailer (12, delta of 2026-10-18), from `BP_ROLE`, `human` when unset.
+    pub enum Role {
+        Session = "session",
+        Worker = "worker",
+        Reviewer = "reviewer",
+        Researcher = "researcher",
+        Human = "human",
     }
 }
 

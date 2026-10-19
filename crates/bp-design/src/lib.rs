@@ -1,5 +1,5 @@
 //! Design domain: project, design, design kinds, concern answers, terms, diagrams, deltas, blueprint versions.
-//! This milestone holds the status sets of the logical data model (13).
+//! This milestone holds the status sets and the label vocabularies of the logical data model (13).
 
 bp_vault::closed_enum! {
     /// A project's status.
@@ -16,6 +16,39 @@ bp_vault::closed_enum! {
         Active = "active",
         Deprecated = "deprecated",
         Retired = "retired",
+    }
+}
+
+bp_vault::closed_enum! {
+    /// A design's C4 level.
+    pub enum Scope {
+        Product = "product",
+        System = "system",
+        Container = "container",
+        Component = "component",
+    }
+}
+
+bp_vault::closed_enum! {
+    /// The concern a design answers. The bundle will ship the list (13, reference); until then, the converted
+    /// vault's values and the glossary of the spine (12, Identity).
+    pub enum DesignKind {
+        Product = "product",
+        System = "system",
+        DataModel = "data-model",
+        Glossary = "glossary",
+        Container = "container",
+        Component = "component",
+    }
+}
+
+bp_vault::closed_enum! {
+    /// A project's class, which selects its concerns. The bundle will ship the list (13, reference); until then,
+    /// the converted vault's values.
+    pub enum ProjectClass {
+        AgentFramework = "agent-framework",
+        DataMlPlatform = "data-ml-platform",
+        SmallCli = "small-cli",
     }
 }
 

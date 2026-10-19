@@ -1,5 +1,6 @@
 //! Change domain: milestone, issue, check rows, run, claim, review, disposition, waiver; the Intents function.
-//! This milestone holds the status sets of the logical data model (13) and the `Intents` function (21).
+//! This milestone holds the status sets and the issue's severity of the logical data model (13), and the `Intents`
+//! function (21).
 
 pub mod intents;
 
@@ -20,6 +21,16 @@ bp_vault::closed_enum! {
         InProgress = "in-progress",
         Resolved = "resolved",
         Abandoned = "abandoned",
+    }
+}
+
+bp_vault::closed_enum! {
+    /// An issue's severity: a label `set` writes. The four values the converted vault holds.
+    pub enum Severity {
+        Low = "low",
+        Medium = "medium",
+        High = "high",
+        Critical = "critical",
     }
 }
 
