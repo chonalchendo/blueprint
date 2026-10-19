@@ -208,7 +208,15 @@ pub fn timestamp(text: &str) -> Option<i64> {
         let n = digits.iter().try_fold(0, |n, d| d.is_ascii_digit().then(|| n * 10 + i64::from(d - b'0')))?;
         (n <= max).then_some(n)
     };
-    let (year, month, day) = (field(0, 4, 9999)?, field(5, 2, 12)?, field(8, 2, 31)?);
+    let (year, month) = (field(0, 4, 9999)?, field(5, 2, 12)?);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let last = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    let day = field(8, 2, last)?;
     if month == 0 || day == 0 {
         return None;
     }
@@ -262,7 +270,12 @@ mod tests {
         assert_eq!(timestamp("2026-10-18T00:00:00Z"), Some(NOW));
         assert_eq!(timestamp("1970-01-01T00:00:01Z"), Some(1));
         assert_eq!(timestamp("2024-02-29T12:00:00Z"), Some(1_709_208_000));
+        assert!(timestamp("2000-02-29T00:00:00Z").is_some() && timestamp("2026-04-30T00:00:00Z").is_some());
         for bad in [
+            "2026-02-30T00:00:00Z",
+            "2026-02-29T00:00:00Z",
+            "1900-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
             "2026-10-18 00:00:00",
             "2026-13-45T99:99:99Z",
             "2026-10-18T00:00:00ZZZ",

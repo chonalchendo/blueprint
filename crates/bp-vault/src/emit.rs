@@ -18,7 +18,8 @@ impl Header {
         if let Some(s) = &self.status {
             out.push_str(&line("status", &Value::from(s.as_str())));
         }
-        let mut links: Vec<&str> = std::iter::once("under").chain(LINKS).collect();
+        let mut links: Vec<&str> =
+            std::iter::once("under").chain(LINKS).chain(self.kind.record_links().iter().copied()).collect();
         links.sort_by_key(|k| self.unresolved.iter().position(|u| u.field == *k).unwrap_or(usize::MAX));
         for key in links {
             let mut loose = self.unresolved.iter().filter(|u| u.field == key).map(|u| Value::from(u.text.as_str()));
@@ -28,8 +29,9 @@ impl Header {
                     out.push_str(&line(key, &u));
                 }
             } else if let Some(ids) = self.links.get(key) {
-                let all = ids.iter().map(|i| Value::from(i.as_str())).chain(loose).collect();
-                out.push_str(&line(key, &Value::Array(all)));
+                let mut all: Vec<Value> = ids.iter().map(|i| Value::from(i.as_str())).chain(loose).collect();
+                let value = if self.kind.is_record() && all.len() == 1 { all.remove(0) } else { Value::Array(all) };
+                out.push_str(&line(key, &value));
             }
         }
         if !self.aliases.is_empty() {

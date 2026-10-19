@@ -347,17 +347,28 @@ impl Index {
         Ok(text.map(|t| object(&t)))
     }
 
-    /// The header and body of every record of one kind under a node, in id order. A record's body holds what its
+    /// The header and body of every record of one kind under a node, in time order: by the kind's time field, then
+    /// by the `-N` a second record with one key took, as a number (13, rule 1). A record's body holds what its
     /// appends wrote, such as a claim's `## Released` section (13).
     pub fn records(&self, under: &str, kind: Kind) -> Result<Vec<Record>, Refusal> {
-        let run = || -> rusqlite::Result<Vec<(String, String)>> {
-            let mut st = self
-                .conn
-                .prepare_cached("select header, body from records where under = ?1 and kind = ?2 order by id")?;
-            st.query_map([under, kind.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        let run = || -> rusqlite::Result<Vec<(String, String, String)>> {
+            let mut st =
+                self.conn.prepare_cached("select id, header, body from records where under = ?1 and kind = ?2")?;
+            st.query_map([under, kind.as_str()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
         };
         let rows = run().map_err(|e| failed(Path::new(".bp/index.db"), &e))?;
-        Ok(rows.into_iter().map(|(h, body)| Record { header: object(&h), body }).collect())
+        // Every instant the vault writes is UTC with `Z`, so text order is time order.
+        let time = |r: &Record| kind.time_field().and_then(|f| r.header.get(f)?.as_str().map(str::to_string));
+        let mut rows: Vec<_> = rows
+            .into_iter()
+            .map(|(id, h, body)| {
+                let r = Record { header: object(&h), body };
+                let (stem, n) = second(&id);
+                ((time(&r), stem.to_string(), n), r)
+            })
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(rows.into_iter().map(|(_, r)| r).collect())
     }
 
     /// BM25 over ids, titles and bodies of nodes. Every term must match; when none does, any term may.
@@ -399,6 +410,15 @@ impl Index {
 }
 
 /// rusqlite reads no `usize`; a `count(*)` is never negative.
+/// A record id's key without its `-N`, and N: 1 for the first record with the key.
+fn second(id: &str) -> (&str, u64) {
+    let key = id.rsplit('/').next().unwrap_or(id);
+    match key.rsplit_once('-') {
+        Some((stem, n)) if !n.starts_with('0') && n.len() < 6 => n.parse().map_or((key, 1), |n| (stem, n)),
+        _ => (key, 1),
+    }
+}
+
 pub(crate) fn count_at(r: &rusqlite::Row, i: usize) -> rusqlite::Result<usize> {
     Ok(usize::try_from(r.get::<_, i64>(i)?).expect("a count is never negative"))
 }
@@ -518,6 +538,36 @@ mod tests {
         let index = Index::open(&v).unwrap();
         let (rows, _) = index.list(&Filter { status: Some("resolved"), ..all("issue") }).unwrap();
         assert_eq!(rows[0].id, "projects/bp/issues/0001.a");
+    }
+
+    #[test]
+    fn records_read_in_time_order_and_record_fields_are_edges() {
+        let (_d, v) = vault();
+        let l = "shared/learnings/l";
+        write(&v.root, l, "---\nkind: learning\ntitle: L\nstatus: draft\n---\n");
+        let evidence = |at: &str, note: &str| {
+            format!(
+                "---\nkind: evidence\nunder: {l}\nat: {at}\noutcome: helped\nissue: projects/bp/issues/gone\nnote: {note}\n---\n\n~~~check shell\nx\n~~~\n"
+            )
+        };
+        let z = "2026-10-19T10-00-00Z";
+        for n in 1..=10 {
+            let id = if n == 1 { format!("{l}/evidence/{z}") } else { format!("{l}/evidence/{z}-{n}") };
+            write(&v.root, &id, &evidence("2026-10-19T10:00:00Z", &n.to_string()));
+        }
+        write(&v.root, &format!("{l}/evidence/2026-10-19T11-00-00Z"), &evidence("2026-10-19T09:00:00Z", "0"));
+        let index = Index::open(&v).unwrap();
+        let notes: Vec<i64> =
+            index.records(l, Kind::Evidence).unwrap().iter().map(|r| r.header["note"].as_i64().unwrap()).collect();
+        assert_eq!(notes, (0..=10).collect::<Vec<_>>());
+        let edges: i64 = index
+            .conn
+            .query_row("select count(*) from links where type = 'issue' and dst = 'projects/bp/issues/gone'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(edges, 11, "a record's `→` field is an edge");
+        assert_eq!(index.counts().unwrap().check_blocks, 0, "a record's check block is prose");
     }
 
     #[test]

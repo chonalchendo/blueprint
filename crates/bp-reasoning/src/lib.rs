@@ -1,5 +1,6 @@
 //! Reasoning domain: thread, decision, convention, learning, evidence rows, inbox entry.
-//! This milestone holds the status sets of the logical data model (13).
+//! This milestone holds the status sets, their machines (25, design change 3), and the evidence outcomes of the
+//! logical data model (13).
 
 bp_vault::closed_enum! {
     /// A thread's status.
@@ -43,6 +44,53 @@ bp_vault::closed_enum! {
         Raw = "raw",
         Promoted = "promoted",
         Dropped = "dropped",
+    }
+}
+
+impl ThreadStatus {
+    /// The moves `transition` makes (25, design change 3).
+    pub const MOVES: &'static [(Self, Self)] = &[
+        (Self::Open, Self::Paused),
+        (Self::Paused, Self::Open),
+        (Self::Open, Self::Closed),
+        (Self::Paused, Self::Closed),
+    ];
+}
+
+impl DecisionStatus {
+    /// The moves `transition` makes (25, design change 3).
+    pub const MOVES: &'static [(Self, Self)] =
+        &[(Self::Proposed, Self::Accepted), (Self::Proposed, Self::Rejected), (Self::Accepted, Self::Superseded)];
+
+    /// A move that is the human's decision, so it writes `decided_at` (13, Decision).
+    pub fn decides(to: Self) -> bool {
+        matches!(to, Self::Accepted | Self::Rejected)
+    }
+}
+
+impl ConventionStatus {
+    /// The moves `transition` makes (25, design change 3).
+    pub const MOVES: &'static [(Self, Self)] = &[(Self::Active, Self::Retired)];
+}
+
+impl LearningStatus {
+    /// The moves `transition` makes (25, design change 3).
+    pub const MOVES: &'static [(Self, Self)] =
+        &[(Self::Draft, Self::Verified), (Self::Draft, Self::Retracted), (Self::Verified, Self::Retracted)];
+}
+
+impl InboxStatus {
+    /// The moves `transition` makes (25, design change 3).
+    pub const MOVES: &'static [(Self, Self)] = &[(Self::Raw, Self::Promoted), (Self::Raw, Self::Dropped)];
+}
+
+bp_vault::closed_enum! {
+    /// What applying a learning did (13, EvidenceRow).
+    pub enum Outcome {
+        Helped = "helped",
+        Hurt = "hurt",
+        NoEffect = "no-effect",
+        Confounded = "confounded",
     }
 }
 
