@@ -42,8 +42,27 @@ impl World {
     }
 }
 
-/// The intent of one issue row.
-pub fn of(vault: &Vault, index: &Index, world: &World, id: &str, status: &str) -> Result<Verdict, Refusal> {
+/// The intent of one issue or milestone. A milestone's intent reads only its status, so the clock and the forge
+/// are read, and `world` given, only when an issue is in view.
+pub fn row(
+    vault: &Vault,
+    index: &Index,
+    world: Option<&World>,
+    kind: Kind,
+    id: &str,
+    status: Option<&str>,
+) -> Result<Verdict, Refusal> {
+    let status = status.unwrap_or_default();
+    match kind {
+        Kind::Issue => {
+            of(vault, index, world.expect("the caller reads the world when an issue is in view"), id, status)
+        }
+        _ => Ok(intents::milestone(status)),
+    }
+}
+
+/// The intent of one issue.
+fn of(vault: &Vault, index: &Index, world: &World, id: &str, status: &str) -> Result<Verdict, Refusal> {
     if !intents::is_live_issue(status) {
         return Ok(Verdict::NONE);
     }

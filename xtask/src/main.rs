@@ -1,4 +1,7 @@
-//! `cargo xtask <check>`. Today: `deps`, the crate rule. Exit 0 when the rule holds, 2 with one line per violation.
+//! `cargo xtask <check>`. `deps`, the crate rule: exit 0 when the rule holds, 2 with one line per violation.
+//! `bench`, the call budget: prints the largest ratio last.
+
+mod bench;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -8,10 +11,22 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 fn main() -> ExitCode {
-    let task = std::env::args().nth(1).unwrap_or_default();
-    if task != "deps" {
-        eprintln!("usage: cargo xtask deps");
-        return ExitCode::from(4);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("deps") => {}
+        Some("bench") => {
+            return match bench::run(&args[1..]) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("xtask: {e:#}");
+                    ExitCode::from(1)
+                }
+            };
+        }
+        _ => {
+            eprintln!("usage: cargo xtask deps | cargo xtask bench <runs> <plain> <label=command>...");
+            return ExitCode::from(4);
+        }
     }
     let result = deps(Path::new("."));
     match result {

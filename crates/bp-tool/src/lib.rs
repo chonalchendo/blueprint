@@ -7,6 +7,7 @@ mod schema;
 use std::path::Path;
 use std::process::ExitCode;
 
+use bp_operation::Action;
 use bp_vault::{Code, Filter, Id, Index, Kind, Refusal, Vault};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
@@ -46,6 +47,27 @@ pub enum Verb {
     List(List),
     /// BM25 over ids, titles and bodies; each row has id, kind, rank and one snippet.
     Search(Search),
+    /// The ranked slice an action needs, under its budget, with the scope's intents.
+    Walk(Walk),
+}
+
+/// `bp walk <id> --for <action> [--budget <tokens>] [--depth <hops>] [--ids]`.
+#[derive(Args)]
+pub struct Walk {
+    /// The seed: an issue for complete, review and respond; a milestone for derive.
+    pub id: String,
+    /// The action: complete, review, respond, derive, design, shape, research, triage-drift, distil, capture.
+    #[arg(long = "for")]
+    pub action: String,
+    /// The token budget; the action's own by default (21).
+    #[arg(long)]
+    pub budget: Option<usize>,
+    /// Hops from the seed.
+    #[arg(long, default_value_t = 2)]
+    pub depth: usize,
+    /// The map only: every reached id in rank order, no bodies.
+    #[arg(long)]
+    pub ids: bool,
 }
 
 /// `bp show <id> [--section <heading>] [--no-body] [--at <ref>]`.
@@ -128,6 +150,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Show(show) => finish(show_(cwd, show), cli.json, out),
         Verb::List(list) => finish(list_(cwd, list), cli.json, out),
         Verb::Search(search) => finish(search_(cwd, search), cli.json, out),
+        Verb::Walk(walk) => finish(walk_(cwd, walk), cli.json, out),
     }
 }
 
@@ -265,15 +288,10 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     if !matches!(kind_value, Kind::Issue | Kind::Milestone) {
         return Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }));
     }
-    // A milestone's intent reads only its status; the clock and the forge are read for issues alone.
     let world = if kind_value == Kind::Issue { Some(intent::World::read()?) } else { None };
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let status = row.status.as_deref().unwrap_or_default();
-        let verdict = match &world {
-            Some(w) => intent::of(&vault, &index, w, &row.id, status)?,
-            None => bp_change::intents::milestone(status),
-        };
+        let verdict = intent::row(&vault, &index, world.as_ref(), kind_value, &row.id, row.status.as_deref())?;
         if ready && verdict.intent != Some(bp_change::intents::Intent::Ready) {
             continue;
         }
@@ -328,6 +346,97 @@ fn search_(cwd: &Path, search: &Search) -> Result<Value, Refusal> {
     let index = Index::open(&Vault::discover(cwd)?)?;
     let rows = index.search(&search.terms, kind, search.project.as_deref(), search.limit)?;
     Ok(serde_json::json!({ "rows": rows }))
+}
+
+fn walk_(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
+    let action: Action = walk.action.parse().map_err(|_| {
+        let actions: Vec<&str> = Action::ALL.iter().map(|a| a.as_str()).collect();
+        unknown("for", &walk.action, format!("use one of: {}", actions.join(", ")))
+    })?;
+    let id = node_id(&walk.id)?;
+    let vault = Vault::discover(cwd)?;
+    let index = Index::open(&vault)?;
+    let _reading = index.reading()?;
+    let header = index.header(id.as_str())?.ok_or_else(|| {
+        Refusal::new(
+            Code::NoNode,
+            id.as_str(),
+            "an id names a markdown file under the vault root",
+            format!("bp search {}", id.as_str().rsplit('/').next().unwrap_or_default().replace(['-', '.'], " ")),
+        )
+    })?;
+    let kind: Kind = header["kind"].as_str().and_then(|k| k.parse().ok()).expect("the index stores closed kinds");
+    if !action.seed().contains(&kind) {
+        return Err(unknown("for", action.as_str(), format!("{action} walks from a {}", action.seed()[0])));
+    }
+    context(&index, &id, action)?;
+    let mut reached = index.reach(id.as_str(), walk.depth)?;
+    if let Some(project) = id.project() {
+        for c in index.cited_conventions(&format!("projects/{project}/project"))? {
+            if !reached.iter().any(|r| r.id == c.id) {
+                reached.push(c);
+            }
+        }
+    }
+    let world = if reached.iter().any(|r| r.kind == Kind::Issue) { Some(intent::World::read()?) } else { None };
+    let mut intents = Vec::new();
+    for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone)) {
+        let verdict = intent::row(&vault, &index, world.as_ref(), r.kind, &r.id, r.status.as_deref())?;
+        if let Some(intent) = verdict.intent {
+            intents.push(serde_json::json!({ "id": r.id, "intent": intent, "note": verdict.note }));
+        }
+    }
+    let line =
+        |r: &bp_vault::Reached| serde_json::json!({ "id": r.id, "kind": r.kind, "title": r.title, "rank": r.rank });
+    if walk.ids {
+        let ids: Vec<Value> = reached.iter().map(line).collect();
+        return Ok(serde_json::json!({ "seed": id, "for": action, "ids": ids, "intents": intents }));
+    }
+    let budget = walk.budget.unwrap_or_else(|| action.budget());
+    let f = bp_vault::fill(&reached, action.bodies(), budget);
+    let by_id = |want: &String| reached.iter().find(|r| &r.id == want).expect("the fill chose from the reached");
+    let mut bodies = Vec::with_capacity(f.bodies.len());
+    for b in &f.bodies {
+        let mut v = line(by_id(b));
+        v["body"] = index.body(b)?.into();
+        bodies.push(v);
+    }
+    let ids: Vec<Value> = f.ids.iter().map(|i| line(by_id(i))).collect();
+    Ok(serde_json::json!({
+        "seed": id, "for": action, "budget": budget, "used": f.used,
+        "bodies": bodies, "ids": ids, "cut": f.cut, "intents": intents,
+    }))
+}
+
+/// The context the action cannot run without (21, rule 3): every required link from the seed names a node of its
+/// kind with a body, and at least one does.
+fn context(index: &Index, id: &Id, action: Action) -> Result<(), Refusal> {
+    for req in action.requires() {
+        let targets: Vec<String> = index
+            .links_of(id.as_str(), req.field)?
+            .into_iter()
+            .filter(|t| Id::parse(t).is_ok_and(|t| req.kind.fits(&t)))
+            .collect();
+        let missing = |what: String| {
+            Refusal::new(
+                Code::ContextIncomplete,
+                format!("{id} --for {action}"),
+                "a walk refuses when a kind its action requires is absent or empty (21, rule 3)",
+                format!("{what}; bp show {id} --no-body"),
+            )
+        };
+        if targets.is_empty() {
+            return Err(missing(format!("no {} under `{}`", req.kind, req.field)));
+        }
+        for t in &targets {
+            match index.tokens_of(t)? {
+                None => return Err(missing(format!("the {} {t} is absent", req.kind))),
+                Some(0) => return Err(missing(format!("the {} {t} is empty", req.kind))),
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 fn emit(out: &mut impl std::io::Write, value: &impl Serialize, json: bool) {

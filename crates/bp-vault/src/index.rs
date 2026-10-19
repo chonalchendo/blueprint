@@ -1,21 +1,15 @@
 //! The index: `.bp/index.db`, derived from the files and holding nothing else (12). It refreshes at open when the
-//! vault's fingerprint moved: every file is hashed, and only files whose content hash changed are parsed again.
-//!
-//! The fingerprint is cheap on purpose; hashing every file costs about 240 ms against a call budget of a few. It
-//! holds the git head, the time and size of git's own index (checkout, reset, stash and add rewrite it), and the
-//! time of every kind directory and design subdirectory (a node file added or removed). The tool is the single
-//! writer and commits every write, so a tool write always moves the head. Two changes stay unseen until a commit:
-//! an in-place edit, and a record added or removed by hand under a node. The census (`list --count-only`) hashes
-//! every file whatever the fingerprint says, so it is the read that reconciles them.
+//! vault's fingerprint moved (see the fingerprint module): every file is hashed, and only files whose content hash
+//! changed are parsed again.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::fingerprint::{fingerprint, still};
 use crate::{Counts, File, FindingKind, Kind, Refusal, Vault};
 
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
@@ -23,7 +17,7 @@ use crate::{Counts, File, FindingKind, Kind, Refusal, Vault};
 /// bump to the same number still differ.
 const SCHEMA: i64 = 4;
 
-fn schema() -> String {
+pub(crate) fn schema() -> String {
     format!("{SCHEMA}-{}", &blake3::hash(TABLES.as_bytes()).to_hex()[..12])
 }
 
@@ -31,7 +25,7 @@ const TABLES: &str = "
 create table meta (key text primary key, value text not null);
 create table files (id text primary key, hash text not null, class text not null);
 create table nodes (rowid integer primary key, id text unique not null, kind text not null, title text,
-  status text, project text, under text, header text not null);
+  status text, project text, under text, header text not null, tokens integer not null);
 create index nodes_kind on nodes (kind, project, status);
 create table records (id text primary key, kind text not null, project text, under text, header text not null,
   body text not null);
@@ -45,14 +39,23 @@ create table checks (src text not null);
 create index checks_src on checks (src);
 create table findings (src text not null, kind text not null);
 create index findings_src on findings (src);
-create index links_src on links (src);
-create index links_dst on links (dst);
+create index links_src on links (src, type, dst);
+create index links_dst on links (dst, type, src);
+create table edges (src integer not null, dst integer not null, weight real not null);
+create index edges_src on edges (src, dst, weight);
+create index edges_dst on edges (dst, src, weight);
 create virtual table fts using fts5 (id, title, body, tokenize = 'unicode61');
 ";
 
 /// An open, fresh index.
 pub struct Index {
-    conn: Connection,
+    pub(crate) conn: Connection,
+}
+
+/// One read transaction, held until dropped: every statement of a multi-statement read sees the same index, even
+/// while another process refreshes it.
+pub struct Reading<'a> {
+    _tx: rusqlite::Transaction<'a>,
 }
 
 /// One row of `list`.
@@ -126,9 +129,8 @@ impl Index {
         let conn = Connection::open(&path).map_err(|e| failed(&path, &e))?;
         conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(|e| failed(&path, &e))?;
         let mut index = Self { conn };
-        let print = fingerprint(&vault.root);
-        if index.meta("fingerprint").as_deref() != Some(print.as_str()) {
-            index.refresh_or_fail(vault, &print, &path)?;
+        if !index.meta("fingerprint").is_some_and(|stored| still(&vault.root, &stored)) {
+            index.refresh_or_fail(vault, &fingerprint(&vault.root), &path)?;
         }
         Ok(index)
     }
@@ -180,17 +182,23 @@ impl Index {
             .prepare("select id, hash from files")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
+        let mut changed = false;
         for id in vault.ids()? {
             let bytes = std::fs::read(id.path(&vault.root))?;
             let hash = blake3::hash(&bytes).to_hex().to_string();
             if known.remove(id.as_str()).as_deref() == Some(hash.as_str()) {
                 continue;
             }
+            changed = true;
             remove(&tx, id.as_str())?;
             insert(&tx, &File::from_bytes(id, &bytes)?)?;
         }
         for gone in known.keys() {
+            changed = true;
             remove(&tx, gone)?;
+        }
+        if changed {
+            crate::walk::rebuild_edges(&tx)?;
         }
         tx.execute("insert or replace into meta values ('fingerprint', ?1)", [print])?;
         tx.commit()?;
@@ -286,6 +294,20 @@ impl Index {
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
+    /// Starts one read transaction; see [`Reading`].
+    pub fn reading(&self) -> Result<Reading<'_>, Refusal> {
+        let tx = self.conn.unchecked_transaction().map_err(|e| failed(Path::new(".bp/index.db"), &e))?;
+        Ok(Reading { _tx: tx })
+    }
+
+    /// A node's body cost in tokens; `None` when no node has the id. Zero tokens is an empty body.
+    pub fn tokens_of(&self, id: &str) -> Result<Option<usize>, Refusal> {
+        self.conn
+            .query_row("select tokens from nodes where id = ?1", [id], |r| count_at(r, 0))
+            .optional()
+            .map_err(|e| failed(Path::new(".bp/index.db"), &e))
+    }
+
     /// The header of one node or record as JSON, when the id is in the index.
     pub fn header(&self, id: &str) -> Result<Option<Map<String, Value>>, Refusal> {
         let text: Option<String> = self
@@ -352,8 +374,14 @@ impl Index {
 }
 
 /// rusqlite reads no `usize`; a `count(*)` is never negative.
-fn count_at(r: &rusqlite::Row, i: usize) -> rusqlite::Result<usize> {
+pub(crate) fn count_at(r: &rusqlite::Row, i: usize) -> rusqlite::Result<usize> {
     Ok(usize::try_from(r.get::<_, i64>(i)?).expect("a count is never negative"))
+}
+
+/// A body's cost in the walk's budget, at four characters a token.
+/// Four characters a token, over the trimmed body, rounded up: an empty body costs nothing and any other at least one.
+fn body_tokens(body: &str) -> i64 {
+    i64::try_from(body.trim().len().div_ceil(4)).expect("a body is far below i64::MAX bytes")
 }
 
 fn count(r: &rusqlite::Row) -> rusqlite::Result<usize> {
@@ -384,8 +412,18 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     } else {
         tx.execute("insert into files values (?1, ?2, 'node')", params![id, file.hash])?;
         tx.execute(
-            "insert into nodes (id, kind, title, status, project, under, header) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, kind, header.title, header.status, file.id.project(), under, json],
+            "insert into nodes (id, kind, title, status, project, under, header, tokens)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                kind,
+                header.title,
+                header.status,
+                file.id.project(),
+                under,
+                json,
+                body_tokens(&file.body.text)
+            ],
         )?;
         tx.execute(
             "insert into fts (rowid, id, title, body) values (last_insert_rowid(), ?1, ?2, ?3)",
@@ -439,48 +477,12 @@ fn remove(tx: &rusqlite::Transaction, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// The schema, the git head and the modification time of `projects/`, `shared/`, every project and every kind directory.
-fn fingerprint(root: &Path) -> String {
-    // The schema leads, so a binary with another schema never takes this index as fresh.
-    let repo = crate::git::Repo::find(root);
-    let head = repo.as_ref().and_then(crate::git::Repo::head).unwrap_or_default();
-    let mut print = format!("schema={}\n{head}", schema());
-    if let Some(m) = repo.and_then(|r| std::fs::metadata(r.git.join("index")).ok()) {
-        let nanos = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
-        let _ = write!(print, "\nindex={}:{}", nanos.unwrap_or_default(), m.len());
-    }
-    let mut dirs = vec![root.join("projects"), root.join("shared")];
-    if let Ok(projects) = std::fs::read_dir(root.join("projects")) {
-        dirs.extend(projects.flatten().map(|e| e.path()));
-    }
-    let mut kinds = Vec::new();
-    for d in &dirs[1..] {
-        if let Ok(entries) = std::fs::read_dir(d) {
-            kinds.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
-        }
-    }
-    let designs: Vec<_> = kinds
-        .iter()
-        .filter(|p| p.ends_with("designs"))
-        .flat_map(|d| [d.join("containers"), d.join("components")])
-        .collect();
-    dirs.extend(kinds);
-    dirs.extend(designs);
-    for d in dirs {
-        if let Ok(t) = std::fs::metadata(&d).and_then(|m| m.modified()) {
-            let nanos = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
-            let _ = write!(print, "\n{}={nanos}", d.display());
-        }
-    }
-    print
-}
-
 /// A stored header: the index wrote it from a JSON object, so it reads back as one.
 fn object(text: &str) -> Map<String, Value> {
     serde_json::from_str(text).expect("the index stores headers as JSON objects")
 }
 
-fn failed(subject: &Path, e: &dyn std::fmt::Display) -> Refusal {
+pub(crate) fn failed(subject: &Path, e: &dyn std::fmt::Display) -> Refusal {
     Refusal::failed(subject.display().to_string(), format!("{e}; delete .bp/index.db and rerun"))
 }
 
@@ -594,6 +596,9 @@ mod tests {
         assert_eq!(index.list(&all("claim")).unwrap().1, 0, "the census reconciles");
         write(&v.root, "projects/bp/designs/components/walk", "---\nkind: design\ntitle: Walk\nstatus: active\n---\n");
         assert_eq!(Index::open(&v).unwrap().list(&all("design")).unwrap().1, 1);
+        // A new project moves `projects/`, which every fingerprint names, so the fast path sees it too.
+        write(&v.root, "projects/zz/issues/0001.z", &issue("New project", "open"));
+        assert_eq!(Index::open(&v).unwrap().list(&all("issue")).unwrap().1, 4);
     }
 
     #[test]
@@ -625,6 +630,10 @@ mod tests {
             ("nodes", "id, kind, title, status, project, under, header"),
             ("records", "id, kind, project, under, header"),
             ("links", "src, type, dst"),
+            (
+                "edges e join nodes a on a.rowid = e.src join nodes b on b.rowid = e.dst",
+                "a.id, b.id, cast(e.weight as text)",
+            ),
             ("fts", "id, title, body"),
             ("unresolved", "src, field, text"),
             ("aliases", "alias, id"),
