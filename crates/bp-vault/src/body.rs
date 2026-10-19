@@ -135,9 +135,13 @@ impl Body {
                 Event::End(TagEnd::CodeBlock) => {
                     if let Some((mut c, at)) = check.take() {
                         c.text = c.text.trim_end_matches('\n').to_string();
-                        if !c.attrs.contains_key("name") {
-                            let detail = c.runner.clone();
-                            body.findings.push(Finding { kind: FindingKind::CheckUnnamed, line: line(at), detail });
+                        // A run file embeds the name (13), so a name outside the slug grammar names no block.
+                        match c.attrs.get("name") {
+                            Some(name) if crate::is_slug(name) => {}
+                            name => {
+                                let detail = name.map_or_else(|| c.runner.clone(), |n| format!("name={n}"));
+                                body.findings.push(Finding { kind: FindingKind::CheckUnnamed, line: line(at), detail });
+                            }
                         }
                         body.checks.push(c);
                         blocks.push(at);
@@ -337,6 +341,9 @@ mod tests {
         let b = Body::parse("```check shell {expect=0}\nx\n```\n\n```checklist\n- a\n```\n");
         assert_eq!(b.checks.len(), 1, "checklist is not a check block");
         assert_eq!(b.findings[0].kind, FindingKind::CheckUnnamed);
+        let b = Body::parse("```check shell {name=A}\nx\n```\n\n```check shell {name=../../x}\nx\n```\n");
+        let details: Vec<&str> = b.findings.iter().map(|f| f.detail.as_str()).collect();
+        assert_eq!(details, ["name=A", "name=../../x"], "a name is a slug");
         let b = Body::parse("```check shell {name=x}trailing\n```\n\n```check {name=a name=b \"q\"}\n```\n");
         let kinds: Vec<FindingKind> = b.findings.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, [FindingKind::CheckMalformed; 4], "{:?}", b.findings);

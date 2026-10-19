@@ -1,26 +1,17 @@
 //! `bp link` through the binary, over a small vault under git: one edge, one changed line, one commit, the repeats,
 //! the removal and the refusals.
 
-use std::path::Path;
-use std::process::Command as Std;
+mod common;
 
-use assert_cmd::Command;
+use common::{bp, commits, git};
 
 const A: &str = "projects/bp/issues/0001.a";
 const B: &str = "projects/bp/issues/0002.b";
 const SYSTEM: &str = "projects/bp/designs/system";
 const D: &str = "projects/bp/decisions/d";
 
-fn git(root: &Path, args: &[&str]) -> String {
-    let out = Std::new("git").arg("-C").arg(root).args(args).output().unwrap();
-    assert!(out.status.success(), "git {args:?}");
-    String::from_utf8(out.stdout).unwrap()
-}
-
 fn vault() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    for (rel, text) in [
+    common::vault(&[
         ("projects/bp/designs/system.md", "---\nkind: design\ntitle: S\nstatus: active\n---\n"),
         (
             "projects/bp/issues/0001.a.md",
@@ -34,36 +25,10 @@ fn vault() -> tempfile::TempDir {
             "projects/bp/decisions/d.md",
             "---\nkind: decision\ntitle: D\nstatus: proposed\nanswers: [\"shared/threads/t\"]\n---\n",
         ),
+        ("projects/zz/issues/0001.z.md", "---\nkind: issue\ntitle: Z\nstatus: open\n---\n"),
         ("shared/threads/t.md", "---\nkind: thread\ntitle: T\nstatus: open\n---\n"),
         ("shared/threads/u.md", "---\nkind: thread\ntitle: U\nstatus: open\n---\n"),
-        (".bp/.gitignore", "*\n"),
-    ] {
-        std::fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
-        std::fs::write(root.join(rel), text).unwrap();
-    }
-    git(root, &["init", "-q"]);
-    git(root, &["config", "user.name", "t"]);
-    git(root, &["config", "user.email", "t@t"]);
-    git(root, &["add", "-A"]);
-    git(root, &["commit", "-qm", "one"]);
-    dir
-}
-
-fn bp(root: &Path, args: &[&str]) -> (Option<i32>, serde_json::Value) {
-    let out = Command::cargo_bin("bp")
-        .unwrap()
-        .current_dir(root)
-        .env_remove("BP_VAULT")
-        .env_remove("BP_ROLE")
-        .args(args)
-        .arg("--json")
-        .output()
-        .unwrap();
-    (out.status.code(), serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null))
-}
-
-fn commits(root: &Path) -> String {
-    git(root, &["rev-list", "--count", "HEAD"]).trim().to_string()
+    ])
 }
 
 #[test]
@@ -75,6 +40,8 @@ fn link_adds_and_removes_one_edge_a_commit() {
     assert_eq!(v["commit"].as_str().unwrap(), git(root, &["rev-parse", "HEAD"]).trim());
     assert_eq!(git(root, &["diff", "--numstat", "HEAD~1", "HEAD"]), "1\t1\tprojects/bp/issues/0001.a.md\n");
     assert!(git(root, &["log", "-1", "--format=%B"]).lines().any(|l| l == "Bp-Verb: link"));
+    let text = std::fs::read_to_string(root.join(format!("{A}.md"))).unwrap();
+    assert!(text.contains(&format!("cites: [\"[[legacy.x]]\", \"{SYSTEM}\"]\n")), "written order, appended: {text}");
     let shown = bp(root, &["show", A]).1;
     assert_eq!(shown["cites"], serde_json::json!([SYSTEM]), "the index took the write");
     assert_eq!(shown["unresolved"][0]["text"], "[[legacy.x]]", "a link text the write did not name stays");
@@ -88,6 +55,8 @@ fn link_adds_and_removes_one_edge_a_commit() {
     assert_eq!(bp(root, &["link", A, "cites", SYSTEM, "--remove"]).0, Some(3), "an absent edge is a no-op");
     assert_eq!(bp(root, &["link", A, "cites", "[[legacy.x]]", "--remove"]).0, Some(0), "a broken link text can go");
     assert_eq!(bp(root, &["show", A]).1.get("unresolved"), None);
+    let text = std::fs::read_to_string(root.join(format!("{A}.md"))).unwrap();
+    assert!(!text.contains("cites"), "the last edge out takes its line: {text}");
     assert_eq!(commits(root), "5");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
 }
@@ -103,6 +72,8 @@ fn link_refuses_what_the_kind_schema_does_not_hold() {
         (["link", A, "related", SYSTEM], "schema_invalid"),
         (["link", D, "answers", "shared/threads/u"], "schema_invalid"),
         (["link", "projects/bp/issues/nope", "cites", SYSTEM], "no_node"),
+        (["link", A, "depends", A], "schema_invalid"),
+        (["link", A, "depends", "projects/zz/issues/0001.z"], "schema_invalid"),
     ] {
         let (code, v) = bp(root, &args);
         assert_eq!((code, v["code"].as_str()), (Some(2), Some(want)), "{args:?}: {v}");
@@ -121,4 +92,28 @@ fn a_dry_run_writes_nothing() {
     assert!(v.get("commit").is_none());
     assert_eq!(commits(root), "1");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_removal_through_an_alias_removes_the_edge() {
+    let dir = vault();
+    let root = dir.path();
+    assert_eq!(bp(root, &["link", A, "depends", "projects/bp/issues/old"]).0, Some(0));
+    let (code, v) = bp(root, &["link", A, "depends", "projects/bp/issues/old", "--remove"]);
+    assert_eq!((code, v["to"].as_str()), (Some(0), Some(B)), "{v}");
+    assert_eq!(bp(root, &["show", A]).1.get("depends"), None);
+    assert_eq!(commits(root), "3");
+}
+
+#[test]
+fn a_dirty_source_refuses_path_dirty_before_the_comparison() {
+    let dir = vault();
+    let root = dir.path();
+    let path = root.join(format!("{A}.md"));
+    let edited = std::fs::read_to_string(&path).unwrap().replace("[\"[[legacy.x]]\"]", &format!("[\"{SYSTEM}\"]"));
+    std::fs::write(&path, &edited).unwrap();
+    let (code, v) = bp(root, &["link", A, "cites", SYSTEM]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("path_dirty")), "not exit 3 from uncommitted bytes: {v}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+    assert_eq!(commits(root), "1");
 }

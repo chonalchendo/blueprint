@@ -2,26 +2,19 @@
 //! refusals and the dry run.
 
 use std::path::Path;
-use std::process::Command as Std;
 
-use assert_cmd::Command;
+mod common;
+
+use common::{bp, commits, git};
 
 const M: &str = "projects/bp/milestones/m";
 
-fn git(root: &Path, args: &[&str]) -> String {
-    let out = Std::new("git").arg("-C").arg(root).args(args).output().unwrap();
-    assert!(out.status.success(), "git {args:?}");
-    String::from_utf8(out.stdout).unwrap()
-}
-
 fn vault() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    for (rel, text) in [
+    common::vault(&[
         ("projects/bp/project.md", "---\nkind: project\ntitle: bp\nstatus: active\n---\n"),
         (
             "projects/bp/designs/system.md",
-            "---\nkind: design\ntitle: S\nstatus: active\nunder: projects/bp/project\n---\n\nThe system.\n",
+            "---\nkind: design\ntitle: S\nstatus: active\nunder: projects/bp/project\naliases: [\"projects/bp/designs/old-system\"]\n---\n\nThe system.\n",
         ),
         (
             "projects/bp/milestones/m.md",
@@ -31,42 +24,27 @@ fn vault() -> tempfile::TempDir {
             "projects/bp/issues/0002.b.md",
             "---\nkind: issue\ntitle: B\nstatus: open\nunder: projects/bp/milestones/m\naliases: [\"projects/bp/issues/old\"]\n---\n",
         ),
+        (
+            "projects/bp/issues/0003.Case.md",
+            "---\nkind: issue\ntitle: Case\nstatus: open\nunder: projects/bp/milestones/m\n---\n",
+        ),
+        ("projects/zz/project.md", "---\nkind: project\ntitle: zz\nstatus: active\n---\n"),
+        (
+            "projects/zz/designs/system.md",
+            "---\nkind: design\ntitle: Z\nstatus: active\nunder: projects/zz/project\n---\n",
+        ),
+        (
+            "projects/zz/milestones/m.md",
+            "---\nkind: milestone\ntitle: ZM\nstatus: planned\nunder: projects/zz/designs/system\n---\n",
+        ),
         ("shared/.keep", ""),
-        (".bp/.gitignore", "*\n"),
-    ] {
-        std::fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
-        std::fs::write(root.join(rel), text).unwrap();
-    }
-    git(root, &["init", "-q"]);
-    git(root, &["config", "user.name", "t"]);
-    git(root, &["config", "user.email", "t@t"]);
-    git(root, &["add", "-A"]);
-    git(root, &["commit", "-qm", "one"]);
-    dir
-}
-
-fn bp(root: &Path, args: &[&str]) -> (Option<i32>, serde_json::Value) {
-    let out = Command::cargo_bin("bp")
-        .unwrap()
-        .current_dir(root)
-        .env_remove("BP_VAULT")
-        .env_remove("BP_ROLE")
-        .env("BP_NOW", "2026-10-19T08:00:00Z")
-        .args(args)
-        .arg("--json")
-        .output()
-        .unwrap();
-    (out.status.code(), serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null))
+    ])
 }
 
 fn body(root: &Path, text: &str) -> String {
     let path = root.join(".bp/body.md");
     std::fs::write(&path, text).unwrap();
     path.display().to_string()
-}
-
-fn commits(root: &Path) -> String {
-    git(root, &["rev-list", "--count", "HEAD"]).trim().to_string()
 }
 
 #[test]
@@ -135,6 +113,7 @@ fn create_refuses_what_breaks_the_schema() {
     let root = dir.path();
     let issue = ["create", "issue", "--project", "bp", "--title", "X", "--under", M];
     let unnamed = body(root, "## Check\n\n~~~check shell {expect=0}\ntrue\n~~~\n");
+    let badname = body(root, "## Check\n\n~~~check shell {name=../../x}\ntrue\n~~~\n");
     let system = "projects/bp/designs/system";
     for (args, want) in [
         ([&issue[..], &["--slug", "0002.b"]].concat(), "id_taken"),
@@ -148,7 +127,31 @@ fn create_refuses_what_breaks_the_schema() {
             vec!["create", "issue", "--project", "bp", "--title", "X", "--under", "projects/bp/milestones/no"],
             "unresolved_link",
         ),
-        (vec!["create", "issue", "--project", "zz", "--title", "X", "--under", M], "unknown_value"),
+        (vec!["create", "issue", "--project", "qq", "--title", "X", "--under", M], "unknown_value"),
+        (vec!["create", "issue", "--project", "BP", "--title", "X", "--under", M], "unknown_value"),
+        ([&issue[..], &["--slug", "Upper-Case"]].concat(), "schema_invalid"),
+        ([&issue[..], &["--slug", "nl\nBp-Role: worker"]].concat(), "schema_invalid"),
+        ([&issue[..], &["--slug", "foo#bar"]].concat(), "schema_invalid"),
+        ([&issue[..], &["--slug", "notes.md"]].concat(), "schema_invalid"),
+        ([&issue[..], &["--slug", ".hidden"]].concat(), "schema_invalid"),
+        ([&issue[..], &["--slug", &"a".repeat(81)]].concat(), "schema_invalid"),
+        ([&issue[..], &["--slug", "0003.case"]].concat(), "id_taken"),
+        ([&issue[..], &["--body-file", &badname]].concat(), "check_unnamed"),
+        (vec!["create", "issue", "--project", "bp", "--title", "", "--slug", "empty", "--under", M], "schema_invalid"),
+        (
+            vec!["create", "issue", "--project", "bp", "--title", "   ", "--slug", "blank", "--under", M],
+            "schema_invalid",
+        ),
+        (vec!["create", "issue", "--project", "bp", "--title", "   ", "--under", M], "schema_invalid"),
+        (vec!["create", "issue", "--project", "bp", "--title", "Café résumé", "--under", M], "schema_invalid"),
+        (
+            vec!["create", "issue", "--project", "bp", "--title", "X", "--under", "projects/zz/milestones/m"],
+            "schema_invalid",
+        ),
+        (
+            vec!["create", "milestone", "--project", "bp", "--title", "X", "--under", "projects/zz/designs/system"],
+            "schema_invalid",
+        ),
         (vec!["create", "learning", "--project", "bp", "--title", "X"], "schema_invalid"),
         (vec!["create", "design", "--project", "bp", "--title", "Walk", "--under", system], "schema_invalid"),
         (vec!["create", "inbox", "--title", "!!"], "schema_invalid"),
@@ -165,6 +168,14 @@ fn create_refuses_what_breaks_the_schema() {
         let (code, v) = bp(root, &[&issue[..], &["--body-file", &f]].concat());
         assert_eq!((code, v["code"].as_str()), (Some(2), Some(want)), "{text}: {v}");
     }
+    let fix = |args: &[&str]| bp(root, args).1["fix"].as_str().unwrap().to_string();
+    let upper = fix(&[&issue[..], &["--slug", "Upper-Case"]].concat());
+    assert!(upper.contains("--slug x"), "the fix shows the minted slug: {upper}");
+    let cafe = fix(&["create", "issue", "--project", "bp", "--title", "Café", "--under", M]);
+    assert!(cafe.contains("--slug"), "{cafe}");
+    let badname = body(root, "## Check\n\n~~~check shell {name=A}\ntrue\n~~~\n");
+    let name = fix(&[&issue[..], &["--body-file", &badname]].concat());
+    assert!(name.contains("name=A") && name.contains("a name=<slug>"), "{name}");
     let (code, v) = bp(root, &["create", "claim", "--title", "X"]);
     assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "a record has its own verb: {v}");
     assert_eq!(commits(root), "1");
@@ -180,4 +191,57 @@ fn a_dry_run_writes_nothing() {
     assert!(v.get("commit").is_none());
     assert_eq!(commits(root), "1");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_case_variant_alias_and_inbox_slug_resolve_to_one_id() {
+    let dir = vault();
+    let root = dir.path();
+    let case = ["create", "issue", "--project", "bp", "--title", "Case", "--slug", "0003.case", "--under", M];
+    let (code, v) = bp(root, &case);
+    assert_eq!((code, v["id"].as_str()), (Some(3), Some("projects/bp/issues/0003.Case")), "one id up to case: {v}");
+    let (code, v) = bp(root, &["create", "inbox", "--title", "x", "--slug", "no-date"]);
+    assert_eq!((code, v["id"].as_str()), (Some(0), Some("shared/inbox/2026-10-19-no-date")), "{v}");
+    let (code, v) = bp(root, &["create", "inbox", "--title", "x", "--slug", "2026-10-18-dated"]);
+    assert_eq!((code, v["id"].as_str()), (Some(0), Some("shared/inbox/2026-10-18-dated")), "{v}");
+    let alias =
+        ["create", "milestone", "--project", "bp", "--title", "Next", "--under", "projects/bp/designs/old-system"];
+    let (code, v) = bp(root, &alias);
+    assert_eq!(code, Some(0), "{v}");
+    let text = std::fs::read_to_string(root.join("projects/bp/milestones/next.md")).unwrap();
+    assert!(text.contains("under: projects/bp/designs/system\n"), "the real id, not the alias: {text}");
+    assert_eq!(bp(root, &alias).0, Some(3), "a retry through the alias is the same node");
+}
+
+#[test]
+fn a_body_keeps_its_first_indent_and_drops_a_bom_and_crlf() {
+    let dir = vault();
+    let root = dir.path();
+    let f = body(root, "\u{feff}\n\n    indented code\r\nLine two.\r\n\n");
+    let (code, v) =
+        bp(root, &["create", "issue", "--project", "bp", "--title", "Indent", "--under", M, "--body-file", &f]);
+    assert_eq!(code, Some(0), "{v}");
+    let text = std::fs::read_to_string(root.join("projects/bp/issues/indent.md")).unwrap();
+    assert!(text.ends_with("---\n\n    indented code\nLine two.\n"), "{text:?}");
+}
+
+#[test]
+fn a_dirty_target_refuses_path_dirty_before_the_comparison() {
+    let dir = vault();
+    let root = dir.path();
+    let args = ["create", "issue", "--project", "bp", "--title", "Dirty", "--under", M];
+    let (_, dry) = bp(root, &[&args[..], &["--dry-run"]].concat());
+    assert_eq!(dry["id"], "projects/bp/issues/dirty", "{dry}");
+    let path = root.join("projects/bp/issues/dirty.md");
+    std::fs::write(&path, format!("---\nkind: issue\ntitle: Dirty\nstatus: open\nunder: {M}\n---\n")).unwrap();
+    let (code, v) = bp(root, &args);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("path_dirty")), "an untracked twin is not a retry: {v}");
+    assert!(path.exists());
+    let tracked = root.join("projects/bp/issues/0002.b.md");
+    let edited = std::fs::read_to_string(&tracked).unwrap() + "HUMAN WORK\n";
+    std::fs::write(&tracked, &edited).unwrap();
+    let (code, v) = bp(root, &["create", "issue", "--project", "bp", "--title", "B", "--slug", "0002.b", "--under", M]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+    assert_eq!(std::fs::read_to_string(&tracked).unwrap(), edited);
+    assert_eq!(commits(root), "1");
 }

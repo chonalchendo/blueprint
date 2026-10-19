@@ -146,6 +146,19 @@ fn owner(kind: Kind, id: &Id, field: &str) -> Option<String> {
     })
 }
 
+/// The title rule `set` and `create` share: a node has a title with at least one character that is not a space.
+pub fn title(subject: &str, value: &str) -> Result<(), Refusal> {
+    if value.trim().is_empty() {
+        return Err(Refusal::new(
+            Code::SchemaInvalid,
+            subject,
+            "a node has a title (12, the header schema)",
+            "give a title with at least one character that is not a space",
+        ));
+    }
+    Ok(())
+}
+
 /// The value `set` writes to `field` of the node `id` of `kind`. Refuses `not_a_label` with the owning verb,
 /// `schema_invalid` for a field outside the kind's schema, and `unknown_value` for a value outside a closed set.
 pub fn label(kind: Kind, id: &Id, field: &str, value: &str) -> Result<Value, Refusal> {
@@ -178,12 +191,7 @@ pub fn label(kind: Kind, id: &Id, field: &str, value: &str) -> Result<Value, Ref
     match vocab {
         Vocab::Closed(values) if values.contains(&value) => Ok(value.into()),
         Vocab::Closed(values) => Err(outside(&values)),
-        Vocab::Text if field == "title" && value.trim().is_empty() => Err(Refusal::new(
-            Code::SchemaInvalid,
-            format!("{id} title"),
-            "a node has a title (12, the header schema)",
-            "give a title with at least one character that is not a space",
-        )),
+        Vocab::Text if field == "title" => title(&format!("{id} title"), value).map(|()| value.into()),
         Vocab::Text => Ok(value.into()),
         Vocab::Tags => {
             let mut tags: Vec<&str> = Vec::new();

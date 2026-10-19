@@ -54,6 +54,15 @@ impl Id {
 /// The longest slug (12, Identity).
 pub const SLUG_MAX: usize = 80;
 
+/// Whether `text` is a slug (13, rule 1): lowercase ASCII letters, digits, `-` and `.`, starting with a letter or
+/// digit, at most 80 characters. Lowercase only, because the default macOS file system holds one file for two ids
+/// that differ by case; `.` keeps the converted `0411.define-...` slugs.
+pub fn is_slug(text: &str) -> bool {
+    text.len() <= SLUG_MAX
+        && text.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && text.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+}
+
 /// The slug a title mints (13, rule 1): lowercase ASCII letters and digits, every other run a single `-`, at most
 /// `max` characters, cut at a word boundary. Today's slugs cut mid-word ("four-crates-and-an"), which a cold reader
 /// flagged (12). A first word longer than `max` is the one cut inside a word. Empty when the title holds no letter or
@@ -128,6 +137,16 @@ mod tests {
         assert_eq!(slug("--- !!", SLUG_MAX), "");
         let long = slug(&"word ".repeat(40), SLUG_MAX);
         assert!(long.len() <= SLUG_MAX && !long.ends_with('-'), "{long}");
+    }
+
+    #[test]
+    fn a_slug_is_lowercase_ascii_and_short() {
+        for good in ["a", "0411.define-the-design", "round-trip-quokka", &"a".repeat(SLUG_MAX)] {
+            assert!(is_slug(good), "{good}");
+        }
+        for bad in ["", "Upper", "-lead", ".hidden", "a b", "a/b", "foo#bar", "a\nb", "caf\u{e9}", &"a".repeat(81)] {
+            assert!(!is_slug(bad), "{bad}");
+        }
     }
 
     #[test]

@@ -42,8 +42,12 @@ impl Index {
                     return Err(Refusal::new(
                         Code::CheckUnnamed,
                         id.as_str(),
-                        "every check block has a name (15, the check grammar)",
-                        format!("add name=<slug> to the block `{}`", new.text),
+                        "every check block has a name, and a name is a slug (15, the check grammar; 13)",
+                        format!(
+                            "give the block `{}` a name=<slug>: lowercase ASCII letters, digits, `-` and `.`, at \
+                             most 80 characters",
+                            new.text
+                        ),
                     ));
                 }
                 if let Some(refusal) = check_rule(id, new) {
@@ -97,8 +101,9 @@ impl Index {
         out.extend(file.body.empty_checks.iter().map(|s| held(Code::CheckEmpty.as_str(), "body", s)));
         let names: Vec<&String> = file.body.checks.iter().filter_map(|c| c.attrs.get("name")).collect();
         for (i, name) in names.iter().enumerate() {
-            // A shared name is one finding, at its second block.
-            if names[..i].iter().filter(|n| *n == name).count() == 1 {
+            // A shared name is one finding, at its second block. Case is ignored: the run files of `a` and `A` are
+            // one file on the default macOS file system.
+            if names[..i].iter().filter(|n| n.eq_ignore_ascii_case(name)).count() == 1 {
                 out.push(held(Code::CheckDuplicate.as_str(), "body", name));
             }
         }

@@ -43,7 +43,8 @@ impl Header {
 }
 
 /// `text`, a whole file whose header holds `key`, with that field's lines replaced by `key: value`; a header without
-/// the field gains the line before its close. Every other byte, line endings included, stays as it was.
+/// the field gains the line before its close. A null value deletes the field's lines: no converted header holds an
+/// empty `field: []`. Every other byte, line endings included, stays as it was.
 ///
 /// # Panics
 ///
@@ -63,9 +64,12 @@ pub fn set_field(text: &str, key: &str, value: &Value) -> String {
     let at = start.unwrap_or(close);
     // The new line ends as the line it replaces, or as the last field line when it is added.
     let eol = if lines[start.unwrap_or(close - 1)].ends_with("\r\n") { "\r\n" } else { "\n" };
-    let mut new = line(key, value);
-    new.truncate(new.len() - 1);
-    new.push_str(eol);
+    let mut new = String::new();
+    if !value.is_null() {
+        new = line(key, value);
+        new.truncate(new.len() - 1);
+        new.push_str(eol);
+    }
     let mut out = String::from(bom);
     out.extend(lines[..at].iter().copied());
     out.push_str(&new);
@@ -158,6 +162,12 @@ mod tests {
             set_field("---\nkind: issue\nseverity_x: 1\n---\n", "severity", &"true".into()),
             "---\nkind: issue\nseverity_x: 1\nseverity: \"true\"\n---\n"
         );
+        assert_eq!(
+            set_field(text, "tags", &Value::Null),
+            "---\nkind: issue\ntitle: T\nseverity: low\n---\n\nBody: x\n",
+            "null deletes a block value"
+        );
+        assert_eq!(set_field("---\nkind: issue\n---\n", "tags", &Value::Null), "---\nkind: issue\n---\n");
         for quoted in ["\"severity\": low", "'severity': low", "severity : low"] {
             let text = format!("---\nkind: issue\n{quoted}\n---\n");
             assert_eq!(set_field(&text, "severity", &"high".into()), "---\nkind: issue\nseverity: high\n---\n");

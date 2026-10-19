@@ -21,8 +21,11 @@ impl File {
     pub fn from_bytes(id: Id, bytes: &[u8]) -> Result<Self, Refusal> {
         let hash = blake3::hash(bytes).to_hex().to_string();
         let text = std::str::from_utf8(bytes).map_err(|e| Refusal::schema(id.as_str(), format!("not UTF-8: {e}")))?;
-        let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n").replace('\r', "\n");
-        let Some(rest) = text.strip_prefix("---\n") else {
+        let text = normalise(text);
+        let Some((yaml, body)) = split(&text) else {
+            if text.starts_with("---\n") {
+                return Err(Refusal::schema(id.as_str(), "the closing --- is missing"));
+            }
             if !is_asset(&id) {
                 return Err(Refusal::schema(
                     id.as_str(),
@@ -32,20 +35,7 @@ impl File {
             }
             return Ok(Self { id, hash, header: None, body: Body::parse(&text) });
         };
-        // The header closes at the first line that is exactly `---`.
-        let mut offset = 0;
-        let mut close = None;
-        for line in rest.split_inclusive('\n') {
-            if line.trim_end_matches('\n') == "---" {
-                close = Some((offset, offset + line.len()));
-                break;
-            }
-            offset += line.len();
-        }
-        let Some((end, body_at)) = close else {
-            return Err(Refusal::schema(id.as_str(), "the closing --- is missing"));
-        };
-        let header = Header::parse(&rest[..end], id.as_str())?;
+        let header = Header::parse(yaml, id.as_str())?;
         if !header.kind.fits(&id) {
             return Err(Refusal::schema(id.as_str(), format!("the path does not fit the kind `{}`", header.kind)));
         }
@@ -54,8 +44,33 @@ impl File {
             let want = parent.as_ref().map_or("no parent", Id::as_str);
             return Err(Refusal::schema(id.as_str(), format!("a {} record names `under: {want}`", header.kind)));
         }
-        Ok(Self { id, hash, header: Some(header), body: Body::parse(&rest[body_at..]) })
+        Ok(Self { id, hash, header: Some(header), body: Body::parse(body) })
     }
+}
+
+/// The items of the list field `key` as the header writes them, in order: ids and link texts alike. Empty when the
+/// header lacks the field. A link edit keeps this order and appends (15, link).
+pub fn written(text: &str, key: &str) -> Vec<String> {
+    let text = normalise(text);
+    split(&text).map_or_else(Vec::new, |(yaml, _)| crate::header::items(yaml, key))
+}
+
+/// The text without a BOM and with LF line endings.
+fn normalise(text: &str) -> String {
+    text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// The header's YAML and the body; `None` when the first line is not `---` or no later line is exactly `---`.
+fn split(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix("---\n")?;
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end_matches('\n') == "---" {
+            return Some((&rest[..offset], &rest[offset + line.len()..]));
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// A file without a header may sit in `shared/assets/` or in a node's own directory, beside its diagrams (12).
@@ -90,6 +105,14 @@ mod tests {
         let f =
             parse("projects/bp/issues/x", "\u{feff}---\r\nkind: issue\r\ntitle: T\r\n---\r\n\r\nLead.\r\n").unwrap();
         assert_eq!(f.body.lead, "Lead.");
+    }
+
+    #[test]
+    fn a_list_field_reads_in_written_order() {
+        let text = "\u{feff}---\r\nkind: issue\r\ncites: [\"b/x\", \"[[legacy]]\", \"projects/a/y\"]\r\n---\r\n";
+        assert_eq!(written(text, "cites"), ["b/x", "[[legacy]]", "projects/a/y"]);
+        assert!(written(text, "depends").is_empty());
+        assert!(written("no header\n", "cites").is_empty());
     }
 
     #[test]
