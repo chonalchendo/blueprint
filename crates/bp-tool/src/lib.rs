@@ -1,6 +1,7 @@
 //! The tool: the 18 verbs, the write path composition, the envelope. This milestone ships the read verbs. Every verb
 //! prints one JSON object on stdout with `--json`; diagnostics go to stderr.
 
+mod intent;
 mod schema;
 
 use std::path::Path;
@@ -81,8 +82,12 @@ pub struct List {
     /// At most this many rows.
     #[arg(long, default_value_t = 50)]
     pub limit: usize,
+    /// Only issues whose intent is `ready`: open, unclaimed, every dependency resolved or holding an open pull
+    /// request.
+    #[arg(long, conflicts_with = "status")]
+    pub ready: bool,
     /// Files, nodes per kind and records per kind, instead of rows.
-    #[arg(long, conflicts_with_all = ["kind", "status", "project", "under"])]
+    #[arg(long, conflicts_with_all = ["kind", "status", "project", "under", "ready"])]
     pub count_only: bool,
 }
 
@@ -241,15 +246,51 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     {
         return Err(unknown("status", status, format!("bp list {kind}")));
     }
+    if list.ready && kind_value != Kind::Issue {
+        return Err(Refusal::usage(
+            "--ready",
+            format!("--ready lists issues only; bp list issue --ready, or bp list {kind}"),
+        ));
+    }
+    let ready = list.ready;
     let filter = Filter {
         kind: kind_value,
-        status: list.status.as_deref(),
+        // `--ready` reads every open issue, then limits after the intent filter.
+        status: if ready { Some("open") } else { list.status.as_deref() },
         project: list.project.as_deref(),
         under: under.as_ref().map(Id::as_str),
-        limit: list.limit,
+        limit: if ready { usize::MAX >> 1 } else { list.limit },
     };
     let (rows, total) = index.list(&filter)?;
-    Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }))
+    if !matches!(kind_value, Kind::Issue | Kind::Milestone) {
+        return Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }));
+    }
+    // A milestone's intent reads only its status; the clock and the forge are read for issues alone.
+    let world = if kind_value == Kind::Issue { Some(intent::World::read()?) } else { None };
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let status = row.status.as_deref().unwrap_or_default();
+        let verdict = match &world {
+            Some(w) => intent::of(&vault, &index, w, &row.id, status)?,
+            None => bp_change::intents::milestone(status),
+        };
+        if ready && verdict.intent != Some(bp_change::intents::Intent::Ready) {
+            continue;
+        }
+        let mut v = serde_json::to_value(row).expect("a plain struct serialises");
+        if let Some(intent) = verdict.intent {
+            v["intent"] = serde_json::to_value(intent).expect("an enum serialises");
+            v["note"] = verdict.note.into();
+        }
+        out.push(v);
+    }
+    let total = if ready { out.len() } else { total };
+    out.truncate(list.limit);
+    let mut result = serde_json::json!({ "rows": out, "total": total, "truncated": total > out.len() });
+    if let Some(w) = world {
+        result["forge"] = if w.forge.is_some() { "snapshot" } else { "not read" }.into();
+    }
+    Ok(result)
 }
 
 /// A kind argument, from the closed set.

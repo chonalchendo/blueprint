@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 bp-vault.workspace = true
+serde.workspace = true

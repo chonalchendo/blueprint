@@ -14,7 +14,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::{Counts, File, FindingKind, Kind, Refusal, Vault};
 
@@ -33,7 +33,8 @@ create table files (id text primary key, hash text not null, class text not null
 create table nodes (rowid integer primary key, id text unique not null, kind text not null, title text,
   status text, project text, under text, header text not null);
 create index nodes_kind on nodes (kind, project, status);
-create table records (id text primary key, kind text not null, project text, under text, header text not null);
+create table records (id text primary key, kind text not null, project text, under text, header text not null,
+  body text not null);
 create index records_under on records (under, kind);
 create table links (src text not null, type text not null, dst text not null);
 create table unresolved (src text not null, field text not null, text text not null);
@@ -85,6 +86,15 @@ pub struct Hit {
     pub rank: f64,
     /// Matching text from the best column, the terms marked `«` and `»`.
     pub snippet: String,
+}
+
+/// One record as `Index::records` reads it.
+#[derive(Debug)]
+pub struct Record {
+    /// The header, as `show` prints it.
+    pub header: Map<String, Value>,
+    /// The body: what the record's appends wrote.
+    pub body: String,
 }
 
 /// The filters of `list`.
@@ -276,6 +286,33 @@ impl Index {
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
+    /// The header of one node or record as JSON, when the id is in the index.
+    pub fn header(&self, id: &str) -> Result<Option<Map<String, Value>>, Refusal> {
+        let text: Option<String> = self
+            .conn
+            .query_row(
+                "select header from nodes where id = ?1 union all select header from records where id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| failed(Path::new(".bp/index.db"), &e))?;
+        Ok(text.map(|t| object(&t)))
+    }
+
+    /// The header and body of every record of one kind under a node, in id order. A record's body holds what its
+    /// appends wrote, such as a claim's `## Released` section (13).
+    pub fn records(&self, under: &str, kind: Kind) -> Result<Vec<Record>, Refusal> {
+        let run = || -> rusqlite::Result<Vec<(String, String)>> {
+            let mut st = self
+                .conn
+                .prepare_cached("select header, body from records where under = ?1 and kind = ?2 order by id")?;
+            st.query_map([under, kind.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        };
+        let rows = run().map_err(|e| failed(Path::new(".bp/index.db"), &e))?;
+        Ok(rows.into_iter().map(|(h, body)| Record { header: object(&h), body }).collect())
+    }
+
     /// BM25 over ids, titles and bodies of nodes. Every term must match; when none does, any term may.
     pub fn search(
         &self,
@@ -341,8 +378,8 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     if header.kind.is_record() {
         tx.execute("insert into files values (?1, ?2, 'record')", params![id, file.hash])?;
         tx.execute(
-            "insert into records values (?1, ?2, ?3, ?4, ?5)",
-            params![id, kind, file.id.project(), under, json],
+            "insert into records values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, kind, file.id.project(), under, json, file.body.text],
         )?;
     } else {
         tx.execute("insert into files values (?1, ?2, 'node')", params![id, file.hash])?;
@@ -436,6 +473,11 @@ fn fingerprint(root: &Path) -> String {
         }
     }
     print
+}
+
+/// A stored header: the index wrote it from a JSON object, so it reads back as one.
+fn object(text: &str) -> Map<String, Value> {
+    serde_json::from_str(text).expect("the index stores headers as JSON objects")
 }
 
 fn failed(subject: &Path, e: &dyn std::fmt::Display) -> Refusal {
