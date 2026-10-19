@@ -41,9 +41,7 @@ create table findings (src text not null, kind text not null);
 create index findings_src on findings (src);
 create index links_src on links (src, type, dst);
 create index links_dst on links (dst, type, src);
-create table edges (src integer not null, dst integer not null, weight real not null);
-create index edges_src on edges (src, dst, weight);
-create index edges_dst on edges (dst, src, weight);
+create table graph (csr blob not null);
 create virtual table fts using fts5 (id, title, body, tokenize = 'unicode61');
 ";
 
@@ -167,7 +165,8 @@ impl Index {
         }
         let schema: Option<String> =
             tx.query_row("select value from meta where key = 'schema'", [], |r| r.get(0)).optional().unwrap_or(None);
-        if schema != Some(self::schema()) {
+        let rebuilt = schema != Some(self::schema());
+        if rebuilt {
             let names: Vec<String> = tx
                 .prepare("select name from sqlite_master where type in ('table', 'view') and name not like 'fts_%'")?
                 .query_map([], |r| r.get(0))?
@@ -182,7 +181,7 @@ impl Index {
             .prepare("select id, hash from files")?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
-        let mut changed = false;
+        let mut changed = rebuilt;
         for id in vault.ids()? {
             let bytes = std::fs::read(id.path(&vault.root))?;
             let hash = blake3::hash(&bytes).to_hex().to_string();
@@ -198,7 +197,7 @@ impl Index {
             remove(&tx, gone)?;
         }
         if changed {
-            crate::walk::rebuild_edges(&tx)?;
+            crate::walk::rebuild_graph(&tx)?;
         }
         tx.execute("insert or replace into meta values ('fingerprint', ?1)", [print])?;
         tx.commit()?;
@@ -378,8 +377,8 @@ pub(crate) fn count_at(r: &rusqlite::Row, i: usize) -> rusqlite::Result<usize> {
     Ok(usize::try_from(r.get::<_, i64>(i)?).expect("a count is never negative"))
 }
 
-/// A body's cost in the walk's budget, at four characters a token.
-/// Four characters a token, over the trimmed body, rounded up: an empty body costs nothing and any other at least one.
+/// A body's cost in the walk's budget: four characters a token over the trimmed body, rounded up, so an empty
+/// body costs nothing and any other at least one.
 fn body_tokens(body: &str) -> i64 {
     i64::try_from(body.trim().len().div_ceil(4)).expect("a body is far below i64::MAX bytes")
 }
@@ -630,10 +629,6 @@ mod tests {
             ("nodes", "id, kind, title, status, project, under, header"),
             ("records", "id, kind, project, under, header"),
             ("links", "src, type, dst"),
-            (
-                "edges e join nodes a on a.rowid = e.src join nodes b on b.rowid = e.dst",
-                "a.id, b.id, cast(e.weight as text)",
-            ),
             ("fts", "id, title, body"),
             ("unresolved", "src, field, text"),
             ("aliases", "alias, id"),
@@ -649,6 +644,7 @@ mod tests {
                 .unwrap();
             out.extend(rows.map(|r| format!("{table} {:?}", r.unwrap())));
         }
+        out.extend(crate::walk::graph_rows(&index.conn));
         out
     }
 

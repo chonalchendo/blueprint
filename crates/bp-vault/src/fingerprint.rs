@@ -11,14 +11,15 @@ use std::path::{Path, PathBuf};
 
 use crate::index::schema;
 
-/// The schema, the git head and the modification time of `projects/`, `shared/`, every project and every kind directory.
+/// The schema, the git head and the modification time of the root, `projects/`, `shared/`, every project and every
+/// kind directory. The root is listed so that a `projects/` or `shared/` made later moves the stamp.
 pub(crate) fn fingerprint(root: &Path) -> String {
-    let mut dirs = vec![root.join("projects"), root.join("shared")];
+    let mut dirs = vec![root.to_path_buf(), root.join("projects"), root.join("shared")];
     if let Ok(projects) = std::fs::read_dir(root.join("projects")) {
         dirs.extend(projects.flatten().map(|e| e.path()));
     }
     let mut kinds = Vec::new();
-    for d in &dirs[1..] {
+    for d in &dirs[2..] {
         if let Ok(entries) = std::fs::read_dir(d) {
             kinds.extend(entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()));
         }
@@ -34,11 +35,11 @@ pub(crate) fn fingerprint(root: &Path) -> String {
 }
 
 /// Whether the stored fingerprint holds, read again over the directories it names without listing any. A directory
-/// added or removed moves its parent's time, and every parent is in the stored list.
+/// added or removed moves its parent's time, and every parent, the root included, is in the stored list. Only the
+/// root and paths under it count: a vault copied elsewhere names none of them, so its stamp never matches.
 pub(crate) fn still(root: &Path, stored: &str) -> bool {
-    let prefix = root.display().to_string();
     let dirs =
-        stored.lines().filter(|l| l.starts_with(&prefix)).filter_map(|l| l.rsplit_once('=')).map(|(d, _)| Path::new(d));
+        stored.lines().filter_map(|l| l.rsplit_once('=')).map(|(d, _)| Path::new(d)).filter(|d| d.starts_with(root));
     stamp(root, dirs) == stored
 }
 
@@ -58,4 +59,30 @@ fn stamp<'a>(root: &Path, dirs: impl Iterator<Item = &'a Path>) -> String {
         }
     }
     print
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stamp_holds_only_for_its_own_root() {
+        let t = tempfile::tempdir().unwrap();
+        let (long, short) = (t.path().join("vB-x"), t.path().join("vB"));
+        for root in [&long, &short] {
+            std::fs::create_dir_all(root.join("projects/bp/issues")).unwrap();
+        }
+        let stored = fingerprint(&long);
+        assert!(still(&long, &stored));
+        assert!(!still(&short, &stored), "a root that is a string prefix of the stored one is another vault");
+    }
+
+    #[test]
+    fn a_shared_directory_made_later_moves_the_stamp() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("projects/bp/issues")).unwrap();
+        let stored = fingerprint(t.path());
+        std::fs::create_dir_all(t.path().join("shared/conventions")).unwrap();
+        assert!(!still(t.path(), &stored));
+    }
 }

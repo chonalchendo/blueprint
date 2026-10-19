@@ -29,6 +29,19 @@ pub struct Requires {
     pub kind: Kind,
 }
 
+/// Every node kind: a record is evidence about its parent, so no walk starts from one.
+const NODES: [Kind; 9] = [
+    Kind::Project,
+    Kind::Design,
+    Kind::Milestone,
+    Kind::Issue,
+    Kind::Thread,
+    Kind::Decision,
+    Kind::Convention,
+    Kind::Learning,
+    Kind::Inbox,
+];
+
 impl Action {
     /// The token budget (21, rule 6).
     pub fn budget(self) -> usize {
@@ -46,19 +59,19 @@ impl Action {
             Self::Complete | Self::Review | Self::Respond => &[Kind::Issue],
             Self::Derive => &[Kind::Milestone],
             Self::Design | Self::Shape | Self::TriageDrift | Self::Research => &[Kind::Design, Kind::Project],
-            Self::Distil | Self::Capture => Kind::ALL,
+            Self::Distil | Self::Capture => &NODES,
         }
     }
 
-    /// The kinds the walk returns as bodies (21, the context column); every other reached node is an id line.
+    /// The kinds the walk returns as bodies besides the seed, which is always one (21, the context column). Every
+    /// other reached node is an id line; a sibling issue is never a body.
     pub fn bodies(self) -> &'static [Kind] {
         match self {
-            Self::Complete => &[Kind::Issue, Kind::Milestone, Kind::Design, Kind::Learning],
-            Self::Review | Self::Respond => &[Kind::Issue, Kind::Design],
+            Self::Complete => &[Kind::Milestone, Kind::Design, Kind::Learning],
+            Self::Review | Self::Respond | Self::TriageDrift => &[Kind::Design],
             Self::Design | Self::Research => &[Kind::Design, Kind::Project],
             Self::Shape => &[Kind::Design, Kind::Learning],
             Self::Derive => &[Kind::Milestone, Kind::Design, Kind::Issue],
-            Self::TriageDrift => &[Kind::Design],
             Self::Distil => &[Kind::Learning],
             Self::Capture => &[],
         }

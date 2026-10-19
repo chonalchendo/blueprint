@@ -58,9 +58,11 @@ fn the_seed_leads_and_the_cited_conventions_close_the_id_tail() {
     assert_eq!(code, Some(0), "{v}");
     let bodies = ids(&v["bodies"]);
     assert_eq!(bodies[0], SEED);
-    for want in ["projects/bp/milestones/m", "projects/bp/designs/system", "projects/bp/issues/0002.sibling"] {
+    for want in ["projects/bp/milestones/m", "projects/bp/designs/system"] {
         assert!(bodies.contains(&want), "{want} is a body: {bodies:?}");
     }
+    assert!(ids(&v["ids"]).contains(&"projects/bp/issues/0002.sibling"), "a sibling issue is an id line: {v}");
+    assert_eq!(v["cut"], 0);
     assert_eq!(ids(&v["ids"]).last(), Some(&"shared/conventions/style"), "{v}");
     let all = [bodies, ids(&v["ids"])].concat();
     assert!(!all.contains(&"projects/bp/inbox/note"), "an inbox entry is never walked");
@@ -70,16 +72,16 @@ fn the_seed_leads_and_the_cited_conventions_close_the_id_tail() {
 }
 
 #[test]
-fn a_small_budget_cuts_bodies_to_id_lines() {
+fn a_body_that_does_not_fit_becomes_an_id_line() {
     let d = vault();
     let long = format!("---\nkind: design\ntitle: S\nstatus: active\n---\n\n{}\n", "word ".repeat(200));
     write(d.path(), "projects/bp/designs/system.md", &long);
-    let (code, v) = walk(d.path(), &[SEED, "--for", "complete", "--budget", "60"]);
+    let (code, v) = walk(d.path(), &[SEED, "--for", "complete", "--budget", "200"]);
     assert_eq!(code, Some(0), "{v}");
     assert_eq!(ids(&v["bodies"])[0], SEED, "the seed is always a body");
     assert!(!ids(&v["bodies"]).contains(&"projects/bp/designs/system"), "{v}");
-    assert!(v["cut"].as_array().unwrap().contains(&"projects/bp/designs/system".into()), "{v}");
-    assert!(v["used"].as_u64().unwrap() <= 60, "{v}");
+    assert!(ids(&v["ids"]).contains(&"projects/bp/designs/system"), "{v}");
+    assert!(v["used"].as_u64().unwrap() <= 200, "{v}");
 }
 
 #[test]
@@ -88,6 +90,7 @@ fn ids_lists_every_reached_node_seed_first() {
     let (code, v) = walk(d.path(), &[SEED, "--for", "complete", "--ids"]);
     assert_eq!(code, Some(0), "{v}");
     assert_eq!(ids(&v["ids"])[0], SEED);
+    assert_eq!(ids(&v["ids"]).last(), Some(&"shared/conventions/style"), "conventions close the map too");
     assert!(v["ids"][0]["rank"].as_f64().unwrap() > 0.0);
 }
 
@@ -112,4 +115,19 @@ fn the_seed_must_fit_the_action() {
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("unknown_value")), "{v}");
     let (code, v) = walk(d.path(), &[SEED, "--for", "nonsense"]);
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("unknown_value")), "{v}");
+}
+
+#[test]
+fn a_record_seed_and_a_deep_walk_are_refused() {
+    let d = vault();
+    write(
+        d.path(),
+        &format!("{SEED}/claims/c.md"),
+        &format!("---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n"),
+    );
+    let (code, v) = walk(d.path(), &[&format!("{SEED}/claims/c"), "--for", "distil"]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("unknown_value")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("distil walks from: project"), "{v}");
+    let (code, v) = walk(d.path(), &[SEED, "--for", "complete", "--depth", "9"]);
+    assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "{v}");
 }
