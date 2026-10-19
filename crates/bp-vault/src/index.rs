@@ -405,8 +405,10 @@ fn remove(tx: &rusqlite::Transaction, id: &str) -> rusqlite::Result<()> {
 /// The schema, the git head and the modification time of `projects/`, `shared/`, every project and every kind directory.
 fn fingerprint(root: &Path) -> String {
     // The schema leads, so a binary with another schema never takes this index as fresh.
-    let mut print = format!("schema={}\n{}", schema(), head(root).unwrap_or_default());
-    if let Ok(m) = std::fs::metadata(git_dir(root).join("index")) {
+    let repo = crate::git::Repo::find(root);
+    let head = repo.as_ref().and_then(crate::git::Repo::head).unwrap_or_default();
+    let mut print = format!("schema={}\n{head}", schema());
+    if let Some(m) = repo.and_then(|r| std::fs::metadata(r.git.join("index")).ok()) {
         let nanos = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
         let _ = write!(print, "\nindex={}:{}", nanos.unwrap_or_default(), m.len());
     }
@@ -434,29 +436,6 @@ fn fingerprint(root: &Path) -> String {
         }
     }
     print
-}
-
-/// The git directory: `.git`, or the directory a linked worktree's `.git` file names.
-fn git_dir(root: &Path) -> std::path::PathBuf {
-    let git = root.join(".git");
-    match std::fs::read_to_string(&git) {
-        Ok(text) => text.strip_prefix("gitdir:").map_or(git.clone(), |d| root.join(d.trim())),
-        Err(_) => git,
-    }
-}
-
-/// The commit `HEAD` names, read from `.git` without a subprocess. `None` outside a git repository.
-fn head(root: &Path) -> Option<String> {
-    let git = git_dir(root);
-    let head = std::fs::read_to_string(git.join("HEAD")).ok()?;
-    let Some(name) = head.trim().strip_prefix("ref: ") else { return Some(head.trim().to_string()) };
-    // A linked worktree keeps its refs in the common directory.
-    let common = std::fs::read_to_string(git.join("commondir")).map_or_else(|_| git.clone(), |c| git.join(c.trim()));
-    if let Ok(sha) = std::fs::read_to_string(common.join(name)) {
-        return Some(sha.trim().to_string());
-    }
-    let packed = std::fs::read_to_string(common.join("packed-refs")).ok()?;
-    packed.lines().find_map(|l| l.strip_suffix(name).map(|s| s.trim().to_string()))
 }
 
 fn failed(subject: &Path, e: &dyn std::fmt::Display) -> Refusal {
@@ -637,9 +616,8 @@ mod tests {
         std::fs::create_dir_all(git.join("refs/heads")).unwrap();
         std::fs::write(git.join("HEAD"), "ref: refs/heads/master\n").unwrap();
         std::fs::write(git.join("packed-refs"), "# pack-refs\ncafe refs/heads/master\n").unwrap();
-        assert_eq!(head(dir.path()).as_deref(), Some("cafe"));
+        assert_eq!(crate::git::Repo::find(dir.path()).unwrap().head().as_deref(), Some("cafe"));
         std::fs::write(git.join("refs/heads/master"), "beef\n").unwrap();
-        assert_eq!(head(dir.path()).as_deref(), Some("beef"));
-        assert_eq!(head(&dir.path().join("none")), None);
+        assert_eq!(crate::git::Repo::find(dir.path()).unwrap().head().as_deref(), Some("beef"));
     }
 }

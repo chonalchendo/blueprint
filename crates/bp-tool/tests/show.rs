@@ -189,3 +189,55 @@ fn a_duplicate_heading_is_a_finding_and_its_section_refuses() {
     let kinds: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["kind"].as_str().unwrap()).collect();
     assert_eq!(kinds, ["duplicate_heading", "unclosed_fence"]);
 }
+
+#[test]
+fn show_without_the_body_keeps_the_header_lead_and_headings() {
+    let dir = vault();
+    let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0001.a", "--no-body", "--json"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert!(v.get("body").is_none());
+    assert_eq!(v["lead"], "Lead.");
+    assert_eq!(v["sections"], serde_json::json!(["Problem", "Direction"]));
+}
+
+#[test]
+fn show_at_a_commit_reads_the_file_as_it_was() {
+    let dir = vault();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").current_dir(dir.path()).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "add", "."]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one"]);
+    let id = "projects/bp/issues/0001.a";
+    let path = dir.path().join(format!("{id}.md"));
+    let now = std::fs::read_to_string(&path).unwrap().replace("status: resolved", "status: open");
+    std::fs::write(&path, now).unwrap();
+    let (code, v) = bp(dir.path(), &["show", id, "--at", "HEAD", "--json"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["status"], "resolved");
+    let (code, v) = bp(dir.path(), &["show", id, "--at", "no-such-ref", "--json"]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("unknown_value")));
+    let (code, v) = bp(dir.path(), &["show", "projects/bp/issues/0009.none", "--at", "HEAD", "--json"]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("no_node")));
+    // An option-shaped ref is a ref git does not know, never an option: nothing is written.
+    let out = dir.path().join("out");
+    let (code, v) = bp(dir.path(), &["show", id, &format!("--at=--output={}", out.display()), "--json"]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("unknown_value")), "{v}");
+    assert!(!out.exists());
+    let (code, v) = bp(dir.path(), &["show", id, "--at=", "--json"]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("unknown_value")), "an empty ref reads no commit: {v}");
+    // The refusal does not depend on git's language.
+    let de = Command::cargo_bin("bp")
+        .unwrap()
+        .current_dir(dir.path())
+        .env_remove("BP_VAULT")
+        .env("LC_ALL", "de_DE.UTF-8")
+        .args(["show", id, "--at", "no-such-ref", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(de.status.code(), Some(2));
+    let (_, v) = bp(dir.path(), &["show", id, "--at", "HEAD", "--section", "Nope", "--json"]);
+    assert!(v["fix"].as_str().unwrap().contains("--at HEAD"), "the fix reads the same commit: {v}");
+}

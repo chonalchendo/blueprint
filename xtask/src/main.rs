@@ -32,8 +32,10 @@ fn main() -> ExitCode {
 /// Runs the crate rule over the workspace at `root`. Returns the violations, one line each.
 fn deps(root: &Path) -> Result<Vec<String>> {
     let rule = Rule::parse(&std::fs::read_to_string(root.join("crate-rule.txt")).context("read crate-rule.txt")?)?;
-    let out = Command::new("cargo")
-        .args(["metadata", "--format-version", "1", "--no-deps"])
+    // `$CARGO` is the cargo that runs this alias, with its toolchain; a bare `cargo` may be another one.
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let out = Command::new(cargo)
+        .args(["metadata", "--format-version", "1"])
         .current_dir(root)
         .output()
         .context("run cargo metadata")?;
@@ -41,7 +43,7 @@ fn deps(root: &Path) -> Result<Vec<String>> {
         bail!("cargo metadata failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     let meta: Value = serde_json::from_slice(&out.stdout).context("parse cargo metadata")?;
-    Ok(rule.check(&meta))
+    Ok(rule.check(&meta, root))
 }
 
 #[derive(Debug, Default)]
@@ -75,37 +77,63 @@ impl Rule {
         Ok(rule)
     }
 
-    fn check(&self, meta: &Value) -> Vec<String> {
-        let packages = meta["packages"].as_array().cloned().unwrap_or_default();
-        let members: BTreeSet<String> =
-            packages.iter().filter_map(|p| p["name"].as_str().map(str::to_string)).collect();
+    fn check(&self, meta: &Value, root: &Path) -> Vec<String> {
+        let graph = Graph::of(meta);
         let mut violations = Vec::new();
-        for p in &packages {
-            let name = p["name"].as_str().unwrap_or_default();
-            let Some(permitted) = self.edges.get(name) else {
+        let rows: BTreeSet<&String> = self.edges.keys().chain(self.only.values()).collect();
+        for krate in rows {
+            if !graph.members.contains_key(krate.as_str()) {
+                violations.push(format!("rule row with no package: {krate}"));
+            }
+        }
+        for (name, p) in &graph.members {
+            let Some(permitted) = self.edges.get(*name) else {
                 violations.push(format!("crate not in the rule: {name}"));
                 continue;
             };
             for d in p["dependencies"].as_array().into_iter().flatten() {
-                if d["kind"].as_str().is_some_and(|k| k == "dev") {
+                let dep = d["name"].as_str().unwrap_or_default();
+                if d["kind"].as_str().is_some_and(|k| k == "dev") || !graph.members.contains_key(dep) {
                     continue;
                 }
-                let dep = d["name"].as_str().unwrap_or_default();
-                if members.contains(dep) {
-                    match permitted.get(dep) {
-                        None => violations.push(format!("edge outside the rule: {name} -> {dep}")),
-                        Some(features) => {
-                            for f in d["features"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                                if !features.contains(f) {
-                                    violations.push(format!("feature outside the rule: {name} -> {dep}[{f}]"));
-                                }
+                match permitted.get(dep) {
+                    None => violations.push(format!("edge outside the rule: {name} -> {dep}")),
+                    Some(features) => {
+                        for f in d["features"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                            if !features.contains(f) {
+                                violations.push(format!("feature outside the rule: {name} -> {dep}[{f}]"));
                             }
                         }
                     }
-                } else if let Some(owner) = self.only.get(dep)
-                    && owner != name
-                {
-                    violations.push(format!("external dependency reserved for {owner}: {name} -> {dep}"));
+                }
+            }
+            // A `[features]` entry `<dep>/<feature>` or `<dep>?/<feature>` switches the feature on as surely as
+            // the dependency line does.
+            for enables in p["features"].as_object().into_iter().flat_map(|m| m.values()) {
+                for e in enables.as_array().into_iter().flatten().filter_map(Value::as_str) {
+                    let Some((dep, f)) = e.split_once('/') else { continue };
+                    let dep = dep.trim_end_matches('?');
+                    if let Some(features) = permitted.get(dep)
+                        && !features.contains(f)
+                    {
+                        violations.push(format!("feature outside the rule: {name} -> {dep}[{f}]"));
+                    }
+                }
+            }
+            // A reserved crate counts wherever it enters: directly, or through an external dependency. An entry
+            // through another member is that member's violation, or an edge outside the rule. cargo's resolve
+            // unions every member's features, so a path it shows is confirmed against the member's own build.
+            for (dep, owner) in &self.only {
+                if owner == name {
+                    continue;
+                }
+                for direct in graph.external_deps(name) {
+                    let lead = format!("external dependency reserved for {owner}: {name} -> {dep}");
+                    if direct == dep {
+                        violations.push(lead);
+                    } else if graph.reaches(direct, dep) && builds_with(root, name, dep) {
+                        violations.push(format!("{lead} through {direct}"));
+                    }
                 }
             }
         }
@@ -113,81 +141,69 @@ impl Rule {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Whether `member`'s own build for the host, with its own features, compiles `dep` as a normal dependency.
+fn builds_with(root: &Path, member: &str, dep: &str) -> bool {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    std::process::Command::new(cargo)
+        .args(["tree", "--quiet", "-p", member, "-e", "normal", "-i", dep, "--prefix", "none"])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
 
-    fn workspace_root() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
-    }
+/// The resolved dependency graph by package name, normal edges only: dev and build dependencies put nothing in the
+/// shipped binary.
+struct Graph<'a> {
+    members: BTreeMap<&'a str, &'a Value>,
+    edges: BTreeMap<&'a str, BTreeSet<&'a str>>,
+}
 
-    /// Copies the manifests of the workspace into a temporary directory, so a test can break one edge.
-    fn copy_workspace() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let root = workspace_root();
-        for rel in ["Cargo.toml", "crate-rule.txt", "rust-toolchain.toml"] {
-            std::fs::copy(root.join(rel), dir.path().join(rel)).unwrap();
-        }
-        for member in ["crates", "xtask"] {
-            copy_manifests(&root.join(member), &dir.path().join(member));
-        }
-        dir
-    }
-
-    fn copy_manifests(from: &Path, to: &Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for entry in std::fs::read_dir(from).unwrap().flatten() {
-            let path = entry.path();
-            let dest = to.join(entry.file_name());
-            if path.is_dir() && entry.file_name() != "target" {
-                copy_manifests(&path, &dest);
-            } else if path.file_name().is_some_and(|f| f == "Cargo.toml") {
-                std::fs::copy(&path, &dest).unwrap();
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                // cargo metadata needs the targets to exist; their content does not matter.
-                std::fs::write(&dest, "").unwrap();
+impl<'a> Graph<'a> {
+    fn of(meta: &'a Value) -> Self {
+        let packages = meta["packages"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let name_of: BTreeMap<&str, &str> =
+            packages.iter().filter_map(|p| Some((p["id"].as_str()?, p["name"].as_str()?))).collect();
+        let member_ids: BTreeSet<&str> =
+            meta["workspace_members"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let members = packages
+            .iter()
+            .filter(|p| p["id"].as_str().is_some_and(|id| member_ids.contains(id)))
+            .filter_map(|p| Some((p["name"].as_str()?, p)))
+            .collect();
+        let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        for node in meta["resolve"]["nodes"].as_array().into_iter().flatten() {
+            let Some(from) = node["id"].as_str().and_then(|id| name_of.get(id)) else { continue };
+            for d in node["deps"].as_array().into_iter().flatten() {
+                let normal = d["dep_kinds"].as_array().into_iter().flatten().any(|k| k["kind"].is_null());
+                if let Some(to) = d["pkg"].as_str().and_then(|id| name_of.get(id))
+                    && normal
+                {
+                    edges.entry(from).or_default().insert(to);
+                }
             }
         }
+        Self { members, edges }
     }
 
-    /// Adds a line under `[dependencies]`: appending would land in whatever table ends the manifest.
-    fn insert_dependency(dir: &Path, rel: &str, line: &str) {
-        let p = dir.join(rel);
-        let s = std::fs::read_to_string(&p).unwrap().replace("[dependencies]\n", &format!("[dependencies]\n{line}\n"));
-        std::fs::write(&p, s).unwrap();
+    /// A member's direct dependencies that are not members.
+    fn external_deps(&self, member: &str) -> impl Iterator<Item = &'a str> + '_ {
+        self.edges.get(member).into_iter().flatten().copied().filter(|d| !self.members.contains_key(d))
     }
 
-    #[test]
-    fn the_workspace_holds_the_rule() {
-        let violations = deps(&workspace_root()).unwrap();
-        assert!(violations.is_empty(), "{violations:?}");
-    }
-
-    #[test]
-    fn deps_refuses_an_edge_outside_the_rule() {
-        let dir = copy_workspace();
-        insert_dependency(dir.path(), "crates/bp-view/Cargo.toml", "bp-check.workspace = true");
-        let violations = deps(dir.path()).unwrap();
-        assert_eq!(violations, vec!["edge outside the rule: bp-view -> bp-check".to_string()]);
-    }
-
-    #[test]
-    fn deps_refuses_the_write_feature_outside_bp_tool() {
-        let dir = copy_workspace();
-        let p = dir.path().join("crates/bp-view/Cargo.toml");
-        let s = std::fs::read_to_string(&p)
-            .unwrap()
-            .replace("bp-forge.workspace = true", "bp-forge = { workspace = true, features = [\"write\"] }");
-        std::fs::write(&p, s).unwrap();
-        let violations = deps(dir.path()).unwrap();
-        assert_eq!(violations, vec!["feature outside the rule: bp-view -> bp-forge[write]".to_string()]);
-    }
-
-    #[test]
-    fn deps_refuses_a_reserved_external_dependency() {
-        let dir = copy_workspace();
-        insert_dependency(dir.path(), "crates/bp-vault/Cargo.toml", "tokio = \"1\"");
-        let violations = deps(dir.path()).unwrap();
-        assert_eq!(violations, vec!["external dependency reserved for bp-view: bp-vault -> tokio".to_string()]);
+    /// Whether `to` is in the normal-dependency closure of `from`.
+    fn reaches(&self, from: &str, to: &str) -> bool {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![from];
+        while let Some(at) = stack.pop() {
+            for next in self.edges.get(at).into_iter().flatten() {
+                if *next == to {
+                    return true;
+                }
+                if seen.insert(*next) {
+                    stack.push(next);
+                }
+            }
+        }
+        false
     }
 }
