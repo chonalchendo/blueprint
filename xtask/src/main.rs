@@ -43,7 +43,7 @@ fn deps(root: &Path) -> Result<Vec<String>> {
         bail!("cargo metadata failed: {}", String::from_utf8_lossy(&out.stderr));
     }
     let meta: Value = serde_json::from_slice(&out.stdout).context("parse cargo metadata")?;
-    Ok(rule.check(&meta))
+    Ok(rule.check(&meta, root))
 }
 
 #[derive(Debug, Default)]
@@ -77,7 +77,7 @@ impl Rule {
         Ok(rule)
     }
 
-    fn check(&self, meta: &Value) -> Vec<String> {
+    fn check(&self, meta: &Value, root: &Path) -> Vec<String> {
         let graph = Graph::of(meta);
         let mut violations = Vec::new();
         let rows: BTreeSet<&String> = self.edges.keys().chain(self.only.values()).collect();
@@ -121,7 +121,8 @@ impl Rule {
                 }
             }
             // A reserved crate counts wherever it enters: directly, or through an external dependency. An entry
-            // through another member is that member's violation, or an edge outside the rule.
+            // through another member is that member's violation, or an edge outside the rule. cargo's resolve
+            // unions every member's features, so a path it shows is confirmed against the member's own build.
             for (dep, owner) in &self.only {
                 if owner == name {
                     continue;
@@ -130,7 +131,7 @@ impl Rule {
                     let lead = format!("external dependency reserved for {owner}: {name} -> {dep}");
                     if direct == dep {
                         violations.push(lead);
-                    } else if graph.reaches(direct, dep) {
+                    } else if graph.reaches(direct, dep) && builds_with(root, name, dep) {
                         violations.push(format!("{lead} through {direct}"));
                     }
                 }
@@ -138,6 +139,16 @@ impl Rule {
         }
         violations
     }
+}
+
+/// Whether `member`'s own build for the host, with its own features, compiles `dep` as a normal dependency.
+fn builds_with(root: &Path, member: &str, dep: &str) -> bool {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    std::process::Command::new(cargo)
+        .args(["tree", "--quiet", "-p", member, "-e", "normal", "-i", dep, "--prefix", "none"])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// The resolved dependency graph by package name, normal edges only: dev and build dependencies put nothing in the

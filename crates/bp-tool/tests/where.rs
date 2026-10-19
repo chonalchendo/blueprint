@@ -5,6 +5,7 @@ use assert_cmd::Command;
 fn vault() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("projects/bp/issues")).unwrap();
+    std::fs::create_dir_all(dir.path().join("shared")).unwrap();
     dir
 }
 
@@ -29,7 +30,9 @@ fn where_inside_a_project() {
 
 #[test]
 fn where_refuses_outside_a_vault_with_exit_2() {
+    // A `projects/` of code checkouts alone, as in a home directory, is not a vault.
     let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("projects/code")).unwrap();
     let out = Command::cargo_bin("bp")
         .unwrap()
         .current_dir(dir.path())

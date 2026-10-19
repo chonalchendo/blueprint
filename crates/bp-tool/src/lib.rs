@@ -142,7 +142,7 @@ fn finish<T: Serialize>(result: Result<T, Refusal>, json: bool, out: &mut impl s
 fn where_(cwd: &Path) -> Result<Where, Refusal> {
     let vault = Vault::discover(cwd)?;
     Ok(Where {
-        project: vault.project_for(cwd),
+        project: vault.project_for(cwd)?,
         vault: vault.root.display().to_string(),
         worktree: bp_vault::git::Repo::find(cwd).map(|r| r.top.display().to_string()),
         version: env!("CARGO_PKG_VERSION"),
@@ -156,12 +156,20 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
         Some(at) => vault.read_at(&id, at)?,
         None => vault.read(&id)?,
     };
+    // A refusal's fix reads the same commit the verb read.
+    let at = show.at.as_ref().map_or_else(String::new, |a| format!(" --at {a}"));
     let Some(header) = &file.header else {
         return Err(Refusal::new(
             Code::NoNode,
             id.as_str(),
             "an id names a node or record: a file with a header",
-            format!("the file has no header: it is an asset; cat {}", id.path(&vault.root).display()),
+            match &show.at {
+                Some(a) => format!(
+                    "the file has no header: it is an asset; git -C {} show {a}:./{id}.md",
+                    vault.root.display()
+                ),
+                None => format!("the file has no header: it is an asset; cat {}", id.path(&vault.root).display()),
+            },
         ));
     };
     let mut m = serde_json::Map::new();
@@ -192,10 +200,10 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
                         unique.push(h);
                     }
                 }
-                return Err(refuse(format!("bp show {id} --no-body; the headings are: {}", unique.join(", "))));
+                return Err(refuse(format!("bp show {id}{at} --no-body; the headings are: {}", unique.join(", "))));
             }
             // Two sections share the heading: the whole body is the only read that holds both.
-            _ => return Err(refuse(format!("bp show {id} --json"))),
+            _ => return Err(refuse(format!("bp show {id}{at} --json"))),
         };
         m.insert("section".into(), section.text.clone().into());
     } else {

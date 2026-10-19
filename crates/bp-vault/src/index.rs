@@ -407,12 +407,8 @@ fn fingerprint(root: &Path) -> String {
     // The schema leads, so a binary with another schema never takes this index as fresh.
     let repo = crate::git::Repo::find(root);
     let head = repo.as_ref().and_then(crate::git::Repo::head).unwrap_or_default();
-    let mut print = format!(
-        "schema={}
-{head}",
-        schema()
-    );
-    if let Some(m) = repo.and_then(|r| std::fs::metadata(r.index()).ok()) {
+    let mut print = format!("schema={}\n{head}", schema());
+    if let Some(m) = repo.and_then(|r| std::fs::metadata(r.git.join("index")).ok()) {
         let nanos = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos());
         let _ = write!(print, "\nindex={}:{}", nanos.unwrap_or_default(), m.len());
     }
