@@ -1,6 +1,6 @@
 //! Change domain: milestone, issue, check rows, run, claim, review, disposition, waiver; the Intents function.
-//! This milestone holds the status sets and the issue's severity of the logical data model (13), and the `Intents`
-//! function (21).
+//! This milestone holds the status sets, their machines (25, design change 3), the issue's severity and the
+//! disposition values of the logical data model (13), and the `Intents` function (21).
 
 pub mod intents;
 
@@ -21,6 +21,44 @@ bp_vault::closed_enum! {
         InProgress = "in-progress",
         Resolved = "resolved",
         Abandoned = "abandoned",
+    }
+}
+
+impl MilestoneStatus {
+    /// The moves `transition` makes, each one human decision (25, design change 3).
+    pub const MOVES: &'static [(Self, Self)] = &[
+        (Self::Planned, Self::Approved),
+        (Self::Planned, Self::Abandoned),
+        (Self::Approved, Self::Abandoned),
+        (Self::Abandoned, Self::Planned),
+    ];
+
+    /// The verb that owns a move `transition` does not make: `done` waits on the finish line.
+    pub fn owner(_from: Self, to: Self) -> Option<&'static str> {
+        (to == Self::Done).then_some("stamp")
+    }
+}
+
+impl IssueStatus {
+    /// The moves `transition` makes, each one human decision (25, design change 3).
+    pub const MOVES: &'static [(Self, Self)] = &[(Self::Open, Self::Abandoned), (Self::Abandoned, Self::Open)];
+
+    /// The verb that owns a move `transition` does not make: the loop verbs, which also write the claim.
+    pub fn owner(from: Self, to: Self) -> Option<&'static str> {
+        match (from, to) {
+            (_, Self::InProgress) => Some("cut"),
+            (_, Self::Resolved) => Some("land"),
+            (Self::InProgress, Self::Open) => Some("release"),
+            _ => None,
+        }
+    }
+}
+
+bp_vault::closed_enum! {
+    /// The worker's answer to one review finding (13, Disposition).
+    pub enum DispositionAs {
+        Fixed = "fixed",
+        Declined = "declined",
     }
 }
 

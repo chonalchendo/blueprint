@@ -5,8 +5,10 @@ mod clock;
 mod create;
 mod intent;
 mod link;
+mod record;
 mod schema;
 mod set;
+mod transition;
 mod walk;
 
 use std::path::Path;
@@ -59,6 +61,10 @@ pub enum Verb {
     Create(create::Create),
     /// One typed edge, added or removed; a repeat is a no-op.
     Link(link::Link),
+    /// One status move under the kind's machine: one changed line, one commit.
+    Transition(transition::Transition),
+    /// One append-only record under its parent: one new file, one commit.
+    Record(record::Record),
 }
 
 /// `bp show <id> [--section <heading>] [--no-body] [--at <ref>]`.
@@ -145,6 +151,8 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Set(s) => wrote(set::set(cwd, s), cli.json, out),
         Verb::Create(c) => wrote(create::create(cwd, c), cli.json, out),
         Verb::Link(l) => wrote(link::link(cwd, l), cli.json, out),
+        Verb::Transition(t) => wrote(transition::transition(cwd, t), cli.json, out),
+        Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
     }
 }
 
