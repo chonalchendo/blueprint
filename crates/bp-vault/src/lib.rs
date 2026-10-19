@@ -103,6 +103,7 @@ impl Vault {
     /// Reads one file as it was at a commit, branch or blueprint tag. Refuses `unknown_value` when git does not know
     /// the ref and `no_node` when the file did not exist there. It branches on git's exit codes, never its text, so
     /// the locale cannot change the refusal; `--end-of-options` keeps a ref that starts with `-` from being an option.
+    /// It parses the past file under today's schema: a header an older schema allowed refuses (no migration pre-v0.1).
     pub fn read_at(&self, id: &Id, at: &str) -> Result<File, Refusal> {
         let git = |args: &[&str]| {
             std::process::Command::new("git")

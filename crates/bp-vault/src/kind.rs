@@ -99,10 +99,7 @@ impl Kind {
         };
         match self {
             Self::Project => project(3) && p[2] == dir,
-            Self::Design => {
-                (project(4) && p[2] == dir && SPINE.contains(&p[3]))
-                    || (project(5) && p[2] == dir && matches!(p[3], "containers" | "components"))
-            }
+            Self::Design => DesignLevel::of(id).is_some(),
             Self::Issue | Self::Milestone | Self::ConcernAnswer | Self::BlueprintVersion => project(4) && p[2] == dir,
             Self::Decision | Self::Thread | Self::Inbox | Self::Handoff => {
                 (project(4) && p[2] == dir) || (shared(3) && p[1] == dir)
@@ -118,9 +115,6 @@ impl Kind {
     }
 }
 
-/// The spine designs, named by level (12, Identity; 13 adds the glossary).
-const SPINE: [&str; 4] = ["product", "system", "data-model", "glossary"];
-
 /// A design's kind and scope (13, Design). Both come from the path, so the header stores neither (12, Layout).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesignLevel {
@@ -130,22 +124,24 @@ pub struct DesignLevel {
     pub scope: &'static str,
 }
 
+/// Every design path form (12, Layout): the segment after `designs/`, the id's length in segments, and the level the
+/// path names. A spine design is the segment itself; a container or component sits one directory down. This one
+/// table decides both whether a path is a design's and which level it is, so the two cannot disagree.
+const LEVELS: [(&str, usize, DesignLevel); 6] = [
+    ("product", 4, DesignLevel { design_kind: "product", scope: "product" }),
+    ("system", 4, DesignLevel { design_kind: "system", scope: "system" }),
+    ("data-model", 4, DesignLevel { design_kind: "data-model", scope: "system" }),
+    ("glossary", 4, DesignLevel { design_kind: "glossary", scope: "system" }),
+    ("containers", 5, DesignLevel { design_kind: "container", scope: "container" }),
+    ("components", 5, DesignLevel { design_kind: "component", scope: "component" }),
+];
+
 impl DesignLevel {
     /// The level a design's path names; `None` for a path that is not a design's.
     pub fn of(id: &Id) -> Option<Self> {
-        if !Kind::Design.fits(id) {
-            return None;
-        }
-        let (design_kind, scope) = match id.as_str().split('/').nth(3)? {
-            "product" => ("product", "product"),
-            "system" => ("system", "system"),
-            "data-model" => ("data-model", "system"),
-            "glossary" => ("glossary", "system"),
-            "containers" => ("container", "container"),
-            "components" => ("component", "component"),
-            _ => return None,
-        };
-        Some(Self { design_kind, scope })
+        let p: Vec<&str> = id.as_str().split('/').collect();
+        let designs = p.len() >= 4 && p[0] == "projects" && p[2] == Kind::Design.dir();
+        LEVELS.iter().find(|(seg, len, _)| designs && p.len() == *len && p[3] == *seg).map(|(_, _, level)| *level)
     }
 }
 

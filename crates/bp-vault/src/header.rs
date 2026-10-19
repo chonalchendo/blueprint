@@ -112,7 +112,14 @@ impl Header {
                 }
                 k if RESERVED.contains(&k) => return Err(bad(format!("`{k}` is a reserved name"))),
                 k if DERIVED.contains(&k) => {
-                    return Err(bad(format!("`{k}` comes from the path, not the header; delete the line")));
+                    // A design's path names the value; no other kind has the field at all (13).
+                    return Err(bad(match header.kind {
+                        Kind::Design => format!("`{k}` comes from the path, not the header; delete the line"),
+                        other => {
+                            let a = if other.as_str().starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+                            format!("`{k}` is not a field of {a} {other}; delete the line")
+                        }
+                    }));
                 }
                 k => {
                     header.fields.insert(k.into(), json(value));
@@ -239,6 +246,8 @@ mod tests {
             ("kind: issue\nbody: x\n", "reserved"),
             ("kind: design\ntitle: T\ndesign_kind: system\n", "comes from the path"),
             ("kind: design\ntitle: T\nscope: system\n", "comes from the path"),
+            ("kind: issue\ntitle: T\nscope: system\n", "`scope` is not a field of an issue; delete the line"),
+            ("kind: milestone\ntitle: T\ndesign_kind: system\n", "`design_kind` is not a field of a milestone"),
         ] {
             let e = Header::parse(yaml, "f").unwrap_err();
             assert_eq!(e.code, crate::Code::SchemaInvalid, "{yaml}");
