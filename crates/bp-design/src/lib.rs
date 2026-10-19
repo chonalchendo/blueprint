@@ -20,29 +20,6 @@ bp_vault::closed_enum! {
 }
 
 bp_vault::closed_enum! {
-    /// A design's C4 level.
-    pub enum Scope {
-        Product = "product",
-        System = "system",
-        Container = "container",
-        Component = "component",
-    }
-}
-
-bp_vault::closed_enum! {
-    /// The concern a design answers. The bundle will ship the list (13, reference); until then, the converted
-    /// vault's values and the glossary of the spine (12, Identity).
-    pub enum DesignKind {
-        Product = "product",
-        System = "system",
-        DataModel = "data-model",
-        Glossary = "glossary",
-        Container = "container",
-        Component = "component",
-    }
-}
-
-bp_vault::closed_enum! {
     /// A project's class, which selects its concerns. The bundle will ship the list (13, reference); until then,
     /// the converted vault's values.
     pub enum ProjectClass {

@@ -1,7 +1,7 @@
 //! The per-kind schema rules that live in the domain crates, composed for the census and for `set` (23, rule 2).
 
 use bp_change::{IssueStatus, MilestoneStatus, Severity};
-use bp_design::{DesignKind, DesignStatus, ProjectClass, ProjectStatus, Scope};
+use bp_design::{DesignStatus, ProjectClass, ProjectStatus};
 use bp_reasoning::{ConventionStatus, DecisionStatus, InboxStatus, LearningStatus, ThreadStatus};
 use bp_vault::{Code, Id, Kind, LINKS, Refusal};
 use serde_json::Value;
@@ -24,19 +24,8 @@ pub fn status_in_set(kind: &str, status: Option<&str>) -> bool {
 }
 
 /// Every label field of any kind, for the fix that lists one kind's.
-const LABELS: [&str; 11] = [
-    "title",
-    "tags",
-    "applies",
-    "class",
-    "repository",
-    "forge",
-    "cue",
-    "scope",
-    "design_kind",
-    "severity",
-    "walkthrough",
-];
+const LABELS: [&str; 9] =
+    ["title", "tags", "applies", "class", "repository", "forge", "cue", "severity", "walkthrough"];
 
 /// What a label holds.
 enum Vocab {
@@ -60,8 +49,6 @@ fn vocab(kind: Kind, field: &str) -> Option<Vocab> {
         (_, "title") | (Kind::Project, "repository" | "forge") | (Kind::Learning, "cue") => Vocab::Text,
         (_, "tags") | (Kind::Convention, "applies") => Vocab::Tags,
         (Kind::Project, "class") => closed(ProjectClass::ALL, ProjectClass::as_str),
-        (Kind::Design, "scope") => closed(Scope::ALL, Scope::as_str),
-        (Kind::Design, "design_kind") => closed(DesignKind::ALL, DesignKind::as_str),
         (Kind::Issue, "severity") => closed(Severity::ALL, Severity::as_str),
         (Kind::Issue, "walkthrough") => Vocab::Bool,
         _ => return None,
@@ -87,6 +74,7 @@ fn owner(kind: Kind, id: &Id, field: &str) -> Option<String> {
         (_, "kind") => format!("the path names the kind: bp create <kind>, then retire {id}"),
         (_, "under") => "`under` changes only by a re-parenting verb, not yet built (15, Open)".into(),
         (_, "aliases") => format!("bp rename {id} <slug> keeps the old slug as an alias"),
+        (Kind::Design, "scope" | "design_kind") => "the path names it (12, Layout); rename moves a design".into(),
         (_, "carries") => "`carries` derives from the diagram sidecars and check blocks (13); edit the body".into(),
         (_, f) if LINKS.contains(&f) => format!("bp link {id} {f} <id>, or bp link {id} {f} <id> --remove"),
         (Kind::Learning, "confidence") => {
@@ -135,8 +123,32 @@ pub fn label(kind: Kind, id: &Id, field: &str, value: &str) -> Result<Value, Ref
     match vocab {
         Vocab::Closed(values) if values.contains(&value) => Ok(value.into()),
         Vocab::Closed(values) => Err(outside(&values)),
+        Vocab::Text if field == "title" && value.trim().is_empty() => Err(Refusal::new(
+            Code::SchemaInvalid,
+            format!("{id} title"),
+            "a node has a title (12, the header schema)",
+            "give a title with at least one character that is not a space",
+        )),
         Vocab::Text => Ok(value.into()),
-        Vocab::Tags => Ok(value.split(',').map(str::trim).filter(|t| !t.is_empty()).map(Value::from).collect()),
+        Vocab::Tags => {
+            let mut tags: Vec<&str> = Vec::new();
+            for tag in value.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                if !tag.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+                    || !tag.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '/')
+                {
+                    return Err(Refusal::new(
+                        Code::SchemaInvalid,
+                        format!("{field} {tag}"),
+                        "a tag is lowercase letters, digits, `-` and `/` (13)",
+                        format!("rewrite {tag:?} in that shape, for example domain/write-path"),
+                    ));
+                }
+                if !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+            }
+            Ok(tags.into_iter().map(Value::from).collect())
+        }
         Vocab::Bool => value.parse::<bool>().map(Value::from).map_err(|_| outside(&["true", "false"])),
     }
 }

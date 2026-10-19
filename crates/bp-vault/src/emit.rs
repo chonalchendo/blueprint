@@ -1,6 +1,6 @@
 //! The header writer. `set` rewrites one field's lines and leaves every other byte alone, so a label change is a
 //! one-line diff; `Header::emit` writes a whole header for a new file. Both write a field one way: plain when YAML
-//! reads the text back unchanged, else as JSON, which YAML reads as the same value.
+//! 1.2 reads the text back unchanged and YAML 1.1 reads it as text, else as JSON, which YAML reads as the same value.
 
 use serde_json::Value;
 use yaml_rust2::{Yaml, YamlLoader};
@@ -53,7 +53,11 @@ pub fn set_field(text: &str, key: &str, value: &Value) -> String {
     let lines: Vec<&str> = rest.split_inclusive('\n').collect();
     let bare = |l: &str| l.trim_end_matches(['\n', '\r']).to_string();
     let close = (1..lines.len()).find(|&i| bare(lines[i]) == "---").expect("a parsed header closes");
-    let start = (1..close).find(|&i| lines[i].strip_prefix(key).is_some_and(|r| r.starts_with(':')));
+    // YAML reads `severity:`, `"severity":` and `'severity' :` as one key.
+    let spellings = [key.to_string(), format!("\"{key}\""), format!("'{key}'")];
+    let named =
+        |l: &str| spellings.iter().any(|n| l.strip_prefix(n.as_str()).is_some_and(|r| r.trim_start().starts_with(':')));
+    let start = (1..close).find(|&i| named(lines[i]));
     // A block value continues on the indented or `- ` lines under its key.
     let end = start.map(|s| (s + 1..close).find(|&i| !lines[i].starts_with([' ', '\t', '-'])).unwrap_or(close));
     let at = start.unwrap_or(close);
@@ -89,9 +93,29 @@ fn yaml(key: &str, value: &Value) -> String {
 
 /// Whether `key: s` reads back as the text `s`: not empty, not a number, a boolean or null, no comment, no flow.
 fn plain(key: &str, s: &str) -> bool {
+    if yaml11_typed(s) {
+        return false;
+    }
     let Ok(docs) = YamlLoader::load_from_str(&format!("{key}: {s}")) else { return false };
     let Some(Yaml::Hash(map)) = docs.first() else { return false };
     map.get(&Yaml::String(key.into())).and_then(Yaml::as_str) == Some(s)
+}
+
+/// Whether a YAML 1.1 reader, such as `PyYAML`, takes the plain scalar `s` for a bool, a null, a number or a
+/// timestamp. It errs towards yes: a needless quote still reads back as the same text.
+fn yaml11_typed(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    if matches!(lower.as_str(), "" | "~" | "null" | "y" | "n" | "yes" | "no" | "on" | "off" | "true" | "false") {
+        return true;
+    }
+    let t = lower.strip_prefix(['+', '-']).unwrap_or(&lower);
+    let b = t.as_bytes();
+    // A timestamp starts `YYYY-`; a number in any base, sexagesimal included, starts with a digit or a dot and holds
+    // no space.
+    let date = b.len() >= 8 && b[..4].iter().all(u8::is_ascii_digit) && b[4] == b'-';
+    let number = t.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+        && t.chars().all(|c| c.is_ascii_alphanumeric() || "_:.+-".contains(c));
+    date || number
 }
 
 #[cfg(test)]
@@ -134,5 +158,52 @@ mod tests {
             set_field("---\nkind: issue\nseverity_x: 1\n---\n", "severity", &"true".into()),
             "---\nkind: issue\nseverity_x: 1\nseverity: \"true\"\n---\n"
         );
+        for quoted in ["\"severity\": low", "'severity': low", "severity : low"] {
+            let text = format!("---\nkind: issue\n{quoted}\n---\n");
+            assert_eq!(set_field(&text, "severity", &"high".into()), "---\nkind: issue\nseverity: high\n---\n");
+        }
+    }
+
+    #[test]
+    fn quotes_what_yaml_1_1_reads_as_another_type() {
+        for typed in [
+            "yes",
+            "No",
+            "ON",
+            "off",
+            "y",
+            "N",
+            "True",
+            "~",
+            "Null",
+            "",
+            "2026-10-19",
+            "2001-12-14 21:59:43.10 -5",
+            "2001-12-14t21:59:43.10-05:00",
+            "123",
+            "-17",
+            "0o17",
+            "017",
+            "0x1F",
+            "0b101",
+            "1_000",
+            "190:20:30",
+            "1.5",
+            "6.8523015e+5",
+            ".inf",
+            "-.Inf",
+            ".NaN",
+            "+1",
+        ] {
+            let line = set_field("---\nkind: issue\n---\n", "title", &typed.into());
+            assert_eq!(line, format!("---\nkind: issue\ntitle: {}\n---\n", serde_json::json!(typed)), "{typed}");
+        }
+        for text in ["yesterday", "Night on the town", "2 pass design", "v1.5", "no-op", "a: b"] {
+            let want = if text == "a: b" { "\"a: b\"".to_string() } else { text.to_string() };
+            assert_eq!(
+                set_field("---\nkind: issue\n---\n", "title", &text.into()),
+                format!("---\nkind: issue\ntitle: {want}\n---\n")
+            );
+        }
     }
 }

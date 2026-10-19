@@ -32,6 +32,7 @@ crate::closed_enum! {
         CouldNotRun = "could_not_run",
         Usage = "usage",
         NotALabel = "not_a_label",
+        PathDirty = "path_dirty",
     }
 }
 

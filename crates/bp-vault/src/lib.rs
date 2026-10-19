@@ -11,6 +11,7 @@ mod header;
 mod id;
 mod index;
 mod kind;
+mod propose;
 mod refusal;
 mod walk;
 mod write;
@@ -60,6 +61,11 @@ impl Vault {
                 "unset BP_VAULT, or point it at the vault root",
             ));
         }
+        Self::search(from)
+    }
+
+    /// The ancestor search alone, so a test reads the same rule whatever `BP_VAULT` its runner set.
+    fn search(from: &Path) -> Result<Self, Refusal> {
         // Both top directories: a home directory with a `projects/` of code checkouts is not a vault.
         for dir in from.ancestors() {
             if dir.join("projects").is_dir() && dir.join("shared").is_dir() {
@@ -260,7 +266,7 @@ mod tests {
         let root = dir.path().join("vault");
         std::fs::create_dir_all(root.join("projects/bp/issues")).unwrap();
         std::fs::create_dir_all(root.join("shared")).unwrap();
-        let v = Vault::discover(&root.join("projects/bp/issues")).unwrap();
+        let v = Vault::search(&root.join("projects/bp/issues")).unwrap();
         assert_eq!(v.root, root);
         assert_eq!(v.project_of(&root.join("projects/bp/issues")), Some("bp".into()));
         assert_eq!(v.project_of(&root), None);
@@ -269,7 +275,7 @@ mod tests {
     #[test]
     fn refuses_outside_a_vault() {
         let dir = tempfile::tempdir().unwrap();
-        let err = Vault::discover(dir.path()).unwrap_err();
+        let err = Vault::search(dir.path()).unwrap_err();
         assert_eq!(err.code, Code::NoVault);
         assert_eq!(err.exit, 2);
     }

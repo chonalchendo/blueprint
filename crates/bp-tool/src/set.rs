@@ -2,20 +2,21 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::ExitCode;
 
 use bp_operation::Role;
 use bp_vault::{Code, Index, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
-use crate::{Wrote, node_id, schema};
+use crate::{CONTRACT, Envelope, emit, finish, node_id, schema};
 
 /// `bp set <id> <field> <value> [--dry-run]`.
 #[derive(Args)]
 pub struct Set {
     /// The node, for example `projects/bp/issues/0412.define-the-per-project-minimum-design`.
     pub id: String,
-    /// The label, for example `severity`, `tags`, `scope`.
+    /// The label, for example `severity`, `tags`, `title`.
     pub field: String,
     /// The value; a list label takes comma-separated values.
     pub value: String,
@@ -24,12 +25,34 @@ pub struct Set {
     pub dry_run: bool,
 }
 
-pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
+/// A write verb's result: what it wrote (exit 0), or the id of what the vault already held (exit 3).
+enum Wrote {
+    Changed(Value),
+    Already(Value),
+}
+
+/// Runs `set` and prints its result: exit 0 for a commit or a dry run, 3 when the vault already holds the value.
+pub(crate) fn run(cwd: &Path, set: &Set, json: bool, out: &mut impl std::io::Write) -> ExitCode {
+    match self::set(cwd, set) {
+        Ok(Wrote::Already(v)) => {
+            emit(out, &Envelope { result: v, contract_version: CONTRACT }, json);
+            ExitCode::from(3)
+        }
+        Ok(Wrote::Changed(v)) => finish(Ok(v), json, out),
+        Err(refusal) => finish::<Value>(Err(refusal), json, out),
+    }
+}
+
+fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     let id = node_id(&set.id)?;
     let vault = Vault::discover(cwd)?;
     let role = role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let writer = if set.dry_run { None } else { Some(vault.writer()?) };
+    let mut writer = if set.dry_run { None } else { Some(vault.writer()?) };
+    // A human's uncommitted edit refuses first, before its text is read (12, Write path).
+    if let Some(w) = &mut writer {
+        w.clean([&id])?;
+    }
     let text = vault.text(&id)?;
     let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
     let Some(header) = &file.header else {
@@ -63,17 +86,16 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     Ok(Wrote::Changed(result))
 }
 
-/// The `Bp-Role` of this process's commits: `BP_ROLE`, `human` when unset (25, design change 7).
+/// The `Bp-Role` of this process's commits: `BP_ROLE`, `human` when unset or empty (25, design change 7). A value
+/// outside the set is an environment value that does not parse: `usage`, as for `BP_NOW`.
 fn role() -> Result<Role, Refusal> {
-    let Some(text) = std::env::var_os("BP_ROLE") else { return Ok(Role::Human) };
+    let text = std::env::var_os("BP_ROLE").unwrap_or_default();
     let text = text.to_string_lossy();
+    if text.is_empty() {
+        return Ok(Role::Human);
+    }
     text.parse().map_err(|_| {
         let roles: Vec<&str> = Role::ALL.iter().map(|r| r.as_str()).collect();
-        Refusal::new(
-            Code::UnknownValue,
-            format!("BP_ROLE {text}"),
-            "a commit names its role from a closed set (12, Bp-Role)",
-            format!("unset BP_ROLE, or set it to one of: {}", roles.join(", ")),
-        )
+        Refusal::usage(format!("BP_ROLE={text}"), format!("unset BP_ROLE, or set it to one of: {}", roles.join(", ")))
     })
 }
