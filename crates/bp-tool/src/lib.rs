@@ -1,7 +1,10 @@
 //! The tool: the 18 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
 //! `--json`; diagnostics go to stderr.
 
+mod clock;
+mod create;
 mod intent;
+mod link;
 mod schema;
 mod set;
 mod walk;
@@ -52,6 +55,10 @@ pub enum Verb {
     Walk(walk::Walk),
     /// One header label of one node: one changed line, one commit.
     Set(set::Set),
+    /// One node from flags, keyed by its slug; a same-content repeat is a no-op.
+    Create(create::Create),
+    /// One typed edge, added or removed; a repeat is a no-op.
+    Link(link::Link),
 }
 
 /// `bp show <id> [--section <heading>] [--no-body] [--at <ref>]`.
@@ -135,8 +142,28 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::List(list) => finish(list_(cwd, list), cli.json, out),
         Verb::Search(search) => finish(search_(cwd, search), cli.json, out),
         Verb::Walk(w) => finish(walk::walk(cwd, w), cli.json, out),
-        Verb::Set(s) => set::run(cwd, s, cli.json, out),
+        Verb::Set(s) => wrote(set::set(cwd, s), cli.json, out),
+        Verb::Create(c) => wrote(create::create(cwd, c), cli.json, out),
+        Verb::Link(l) => wrote(link::link(cwd, l), cli.json, out),
     }
+}
+
+/// A write verb's exit: 0 for a write, 3 for a repeat, with the id, else the refusal's own.
+fn wrote(result: Result<Wrote, Refusal>, json: bool, out: &mut impl std::io::Write) -> ExitCode {
+    match result {
+        Ok(Wrote::Already(v)) => {
+            emit(out, &Envelope { result: v, contract_version: CONTRACT }, json);
+            ExitCode::from(3)
+        }
+        Ok(Wrote::Changed(v)) => finish(Ok(v), json, out),
+        Err(refusal) => finish::<Value>(Err(refusal), json, out),
+    }
+}
+
+/// A write verb's result: what it wrote (exit 0), or the id of what the vault already held (exit 3).
+enum Wrote {
+    Changed(Value),
+    Already(Value),
 }
 
 pub(crate) fn finish<T: Serialize>(result: Result<T, Refusal>, json: bool, out: &mut impl std::io::Write) -> ExitCode {

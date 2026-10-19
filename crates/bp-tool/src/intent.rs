@@ -17,14 +17,7 @@ pub struct World {
 impl World {
     /// Reads `BP_NOW` and `BP_FORGE_SNAPSHOT`. The live forge read lands with the repo verbs.
     pub fn read() -> Result<Self, Refusal> {
-        let now = if let Ok(s) = std::env::var("BP_NOW") {
-            intents::timestamp(&s).ok_or_else(|| {
-                Refusal::usage(format!("BP_NOW={s}"), "set BP_NOW to YYYY-MM-DDTHH:MM:SSZ, or unset it")
-            })?
-        } else {
-            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-            i64::try_from(since.expect("the clock is past 1970").as_secs()).expect("the clock fits i64")
-        };
+        let now = crate::clock::now()?;
         let forge = match std::env::var_os("BP_FORGE_SNAPSHOT") {
             Some(dir) => Some(Snapshot::from_dir(std::path::Path::new(&dir)).map_err(|(path, e)| {
                 Refusal::failed(

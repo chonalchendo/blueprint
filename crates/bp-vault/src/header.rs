@@ -173,6 +173,13 @@ impl Header {
 }
 
 /// A scalar or a sequence of text; `None` when an item is not text.
+/// The text items of the field `key` in `yaml`, in order; empty when the field is missing or holds no text list.
+pub(crate) fn items(yaml: &str, key: &str) -> Vec<String> {
+    let docs = YamlLoader::load_from_str(yaml).unwrap_or_default();
+    let Some(Yaml::Hash(map)) = docs.first() else { return Vec::new() };
+    map.get(&Yaml::String(key.into())).and_then(texts).unwrap_or_default()
+}
+
 fn texts(value: &Yaml) -> Option<Vec<String>> {
     match value {
         Yaml::String(s) => Some(vec![s.clone()]),

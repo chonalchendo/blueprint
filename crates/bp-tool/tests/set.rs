@@ -1,23 +1,14 @@
 //! `bp set` through the binary, over a small vault under git: one line, one commit, the refusals, the no-op and
 //! the dry run.
 
-use std::path::Path;
-use std::process::Command as Std;
+mod common;
 
-use assert_cmd::Command;
+use common::{bp, bp_env, commits, git};
 
 const ISSUE: &str = "projects/bp/issues/0001.a";
 
-fn git(root: &Path, args: &[&str]) -> String {
-    let out = Std::new("git").arg("-C").arg(root).args(args).output().unwrap();
-    assert!(out.status.success(), "git {args:?}");
-    String::from_utf8(out.stdout).unwrap()
-}
-
 fn vault() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    for (rel, text) in [
+    common::vault(&[
         (
             "projects/bp/issues/0001.a.md",
             "---\nkind: issue\ntitle: A\nstatus: open\nseverity: low\ntags: [\"x\"]\n---\n\nLead.\n",
@@ -28,31 +19,7 @@ fn vault() -> tempfile::TempDir {
         ),
         ("projects/bp/designs/system.md", "---\nkind: design\ntitle: S\nstatus: active\n---\n"),
         ("shared/.keep", ""),
-        (".bp/.gitignore", "*\n"),
-    ] {
-        std::fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
-        std::fs::write(root.join(rel), text).unwrap();
-    }
-    git(root, &["init", "-q"]);
-    git(root, &["config", "user.name", "t"]);
-    git(root, &["config", "user.email", "t@t"]);
-    git(root, &["add", "-A"]);
-    git(root, &["commit", "-qm", "one"]);
-    dir
-}
-
-fn bp(root: &Path, args: &[&str]) -> (Option<i32>, serde_json::Value) {
-    bp_with(root, None, args)
-}
-
-fn bp_with(root: &Path, role: Option<&str>, args: &[&str]) -> (Option<i32>, serde_json::Value) {
-    let mut cmd = Command::cargo_bin("bp").unwrap();
-    cmd.current_dir(root).env_remove("BP_VAULT").env_remove("BP_ROLE");
-    if let Some(r) = role {
-        cmd.env("BP_ROLE", r);
-    }
-    let out = cmd.args(args).arg("--json").output().unwrap();
-    (out.status.code(), serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null))
+    ])
 }
 
 #[test]
@@ -74,7 +41,7 @@ fn set_writes_one_line_in_one_commit() {
     let (code, _) = bp(root, &["set", ISSUE, "tags", "a, b"]);
     assert_eq!(code, Some(0));
     assert_eq!(bp(root, &["show", ISSUE]).1["tags"], serde_json::json!(["a", "b"]));
-    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "3");
+    assert_eq!(commits(root), "3");
 }
 
 #[test]
@@ -102,7 +69,7 @@ fn set_refuses_what_is_not_a_label() {
     assert!(v["fix"].as_str().unwrap().contains("bp transition"), "{v}");
     let (_, v) = bp(root, &["set", "projects/bp/designs/system", "scope", "product"]);
     assert_eq!(v["fix"], "the path names it (12, Layout); rename moves a design");
-    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    assert_eq!(commits(root), "1");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
 }
 
@@ -110,9 +77,9 @@ fn set_refuses_what_is_not_a_label() {
 fn bp_role_is_a_closed_set_and_empty_reads_as_human() {
     let dir = vault();
     let root = dir.path();
-    let (code, v) = bp_with(root, Some("bogus"), &["set", ISSUE, "severity", "high"]);
+    let (code, v) = bp_env(root, &[("BP_ROLE", "bogus")], &["set", ISSUE, "severity", "high"]);
     assert_eq!((code, v["code"].as_str(), v["subject"].as_str()), (Some(4), Some("usage"), Some("BP_ROLE=bogus")));
-    let (code, _) = bp_with(root, Some(""), &["set", ISSUE, "severity", "high"]);
+    let (code, _) = bp_env(root, &[("BP_ROLE", "")], &["set", ISSUE, "severity", "high"]);
     assert_eq!(code, Some(0));
     assert!(git(root, &["log", "-1", "--format=%B"]).lines().any(|l| l == "Bp-Role: human"));
 }
@@ -142,7 +109,7 @@ fn a_dirty_target_refuses_path_dirty_first() {
     let (code, v) = bp(root, &["set", ISSUE, "severity", "low"]);
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("path_dirty")), "even a value the file holds: {v}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
-    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    assert_eq!(commits(root), "1");
 }
 
 #[test]
@@ -152,6 +119,6 @@ fn a_dry_run_writes_nothing() {
     let (code, v) = bp(root, &["set", ISSUE, "severity", "high", "--dry-run"]);
     assert_eq!((code, v["dry_run"].as_bool(), v["value"].as_str()), (Some(0), Some(true), Some("high")));
     assert!(v.get("commit").is_none());
-    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    assert_eq!(commits(root), "1");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
 }

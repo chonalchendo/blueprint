@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::fingerprint::{fingerprint, still};
-use crate::{Counts, File, FindingKind, Kind, Refusal, Vault};
+use crate::{Counts, File, FindingKind, Id, Kind, Refusal, Vault};
 
 mod insert;
 use insert::remove;
@@ -315,6 +315,22 @@ impl Index {
             .query_row("select tokens from nodes where id = ?1", [id], |r| count_at(r, 0))
             .optional()
             .map_err(|e| failed(Path::new(".bp/index.db"), &e))
+    }
+
+    /// What holds `id` up to case: a file, else a node with it as a live alias, and whether it is the alias. Two ids
+    /// that differ only by case are one id, because the default macOS file system cannot hold both (13, rule 1).
+    pub fn holder(&self, id: &Id) -> Result<Option<(Id, bool)>, Refusal> {
+        let row: Option<(String, bool)> = self
+            .conn
+            .query_row(
+                "select id, alias from (select id, 0 as alias from files where id = ?1 collate nocase \
+                 union all select id, 1 from aliases where alias = ?1 collate nocase) order by alias, id limit 1",
+                [id.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| failed(Path::new(".bp/index.db"), &e))?;
+        Ok(row.map(|(id, alias)| (Id::from_trusted(id), alias)))
     }
 
     /// The header of one node or record as JSON, when the id is in the index.

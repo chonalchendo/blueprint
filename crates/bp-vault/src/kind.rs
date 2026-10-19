@@ -46,7 +46,8 @@ impl Kind {
         )
     }
 
-    fn dir(self) -> &'static str {
+    /// The directory a node of this kind sits in, or a record of it under its parent: `issues`, `claims`.
+    pub fn dir(self) -> &'static str {
         match self {
             Self::Project => "project",
             Self::Design => "designs",

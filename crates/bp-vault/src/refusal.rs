@@ -33,6 +33,8 @@ crate::closed_enum! {
         Usage = "usage",
         NotALabel = "not_a_label",
         PathDirty = "path_dirty",
+        IdTaken = "id_taken",
+        CheckDuplicate = "check_duplicate",
     }
 }
 
