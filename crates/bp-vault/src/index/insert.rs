@@ -50,7 +50,7 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
             ],
         )?;
         tx.execute(
-            "insert into fts (rowid, id, title, body) values (last_insert_rowid(), ?1, ?2, ?3)",
+            "insert into fts (rowid, id, title, body) values ((select rowid from nodes where id = ?1), ?1, ?2, ?3)",
             params![id, header.title, file.body.text],
         )?;
     }
