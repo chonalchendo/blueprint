@@ -3,7 +3,7 @@
 use rusqlite::params;
 use serde_json::Value;
 
-use crate::File;
+use crate::{Code, File};
 
 /// Puts a changed file's rows in place of its old ones. A node keeps its rowid, so the graph and a walk's float sums
 /// are those a rebuild from nothing gives.
@@ -87,10 +87,20 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     for _ in &file.body.checks {
         st.execute([id])?;
     }
-    let mut st = tx.prepare_cached("insert into findings values (?1, ?2)")?;
+    let mut st = tx.prepare_cached("insert into findings values (?1, ?2, ?3)")?;
     for f in &file.body.findings {
-        st.execute([id, f.kind.as_str()])?;
+        st.execute([id, f.kind.as_str(), &f.detail])?;
     }
+    Ok(())
+}
+
+/// Puts a file that does not parse in place of its old rows: a `files` row and one `schema_invalid` finding with
+/// the parse error, and no node. One hand-made mistake then blocks no read and no write but its own (25, issue 8);
+/// a link to the file resolves to nothing, as to a missing node.
+pub(crate) fn broken(tx: &rusqlite::Transaction, id: &str, hash: &str, why: &str) -> rusqlite::Result<()> {
+    remove(tx, id, false)?;
+    tx.execute("insert into files values (?1, ?2, 'broken')", params![id, hash])?;
+    tx.execute("insert into findings values (?1, ?2, ?3)", params![id, Code::SchemaInvalid.as_str(), why])?;
     Ok(())
 }
 

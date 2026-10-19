@@ -211,7 +211,18 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     let id = if show.at.is_some() { node_id(&show.id)? } else { subject(&Index::open(&vault)?, &show.id)? };
     let file = match &show.at {
         Some(at) => vault.read_at(&id, at)?,
-        None => vault.read(&id)?,
+        // No verb rewrites a file it cannot parse, so only a human's edit repairs it.
+        None => vault.read(&id).map_err(|e| match e.code {
+            Code::SchemaInvalid => Refusal {
+                fix: format!(
+                    "the file does not parse ({}); edit {} by hand, then git commit it",
+                    e.why(),
+                    id.path(&vault.root).display()
+                ),
+                ..e
+            },
+            _ => e,
+        })?,
     };
     // A refusal's fix reads the same commit the verb read.
     let at = show.at.as_ref().map_or_else(String::new, |a| format!(" --at {a}"));
@@ -360,7 +371,7 @@ pub(crate) fn unknown(what: &str, value: &str, fix: String) -> Refusal {
 }
 
 /// The counts, and the findings the reader keeps instead of ignoring: statuses outside their kind's set, link
-/// targets that are not ids, and the body findings.
+/// targets that are not ids, the body findings, and files that do not parse.
 fn census(index: &Index) -> Result<Value, Refusal> {
     let mut v = serde_json::to_value(index.counts()?).expect("a plain struct serialises");
     let outside: usize = index
@@ -370,7 +381,7 @@ fn census(index: &Index) -> Result<Value, Refusal> {
         .map(|(_, _, n)| n)
         .sum();
     let mut findings = serde_json::json!({ "status_outside_set": outside, "unresolved_link": index.unresolved()? });
-    for (kind, n) in index.body_findings()? {
+    for (kind, n) in index.findings()? {
         findings[kind] = n.into();
     }
     v["findings"] = findings;

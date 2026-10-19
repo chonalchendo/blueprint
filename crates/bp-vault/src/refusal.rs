@@ -39,6 +39,9 @@ crate::closed_enum! {
     }
 }
 
+/// The opening words of a `schema` refusal's fix, before what is wrong with the file.
+const FIX_THE_FILE: &str = "fix the file: ";
+
 /// One envelope: exit 2 for a refusal, 1 when the tool could not run, 4 for a usage error.
 #[derive(Debug, Clone, Serialize, thiserror::Error)]
 #[error("{code}: {rule}")]
@@ -89,7 +92,12 @@ impl Refusal {
             Code::SchemaInvalid,
             subject,
             "a file holds its kind's schema (12, the kind schemas)",
-            format!("fix the file: {why}"),
+            format!("{FIX_THE_FILE}{why}"),
         )
+    }
+
+    /// What a `schema` refusal says is wrong with the file: its fix without the opening words.
+    pub fn why(&self) -> &str {
+        self.fix.strip_prefix(FIX_THE_FILE).unwrap_or(&self.fix)
     }
 }
