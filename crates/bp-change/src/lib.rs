@@ -33,9 +33,10 @@ impl MilestoneStatus {
         (Self::Abandoned, Self::Planned),
     ];
 
-    /// The verb that owns a move `transition` does not make: `done` waits on the finish line.
-    pub fn owner(_from: Self, to: Self) -> Option<&'static str> {
-        (to == Self::Done).then_some("stamp")
+    /// The verb that owns a move `transition` does not make: `done` waits on the finish line of an approved
+    /// milestone.
+    pub fn owner(from: Self, to: Self) -> Option<&'static str> {
+        (from == Self::Approved && to == Self::Done).then_some("stamp")
     }
 }
 
@@ -43,11 +44,12 @@ impl IssueStatus {
     /// The moves `transition` makes, each one human decision (25, design change 3).
     pub const MOVES: &'static [(Self, Self)] = &[(Self::Open, Self::Abandoned), (Self::Abandoned, Self::Open)];
 
-    /// The verb that owns a move `transition` does not make: the loop verbs, which also write the claim.
+    /// The verb that owns a move `transition` does not make: the loop verbs, which also write the claim. Each owns
+    /// one edge, so a fix never names a verb that cannot run from the current status.
     pub fn owner(from: Self, to: Self) -> Option<&'static str> {
         match (from, to) {
-            (_, Self::InProgress) => Some("cut"),
-            (_, Self::Resolved) => Some("land"),
+            (Self::Open, Self::InProgress) => Some("cut"),
+            (Self::InProgress, Self::Resolved) => Some("land"),
             (Self::InProgress, Self::Open) => Some("release"),
             _ => None,
         }

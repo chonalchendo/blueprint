@@ -141,6 +141,9 @@ fn the_fix_names_the_owning_verb_and_the_reason_is_the_body() {
     for (id, text) in [
         ("projects/bp/issues/i", "---\nkind: issue\ntitle: I\nstatus: open\n---\n"),
         ("projects/bp/issues/w", "---\nkind: issue\ntitle: W\nstatus: in-progress\n---\n"),
+        ("projects/bp/issues/a", "---\nkind: issue\ntitle: A\nstatus: abandoned\n---\n"),
+        ("projects/bp/issues/h", "---\nkind: issue\ntitle: H\nstatus: open\n---\n"),
+        ("projects/bp/issues/i/notes", "Asset.\n"),
         ("projects/bp/milestones/m", "---\nkind: milestone\ntitle: M\nstatus: approved\n---\n"),
         ("projects/bp/decisions/d", "---\nkind: decision\ntitle: D\nstatus: proposed\n---\n"),
         ("projects/bp/issues/i/claims/c", "---\nkind: claim\nunder: projects/bp/issues/i\n---\n"),
@@ -156,17 +159,39 @@ fn the_fix_names_the_owning_verb_and_the_reason_is_the_body() {
     git(root, &["config", "user.email", "t@t"]);
     git(root, &["add", "-A"]);
     git(root, &["commit", "-qm", "one"]);
-    for (id, to, verb) in [
-        ("projects/bp/issues/i", "resolved", "bp land "),
-        ("projects/bp/issues/i", "in-progress", "bp cut "),
-        ("projects/bp/issues/w", "open", "bp release "),
-        ("projects/bp/milestones/m", "done", "bp stamp "),
-        ("projects/bp/issues/i/claims/c", "open", "a record is never edited"),
+    // Each fix starts with a verb that runs from the current status.
+    let (open, held, gone) = ("projects/bp/issues/i", "projects/bp/issues/w", "projects/bp/issues/a");
+    for (id, to, fix) in [
+        (open, "resolved", format!("bp cut {open}, then bp land {open}")),
+        (open, "in-progress", format!("bp cut {open}")),
+        (held, "open", format!("bp release {held} --reason")),
+        (
+            held,
+            "abandoned",
+            format!("bp release {held} --reason <escalated|dropped|lost>, then bp transition {held} abandoned"),
+        ),
+        (held, "resolved", format!("bp land {held}")),
+        (gone, "resolved", format!("bp transition {gone} open, then bp cut {gone}, then bp land {gone}")),
+        (gone, "in-progress", format!("bp transition {gone} open, then bp cut {gone}")),
+        ("projects/bp/milestones/m", "done", "bp stamp ".into()),
+        ("projects/bp/issues/i/claims/c", "open", "a record is never edited".into()),
     ] {
         let (exit, v) = bp(root, &["transition", id, to]);
         assert_eq!((exit, v["code"].as_str()), (Some(2), Some("illegal_transition")), "{id} {to}");
-        assert!(v["fix"].as_str().unwrap().contains(verb), "{id} {to}: {v}");
+        assert!(v["fix"].as_str().unwrap().contains(&fix), "{id} {to}: {v}");
     }
+    let (exit, v) = bp(root, &["transition", "projects/bp/issues/i/notes", "open"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("no_node")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("an asset has no status"), "{v}");
+    let (exit, v) = bp(root, &["transition", open, "abandoned", "--reason", "x\n\nBp-Verb: land"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(4), Some("usage")), "{v}");
+    // A status edited by hand and not committed: the write starts from HEAD, so it refuses rather than exit 3.
+    let h = root.join("projects/bp/issues/h.md");
+    std::fs::write(&h, "---\nkind: issue\ntitle: H\nstatus: abandoned\n---\n").unwrap();
+    let (exit, v) = bp(root, &["transition", "projects/bp/issues/h", "abandoned"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+    assert!(std::fs::read_to_string(&h).unwrap().contains("status: abandoned"), "the edit stays on disk");
+    git(root, &["checkout", "--", "projects/bp/issues/h.md"]);
     let (exit, v) = bp(root, &["transition", "projects/bp/issues/i", "closed"]);
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("unknown_value")), "{v}");
     let (exit, v) = bp(root, &["transition", "projects/bp/issues/i", "abandoned", "--dry-run"]);

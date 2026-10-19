@@ -40,8 +40,9 @@ pub struct Record {
 enum Type {
     Text,
     Closed(Vec<&'static str>),
+    /// A whole number from 1.
     Int,
-    /// A commit sha, hex.
+    /// A full commit sha: 40 or 64 lower-case hex digits, so one commit has one key (13, Review).
     Sha,
     /// Lower-case letters, digits and `-`: it may name a file.
     Slug,
@@ -51,21 +52,24 @@ enum Type {
     Link(&'static [Kind]),
 }
 
-/// What names a record within its parent's directory.
+/// What names a record within its kind's directory (13). A stamp key and a second reading of one head take `-N`; an
+/// identity key refuses `id_taken` when taken, and an identical retry exits 3 (25, Goal).
 enum Key {
     /// The record's instant, UTC to the second with `-` for `:`.
     Stamp,
-    /// One of its fields.
-    Field(&'static str),
-    /// `<date>-<short session id>`, the date from `started_at` or the record's instant.
+    /// `<concern>/<stamp>`: one file per state of one concern.
+    Concern,
+    /// A review's head; a second reading of it takes `-N`.
+    Head,
+    /// A disposition's finding: an identity.
+    Finding,
+    /// `<date>-<short session id>`, the date from `started_at` or the record's instant: an identity.
     Handoff,
 }
 
-/// One record kind (13): the parent kinds, the directory, the key, the field that takes the record's instant, and
-/// the fields `--field` sets, each with its type and whether it is required.
+/// One record kind (13): the key, the field that takes the record's instant, and the fields `--field` sets, each
+/// with its type and whether it is required. The parent kinds and the directory are the kind's own (`Kind`).
 struct Spec {
-    parents: &'static [Kind],
-    dir: &'static str,
     key: Key,
     now: Option<&'static str>,
     fields: Vec<(&'static str, Type, bool)>,
@@ -76,10 +80,8 @@ fn closed<T: Copy>(all: &[T], text: fn(T) -> &'static str) -> Type {
 }
 
 fn spec(kind: Kind) -> Option<Spec> {
-    let (parents, dir, key, now, fields): (&[Kind], _, _, _, _) = match kind {
+    let (key, now, fields) = match kind {
         Kind::Delta => (
-            &[Kind::Design],
-            "deltas",
             Key::Stamp,
             Some("stamp"),
             vec![
@@ -90,9 +92,7 @@ fn spec(kind: Kind) -> Option<Spec> {
             ],
         ),
         Kind::Review => (
-            &[Kind::Issue],
-            "reviews",
-            Key::Field("head"),
+            Key::Head,
             Some("at"),
             vec![
                 ("head", Type::Sha, true),
@@ -102,9 +102,7 @@ fn spec(kind: Kind) -> Option<Spec> {
             ],
         ),
         Kind::Disposition => (
-            &[Kind::Review],
-            "dispositions",
-            Key::Field("finding"),
+            Key::Finding,
             None,
             vec![
                 ("finding", Type::Int, true),
@@ -114,9 +112,7 @@ fn spec(kind: Kind) -> Option<Spec> {
             ],
         ),
         Kind::ConcernAnswer => (
-            &[Kind::Project],
-            "concerns",
-            Key::Field("concern"),
+            Key::Concern,
             Some("decided_at"),
             vec![
                 ("concern", Type::Slug, true),
@@ -127,8 +123,6 @@ fn spec(kind: Kind) -> Option<Spec> {
             ],
         ),
         Kind::Evidence => (
-            &[Kind::Learning],
-            "evidence",
             Key::Stamp,
             Some("at"),
             vec![
@@ -138,8 +132,6 @@ fn spec(kind: Kind) -> Option<Spec> {
             ],
         ),
         Kind::Handoff => (
-            &[Kind::Project],
-            "handoffs",
             Key::Handoff,
             None,
             vec![
@@ -151,7 +143,7 @@ fn spec(kind: Kind) -> Option<Spec> {
         ),
         _ => return None,
     };
-    Some(Spec { parents, dir, key, now, fields })
+    Some(Spec { key, now, fields })
 }
 
 /// The usage error for a kind `record` does not write, with the verb that does.
@@ -171,6 +163,9 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     let kind = r.kind.parse::<Kind>().map_err(|_| not_recorded(&r.kind))?;
     let spec = spec(kind).ok_or_else(|| not_recorded(&r.kind))?;
     let given = given(kind, &spec, &r.fields)?;
+    if r.external.as_deref().is_some_and(|e| e.trim().is_empty()) {
+        return Err(Refusal::usage("--external", "give the forge URI the record names, or leave the flag out"));
+    }
     let body = match &r.body_file {
         Some(p) => std::fs::read_to_string(p).map_err(|e| Refusal::failed(p.display().to_string(), e.to_string()))?,
         None => String::new(),
@@ -182,11 +177,11 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     let role = crate::set::role()?;
     let now = crate::clock::now()?;
     // The lock comes before the reads, so the key this write takes is still free when it commits.
-    let writer = if r.dry_run { None } else { Some(vault.writer()?) };
+    let mut writer = if r.dry_run { None } else { Some(vault.writer()?) };
     let index = Index::open(&vault)?;
     let parent = if kind == Kind::Handoff && r.parent == "shared" { None } else { Some(node_id(&r.parent)?) };
     if let Some(p) = &parent {
-        parent_fits(&index, kind, &spec, p)?;
+        parent_fits(&index, kind, p)?;
     }
     let mut fields = BTreeMap::new();
     for (name, ty, _) in &spec.fields {
@@ -205,28 +200,20 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     if let Some(uri) = &r.external {
         fields.insert("external".into(), uri.as_str().into());
     }
-    let key = match spec.key {
-        Key::Stamp => crate::clock::instant(now).replace(':', "-"),
-        Key::Field(f) => match &fields[f] {
-            Value::String(s) => s.clone(),
-            v => v.to_string(),
-        },
-        Key::Handoff => {
-            let date = fields
-                .get("started_at")
-                .and_then(Value::as_str)
-                .map_or_else(|| crate::clock::instant(now), str::to_string);
-            let session = fields["session"].as_str().expect("a session is a slug");
-            format!("{}-{}", &date[..10], session.chars().take(8).collect::<String>())
-        }
-    };
+    let key = key(&spec.key, &given, &fields, now);
     // A record of the project's own sits in the project's kind directory (13, rule 4).
     let base = match &parent {
-        Some(p) if spec.parents == [Kind::Project] => p.as_str().trim_end_matches("/project").to_string(),
+        Some(p) if kind.parents() == [Kind::Project] => format!("projects/{}", p.project().expect("a project node")),
         Some(p) => p.to_string(),
         None => "shared".into(),
     };
-    let id = free(&vault.root, &format!("{base}/{}/{key}", spec.dir));
+    let stem = format!("{base}/{}/{key}", kind.dir());
+    let identity = matches!(spec.key, Key::Finding | Key::Handoff);
+    let id = if identity {
+        Id::parse(&stem).expect("a parent id and a slug key make an id")
+    } else {
+        free(&vault.root, &stem)
+    };
     let header = Header {
         kind,
         title: None,
@@ -240,6 +227,20 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     let mut text = format!("---\n{}---\n", header.emit());
     if !body.is_empty() {
         text = format!("{text}\n{body}");
+    }
+    // The parent and each link target are committed, so the record cites HEAD, not a human's work in progress
+    // (25, design change 1); the record's own path is clean too.
+    if let Some(w) = &mut writer {
+        let links = spec.fields.iter().filter(|(_, ty, _)| matches!(ty, Type::Link(_)));
+        let targets: Vec<Id> = links
+            .filter_map(|(name, _, _)| Id::parse(header.fields.get(*name)?.as_str()?).ok())
+            .chain(parent.clone())
+            .chain([id.clone()])
+            .collect();
+        w.clean(&targets)?;
+    }
+    if identity && let Some(already) = taken(&vault.root, &id, &text)? {
+        return Ok(already);
     }
     let changes = BTreeMap::from([(id.clone(), text)]);
     let mut result = serde_json::json!({ "id": id, "kind": kind, "under": parent });
@@ -255,6 +256,40 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     Ok(Wrote::Changed(result))
 }
 
+/// The record's key within its kind's directory.
+fn key(key: &Key, given: &BTreeMap<&str, &str>, fields: &BTreeMap<String, Value>, now: i64) -> String {
+    let stamp = crate::clock::instant(now).replace(':', "-");
+    match key {
+        Key::Stamp => stamp,
+        Key::Concern => format!("{}/{stamp}", given["concern"]),
+        Key::Head => given["head"].to_string(),
+        // The number as it parsed, so `01` and `1` name one finding.
+        Key::Finding => fields["finding"].to_string(),
+        Key::Handoff => {
+            let date = fields
+                .get("started_at")
+                .and_then(Value::as_str)
+                .map_or_else(|| crate::clock::instant(now), str::to_string);
+            let session = fields["session"].as_str().expect("a session is a slug");
+            format!("{}-{}", &date[..10], session.chars().take(8).collect::<String>())
+        }
+    }
+}
+
+/// An identity key that a record already holds: exit 3 when it holds these bytes, else `id_taken` (13).
+fn taken(root: &Path, id: &Id, text: &str) -> Result<Option<Wrote>, Refusal> {
+    let Ok(held) = std::fs::read_to_string(id.path(root)) else { return Ok(None) };
+    if held == text {
+        return Ok(Some(Wrote::Already(serde_json::json!({ "id": id }))));
+    }
+    Err(Refusal::new(
+        Code::IdTaken,
+        id.as_str(),
+        "a disposition is one per finding and a handoff one per session; a record is never rewritten (13)",
+        format!("bp show {id}; a correction is a new record that cites it"),
+    ))
+}
+
 fn schema(subject: String, fix: String) -> Refusal {
     Refusal::new(Code::SchemaInvalid, subject, "a record holds its kind's fields (13, the record tables)", fix)
 }
@@ -266,6 +301,9 @@ fn given<'a>(kind: Kind, spec: &Spec, flags: &'a [String]) -> Result<BTreeMap<&'
         let Some((name, value)) = f.split_once('=') else {
             return Err(Refusal::usage(format!("--field {f}"), "write each field as --field name=value"));
         };
+        if name.is_empty() {
+            return Err(Refusal::usage(format!("--field {f}"), "write each field as --field name=value"));
+        }
         if given.insert(name, value).is_some() {
             return Err(Refusal::usage(format!("--field {name}"), "give each field once"));
         }
@@ -286,7 +324,7 @@ fn given<'a>(kind: Kind, spec: &Spec, flags: &'a [String]) -> Result<BTreeMap<&'
 }
 
 /// The parent exists and is a kind this record sits under.
-fn parent_fits(index: &Index, kind: Kind, spec: &Spec, parent: &Id) -> Result<(), Refusal> {
+fn parent_fits(index: &Index, kind: Kind, parent: &Id) -> Result<(), Refusal> {
     match index.header(parent.as_str())?.and_then(|h| h["kind"].as_str()?.parse::<Kind>().ok()) {
         None => Err(Refusal::new(
             Code::NoNode,
@@ -294,8 +332,8 @@ fn parent_fits(index: &Index, kind: Kind, spec: &Spec, parent: &Id) -> Result<()
             "a record sits under a node or record that exists (13, rule 4)",
             format!("bp search {}", parent.as_str().rsplit('/').next().unwrap_or_default().replace(['-', '.'], " ")),
         )),
-        Some(k) if !spec.parents.contains(&k) => {
-            let want: Vec<&str> = spec.parents.iter().map(|k| k.as_str()).collect();
+        Some(k) if !kind.parents().contains(&k) => {
+            let want: Vec<&str> = kind.parents().iter().map(|k| k.as_str()).collect();
             Err(schema(
                 parent.to_string(),
                 format!("kind {kind} sits under kind {}; {parent} is kind {k}", want.join(" or ")),
@@ -358,9 +396,14 @@ fn value(index: &Index, kind: Kind, name: &str, ty: &Type, text: &str) -> Result
                 format!("use one of: {}", values.join(", ")),
             ));
         }
-        Type::Int => text.parse::<u64>().map_err(|_| bad("a whole number"))?.into(),
-        Type::Sha if (7..=64).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_hexdigit()) => text.into(),
-        Type::Sha => return Err(bad("a commit sha in hex")),
+        Type::Int => text.parse::<u64>().ok().filter(|n| *n >= 1).ok_or_else(|| bad("a whole number from 1"))?.into(),
+        Type::Sha
+            if matches!(text.len(), 40 | 64)
+                && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+        {
+            text.into()
+        }
+        Type::Sha => return Err(bad("a full commit sha: 40 or 64 lower-case hex digits")),
         Type::Slug
             if !text.is_empty() && text.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') =>
         {

@@ -71,6 +71,54 @@ impl Kind {
         }
     }
 
+    /// The kinds whose bodies own check blocks; a run sits under one of them. A fenced `check` block in any other
+    /// body is prose (13, rule 1; 15, the check grammar).
+    pub const CHECK_OWNERS: [Self; 3] = [Self::Design, Self::Issue, Self::Milestone];
+
+    /// The kinds a record of this kind sits under (13): a claim and a review under an issue, a run under a check's
+    /// owner, a delta under a design, a waiver under a milestone, evidence under a learning, a disposition under a
+    /// review. The project's own records sit under the project node; a handoff may also sit in `shared/`. Empty for
+    /// a node.
+    pub fn parents(self) -> &'static [Self] {
+        match self {
+            Self::Claim | Self::Review => &[Self::Issue],
+            Self::Run => &Self::CHECK_OWNERS,
+            Self::Delta => &[Self::Design],
+            Self::Waiver => &[Self::Milestone],
+            Self::Evidence => &[Self::Learning],
+            Self::Disposition => &[Self::Review],
+            Self::ConcernAnswer | Self::Handoff | Self::BlueprintVersion => &[Self::Project],
+            _ => &[],
+        }
+    }
+
+    /// A record's `→` fields (13): each holds one id and is an edge in the index, as a node's links are.
+    pub fn record_links(self) -> &'static [&'static str] {
+        match self {
+            Self::Delta => &["milestone", "cause", "authorized_by", "version"],
+            Self::BlueprintVersion => &["milestone"],
+            Self::ConcernAnswer => &["design"],
+            Self::Evidence => &["issue"],
+            Self::Handoff => &["resumes"],
+            Self::Claim => &["base_issue"],
+            Self::Run => &["opens"],
+            _ => &[],
+        }
+    }
+
+    /// The field that holds a record's own instant: records under one parent are read in its order (13, rule 1).
+    pub fn time_field(self) -> Option<&'static str> {
+        match self {
+            Self::Claim => Some("from"),
+            Self::Run | Self::Review | Self::Evidence => Some("at"),
+            Self::Delta => Some("stamp"),
+            Self::ConcernAnswer => Some("decided_at"),
+            Self::Handoff => Some("started_at"),
+            Self::BlueprintVersion => Some("accepted_at"),
+            _ => None,
+        }
+    }
+
     /// The parent a record of this kind at `id` must name in `under`: the node whose directory holds it, or the
     /// project node for the project's own records. `None` for nodes and for a shared handoff.
     pub fn parent(self, id: &Id) -> Option<Id> {
@@ -84,9 +132,7 @@ impl Kind {
         }
     }
 
-    /// The path fits this kind's pattern. A record nested under a node names that node's kind (13): a claim and a
-    /// review under an issue, a run under a check's owner, a delta under a design, a waiver under a milestone,
-    /// evidence under a learning, a disposition under a review.
+    /// The path fits this kind's pattern. A record nested under a node sits under one of its `parents`.
     pub fn fits(self, id: &Id) -> bool {
         let p: Vec<&str> = id.as_str().split('/').collect();
         let project = |len: usize| p.len() == len && p[0] == "projects";
@@ -94,24 +140,27 @@ impl Kind {
         let dir = self.dir();
         // Every id has at least three segments, so the split leaves a parent of at least one.
         let (parent, tail) = p.split_at(p.len() - 2);
-        let under = |kinds: &[Self]| {
+        let under = || {
             let parent = Id::from_trusted(parent.join("/"));
-            tail[0] == dir && kinds.iter().any(|k| k.fits(&parent))
+            tail[0] == dir && self.parents().iter().any(|k| k.fits(&parent))
         };
         match self {
             Self::Project => project(3) && p[2] == dir,
             Self::Design => DesignLevel::of(id).is_some(),
-            Self::Issue | Self::Milestone | Self::ConcernAnswer | Self::BlueprintVersion => project(4) && p[2] == dir,
+            Self::Issue | Self::Milestone | Self::BlueprintVersion => project(4) && p[2] == dir,
+            // One file per state of one concern: `concerns/<concern>/<stamp>` (13, ConcernAnswer).
+            Self::ConcernAnswer => project(5) && p[2] == dir,
             Self::Decision | Self::Thread | Self::Inbox | Self::Handoff => {
                 (project(4) && p[2] == dir) || (shared(3) && p[1] == dir)
             }
             Self::Convention | Self::Learning => shared(3) && p[1] == dir,
-            Self::Claim | Self::Review => under(&[Self::Issue]),
-            Self::Run => under(&[Self::Design, Self::Issue, Self::Milestone]),
-            Self::Delta => under(&[Self::Design]),
-            Self::Waiver => under(&[Self::Milestone]),
-            Self::Evidence => under(&[Self::Learning]),
-            Self::Disposition => under(&[Self::Review]),
+            Self::Claim
+            | Self::Review
+            | Self::Run
+            | Self::Delta
+            | Self::Waiver
+            | Self::Evidence
+            | Self::Disposition => under(),
         }
     }
 }
@@ -186,6 +235,10 @@ mod tests {
         assert!(fits(Kind::Evidence, "shared/learnings/l/evidence/e"));
         assert!(fits(Kind::Handoff, "projects/bp/handoffs/2026-05-31-7c08a6ac"));
         assert!(fits(Kind::Handoff, "shared/handoffs/2026-05-31-7c08a6ac"));
+        assert!(fits(Kind::ConcernAnswer, "projects/bp/concerns/data-retention/2026-10-19T10-00-00Z"));
+        assert!(!fits(Kind::ConcernAnswer, "projects/bp/concerns/data-retention"), "one file per state");
+        let answer = Id::parse("projects/bp/concerns/c/2026-10-19T10-00-00Z").unwrap();
+        assert_eq!(Kind::ConcernAnswer.parent(&answer).unwrap().as_str(), "projects/bp/project");
         let claim = Id::parse("projects/bp/issues/0411.x/claims/s").unwrap();
         assert_eq!(Kind::Claim.parent(&claim).unwrap().as_str(), "projects/bp/issues/0411.x");
         let handoff = Id::parse("projects/bp/handoffs/h").unwrap();

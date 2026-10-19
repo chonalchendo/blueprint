@@ -77,7 +77,18 @@ fn each_kind_writes_one_file_at_its_path() {
         ),
         (
             vec!["concern-answer", "projects/bp/project", "--field", "concern=data-retention", "--field", "state=open"],
-            "projects/bp/concerns/data-retention",
+            "projects/bp/concerns/data-retention/2026-10-19T10-00-00Z",
+        ),
+        (
+            vec![
+                "concern-answer",
+                "projects/bp/project",
+                "--field",
+                "concern=data-retention",
+                "--field",
+                "state=waived",
+            ],
+            "projects/bp/concerns/data-retention/2026-10-19T10-00-00Z-2",
         ),
         (
             vec!["evidence", LEARNING, "--field", "outcome=helped", "--field", &iss],
@@ -110,8 +121,82 @@ fn each_kind_writes_one_file_at_its_path() {
     assert_eq!((v["external"].as_str(), v.get("under")), (Some("https://x/pull/1"), None));
     let (_, v) = bp(root, &["show", "shared/learnings/l/evidence/2026-10-19T10-00-00Z"]);
     assert_eq!((v["outcome"].as_str(), v["at"].as_str()), (Some("helped"), Some("2026-10-19T10:00:00Z")));
-    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "10");
+    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "11");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn an_identity_refuses_a_second_and_a_retry_changes_nothing() {
+    let dir = vault();
+    let root = dir.path();
+    let head = "0123456789abcdef0123456789abcdef01234567";
+    let review = format!("{ISSUE}/reviews/{head}");
+    let (exit, _) = bp(root, &["record", "review", ISSUE, "--field", &format!("head={head}")]);
+    assert_eq!(exit, Some(0));
+    let fixed = ["record", "disposition", &review, "--field", "finding=1", "--field", "as=fixed"];
+    let handoff = ["record", "handoff", "projects/bp/project", "--field", "session=8b8b7784-352c"];
+    for args in [&fixed[..], &handoff[..]] {
+        let (exit, v) = bp(root, args);
+        assert_eq!(exit, Some(0), "{args:?}: {v}");
+        let (exit, v) = bp(root, args);
+        assert_eq!((exit, v["id"].as_str().is_some()), (Some(3), true), "an identical retry: {v}");
+    }
+    let (exit, v) = bp(root, &["record", "disposition", &review, "--field", "finding=01", "--field", "as=declined"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("id_taken")), "{v}");
+    let (exit, v) = bp(root, &["record", "disposition", &review, "--field", "finding=0", "--field", "as=fixed"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "findings count from 1: {v}");
+    let (exit, v) = bp(root, &["record", "handoff", "projects/bp/project", "--field", "session=8b8b7784-other"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("id_taken")), "{v}");
+    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "4");
+    assert_eq!(git(root, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_record_cites_only_what_head_holds() {
+    let dir = vault();
+    let root = dir.path();
+    let ghost = root.join("projects/bp/issues/ghost.md");
+    std::fs::write(&ghost, "---\nkind: issue\ntitle: G\nstatus: open\n---\n").unwrap();
+    let head = "head=0123456789abcdef0123456789abcdef01234567";
+    for args in [
+        vec!["review", "projects/bp/issues/ghost", "--field", head],
+        vec!["evidence", LEARNING, "--field", "outcome=helped", "--field", "issue=projects/bp/issues/ghost"],
+    ] {
+        let mut a = vec!["record"];
+        a.extend(&args);
+        let (exit, v) = bp(root, &a);
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{args:?}: {v}");
+    }
+    std::fs::remove_file(&ghost).unwrap();
+    let mut issue = std::fs::read_to_string(root.join(format!("{ISSUE}.md"))).unwrap();
+    issue.push_str("WIP\n");
+    std::fs::write(root.join(format!("{ISSUE}.md")), issue).unwrap();
+    let (exit, v) =
+        bp(root, &["record", "evidence", LEARNING, "--field", "outcome=helped", "--field", &format!("issue={ISSUE}")]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+}
+
+#[test]
+fn a_project_named_project_and_a_check_block_in_a_record() {
+    let dir = vault();
+    let root = dir.path();
+    let p = "projects/project/project";
+    std::fs::create_dir_all(root.join("projects/project")).unwrap();
+    std::fs::write(root.join(format!("{p}.md")), "---\nkind: project\ntitle: P\nstatus: active\n---\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "two"]);
+    let (exit, v) = bp(root, &["record", "concern-answer", p, "--field", "concern=x", "--field", "state=open"]);
+    assert_eq!((exit, v["id"].as_str()), (Some(0), Some("projects/project/concerns/x/2026-10-19T10-00-00Z")), "{v}");
+    let body = root.join("change.md");
+    std::fs::write(&body, "A new check:\n\n~~~check shell\ntrue\n~~~\n").unwrap();
+    let ms = format!("milestone={MILESTONE}");
+    let (exit, v) = bp(root, &["record", "delta", DESIGN, "--field", &ms, "--body-file", body.to_str().unwrap()]);
+    assert_eq!(
+        (exit, v["findings"].as_array().map(Vec::len)),
+        (Some(0), Some(0)),
+        "a record's check block is prose: {v}"
+    );
 }
 
 #[test]
@@ -153,6 +238,24 @@ fn record_refuses_what_its_kind_does_not_hold() {
         (vec!["delta", DESIGN, "--field", &ms], 2, "schema_invalid"),
         (vec!["delta", DESIGN, "--field", &ms, "--field", "state=accepted", "--body-file", b], 2, "schema_invalid"),
         (vec!["review", ISSUE, "--field", "head=../x"], 2, "schema_invalid"),
+        (vec!["review", ISSUE, "--field", "head=abcdef0"], 2, "schema_invalid"),
+        (vec!["review", ISSUE, "--field", "head=0123456789ABCDEF0123456789ABCDEF01234567"], 2, "schema_invalid"),
+        (vec!["evidence", LEARNING, "--field", "outcome=helped", "--external", ""], 4, "usage"),
+        (vec!["evidence", LEARNING, "--field", "=x"], 4, "usage"),
+        (
+            vec![
+                "concern-answer",
+                "projects/bp/project",
+                "--field",
+                "concern=c",
+                "--field",
+                "state=waived",
+                "--field",
+                "valid_until=2026-02-30",
+            ],
+            2,
+            "schema_invalid",
+        ),
         (vec!["handoff", "shared", "--field", "session=S/../x"], 2, "schema_invalid"),
     ] {
         let mut a = vec!["record"];

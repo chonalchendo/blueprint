@@ -20,7 +20,7 @@ pub struct Transition {
     pub id: String,
     /// The status it moves to, from its kind's machine.
     pub status: String,
-    /// Why, in one line; it goes in the commit body.
+    /// Why, in one line; it goes in the commit body. A newline refuses, so no line of it reads as a trailer.
     #[arg(long)]
     pub reason: Option<String>,
     /// Validate and print what would change; write nothing.
@@ -66,10 +66,20 @@ pub(crate) fn machine(kind: Kind) -> Option<Machine> {
 
 pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
     let id = node_id(&t.id)?;
+    if t.reason.as_deref().is_some_and(|r| r.contains(['\n', '\r'])) {
+        return Err(Refusal::usage(
+            "--reason",
+            "give the reason in one line; a line of its own could read as a trailer",
+        ));
+    }
     let vault = Vault::discover(cwd)?;
     let role = crate::set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let writer = if t.dry_run { None } else { Some(vault.writer()?) };
+    let mut writer = if t.dry_run { None } else { Some(vault.writer()?) };
+    // A human's uncommitted edit refuses first, before its text is read (12, Write path).
+    if let Some(w) = &mut writer {
+        w.clean([&id])?;
+    }
     let text = vault.text(&id)?;
     let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
     let illegal = |fix: String| {
@@ -80,7 +90,15 @@ pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
             fix,
         )
     };
-    let Some((header, m)) = file.header.as_ref().and_then(|h| Some((h, machine(h.kind)?))) else {
+    let Some(header) = &file.header else {
+        return Err(Refusal::new(
+            Code::NoNode,
+            id.as_str(),
+            "an id names a node or record: a file with a header",
+            format!("the file has no header: an asset has no status; edit {}", id.path(&vault.root).display()),
+        ));
+    };
+    let Some(m) = machine(header.kind) else {
         return Err(illegal(format!("{id} has no status: a record is never edited (13, rule 6); bp show {id}")));
     };
     if !m.statuses.contains(&t.status.as_str()) {
@@ -96,18 +114,21 @@ pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
         return Ok(Wrote::Already(serde_json::json!({ "id": id, "status": from })));
     }
     if !m.moves.contains(&(from, t.status.as_str())) {
-        return Err(illegal(match (m.owner)(from, &t.status) {
-            Some("release") => format!("bp release {id} --reason <escalated|dropped|lost>"),
-            Some(verb) => format!("bp {verb} {id}"),
-            None => {
-                let next: Vec<&str> = m.moves.iter().filter(|(f, _)| *f == from).map(|(_, to)| *to).collect();
-                if next.is_empty() {
-                    format!("no verb moves kind {} from {from} to {}", header.kind, t.status)
-                } else {
-                    format!("from {from}, transition moves kind {} to: {}", header.kind, next.join(", "))
-                }
+        let fix = match route(&m, from, &t.status) {
+            Some(steps) => {
+                let steps: Vec<String> = steps
+                    .iter()
+                    .map(|(verb, to)| match *verb {
+                        "transition" => format!("bp transition {id} {to}"),
+                        "release" => format!("bp release {id} --reason <escalated|dropped|lost>"),
+                        verb => format!("bp {verb} {id}"),
+                    })
+                    .collect();
+                steps.join(", then ")
             }
-        }));
+            None => format!("no verb moves kind {} from {from} to {}", header.kind, t.status),
+        };
+        return Err(illegal(fix));
     }
     let mut new = bp_vault::set_field(&text, "status", &t.status.as_str().into());
     if header.kind == Kind::Decision && t.status.parse().is_ok_and(DecisionStatus::decides) {
@@ -130,4 +151,29 @@ pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
     result["commit"] = Value::from(written.commit);
     result["findings"] = serde_json::to_value(written.findings).expect("a plain struct serialises");
     Ok(Wrote::Changed(result))
+}
+
+/// The shortest run of moves from `from` to `to`, each by `transition` or its owning verb, so each step runs from the
+/// status the step before it leaves: `abandoned → resolved` starts with `transition open`.
+fn route<'a>(m: &Machine, from: &'a str, to: &str) -> Option<Vec<(&'static str, &'a str)>> {
+    let step = |a: &str, b: &str| if m.moves.contains(&(a, b)) { Some("transition") } else { (m.owner)(a, b) };
+    let mut seen = vec![from];
+    let mut frontier = vec![(from, Vec::new())];
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for (at, path) in frontier {
+            for &s in &m.statuses {
+                let Some(verb) = step(at, s).filter(|_| !seen.contains(&s)) else { continue };
+                let mut path: Vec<(&'static str, &'a str)> = path.clone();
+                path.push((verb, s));
+                if s == to {
+                    return Some(path);
+                }
+                seen.push(s);
+                next.push((s, path));
+            }
+        }
+        frontier = next;
+    }
+    None
 }

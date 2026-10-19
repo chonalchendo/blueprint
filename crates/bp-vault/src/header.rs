@@ -11,7 +11,8 @@ use yaml_rust2::{Yaml, YamlLoader};
 use crate::{DesignLevel, Id, Kind, Refusal};
 
 /// The closed set of link fields on nodes (12, the kind schemas). Every value is a path id. `carries` is not one:
-/// it is derived from sidecars and check blocks, never stored (13).
+/// it is derived from sidecars and check blocks, never stored (13). A record's `→` fields are its kind's own
+/// (`Kind::record_links`).
 pub const LINKS: [&str; 6] = ["cites", "answers", "targets", "authorizes", "supersedes", "depends"];
 
 /// Names a verb's result uses at the top level beside the header's fields, so no header may use them. The five
@@ -60,7 +61,7 @@ pub struct Header {
     pub under: Option<Id>,
     /// Old slugs a rename left behind.
     pub aliases: Vec<String>,
-    /// Links by field, in the closed set only.
+    /// Links by field: a node's in the closed set, a record's in its kind's `→` fields.
     pub links: BTreeMap<String, Vec<Id>>,
     /// Link and `under` values that are not path ids.
     pub unresolved: Vec<Unresolved>,
@@ -100,7 +101,7 @@ impl Header {
                 "aliases" => {
                     header.aliases = texts(value).ok_or_else(|| bad("`aliases` holds a non-text item".into()))?;
                 }
-                k if LINKS.contains(&k) => {
+                k if LINKS.contains(&k) || header.kind.record_links().contains(&k) => {
                     let mut ids = Vec::new();
                     for t in texts(value).ok_or_else(|| bad(format!("`{k}` holds a non-text item")))? {
                         match Id::parse(&t) {
@@ -154,7 +155,13 @@ impl Header {
             m.insert("aliases".into(), self.aliases.clone().into());
         }
         for (k, ids) in &self.links {
-            m.insert(k.clone(), ids.iter().map(|i| Value::from(i.as_str())).collect());
+            // A record's `→` field holds one id, so it reads as one, as it was written.
+            let value = match ids.as_slice() {
+                [] if self.kind.is_record() => continue,
+                [one] if self.kind.is_record() => one.as_str().into(),
+                _ => ids.iter().map(|i| Value::from(i.as_str())).collect(),
+            };
+            m.insert(k.clone(), value);
         }
         if !self.unresolved.is_empty() {
             let rows =

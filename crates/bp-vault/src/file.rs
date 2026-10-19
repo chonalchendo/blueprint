@@ -1,5 +1,6 @@
 //! One markdown file of the vault: its id, content hash, header and body. A file without a header is an asset.
 
+use crate::body::FindingKind;
 use crate::{Body, Header, Id, Kind, Refusal};
 
 /// One file, parsed.
@@ -44,7 +45,14 @@ impl File {
             let want = parent.as_ref().map_or("no parent", Id::as_str);
             return Err(Refusal::schema(id.as_str(), format!("a {} record names `under: {want}`", header.kind)));
         }
-        Ok(Self { id, hash, header: Some(header), body: Body::parse(body) })
+        let mut body = Body::parse(body);
+        if !Kind::CHECK_OWNERS.contains(&header.kind) {
+            // Only a check owner's blocks are checks; in any other body the block is prose (13, rule 1).
+            body.checks.clear();
+            body.empty_checks.clear();
+            body.findings.retain(|f| !matches!(f.kind, FindingKind::CheckUnnamed | FindingKind::CheckMalformed));
+        }
+        Ok(Self { id, hash, header: Some(header), body })
     }
 }
 
