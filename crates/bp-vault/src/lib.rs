@@ -4,12 +4,14 @@
 mod body;
 mod closed;
 mod file;
+mod fingerprint;
 pub mod git;
 mod header;
 mod id;
 mod index;
 mod kind;
 mod refusal;
+mod walk;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,9 +23,10 @@ pub use closed::OutsideSet;
 pub use file::File;
 pub use header::{Header, LINKS, RESERVED, Unresolved};
 pub use id::Id;
-pub use index::{Filter, Hit, Index, Record, Row};
+pub use index::{Filter, Hit, Index, Reading, Record, Row};
 pub use kind::Kind;
 pub use refusal::{Code, Refusal};
+pub use walk::{Fill, Reached, fill};
 // The macro's expansion names serde through this crate, so a domain crate needs no serde dependency of its own.
 #[doc(hidden)]
 pub use serde;

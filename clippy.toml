@@ -1,2 +1,2 @@
-# CommonMark is a name, not code.
-doc-valid-idents = ["CommonMark", ".."]
+# CommonMark and PageRank are names, not code.
+doc-valid-idents = ["CommonMark", "PageRank", ".."]

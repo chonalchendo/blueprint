@@ -34,4 +34,4 @@ tempfile.workspace = true
 
 # The edges are declared ahead of their first use, so the crate rule holds them from the start.
 [package.metadata.cargo-machete]
-ignored = ["bp-check", "bp-install", "bp-operation"]
+ignored = ["bp-check", "bp-install"]
