@@ -49,6 +49,10 @@ pub struct Run {
     pub at: Option<i64>,
     /// The commit the run verified.
     pub commit: String,
+    /// The attempt at that commit; the latest run of a check at a commit is the highest (13, Run).
+    pub attempt: u64,
+    /// The block's severity is `error`; a `warn` run never blocks (21, blocked).
+    pub error: bool,
     /// The verdict was `fail` or `timed-out`. `could-not-run` and `skipped` say nothing about the code.
     pub failed: bool,
 }
@@ -126,14 +130,15 @@ pub fn latest_claim(claims: &[Claim]) -> Option<&Claim> {
 pub fn issue(i: &Issue, now: i64) -> Verdict {
     let held = i.claims.iter().find(|c| c.released.is_none());
     if let Some(pr) = &i.pr {
+        // The latest run of each `error` check at the head; `at` is to the second, so attempts order the reruns.
         let mut latest: BTreeMap<&str, &Run> = BTreeMap::new();
-        for r in &i.runs {
+        for r in i.runs.iter().filter(|r| r.error && r.commit == pr.head) {
             let slot = latest.entry(r.check.as_str()).or_insert(r);
-            if r.at > slot.at {
+            if r.attempt > slot.attempt {
                 *slot = r;
             }
         }
-        if latest.values().any(|r| r.commit == pr.head && r.failed) {
+        if latest.values().any(|r| r.failed) {
             return Verdict::of(Intent::Blocked, "run failed at head");
         }
     }
@@ -249,7 +254,7 @@ mod tests {
     }
 
     fn run(check: &str, at: i64, commit: &str, failed: bool) -> Run {
-        Run { check: check.into(), at: Some(at), commit: commit.into(), failed }
+        Run { check: check.into(), at: Some(at), commit: commit.into(), attempt: 1, error: true, failed }
     }
 
     fn released(at: i64) -> Claim {
@@ -340,8 +345,15 @@ mod tests {
         assert_eq!(issue(&failed, NOW), Verdict::of(Intent::Blocked, "run failed at head"));
         let two = Issue { runs: vec![run("a", NOW - 60, "h", true), run("b", NOW, "h", false)], ..i.clone() };
         assert_eq!(issue(&two, NOW).intent, Some(Intent::Blocked), "the latest run of each check counts");
-        let rerun = Issue { runs: vec![run("a", NOW - 60, "h", true), run("a", NOW, "h", false)], ..i };
+        let again = Run { attempt: 2, ..run("a", NOW, "h", false) };
+        let rerun = Issue { runs: vec![run("a", NOW, "h", true), again.clone()], ..i.clone() };
         assert_eq!(issue(&rerun, NOW).intent, Some(Intent::NeedsLanding), "a passing rerun clears its check");
+        let rerun = Issue { runs: vec![again, run("a", NOW, "h", true)], ..i.clone() };
+        assert_eq!(issue(&rerun, NOW).intent, Some(Intent::NeedsLanding), "the highest attempt, not the order read");
+        let warn = Issue { runs: vec![Run { error: false, ..run("w", NOW, "h", true) }], ..i.clone() };
+        assert_eq!(issue(&warn, NOW).intent, Some(Intent::NeedsLanding), "a failing warn run does not block");
+        let old = Issue { runs: vec![run("a", NOW, "old", true)], ..i };
+        assert_eq!(issue(&old, NOW).intent, Some(Intent::NeedsLanding), "only runs at the head count");
     }
 
     #[test]

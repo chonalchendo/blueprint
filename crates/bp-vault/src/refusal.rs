@@ -35,6 +35,7 @@ crate::closed_enum! {
         PathDirty = "path_dirty",
         IdTaken = "id_taken",
         CheckDuplicate = "check_duplicate",
+        CheckFailed = "check_failed",
     }
 }
 

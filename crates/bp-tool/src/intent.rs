@@ -90,6 +90,9 @@ fn of(vault: &Vault, index: &Index, world: &World, id: &str, status: &str) -> Re
             check: text(&r.header, "check").unwrap_or_default(),
             at: text(&r.header, "at").and_then(|t| intents::timestamp(&t)),
             commit: text(&r.header, "commit").unwrap_or_default(),
+            attempt: r.header.get("attempt").and_then(Value::as_u64).unwrap_or_default(),
+            // A converted run has no severity; a block's default is `error` (15).
+            error: text(&r.header, "severity").is_none_or(|s| s != "warn"),
             failed: matches!(text(&r.header, "verdict").as_deref(), Some("fail" | "timed-out")),
         })
         .collect();
