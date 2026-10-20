@@ -126,12 +126,20 @@ pub(crate) fn validate(bundle: &[(&str, &[u8])], spec: &Spec) -> Result<(), Refu
         }
         preloads.insert(stem, loaded);
     }
-    // A template is a file in its role's directory (17, Interfaces 3): `roles/bp-worker/complete.md`.
+    // A template is a file in its role's directory (17, Interfaces 3): `roles/bp-worker/complete.md`. A directory
+    // with no role file is a role that preloads nothing, so its template fails the same rule.
     for (path, role, text) in
         files.iter().filter_map(|(p, t)| Some((p, p.strip_prefix("roles/")?.split_once('/')?.0, t)))
     {
+        let Some(loaded) = preloads.get(role) else {
+            return Err(invalid(
+                path,
+                "Skill",
+                &format!("a template's directory is a role, and roles/{role}.md is absent"),
+            ));
+        };
         let skill = text.lines().find_map(|l| l.strip_prefix("Skill:")).map(str::trim).unwrap_or_default();
-        if skill.starts_with("bp-") && !preloads.get(role).is_some_and(|l| l.iter().any(|s| s == skill)) {
+        if !skill.is_empty() && !loaded.iter().any(|s| s == skill) {
             return Err(invalid(path, "Skill", &format!("the role {role} preloads the template's skill, {skill}")));
         }
     }
@@ -245,6 +253,8 @@ mod tests {
         b.insert("skills/bp-c/SKILL.md".into(), SKILL.replace("bp-a", "bp-c").replace("`scripts/go.sh`", "it"));
         b.insert("roles/bp-worker/a.md".into(), "Node: x\nSkill: bp-c\n".into());
         assert_eq!(verdict(&b), "bundle/roles/bp-worker/a.md: Skill");
+        assert_eq!(broken("roles/bp-worker/a.md", "Skill: c\n"), "bundle/roles/bp-worker/a.md: Skill", "any prefix");
+        assert_eq!(broken("roles/bp-ghost/a.md", "Node: x\n"), "bundle/roles/bp-ghost/a.md: Skill", "no role file");
     }
 
     #[test]

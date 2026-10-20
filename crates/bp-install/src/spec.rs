@@ -30,8 +30,8 @@ pub(crate) struct Spec {
     pub(crate) events: &'static [Hook],
     pub(crate) description_max: usize,
     pub(crate) body_lines: usize,
-    /// The listing budget in description characters: Claude Code's 1% of the context window and Codex's 2% both
-    /// fall back to 8,000 (research, bundle harness surfaces).
+    /// The listing budget in description characters: Claude Code's 1% of the context window is 8,000 and Codex's 2%
+    /// is 16,000 (`analysis/bundle-install-spike.md`).
     pub(crate) listing: usize,
 }
 
@@ -66,11 +66,13 @@ pub(crate) const CODEX: Spec = Spec {
     hooks: ".codex/hooks",
     always_on: "AGENTS.md",
     settings: ".codex/hooks.json",
-    top: "\"$(git rev-parse --show-toplevel)\"",
+    // The main worktree's top, where `install` writes the hooks: a linked worktree holds none of them, as they are
+    // excluded, not tracked.
+    top: "\"$(git rev-parse --path-format=absolute --git-common-dir)/..\"",
     events: &[START],
     description_max: 1024,
     body_lines: 500,
-    listing: 8000,
+    listing: 16000,
 };
 
 impl Spec {

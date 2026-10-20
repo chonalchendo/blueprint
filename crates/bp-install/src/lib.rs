@@ -6,9 +6,9 @@
 mod spec;
 mod validate;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use bp_vault::{Code, Kind, Refusal};
 use serde_json::{Map, Value, json};
@@ -23,6 +23,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A node kind's body template, from `bundle/templates/`; `None` for a record kind, which has none. The binary
 /// embeds them, so `create --template` needs no install, and `install` does not copy them (27, design change 7).
+///
+/// # Panics
+///
+/// When a template is not UTF-8; the test `each_node_kind_has_a_text_template` holds the shipped bundle to it.
 pub fn template(kind: Kind) -> Option<&'static str> {
     let path = format!("templates/{kind}.md");
     BUNDLE.iter().find(|(p, _)| *p == path).map(|(_, b)| std::str::from_utf8(b).expect("a template is UTF-8"))
@@ -45,11 +49,16 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     let spec = Spec::of(target);
     validate::validate(BUNDLE, spec)?;
     let (files, skipped) = plan(spec);
-    let mut entries: BTreeMap<String, String> = files.iter().map(|(p, b)| (p.clone(), hash(b))).collect();
-    let section = format!("{BEGIN}\n{}{END}\n", text_of("always-on.md"));
+    let entries = entries(spec, &files);
     let always_on = top.join(spec.always_on);
     let held = read(&always_on)?;
-    entries.insert(spec.section_entry(), hash(section.as_bytes()));
+    if let Some(text) = held.as_deref()
+        && (text.matches(BEGIN).count(), text.matches(END).count())
+            != if span(text).is_some() { (1, 1) } else { (0, 0) }
+    {
+        let fix = format!("{} holds an unpaired {BEGIN} or {END}; leave one pair or none, then rerun", spec.always_on);
+        return Err(Refusal::failed(spec.always_on, fix));
+    }
     let settings_path = top.join(spec.settings);
     let settings = match read(&settings_path)? {
         Some(t) => serde_json::from_str(&t).ok().filter(Value::is_object),
@@ -58,7 +67,6 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     let settings = settings.and_then(|s| merged(s, spec)).ok_or_else(|| {
         Refusal::failed(spec.settings, format!("{} is not a JSON object with an object `hooks`; fix it", spec.settings))
     })?;
-    entries.insert(spec.hooks_entry(), hash(&ours(&settings, spec)));
     let manifest_rel = spec.manifest();
     let manifest_path = top.join(&manifest_rel);
     let manifest = json!({ "tool_version": VERSION, "target": target, "files": entries });
@@ -68,19 +76,46 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     if old.as_deref() == Some(manifest.as_str()) && check_target(top, spec).is_ok() {
         return Ok((false, result));
     }
-    // A file an older bundle held and this one does not goes, so no stale `bp-` entry stays behind.
+    // A file an older bundle held and this one does not goes, so no stale `bp-` entry stays behind. The old manifest
+    // is not trusted: a tracked one can name any path, so each must lie in one of the target's directories, inside
+    // the clone, before anything goes.
     let old: Value = old.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    for gone in old["files"].as_object().into_iter().flat_map(Map::keys).filter(|p| !entries.contains_key(*p)) {
-        if !gone.contains('#') {
-            let path = top.join(gone);
-            let _ = std::fs::remove_file(&path);
-            let _ = path.parent().map(std::fs::remove_dir);
+    let gone: Vec<&String> = old["files"]
+        .as_object()
+        .into_iter()
+        .flat_map(Map::keys)
+        .filter(|p| !p.contains('#') && !entries.contains_key(*p))
+        .collect();
+    let mut writes = files.keys().map(String::as_str).chain([spec.always_on, spec.settings, manifest_rel.as_str()]);
+    let dirs = [spec.skills, spec.agents, spec.dispatch, spec.hooks];
+    let removable = |p: &str| dirs.iter().any(|d| p.starts_with(&format!("{d}/"))) && inside(top, p);
+    if let Some(out) =
+        gone.iter().map(|p| p.as_str()).find(|p| !removable(p)).or_else(|| writes.find(|p| !inside(top, p)))
+    {
+        return Err(Refusal::new(
+            Code::BundleInvalid,
+            out.to_string(),
+            "install removes only in its target's directories and writes only inside the clone's top: no absolute path, \
+             no `..`, no symlink out (17)",
+            format!(
+                "{out} is not the install's to touch at {}; remove the manifest entry or the link, then rerun",
+                top.display()
+            ),
+        ));
+    }
+    for gone in gone {
+        let path = top.join(gone);
+        let _ = std::fs::remove_file(&path);
+        // The parent is inside the top, as the entry is; the top itself is never a parent here.
+        if let Some(dir) = Path::new(gone).parent().filter(|d| !d.as_os_str().is_empty()) {
+            let _ = std::fs::remove_dir(top.join(dir));
         }
     }
     for (rel, bytes) in &files {
         put(&top.join(rel), bytes)?;
     }
-    put(&always_on, with_section(held.as_deref(), &section).as_bytes())?;
+    put(&always_on, with_section(held.as_deref(), &section()).as_bytes())?;
+    // `serde_json` holds no key order, so the rewrite sorts the user's keys; their values stay.
     put(&settings_path, pretty(&settings).as_bytes())?;
     put(&manifest_path, manifest.as_bytes())?;
     let mut local: Vec<&str> = files.keys().map(String::as_str).collect();
@@ -93,8 +128,41 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     Ok((true, result))
 }
 
-/// Refuses `bundle_mismatch` when an installed bundle at `top` drifted from its manifest: another tool version, an
-/// entry absent or with another hash, or a `bp-` entry with no manifest. A clone with no `bp-` entry is not checked.
+/// Whether `rel` names a path inside `top`: relative, with no `.` or `..` part, and no existing part of it a symlink
+/// that resolves outside the top. A dangling symlink is outside, as a write through it lands where it points.
+fn inside(top: &Path, rel: &str) -> bool {
+    let path = Path::new(rel);
+    if rel.is_empty() || !path.components().all(|c| matches!(c, Component::Normal(_))) {
+        return false;
+    }
+    let Ok(root) = top.canonicalize() else { return false };
+    path.ancestors()
+        .filter(|a| !a.as_os_str().is_empty())
+        .map(|a| top.join(a))
+        .filter(|a| a.symlink_metadata().is_ok())
+        .all(|a| a.canonicalize().is_ok_and(|a| a.starts_with(&root)))
+}
+
+/// The manifest entries for `spec`: each installed file's hash, then the section's and Blueprint's hook entries'.
+/// `install` writes them, and `check` holds a manifest to them, so a bundle the binary no longer ships refuses even
+/// under the same tool version (17, check 7).
+fn entries(spec: &Spec, files: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, String> {
+    let mut entries: BTreeMap<String, String> = files.iter().map(|(p, b)| (p.clone(), hash(b))).collect();
+    entries.insert(spec.section_entry(), hash(section().as_bytes()));
+    // `ours` keeps Blueprint's groups alone, so the user's settings do not change the entry.
+    let hooks = merged(json!({}), spec).expect("an empty object merges");
+    entries.insert(spec.hooks_entry(), hash(&ours(&hooks, spec)));
+    entries
+}
+
+/// Blueprint's section of the always-on file, the markers included.
+fn section() -> String {
+    format!("{BEGIN}\n{}{END}\n", text_of("always-on.md"))
+}
+
+/// Refuses `bundle_mismatch` when an installed bundle at `top` drifted: another tool version, a manifest that is not
+/// the bundle this binary ships, an entry absent or with another hash, or a `bp-` entry with no manifest. A clone with
+/// no `bp-` entry is not checked.
 pub fn check(top: &Path) -> Result<(), Refusal> {
     check_target(top, &spec::CLAUDE)?;
     check_target(top, &spec::CODEX)
@@ -120,8 +188,18 @@ fn check_target(top: &Path, spec: &Spec) -> Result<(), Refusal> {
     if manifest["tool_version"] != VERSION {
         return Err(refuse(spec.manifest(), format!("the bundle is {}, the tool {VERSION}", manifest["tool_version"])));
     }
-    for (entry, want) in manifest["files"].as_object().into_iter().flatten() {
-        if current(top, spec, entry).as_deref() != want.as_str() {
+    // The version alone cannot see a bundle that changed under one version, so the manifest is held to the bundle the
+    // binary embeds, entry by entry.
+    let held = manifest["files"].as_object().cloned().unwrap_or_default();
+    let ships = entries(spec, &plan(spec).0);
+    let names: BTreeSet<&String> = held.keys().chain(ships.keys()).collect();
+    if let Some(entry) =
+        names.into_iter().find(|e| held.get(*e).and_then(Value::as_str) != ships.get(*e).map(String::as_str))
+    {
+        return Err(refuse(entry.clone(), format!("{entry} is not the tool's bundle")));
+    }
+    for (entry, want) in &ships {
+        if current(top, spec, entry).as_ref() != Some(want) {
             return Err(refuse(entry.clone(), format!("{entry} is absent or does not hash to the manifest")));
         }
     }
@@ -256,9 +334,11 @@ fn merged(mut settings: Value, spec: &Spec) -> Option<Value> {
     Some(settings)
 }
 
-/// Adds each installed path to `.git/info/exclude`, so the install stays local and `git status` stays clean.
+/// Adds each installed path to `info/exclude`, so the install stays local and `git status` stays clean. The main
+/// worktree's git directory is the common one, which git reads it from, also when `.git` is a file.
 fn exclude(top: &Path, paths: &[&str]) -> Result<(), Refusal> {
-    let path = top.join(".git/info/exclude");
+    let repo = bp_vault::git::Repo::find(top).expect("install runs at a clone's top");
+    let path = repo.git.join("info/exclude");
     let mut text = read(&path)?.unwrap_or_default();
     let held: Vec<String> = text.lines().map(str::to_string).collect();
     let missing: Vec<String> = paths.iter().map(|p| format!("/{p}")).filter(|l| !held.contains(l)).collect();
@@ -302,6 +382,13 @@ fn put(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn each_node_kind_has_a_text_template() {
+        for kind in bp_vault::Kind::ALL {
+            assert_eq!(super::template(*kind).is_some(), !kind.is_record(), "{kind}");
+        }
+    }
+
     #[test]
     fn a_codex_role_is_toml_that_sets_its_role() {
         let md = "---\nname: bp-worker\ndescription: Says \"x\".\nskills: bp-a\n---\n\nLine one.\nLine two.\n";

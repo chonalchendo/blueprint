@@ -72,15 +72,16 @@ impl World {
         common::bp_env(cwd, &env, args)
     }
 
-    /// Runs an installed hook script with `input` on stdin and `path` as `PATH`.
-    fn hook(&self, script: &str, input: &Value, path: &str) -> Output {
+    /// Runs an installed hook script with `input` on stdin, `path` as `PATH`, and `env` over the world's.
+    fn hook(&self, script: &str, input: &str, path: &str, env: &[(&str, &str)]) -> Output {
         let mut c = self.command(self.code().join(".claude/hooks").join(script), &self.code());
         c.env("PATH", path)
+            .envs(env.iter().copied())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         let mut child = c.spawn().unwrap();
-        std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.to_string().as_bytes()).unwrap();
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.as_bytes()).unwrap();
         child.wait_with_output().unwrap()
     }
 }
@@ -92,6 +93,12 @@ fn bin(dir: &Path, programs: &[(&str, PathBuf)], rest: bool) -> String {
         std::os::unix::fs::symlink(target, dir.join(name)).unwrap();
     }
     if rest { format!("{}:{}", dir.display(), std::env::var("PATH").unwrap()) } else { dir.display().to_string() }
+}
+
+/// The path of a program on the test's own `PATH`.
+fn which(name: &str) -> PathBuf {
+    let out = Command::new("sh").args(["-c", &format!("command -v {name}")]).output().unwrap().stdout;
+    PathBuf::from(String::from_utf8(out).unwrap().trim())
 }
 
 #[test]
@@ -121,27 +128,47 @@ fn walk_refuses_a_drifted_bundle_before_it_reads_the_vault() {
 }
 
 #[test]
-fn the_guard_denies_a_vault_path_and_fails_closed_without_jq() {
+fn the_guard_denies_a_vault_path_and_fails_closed() {
     let w = World::new();
     w.bp(&w.code(), &[], &["install", "--target", "claude"]);
     let bp = assert_cmd::cargo::cargo_bin("bp");
     let path = bin(&w.t.path().join("bin"), &[("bp", bp.clone())], true);
-    let edit = |p: &Path| serde_json::json!({ "hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": { "file_path": p } });
-    let inside = w.vault.path().join("projects/bp/project.md");
-    let out = w.hook("bp-guard.sh", &edit(&inside), &path);
+    let edit = |p: &Path| {
+        serde_json::json!({ "hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": { "file_path": p } })
+            .to_string()
+    };
+    let guard = |p: &Path, path: &str, env: &[(&str, &str)]| w.hook("bp-guard.sh", &edit(p), path, env);
+    let vault = w.vault.path();
+    let inside = vault.join("projects/bp/project.md");
+    let out = guard(&inside, &path, &[]);
     assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
-    let new = w.vault.path().join("projects/bp/new/deep.md");
-    assert_eq!(w.hook("bp-guard.sh", &edit(&new), &path).status.code(), Some(2), "a new file under the vault");
-    let out = w.hook("bp-guard.sh", &edit(&w.code().join("notes.md")), &path);
+    assert_eq!(guard(&vault.join("projects/bp/new/deep.md"), &path, &[]).status.code(), Some(2), "a new file");
+    let notes = w.code().join("notes.md");
+    let out = guard(&notes, &path, &[]);
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
-    // No jq: the guard cannot read its input, so it denies even a path outside the vault.
-    let bash = PathBuf::from(
-        String::from_utf8(Command::new("sh").args(["-c", "command -v bash"]).output().unwrap().stdout).unwrap().trim(),
-    );
-    let bare = bin(&w.t.path().join("nojq"), &[("bash", bash), ("bp", bp)], false);
-    let out = w.hook("bp-guard.sh", &edit(&w.code().join("notes.md")), &bare);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("jq"));
+    // `..` after a directory that does not exist: the walk alone would stop outside the vault.
+    let ups = "../".repeat(w.code().join("nope").components().count());
+    let through = w.code().join("nope").join(format!("{ups}{}", inside.display().to_string().trim_start_matches('/')));
+    assert_eq!(guard(&through, &path, &[]).status.code(), Some(2), "{}", through.display());
+    // A file in the clone that links to a vault file: a Write follows the link.
+    let link = w.code().join("link.md");
+    std::os::unix::fs::symlink(&inside, &link).unwrap();
+    assert_eq!(guard(&link, &path, &[]).status.code(), Some(2), "a symlink to a vault file");
+    // Fails closed: each cause denies even a path outside the vault, and the message names it.
+    let (bash, jq) = (which("bash"), which("jq"));
+    let no_jq = bin(&w.t.path().join("nojq"), &[("bash", bash.clone()), ("bp", bp)], false);
+    let no_bp = bin(&w.t.path().join("nobp"), &[("bash", bash), ("jq", jq)], false);
+    for (path, env, cause) in [
+        (no_jq.as_str(), &[][..], "jq"),
+        (no_bp.as_str(), &[][..], "bp is not on the hook's PATH"),
+        (path.as_str(), &[("BP_VAULT", "/nonexistent")][..], "no_vault"),
+    ] {
+        let out = guard(&notes, path, env);
+        assert_eq!(out.status.code(), Some(2), "{cause}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains(cause), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let empty = w.hook("bp-guard.sh", "", &path, &[]);
+    assert_eq!(empty.status.code(), Some(2), "an empty input denies");
 }
 
 #[test]
@@ -153,13 +180,26 @@ fn the_session_hooks_record_the_seed_and_walk_it() {
         w.bp(&w.code(), &[("BP_ROLE", "session"), ("BP_SESSION", "s-one")], &["set", MILESTONE, "tags", "a"]);
     assert_eq!(code, Some(0), "{v}");
     assert!(git(w.vault.path(), &["log", "-1", "--format=%B"]).lines().any(|l| l == "Bp-Session: s-one"));
-    let end =
-        w.hook("bp-end.sh", &serde_json::json!({ "hook_event_name": "SessionEnd", "session_id": "s-one" }), &path);
+    let end = w.hook(
+        "bp-end.sh",
+        &serde_json::json!({ "hook_event_name": "SessionEnd", "session_id": "s-one" }).to_string(),
+        &path,
+        &[],
+    );
     assert_eq!(end.status.code(), Some(0), "{}", String::from_utf8_lossy(&end.stderr));
     let (_, handoff) = w.bp(w.vault.path(), &[], &["show", "projects/bp/handoffs/2026-10-19-s-one", "--no-body"]);
     assert_eq!(handoff["seed"], MILESTONE, "{handoff}");
-    let start =
-        w.hook("bp-start.sh", &serde_json::json!({ "hook_event_name": "SessionStart", "session_id": "s-two" }), &path);
+    // A later session that committed nothing leaves a handoff with no seed; the start looks past it.
+    let empty = serde_json::json!({ "hook_event_name": "SessionEnd", "session_id": "s-empty" }).to_string();
+    assert_eq!(w.hook("bp-end.sh", &empty, &path, &[]).status.code(), Some(0));
+    let (_, seedless) = w.bp(w.vault.path(), &[], &["show", "projects/bp/handoffs/2026-10-19-s-empty", "--no-body"]);
+    assert!(seedless["id"].is_string() && seedless.get("seed").is_none(), "{seedless}");
+    let start = w.hook(
+        "bp-start.sh",
+        &serde_json::json!({ "hook_event_name": "SessionStart", "session_id": "s-two" }).to_string(),
+        &path,
+        &[],
+    );
     let v: Value = serde_json::from_slice(&start.stdout).unwrap();
     assert_eq!((v["seed"].as_str(), v["for"].as_str()), (Some(MILESTONE), Some("derive")), "{v}");
 }
