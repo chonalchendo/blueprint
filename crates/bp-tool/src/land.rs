@@ -1,10 +1,10 @@
 //! `bp pr <issue>` and `bp land <issue>`: the pull request and its merge (15, the repo verbs; 26, design changes 3,
 //! 4 and 6). `pr` runs the issue's blocks at the worktree's head with no lock held, pushes that head, opens or
 //! retargets the pull request and commits the runs. `land` reads the forge with no lock held and refuses on the
-//! reviewer, the base, the review, the forge check, the run evidence and the patch id, in that order, for a pull
+//! reviewer, the base, the approval at the head, the forge check and the run evidence, in that order, for a pull
 //! request already merged too. It merges at the head it read and moves each layer cut from it onto the base. Then it
-//! removes the worktree and a branch the merged head holds, and commits the claim's release, the issue at `resolved`
-//! and each moved layer's runs at its new head.
+//! removes the worktree and a branch the merged head holds, and commits the claim's release and the issue at
+//! `resolved`; the result names each moved layer's next step.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -155,7 +155,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let c = claimed(cwd, &index, &id)?;
     let gh = Gh::new(&c.top);
     let reviewer = reviewer(&index, &id, &gh.login()?)?;
-    // The patch id reads the base as origin holds it now.
+    // The diff an earlier approval saw is compared with the base as origin holds it now.
     git(&c.top, &["fetch", "-q", "origin"])?;
     let Some(pr) =
         gh.prs_for_head(&c.branch)?.into_iter().filter(|p| p.is_open() || merged(p)).max_by_key(|p| p.number)
@@ -179,12 +179,11 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     }
     let runs = crate::intent::runs(&index, id.as_str())?;
     let blocks = crate::intent::blocks(&vault, id.as_str())?;
-    let carried = |reviewed: &str| c.from.as_deref().is_some_and(|f| crate::stack::same_diff(&c.top, f, reviewed, &pr));
-    let read = crate::intent::pull_request(&pr, &reviewer, carried);
+    let read = crate::intent::pull_request(&pr, &reviewer);
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
     // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
     if let Err(unmet) = intents::landing(&read, &c.base, &runs, &blocks) {
-        let mut r = refusal(&unmet, &id, &pr, &reviewer);
+        let mut r = refusal(&unmet, &c, &id, &pr, &reviewer);
         if merged(&pr) {
             // No approval or run can follow a merge: the human judges a change that skipped a gate.
             r.fix = format!(
@@ -211,12 +210,9 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         })?;
     }
     drop(index);
-    // Each layer above moves onto the base before the branch below goes, and its blocks run again at its new head
-    // (15, a dependency chain to landed). The blocks may take minutes, so no lock is held.
+    // Each layer above moves onto the base before the branch below goes (15, a dependency chain to landed).
     git(&c.top, &["fetch", "-q", "origin"])?;
-    let now = crate::clock::now()?;
-    let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
-    let moved = crate::stack::restack(&gh, &vault, &children, &c.target, &clock)?;
+    let moved = crate::stack::restack(&gh, &children, &c.target, &c.branch)?;
     let kept = remove(&c, &pr.head_ref_oid, !moved.stranded.is_empty())?;
     let mut writer = vault.writer()?;
     writer.clean([&id, &c.claim])?;
@@ -229,13 +225,10 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     }
     let to = crate::clock::instant(crate::clock::now()?);
     let more = format!("pull_request: {}\n", pr.number);
-    let mut changes = BTreeMap::from([
+    let changes = BTreeMap::from([
         (c.claim.clone(), crate::claim::released(&vault.text(&c.claim)?, &to, "landed", &more)),
         (id.clone(), bp_vault::set_field(&vault.text(&id)?, "status", &resolved.into())),
     ]);
-    for r in &moved.ran {
-        changes.extend(r.records(&vault).0);
-    }
     writer.trailer(format!("Bp-Claim: {}", c.claim));
     let written = writer.commit("land", role.as_str(), &format!("land {id}"), &changes)?;
     Ok(Wrote::Changed(json!({
@@ -247,6 +240,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         "branch_kept": kept,
         "restacked": moved.restacked,
         "stranded": moved.stranded,
+        "next": moved.next,
         "commit": written.commit,
         "findings": written.findings,
     })))
@@ -308,8 +302,37 @@ fn claimed(cwd: &Path, index: &Index, id: &Id) -> Result<Claimed, Refusal> {
     })
 }
 
+/// No approval at the head: `review_missing`, or `diff_changed` when the reviewer's latest approval, at an earlier
+/// head, saw another diff. The comparison only names the refusal; the forge merges an approval of the latest push
+/// alone (15, Controls 1).
+fn unapproved(c: &Claimed, id: &Id, pr: &PullRequest, reviewer: &str) -> Refusal {
+    let (n, head) = (pr.number, &pr.head_ref_oid);
+    let rule = "land counts only the reviewer identity's approving review at the head (15, Controls 1)";
+    let again = format!("the human approves pull request {n} at {head} as {reviewer}, then bp land {id}");
+    let Some(&earlier) = pr.approved_heads(reviewer).last() else {
+        return Refusal::new(Code::ReviewMissing, id.as_str(), rule, again);
+    };
+    match c.from.as_deref().and_then(|from| crate::stack::diff_unchanged(&c.top, from, earlier, pr)) {
+        Some(false) => Refusal::new(
+            Code::DiffChanged,
+            id.as_str(),
+            "the diff changed since the reviewer identity's latest approval (15, Controls 1)",
+            format!("{reviewer} approved {earlier}, and the diff at {head} differs; {again}"),
+        ),
+        Some(true) => {
+            Refusal::new(Code::ReviewMissing, id.as_str(), rule, format!("diff unchanged since {earlier}; {again}"))
+        }
+        None => Refusal::new(
+            Code::ReviewMissing,
+            id.as_str(),
+            rule,
+            format!("{reviewer} approved {earlier}, which this clone cannot compare; {again}"),
+        ),
+    }
+}
+
 /// The first unmet part of needs landing as its refusal (26, design change 4).
-fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest, reviewer: &str) -> Refusal {
+fn refusal(unmet: &Unmet, c: &Claimed, id: &Id, pr: &PullRequest, reviewer: &str) -> Refusal {
     let (n, head) = (pr.number, &pr.head_ref_oid);
     match unmet {
         Unmet::Unmerged(below) => Refusal::new(
@@ -327,22 +350,7 @@ fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest, reviewer: &str) -> Refusal 
                 pr.base_ref_name.as_deref().unwrap_or_default()
             ),
         ),
-        Unmet::DiffChanged(approved) => Refusal::new(
-            Code::DiffChanged,
-            id.as_str(),
-            "an approval at an earlier head counts only while its patch id is the head's (15, E7)",
-            format!(
-                "{reviewer} approved {approved}, and the diff at {head} differs; the human approves pull request {n} \
-                 at {head} as {reviewer}, then bp land {id}"
-            ),
-        ),
-        Unmet::Review => Refusal::new(
-            Code::ReviewMissing,
-            id.as_str(),
-            "land counts only the reviewer identity's approving review, at the head or an earlier head with its \
-             patch id (15, Controls 1)",
-            format!("the human approves pull request {n} at {head} as {reviewer}, then bp land {id}"),
-        ),
+        Unmet::Review => unapproved(c, id, pr, reviewer),
         Unmet::Checks => Refusal::new(
             Code::ChecksPending,
             id.as_str(),

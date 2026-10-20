@@ -34,6 +34,7 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
         ("projects/bp/project.md", &project),
         (&format!("{ISSUE}.md"), &issue("open")),
         ("projects/bp/issues/b.md", &issue("open")),
+        ("projects/bp/issues/x.md", &issue("open")),
         ("projects/bp/issues/r.md", &issue("resolved")),
     ]);
     (v, t)
@@ -229,19 +230,47 @@ fn cut_restores_a_removed_worktree_from_its_branch() {
     assert_eq!(git(&w, &["branch", "--show-current"]).trim(), "bp/a");
 }
 
-#[test]
-fn cut_stacks_on_an_open_dependency_and_refuses_an_unpushed_one() {
-    let (v, t) = setup();
-    let (v, t) = (v.path(), t.path());
+/// A `gh` first on `PATH` whose `pr list --head <project>/<slug>` prints `prs-<slug>.json`, else no pull request.
+fn fake_gh(t: &Path) -> String {
     let bin = t.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let fake = format!(
-        "#!/bin/sh\n[ \"$1 $2\" = 'pr list' ] && {{ cat '{}/prs.json' 2>/dev/null || echo '[]'; }}\n",
+        "#!/bin/sh\n[ \"$1 $2\" = 'pr list' ] && {{ cat \"{}/prs-$(basename \"$4\").json\" 2>/dev/null || echo '[]'; }}\n",
         t.display()
     );
     std::fs::write(bin.join("gh"), fake).unwrap();
     std::fs::set_permissions(bin.join("gh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+}
+
+/// An open pull request of `<project>/<slug>` at `head` into master, as the fake prints it.
+fn open_pr(t: &Path, slug: &str, head: &str) {
+    let pr = serde_json::json!([{ "number": 1, "state": "OPEN", "headRefName": format!("bp/{slug}"), "headRefOid": head, "baseRefName": "master" }]);
+    std::fs::write(t.join(format!("prs-{slug}.json")), pr.to_string()).unwrap();
+}
+
+#[test]
+fn cut_refuses_dependencies_in_two_stacks() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let path = fake_gh(t);
+    let env = [("PATH", path.as_str())];
+    for d in [ISSUE, "projects/bp/issues/x"] {
+        assert_eq!(common::bp(v, &["link", B, "depends", d]).0, Some(0));
+    }
+    open_pr(t, "a", "h");
+    open_pr(t, "x", "h");
+    let (code, out) = bp(v, t, &env, &["cut", B]);
+    assert_eq!((code, out["code"].as_str(), out["subject"].as_str()), (Some(2), Some("dependency_split"), Some(B)));
+    assert!(out["fix"].as_str().unwrap().ends_with("land all but one, then rerun"), "{out}");
+    assert_eq!(git(&t.join("code"), &["branch", "--list", "bp/b"]), "", "a refusal adds no branch");
+}
+
+#[test]
+fn cut_stacks_on_an_open_dependency_and_refuses_an_unpushed_one() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let path = fake_gh(t);
     let env = [("PATH", path.as_str())];
     assert_eq!(common::bp(v, &["link", B, "depends", ISSUE]).0, Some(0));
     let (code, out) = bp(v, t, &env, &["cut", B]);
@@ -258,8 +287,7 @@ fn cut_stacks_on_an_open_dependency_and_refuses_an_unpushed_one() {
     git(w, &["commit", "-qm", "a"]);
     git(w, &["push", "-q", "origin", "HEAD:bp/a"]);
     let head = git(w, &["rev-parse", "HEAD"]).trim().to_string();
-    let pr = serde_json::json!([{ "number": 1, "state": "OPEN", "headRefName": "bp/a", "headRefOid": head, "baseRefName": "master" }]);
-    std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
+    open_pr(t, "a", &head);
     let (code, out) = bp(v, t, &env, &["cut", B]);
     assert_eq!(code, Some(0), "{out}");
     assert_eq!(

@@ -1,104 +1,112 @@
 //! The stack (15, a dependency chain to landed): `cut` puts a dependant on its dependency's open pull request head,
-//! `land` reads the base a layer lands on and carries an approval across a rebase by patch id, and `land` of the lower
-//! layer rebases, pushes and retargets each layer above before it deletes its branch.
+//! `land` reads the base a layer lands on, and `land` of the lower layer rebases, pushes and retargets each layer above
+//! before it deletes its branch. Each moved layer needs `pr` and a new approval, as the forge requires an approval of
+//! the latest push (15, Controls 1).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use bp_change::IssueStatus;
-use bp_change::intents::{self, Base};
+use bp_change::intents::{self, Base, Dependency, STACK_DEPTH, Unstacked};
 use bp_forge::{Gh, PullRequest};
-use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
+use bp_vault::{Code, Id, Index, Kind, Record, Refusal};
 use serde_json::Value;
 
 use crate::claim::{branch, field, git, held};
 
-/// A stack is at most three layers deep; the cap is a choice, not a measurement (15, a dependency chain to landed).
-pub(crate) const STACK_DEPTH: usize = 3;
+fn status(index: &Index, id: &str) -> Result<Option<String>, Refusal> {
+    Ok(index.header(id)?.and_then(|h| h.get("status")?.as_str().map(str::to_string)))
+}
 
-/// The dependency `cut` stacks on, and its open pull request: the unresolved `depends` target whose stack holds every
-/// other one. `None` when each target is resolved. A target with no open pull request refuses `dependency_unpushed`,
-/// and a layer past [`STACK_DEPTH`] refuses `stack_too_deep` (15, a dependency chain to landed). `--base` cannot
-/// name another start then.
+/// The stack a dependant of `d` would sit on: `d`, then each held claim's unresolved `base_issue` below it, at most
+/// [`STACK_DEPTH`] layers ([`Dependency::layers`]).
+pub(crate) fn layers(index: &Index, d: &str) -> Result<Vec<String>, Refusal> {
+    let mut layers = vec![d.to_string()];
+    while layers.len() < STACK_DEPTH {
+        let Ok(below) = Id::parse(&layers[layers.len() - 1]) else { break };
+        let Some(next) = held(index, &below)?.and_then(|h| field(&h, "base_issue")) else { break };
+        if status(index, &next)?.as_deref() == Some(IssueStatus::Resolved.as_str()) {
+            break;
+        }
+        layers.push(next);
+    }
+    Ok(layers)
+}
+
+/// The dependency `cut` stacks on, and its open pull request, by the stack test ready shares ([`intents::stack`]);
+/// `None` when each `depends` target is resolved. `--base` cannot name another start then.
 pub(crate) fn below(
     top: &Path,
     index: &Index,
     id: &Id,
     base: Option<&str>,
 ) -> Result<Option<(Id, PullRequest)>, Refusal> {
-    let resolved = |d: &Id| -> Result<bool, Refusal> {
-        let status = index.header(d.as_str())?.and_then(|h| h.get("status")?.as_str().map(str::to_string));
-        Ok(status.as_deref() == Some(IssueStatus::Resolved.as_str()))
-    };
     let header = index.header(id.as_str())?.unwrap_or_default();
-    let mut below = Vec::new();
-    let depends = header.get("depends").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
-    for d in depends.filter_map(|d| Id::parse(d).ok()) {
-        if !resolved(&d)? {
-            below.push(d);
-        }
-    }
-    if below.is_empty() {
-        return Ok(None);
+    let gh = Gh::new(top);
+    let (mut depends, mut prs) = (Vec::new(), Vec::new());
+    for d in header.get("depends").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        let status = status(index, d)?;
+        let pr = match Id::parse(d) {
+            Ok(d) if status.as_deref() != Some(IssueStatus::Resolved.as_str()) => {
+                gh.prs_for_head(&branch(&d))?.into_iter().find(PullRequest::is_open)
+            }
+            _ => None,
+        };
+        let layers = if pr.is_some() { layers(index, d)? } else { Vec::new() };
+        depends.push(Dependency { id: d.to_string(), status, open_pr: pr.is_some(), layers });
+        prs.push(pr);
     }
     let rule = "a dependant is cut from the head of its unresolved dependency's open pull request (15, a dependency \
                 chain to landed)";
-    let gh = Gh::new(top);
-    let mut stacks = Vec::new();
-    for d in &below {
-        let Some(pr) = gh.prs_for_head(&branch(d))?.into_iter().find(PullRequest::is_open) else {
+    let on = match intents::stack(&depends) {
+        Ok(None) => return Ok(None),
+        Ok(Some(on)) => on,
+        Err(Unstacked::Unpushed(d)) => {
             return Err(Refusal::new(
                 Code::DependencyUnpushed,
-                d.as_str(),
+                d[0],
                 rule,
-                format!("{id} depends on {d}, which has no open pull request: bp pr {d}, then rerun"),
+                format!("{id} depends on {}, which has no open pull request: bp pr {}, then rerun", d[0], d[0]),
             ));
-        };
-        // The layers under the new one, `d` first: each held claim's unresolved `base_issue`, one past the cap at most.
-        let mut layers = vec![d.clone()];
-        while layers.len() <= STACK_DEPTH {
-            let next = held(index, &layers[layers.len() - 1])?.and_then(|h| field(&h, "base_issue"));
-            match next.and_then(|n| Id::parse(&n).ok()) {
-                Some(n) if !resolved(&n)? => layers.push(n),
-                _ => break,
-            }
         }
-        stacks.push((pr, layers));
-    }
-    let Some((pr, mut layers)) = stacks.into_iter().find(|(_, layers)| below.iter().all(|d| layers.contains(d))) else {
-        let names: Vec<&str> = below.iter().map(Id::as_str).collect();
-        return Err(Refusal::new(
-            Code::DependencyUnpushed,
-            id.as_str(),
-            rule,
-            format!("{id} depends on {}, which no one stack holds: land all but one, then rerun", names.join(", ")),
-        ));
+        Err(Unstacked::Split(d)) => {
+            return Err(Refusal::new(
+                Code::DependencySplit,
+                id.as_str(),
+                "an issue's unresolved dependencies sit in one stack (15, a dependency chain to landed)",
+                format!("{id} depends on {}, which no one stack holds: land all but one, then rerun", d.join(", ")),
+            ));
+        }
+        Err(Unstacked::Deep(layers)) => {
+            return Err(Refusal::new(
+                Code::StackTooDeep,
+                id.as_str(),
+                "a stack is at most three layers deep (15, a dependency chain to landed)",
+                format!(
+                    "{id} would sit on {}; bp land {} first, then rerun",
+                    layers.join(" on "),
+                    layers[layers.len() - 1]
+                ),
+            ));
+        }
     };
-    if layers.len() >= STACK_DEPTH {
-        let names: Vec<&str> = layers.iter().map(Id::as_str).collect();
-        return Err(Refusal::new(
-            Code::StackTooDeep,
-            id.as_str(),
-            "a stack is at most three layers deep (15, a dependency chain to landed)",
-            format!("{id} would sit on {}; bp land {} first, then rerun", names.join(" on "), names[names.len() - 1]),
-        ));
-    }
-    let below = layers.swap_remove(0);
     if let Some(b) = base {
         return Err(Refusal::usage(
             format!("--base {b}"),
-            format!("{id} is cut from the head of {below}'s pull request; drop --base, then rerun"),
+            format!("{id} is cut from the head of {}'s pull request; drop --base, then rerun", on.id),
         ));
     }
-    Ok(Some((below, pr)))
+    let at = depends.iter().position(|d| std::ptr::eq(d, on)).expect("the stack test returns one of them");
+    let pr = prs.swap_remove(at).expect("a dependency on the stack holds an open pull request");
+    Ok(Some((Id::parse(&on.id).expect("only a parsed id holds a pull request"), pr)))
 }
 
-/// An approval at `reviewed` carries to the pull request's head (15, E7): the patch id of the diff the reviewer saw,
-/// against the claim's base `from`, which stands for the base at review time, equals that of the head against the
-/// base now, read from the clone at `top`. An empty diff or a commit the clone lacks carries nothing.
-pub(crate) fn same_diff(top: &Path, from: &str, reviewed: &str, p: &PullRequest) -> bool {
-    let Some(base) = &p.base_ref_name else { return false };
+/// Whether the diff the reviewer approved at `reviewed`, against the claim's base `from`, is the head's against the
+/// base now, by `git patch-id --verbatim`, whitespace kept: `rm -rf /x/cache` and `rm -rf /x/ cache` differ. `None`
+/// when the clone at `top` lacks a commit or a diff is empty. It only names the refusal: no earlier approval counts.
+pub(crate) fn diff_unchanged(top: &Path, from: &str, reviewed: &str, p: &PullRequest) -> Option<bool> {
+    let base = p.base_ref_name.as_ref()?;
     let id = |range: String| -> Option<String> {
         let diff = Command::new("git")
             .arg("-C")
@@ -112,7 +120,7 @@ pub(crate) fn same_diff(top: &Path, from: &str, reviewed: &str, p: &PullRequest)
         let mut child = Command::new("git")
             .arg("-C")
             .arg(top)
-            .args(["patch-id", "--stable"])
+            .args(["patch-id", "--verbatim"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -121,8 +129,8 @@ pub(crate) fn same_diff(top: &Path, from: &str, reviewed: &str, p: &PullRequest)
         let out = child.wait_with_output().ok()?;
         String::from_utf8_lossy(&out.stdout).split_whitespace().next().map(str::to_string)
     };
-    let reviewed = id(format!("{from}...{reviewed}"));
-    reviewed.is_some() && reviewed == id(format!("refs/remotes/origin/{base}...{}", p.head_ref_oid))
+    let reviewed = id(format!("{from}...{reviewed}"))?;
+    Some(reviewed == id(format!("refs/remotes/origin/{base}...{}", p.head_ref_oid))?)
 }
 
 /// The branch a held `claim`'s pull request lands on (15, a dependency chain to landed): its `base_branch`; or, when
@@ -133,8 +141,7 @@ pub(crate) fn base(index: &Index, claim: &Record) -> Result<Base, Refusal> {
     // A stack is at most `STACK_DEPTH` layers, so the walk ends within as many steps.
     for _ in 0..STACK_DEPTH {
         let Some(issue) = below.take() else { break };
-        let status = index.header(&issue)?.and_then(|h| h.get("status")?.as_str().map(str::to_string));
-        if status.as_deref() != Some(IssueStatus::Resolved.as_str()) {
+        if status(index, &issue)?.as_deref() != Some(IssueStatus::Resolved.as_str()) {
             return Ok(Base::Unmerged(issue));
         }
         let landed = index
@@ -189,51 +196,77 @@ pub(crate) fn children(index: &Index, below: &Id) -> Result<Vec<Child>, Refusal>
     Ok(out)
 }
 
-/// What `land` did to the layers above: those moved onto the base, with their blocks' runs at the new head, and those
-/// stranded on the branch below by a conflict.
+/// What `land` did to the layers above: those moved onto the base, those stranded on the branch below, and the next
+/// step for each child, then the deletion of the branch below while one is stranded.
 pub(crate) struct Moved {
     pub(crate) restacked: Vec<Id>,
     pub(crate) stranded: Vec<Id>,
-    pub(crate) ran: Vec<bp_check::Ran>,
+    pub(crate) next: Vec<String>,
 }
 
-/// Moves each child onto `target` once the layer below has merged, then runs its blocks at its new head with no lock
-/// held, as they may take minutes (15, a dependency chain to landed).
-pub(crate) fn restack(
-    gh: &Gh,
-    vault: &Vault,
-    children: &[Child],
-    target: &str,
-    clock: &dyn Fn() -> String,
-) -> Result<Moved, Refusal> {
-    let mut moved = Moved { restacked: Vec::new(), stranded: Vec::new(), ran: Vec::new() };
+/// Moves each child onto `target` once the layer `below` has merged. It runs no blocks: a child's code runs where the
+/// agent runs it, at `pr`, which the next step names, and the push needs the reviewer's approval again.
+pub(crate) fn restack(gh: &Gh, children: &[Child], target: &str, below: &str) -> Result<Moved, Refusal> {
+    let mut moved = Moved { restacked: Vec::new(), stranded: Vec::new(), next: Vec::new() };
     for child in children {
-        if move_onto(gh, child, target)? {
-            moved.ran.extend(bp_check::run(vault, &child.id, &child.worktree, None, &[], clock)?);
-            moved.restacked.push(child.id.clone());
-        } else {
-            moved.stranded.push(child.id.clone());
+        let (id, w) = (&child.id, child.worktree.display());
+        match move_onto(gh, child, target)? {
+            Onto::Moved => {
+                moved.next.push(format!("bp pr {id}; then the reviewer approves its new head"));
+                moved.restacked.push(id.clone());
+                continue;
+            }
+            Onto::Conflict => moved.next.push(format!(
+                "in {w}: git rebase --onto origin/{target} {}, resolve the conflict, then bp pr {id}",
+                child.from
+            )),
+            Onto::Behind(at) => moved.next.push(format!(
+                "in {w}: git merge {at}, which the forge holds, then git rebase --onto origin/{target} {}, then bp pr {id}",
+                child.from
+            )),
         }
+        moved.stranded.push(id.clone());
+    }
+    if !moved.stranded.is_empty() {
+        moved.next.push(format!("once no pull request targets {below}: git push origin --delete {below}"));
     }
     Ok(moved)
 }
 
+/// Where [`move_onto`] left a child.
+enum Onto {
+    Moved,
+    /// The rebase conflicted, and was undone.
+    Conflict,
+    /// The forge's head holds this commit, which the worktree lacks, so a push would drop it.
+    Behind(String),
+}
+
 /// Moves `child` onto `target`: rebases its own commits, those past its claim's base, onto origin's `target`, pushes
-/// with a lease on the forge's head, and retargets its pull request. The claim's base, not the merged head, bounds
-/// them: a child cut before the layer below moved, or a grandchild whose parent was rebased, holds its own commits
-/// past it alone. Each step skips what is done, so a land that stopped part way finishes on its rerun. `false` when
-/// the rebase conflicts: it is undone, and the child stays on the branch below, which `land` keeps, so its pull
-/// request stays open.
-fn move_onto(gh: &Gh, child: &Child, target: &str) -> Result<bool, Refusal> {
+/// with a lease on the head the forge showed before the rebase, and retargets its pull request. The claim's base, not
+/// the merged head, bounds them: a child cut before the layer below moved, or a grandchild whose parent was rebased,
+/// holds its own commits past it alone. Each step skips what is done, so a land that stopped part way finishes on its
+/// rerun. A child left in place stays on the branch below, which `land` keeps, so its pull request stays open.
+fn move_onto(gh: &Gh, child: &Child, target: &str) -> Result<Onto, Refusal> {
     let (w, onto) = (&child.worktree, format!("refs/remotes/origin/{target}"));
-    if git(w, &["merge-base", "--is-ancestor", &onto, "HEAD"]).is_err()
-        && git(w, &["rebase", "-q", "--onto", &onto, &child.from]).is_err()
-    {
-        git(w, &["rebase", "--abort"])?;
-        return Ok(false);
+    let pr = gh.prs_for_head(&child.branch)?.into_iter().find(PullRequest::is_open);
+    if git(w, &["merge-base", "--is-ancestor", &onto, "HEAD"]).is_err() {
+        if let Some(p) = &pr
+            && git(w, &["merge-base", "--is-ancestor", &p.head_ref_oid, "HEAD"]).is_err()
+        {
+            return Ok(Onto::Behind(p.head_ref_oid.clone()));
+        }
+        if let Err(e) = git(w, &["rebase", "-q", "--onto", &onto, &child.from]) {
+            // Only a conflict leaves a rebase to undo; any other failure is the tool's, and the rerun recovers.
+            if !w.join(git(w, &["rev-parse", "--git-path", "rebase-merge"])?).is_dir() {
+                return Err(e);
+            }
+            git(w, &["rebase", "--abort"])?;
+            return Ok(Onto::Conflict);
+        }
     }
     let head = git(w, &["rev-parse", "HEAD"])?;
-    if let Some(pr) = gh.prs_for_head(&child.branch)?.into_iter().find(PullRequest::is_open) {
+    if let Some(pr) = pr {
         if pr.head_ref_oid != head {
             let lease = format!("--force-with-lease=refs/heads/{}:{}", child.branch, pr.head_ref_oid);
             git(w, &["push", "-q", "origin", &lease, &format!("{head}:refs/heads/{}", child.branch)])?;
@@ -243,5 +276,5 @@ fn move_onto(gh: &Gh, child: &Child, target: &str) -> Result<bool, Refusal> {
             gh.retarget(pr.number, target)?;
         }
     }
-    Ok(true)
+    Ok(Onto::Moved)
 }

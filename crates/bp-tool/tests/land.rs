@@ -121,7 +121,9 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     common::bp(v, &["set", "projects/bp/project", "reviewer", "r"]);
     assert_eq!(land(), "review_missing", "the author's approval does not count");
     forge(t, &h, &[("r", "old")], &["SUCCESS"]);
-    assert_eq!(land(), "diff_changed", "an approval of a head the clone lacks carries nothing");
+    let (_, out) = bp(v, t, &[], &["land", ISSUE]);
+    assert_eq!(out["code"], "review_missing", "an approval of an earlier head never counts");
+    assert!(out["fix"].as_str().unwrap().starts_with("r approved old, which this clone cannot compare"), "{out}");
     forge(t, &h, &[("r", &h)], &[]);
     assert_eq!(land(), "checks_pending");
     let bye = commit(&w, &["rm", "-q", "hello.txt"], "bye");
@@ -139,10 +141,10 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     git(&w, &["revert", "--no-edit", "HEAD"]);
     let back = git(&w, &["rev-parse", "HEAD"]).trim().to_string();
     assert_eq!(bp(v, t, &[], &["pr", ISSUE]).1["runs"][0]["verdict"], "pass");
-    forge(t, &back, &[("r", &bye)], &["SUCCESS", "SKIPPED"]);
-    assert_eq!(land(), "diff_changed", "an approval of an empty diff carries nothing");
-    // `back` holds the diff the reviewer approved at `h`, so the approval carries (15, E7).
+    // `back` holds the diff the reviewer approved at `h`, but the forge needs an approval of the latest push.
     forge(t, &back, &[("r", &h), ("r", &bye)], &["SUCCESS", "SKIPPED"]);
+    assert_eq!(land(), "review_missing", "an approval of an empty diff compares nothing");
+    forge(t, &back, &[("r", &back)], &["SUCCESS", "SKIPPED"]);
     let (code, out) = bp(v, t, &[], &["land", ISSUE]);
     assert_eq!((code, out["status"].as_str()), (Some(0), Some("resolved")), "{out}");
     let merged = std::fs::read_to_string(t.join("merged")).unwrap();
@@ -260,4 +262,33 @@ fn pr_targets_the_claim_base_and_reruns_until_each_block_passes_as_written() {
         before.parse::<u32>().unwrap() + 6,
         "two pr, two edits, two failed pr"
     );
+}
+
+#[test]
+fn a_push_after_the_approval_refuses_and_whitespace_is_part_of_the_diff() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, _) = opened(v, t, &[]);
+    let land = || bp(v, t, &[], &["land", ISSUE]);
+    std::fs::write(w.join("go.sh"), "rm -rf /x/cache\n").unwrap();
+    let h1 = commit(&w, &["add", "go.sh"], "go");
+    std::fs::write(w.join("go.sh"), "rm -rf /x/ cache\n").unwrap();
+    let h2 = commit(&w, &["add", "go.sh"], "space");
+    forge(t, &h2, &[("r", &h1)], &["SUCCESS"]);
+    let (code, out) = land();
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("diff_changed")), "one space deletes /x: {out}");
+    assert!(
+        out["fix"].as_str().unwrap().starts_with(&format!("r approved {h1}, and the diff at {h2} differs")),
+        "{out}"
+    );
+    git(&w, &["commit", "--amend", "-qm", "space, again"]);
+    let h3 = git(&w, &["rev-parse", "HEAD"]).trim().to_string();
+    forge(t, &h3, &[("r", &h2)], &["SUCCESS"]);
+    let (code, out) = land();
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("review_missing")), "{out}");
+    assert!(
+        out["fix"].as_str().unwrap().starts_with(&format!("diff unchanged since {h2}; the human approves")),
+        "{out}"
+    );
+    assert!(!t.join("merged").exists(), "no refusal merges");
 }

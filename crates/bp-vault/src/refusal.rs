@@ -17,6 +17,7 @@ crate::closed_enum! {
         VaultLocked = "vault_locked",
         AlreadyClaimed = "already_claimed",
         DependencyUnpushed = "dependency_unpushed",
+        DependencySplit = "dependency_split",
         StackTooDeep = "stack_too_deep",
         ReviewMissing = "review_missing",
         ChecksPending = "checks_pending",
