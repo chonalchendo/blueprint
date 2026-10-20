@@ -50,16 +50,11 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     let spec = Spec::of(target);
     validate::validate(BUNDLE, spec)?;
     let (files, skipped) = plan(spec);
-    let entries = entries(spec, &files);
+    let import = importer(top, spec);
+    let entries = entries(spec, &files, import);
     let always_on = top.join(spec.always_on);
-    let held = read(&always_on)?;
-    if let Some(text) = held.as_deref()
-        && (text.matches(BEGIN).count(), text.matches(END).count())
-            != if span(text).is_some() { (1, 1) } else { (0, 0) }
-    {
-        let fix = format!("{} holds an unpaired {BEGIN} or {END}; leave one pair or none, then rerun", spec.always_on);
-        return Err(Refusal::failed(spec.always_on, fix));
-    }
+    let held = sectioned(top, spec.always_on)?;
+    let imported = import.map(|rel| sectioned(top, rel).map(|t| (rel, t.unwrap_or_default()))).transpose()?;
     let settings_path = top.join(spec.settings);
     let settings = match read(&settings_path)? {
         Some(t) => serde_json::from_str(&t).ok().filter(Value::is_object),
@@ -93,7 +88,8 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
         .flat_map(Map::keys)
         .filter(|p| !p.contains('#') && !entries.contains_key(*p))
         .collect();
-    let mut writes = files.keys().map(String::as_str).chain([spec.always_on, spec.settings, manifest_rel.as_str()]);
+    let mut writes =
+        files.keys().map(String::as_str).chain([spec.always_on, spec.settings, &manifest_rel]).chain(import);
     let dirs = [spec.skills, spec.agents, spec.dispatch, spec.hooks];
     let removable = |p: &str| dirs.iter().any(|d| p.starts_with(&format!("{d}/"))) && inside(top, p);
     if let Some(out) =
@@ -122,12 +118,16 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
         put(&top.join(rel), bytes)?;
     }
     put(&always_on, with_section(held.as_deref(), &section()).as_bytes())?;
+    if let Some((rel, text)) = &imported {
+        put(&top.join(rel), with_section(Some(text), &import_section(spec)).as_bytes())?;
+    }
     // `serde_json` holds no key order, so the rewrite sorts the user's keys; their values stay.
     put(&settings_path, pretty(&settings).as_bytes())?;
     put(&manifest_path, manifest.as_bytes())?;
     let mut local: Vec<&str> = files.keys().map(String::as_str).collect();
     local.extend([spec.settings, &manifest_rel]);
-    // The one tracked edit is the section; an always-on file the install created is the install's own.
+    // The tracked edits are the sections; an always-on file the install created is the install's own. An import goes
+    // only into a file that exists, so it is never the install's own.
     if held.is_none() {
         local.push(spec.always_on);
     }
@@ -150,12 +150,15 @@ fn inside(top: &Path, rel: &str) -> bool {
         .all(|a| a.canonicalize().is_ok_and(|a| a.starts_with(&root)))
 }
 
-/// The manifest entries for `spec`: each installed file's hash, then the section's and Blueprint's hook entries'.
+/// The manifest entries for `spec`: each installed file's hash, then the sections' and Blueprint's hook entries'.
 /// `install` writes them, and `check` holds a manifest to them, so a bundle the binary no longer ships refuses even
-/// under the same tool version (17, check 7).
-fn entries(spec: &Spec, files: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, String> {
+/// under the same tool version (17, check 7). The import's entry is keyed by the file that holds it.
+fn entries(spec: &Spec, files: &BTreeMap<String, Vec<u8>>, import: Option<&str>) -> BTreeMap<String, String> {
     let mut entries: BTreeMap<String, String> = files.iter().map(|(p, b)| (p.clone(), hash(b))).collect();
     entries.insert(spec.section_entry(), hash(section().as_bytes()));
+    if let Some(rel) = import {
+        entries.insert(format!("{rel}#bp"), hash(import_section(spec).as_bytes()));
+    }
     // `ours` keeps Blueprint's groups alone, so the user's settings do not change the entry.
     let hooks = merged(json!({}), spec).expect("an empty object merges");
     entries.insert(spec.hooks_entry(), hash(&ours(&hooks, spec)));
@@ -165,6 +168,35 @@ fn entries(spec: &Spec, files: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, S
 /// Blueprint's section of the always-on file, the markers included.
 fn section() -> String {
     format!("{BEGIN}\n{}{END}\n", text_of("always-on.md"))
+}
+
+/// The section that imports the always-on file into a harness file that would make the harness skip it.
+fn import_section(spec: &Spec) -> String {
+    format!("{BEGIN}\n@{}\n{END}\n", spec.always_on)
+}
+
+/// The first of `spec.imports` at `top`, when no line of it outside Blueprint's section imports the always-on file
+/// already (27, design change 1). With none of them, the harness reads the always-on file itself.
+fn importer(top: &Path, spec: &Spec) -> Option<&'static str> {
+    let rel = spec.imports.iter().copied().find(|r| top.join(r).is_file())?;
+    let text = std::fs::read_to_string(top.join(rel)).unwrap_or_default();
+    let outside = span(&text).map_or_else(|| text.clone(), |r| format!("{}{}", &text[..r.start], &text[r.end..]));
+    let line = format!("@{}", spec.always_on);
+    (!outside.lines().any(|l| l.trim_end() == line)).then_some(rel)
+}
+
+/// A file that holds or will hold a section, read: `None` when absent. Unpaired markers refuse, as no one section
+/// could be replaced.
+fn sectioned(top: &Path, rel: &str) -> Result<Option<String>, Refusal> {
+    let held = read(&top.join(rel))?;
+    if let Some(text) = held.as_deref()
+        && (text.matches(BEGIN).count(), text.matches(END).count())
+            != if span(text).is_some() { (1, 1) } else { (0, 0) }
+    {
+        let fix = format!("{rel} holds an unpaired {BEGIN} or {END}; leave one pair or none, then rerun");
+        return Err(Refusal::failed(rel, fix));
+    }
+    Ok(held)
 }
 
 /// Refuses `bundle_mismatch` when an installed bundle at `top` drifted: another tool version, a manifest that is not
@@ -198,7 +230,7 @@ fn check_target(top: &Path, spec: &Spec) -> Result<(), Refusal> {
     // The version alone cannot see a bundle that changed under one version, so the manifest is held to the bundle the
     // binary embeds, entry by entry.
     let held = manifest["files"].as_object().cloned().unwrap_or_default();
-    let ships = entries(spec, &plan(spec).0);
+    let ships = entries(spec, &plan(spec).0, importer(top, spec));
     let names: BTreeSet<&String> = held.keys().chain(ships.keys()).collect();
     if let Some(entry) =
         names.into_iter().find(|e| held.get(*e).and_then(Value::as_str) != ships.get(*e).map(String::as_str))
@@ -215,8 +247,8 @@ fn check_target(top: &Path, spec: &Spec) -> Result<(), Refusal> {
 
 /// The hash of one manifest entry as the clone holds it now.
 fn current(top: &Path, spec: &Spec, entry: &str) -> Option<String> {
-    if entry == spec.section_entry() {
-        let text = std::fs::read_to_string(top.join(spec.always_on)).ok()?;
+    if let Some(rel) = entry.strip_suffix("#bp") {
+        let text = std::fs::read_to_string(top.join(rel)).ok()?;
         return Some(hash(text[span(&text)?].as_bytes()));
     }
     if entry == spec.hooks_entry() {

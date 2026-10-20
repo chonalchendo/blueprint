@@ -22,8 +22,13 @@ pub(crate) struct Spec {
     /// The dispatch templates, each named `<role>-<template>`: a harness reads none of them.
     pub(crate) dispatch: &'static str,
     pub(crate) hooks: &'static str,
-    /// The always-on file, which holds Blueprint's section between the markers.
+    /// The always-on file, which holds Blueprint's section between the markers. It is `AGENTS.md` for both targets,
+    /// so one copy serves both harnesses (27, design change 1).
     pub(crate) always_on: &'static str,
+    /// The files that make the harness skip the always-on file, in the harness's order. The first that exists gets a
+    /// section of one line that imports it, unless it imports it already. Claude Code reads `AGENTS.md` only when none
+    /// of its own files exists.
+    pub(crate) imports: &'static [&'static str],
     /// The file whose `hooks` key holds the hook entries, beside the user's own.
     pub(crate) settings: &'static str,
     /// Claude Code's `"onFailure": "block"` on each hook entry: without it, a hook script that cannot start is a
@@ -50,7 +55,8 @@ pub(crate) const CLAUDE: Spec = Spec {
     agents: ".claude/agents",
     dispatch: ".claude/bp/dispatch",
     hooks: ".claude/hooks",
-    always_on: "CLAUDE.md",
+    always_on: "AGENTS.md",
+    imports: &["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"],
     settings: ".claude/settings.local.json",
     block_on_failure: true,
     allow: &["Bash(export BP_ROLE=*)"],
@@ -75,6 +81,7 @@ pub(crate) const CODEX: Spec = Spec {
     dispatch: ".agents/bp/dispatch",
     hooks: ".codex/hooks",
     always_on: "AGENTS.md",
+    imports: &[],
     settings: ".codex/hooks.json",
     block_on_failure: false,
     allow: &[],
@@ -100,10 +107,10 @@ impl Spec {
         format!("{}/bundle.json", self.skills)
     }
 
-    /// The manifest entries of the two edits inside shared files: `CLAUDE.md#bp`, and `settings.local.json#hooks`,
-    /// which holds the hook entries and the allow rules.
+    /// The manifest entries of the edits inside shared files: `AGENTS.md#bp`, an import's `<file>#bp`, and
+    /// `settings.local.json#hooks`, which holds the hook entries and the allow rules.
     pub(crate) fn section_entry(&self) -> String {
-        format!("{}#bp", file_name(self.always_on))
+        format!("{}#bp", self.always_on)
     }
 
     pub(crate) fn hooks_entry(&self) -> String {
