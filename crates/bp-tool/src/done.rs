@@ -94,7 +94,7 @@ pub(crate) fn done(index: &Index, id: &Id, header: &Map<String, Value>, action: 
 /// The batch is full or the finish line is covered: each named block in the milestone's `## Finish line` has a
 /// namesake in the `## Check` of an issue under it (21, needs derivation).
 fn derived(index: &Index, id: &Id) -> Result<bool, Refusal> {
-    let f = Filter { kind: Kind::Issue, status: None, project: None, under: Some(id.as_str()), limit: usize::MAX >> 1 };
+    let f = Filter { kind: Kind::Issue, status: None, project: None, under: Some(id.as_str()), limit: crate::ALL };
     let (issues, _) = index.list(&f)?;
     if issues.iter().filter(|i| intents::is_live_issue(i.status.as_deref().unwrap_or_default())).count() >= BATCH {
         return Ok(true);
