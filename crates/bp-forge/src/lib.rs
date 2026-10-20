@@ -81,7 +81,7 @@ pub struct CheckRun {
 impl PullRequest {
     /// The last segment of the head branch: the issue's slug (15).
     pub fn slug(&self) -> &str {
-        self.head_ref_name.rsplit('/').next().unwrap_or_default()
+        self.head_ref_name.rsplit_once('/').map_or(&self.head_ref_name, |(_, s)| s)
     }
 
     /// Open: `state` is `OPEN`, or absent as in `gh pr list`.

@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bp_vault::Refusal;
 use serde::Deserialize;
@@ -17,6 +18,9 @@ const FIELDS: &str = "number,state,author,baseRefName,headRefName,headRefOid,rev
 
 /// How many open pull requests the snapshot lists; `gh pr list` stops at 30 unless told.
 const OPEN_LIMIT: &str = "1000";
+
+/// Whether this process has run `gh`: one process runs one verb, so this is whether the verb reached the forge.
+static CALLED: AtomicBool = AtomicBool::new(false);
 
 /// `gh`, run in a clone of the project repository: `gh` finds the repository from the clone's `origin`.
 #[derive(Debug, Clone)]
@@ -30,6 +34,12 @@ impl Gh {
     /// `gh` from `PATH`, run in `dir`.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into(), path: None }
+    }
+
+    /// Whether this process has run `gh` yet. A repo verb refused before any forge call refreshes no snapshot (27,
+    /// design change 9).
+    pub fn called() -> bool {
+        CALLED.load(Ordering::Relaxed)
     }
 
     /// The token's own login (`gh api user`).
@@ -78,7 +88,10 @@ impl Gh {
         let failed = |e: std::io::Error| Refusal::failed(dir.display().to_string(), e.to_string());
         std::fs::create_dir_all(dir).map_err(failed)?;
         for (name, bytes) in &files {
-            put(&dir.join(name), bytes)?;
+            let (path, tmp) = (dir.join(name), dir.join(format!(".{name}.{}", std::process::id())));
+            std::fs::write(&tmp, bytes)
+                .and_then(|()| std::fs::rename(&tmp, &path))
+                .map_err(|e| Refusal::failed(path.display().to_string(), e.to_string()))?;
         }
         // A view of a claim no longer held would outlive its pull request's close.
         for path in std::fs::read_dir(dir).map_err(failed)?.flatten().map(|e| e.path()) {
@@ -132,6 +145,7 @@ impl Gh {
 
     /// Stdout of a call that exited 0.
     fn run(&self, args: &[&str]) -> Result<Vec<u8>, Refusal> {
+        CALLED.store(true, Ordering::Relaxed);
         let mut cmd = Command::new("gh");
         cmd.args(args).current_dir(&self.dir).stdin(Stdio::null());
         if let Some(path) = &self.path {
@@ -158,15 +172,6 @@ impl Gh {
     fn subject(args: &[&str]) -> String {
         format!("gh {}", args.join(" "))
     }
-}
-
-/// Writes `bytes` to `path` through a temporary file in its directory and a rename.
-fn put(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = path.with_file_name(format!(".{name}.{}", std::process::id()));
-    std::fs::write(&tmp, bytes)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| Refusal::failed(path.display().to_string(), e.to_string()))
 }
 
 #[cfg(test)]

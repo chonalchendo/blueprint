@@ -137,7 +137,9 @@ fn done_answers_the_stop_column_with_no_slice() {
     let d = vault();
     let (code, v) = walk(d.path(), &[SEED, "--for", "complete", "--done"]);
     assert_eq!(code, Some(0), "{v}");
-    assert_eq!(v, serde_json::json!({ "id": SEED, "for": "complete", "done": false, "contract_version": 1 }));
+    let want =
+        serde_json::json!({ "id": SEED, "for": "complete", "done": false, "forge_age": null, "contract_version": 1 });
+    assert_eq!(v, want, "no snapshot is in view, so its age is null");
     for (seed, action) in [("projects/bp/designs/system", "design"), ("projects/bp/designs/system", "shape")] {
         let (_, v) = walk(d.path(), &[seed, "--for", action, "--done"]);
         assert_eq!(v["done"], true, "{action}: {v}");
@@ -267,11 +269,14 @@ fn a_stop_reads_the_vault_snapshot_and_never_calls_gh() {
         let out = cmd.args(["walk", SEED, "--for", "review", "--done", "--json"]).output().unwrap();
         let v: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert!(out.status.success(), "{v}");
-        v["done"].clone()
+        (v["done"].clone(), v["forge_age"].clone())
     };
-    assert_eq!(stop(), false, "with no snapshot no pull request is in view");
+    assert_eq!(stop(), (Value::Bool(false), Value::Null), "with no snapshot no pull request is in view");
     write(d.path(), ".bp/forge/bp/open-prs.json", r#"[{"number":1,"headRefName":"bp/0001.seed","headRefOid":"aaaa"}]"#);
-    assert_eq!(stop(), true, "the review is at the snapshot's head");
+    // Another project's bad file is out of view: the stop reads its own project's snapshot only.
+    write(d.path(), ".bp/forge/zzz/open-prs.json", "garbage");
+    let (done, age) = stop();
+    assert!(done == true && age.is_i64(), "the review is at the snapshot's head, read {age} seconds ago");
     assert!(!mark.exists(), "no stop called gh");
 }
 

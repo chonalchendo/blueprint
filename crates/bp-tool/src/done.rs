@@ -19,13 +19,15 @@ const BATCH: usize = 3;
 /// How deep `search` must find a learning by its cue: the search verb's default limit.
 const RETRIEVAL: usize = 10;
 
-/// Whether the action's Stop column holds for the seed `id`, whose header the walk read.
+/// Whether the action's Stop column holds for the seed `id`, whose header the walk read. A stop that reads the forge
+/// sets `forge_age` to its snapshot's age; one that reads none leaves it `None`.
 pub(crate) fn done(
     root: &Path,
     index: &Index,
     id: &Id,
     header: &Map<String, Value>,
     action: Action,
+    forge_age: &mut Option<i64>,
 ) -> Result<bool, Refusal> {
     let text = |k: &str| header.get(k).and_then(Value::as_str);
     Ok(match action {
@@ -45,19 +47,19 @@ pub(crate) fn done(
             if intents::latest_claim(&claims).is_some_and(|c| c.escalated) {
                 return Ok(true);
             }
-            match open_head(root, index, id)? {
+            match open_head(root, index, id, forge_age)? {
                 Some((pr, Some(worktree))) => Repo::find(&worktree).and_then(|r| r.head()) == Some(pr),
                 _ => false,
             }
         }
-        Action::Review => match open_head(root, index, id)? {
+        Action::Review => match open_head(root, index, id, forge_age)? {
             Some((pr, _)) => index
                 .records(id.as_str(), Kind::Review)?
                 .iter()
                 .any(|r| field(r, "head").as_deref() == Some(pr.as_str())),
             None => false,
         },
-        Action::Respond => responded(root, index, id)?,
+        Action::Respond => responded(root, index, id, forge_age)?,
         Action::TriageDrift => {
             // An integrity run checks the vault, not a design: 21's drifted reads drift runs only.
             let failed = index.records(id.as_str(), Kind::Run)?.into_iter().filter(|r| {
@@ -121,8 +123,9 @@ fn names(body: &str, heading: &str) -> BTreeSet<String> {
 }
 
 /// Every finding of the latest review has a disposition, matched by its index, and the head moved if one is `fixed`.
-fn responded(root: &Path, index: &Index, id: &Id) -> Result<bool, Refusal> {
-    let (Some((pr, _)), Some(review)) = (open_head(root, index, id)?, index.records(id.as_str(), Kind::Review)?.pop())
+fn responded(root: &Path, index: &Index, id: &Id, forge_age: &mut Option<i64>) -> Result<bool, Refusal> {
+    let (Some((pr, _)), Some(review)) =
+        (open_head(root, index, id, forge_age)?, index.records(id.as_str(), Kind::Review)?.pop())
     else {
         return Ok(false);
     };
@@ -137,10 +140,16 @@ fn responded(root: &Path, index: &Index, id: &Id) -> Result<bool, Refusal> {
 
 /// The head of the issue's open pull request while a claim is held, and the claim's worktree when this machine has
 /// it. The forge is the snapshot the intents read, never a call (22, constraint 8): with none, no pull request is in
-/// view, and the stop reads false until a repo verb writes one.
-fn open_head(root: &Path, index: &Index, id: &Id) -> Result<Option<(String, Option<PathBuf>)>, Refusal> {
+/// view, and the stop reads false until a repo verb writes one. Only the issue's own project is read.
+fn open_head(
+    root: &Path,
+    index: &Index,
+    id: &Id,
+    forge_age: &mut Option<i64>,
+) -> Result<Option<(String, Option<PathBuf>)>, Refusal> {
     let Some(claim) = held(index, id)? else { return Ok(None) };
     let worktree = field(&claim, "worktree").map(PathBuf::from).filter(|w| w.is_dir());
-    let world = crate::intent::World::read(root)?;
+    let world = crate::intent::World::read(root, &id.project().into_iter().collect())?;
+    *forge_age = world.forge_age();
     Ok(world.pr(id.as_str()).map(|p| (p.head_ref_oid.clone(), worktree)))
 }

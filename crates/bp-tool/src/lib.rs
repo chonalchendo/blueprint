@@ -22,6 +22,7 @@ mod transition;
 mod waiver;
 mod walk;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -186,7 +187,8 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Transition(t) => wrote(transition::transition(cwd, t), cli.json, out),
         Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
         Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
-        // The repo verbs refresh the forge snapshot after their forge calls, refused or not (27, design change 9).
+        // The repo verbs refresh the forge snapshot after their forge calls or their write, refused or not (27, design
+        // change 9).
         Verb::Cut(c) => repo(wrote(claim::cut(cwd, c), cli.json, out), cwd, &c.issue),
         Verb::Release(r) => repo(wrote(claim::release(cwd, r), cli.json, out), cwd, &r.issue),
         Verb::Pr(p) => repo(land::run_pr(cwd, p, cli.json, out), cwd, &p.issue),
@@ -197,9 +199,12 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
     }
 }
 
-/// A repo verb's exit, once the forge snapshot of its issue's project is rewritten.
+/// A repo verb's exit, once the forge snapshot of its issue's project is rewritten. A refusal before any forge call
+/// changed neither the forge nor the claims, so it rewrites nothing and calls no `gh`: offline, it returns at once.
 fn repo(code: ExitCode, cwd: &Path, issue: &str) -> ExitCode {
-    snapshot::refresh(cwd, issue);
+    if code == ExitCode::SUCCESS || code == ExitCode::from(3) || bp_forge::Gh::called() {
+        snapshot::refresh(cwd, issue);
+    }
     code
 }
 
@@ -376,7 +381,12 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     if !matches!(kind_value, Kind::Issue | Kind::Milestone) {
         return Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }));
     }
-    let intents = intent::Intents::new(&vault, &index, kind_value == Kind::Issue)?;
+    // The projects in view: `--project`, else the rows' own; a snapshot outside them is not read (27, design change 9).
+    let projects: BTreeSet<&str> = match list.project.as_deref() {
+        Some(p) => BTreeSet::from([p]),
+        None => rows.iter().filter_map(|r| intent::split(&r.id)).map(|(p, _)| p).collect(),
+    };
+    let intents = intent::Intents::new(&vault, &index, (kind_value == Kind::Issue).then_some(&projects))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let verdict = intents.row(kind_value, &row.id, row.status.as_deref())?;
@@ -394,7 +404,7 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     out.truncate(list.limit);
     let mut result = serde_json::json!({ "rows": out, "total": total, "truncated": total > out.len() });
     if let Some(w) = intents.world {
-        match w.forge_age(list.project.as_deref()) {
+        match w.forge_age() {
             Some(age) => {
                 result["forge"] = "snapshot".into();
                 result["forge_age"] = age.into();

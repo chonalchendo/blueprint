@@ -1,6 +1,7 @@
 //! `bp walk <id> --for <action>`: the ranked slice an action needs, under its budget, with the scope's intents (21).
 //! `--done` answers the action's stop instead (27, design change 11).
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use bp_operation::Action;
@@ -70,8 +71,9 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     if walk.done {
         // A stop reads a few rows, and `list` opens its own read transaction.
         drop(reading);
-        let done = crate::done::done(&vault.root, &index, &id, &header, action)?;
-        return Ok(serde_json::json!({ "id": id, "for": action, "done": done }));
+        let mut forge_age = None;
+        let done = crate::done::done(&vault.root, &index, &id, &header, action, &mut forge_age)?;
+        return Ok(serde_json::json!({ "id": id, "for": action, "done": done, "forge_age": forge_age }));
     }
     context(&vault, &index, &id, action)?;
     let mut reached = index.reach(id.as_str(), usize::from(walk.depth))?;
@@ -82,7 +84,9 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             }
         }
     }
-    let read = intent::Intents::new(&vault, &index, reached.iter().any(|r| r.kind == Kind::Issue))?;
+    let projects: BTreeSet<&str> =
+        reached.iter().filter(|r| r.kind == Kind::Issue).filter_map(|r| intent::split(&r.id)).map(|(p, _)| p).collect();
+    let read = intent::Intents::new(&vault, &index, (!projects.is_empty()).then_some(&projects))?;
     let mut intents = Vec::new();
     for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone)) {
         let verdict = read.row(r.kind, &r.id, r.status.as_deref())?;

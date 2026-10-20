@@ -299,3 +299,44 @@ fn cut_stacks_on_an_open_dependency_and_refuses_an_unpushed_one() {
     let (_, claim) = common::bp(v, &["show", out["claim"].as_str().unwrap()]);
     assert_eq!(claim["base_issue"], ISSUE);
 }
+
+#[test]
+fn a_refusal_before_the_forge_calls_no_gh_and_a_failed_refresh_says_so() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    // A `gh` first on `PATH` that logs each call and fails, as offline.
+    let bin = t.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let log = t.join("calls");
+    std::fs::write(bin.join("gh"), format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", log.display())).unwrap();
+    std::fs::set_permissions(bin.join("gh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let cut = |issue: &str| {
+        let out = assert_cmd::Command::cargo_bin("bp")
+            .unwrap()
+            .current_dir(t.join("code"))
+            .env("BP_VAULT", v)
+            .env_remove("BP_ROLE")
+            .env("BP_NOW", "2026-10-19T08:00:00Z")
+            .env("PATH", &path)
+            .args(["cut", issue, "--json"])
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        (out.status.code(), v, String::from_utf8(out.stderr).unwrap())
+    };
+    for (issue, code) in
+        [("projects/bp/issues/no-such-quokka", "no_node"), ("projects/bp/issues/r", "illegal_transition")]
+    {
+        let (exit, out, err) = cut(issue);
+        assert_eq!((exit, out["code"].as_str(), err.as_str()), (Some(2), Some(code), ""), "{out}");
+        assert!(!log.exists(), "a refusal before any forge call makes no gh call");
+    }
+    assert!(!v.join(".bp/forge/bp").exists());
+    // The cut writes, so it refreshes; the refresh fails, and the cut's result and exit stand.
+    let (exit, out, err) = cut(ISSUE);
+    assert_eq!((exit, out["status"].as_str()), (Some(0), Some("in-progress")), "{out}");
+    assert!(err.starts_with("snapshot of bp not refreshed: gh pr list --state open"), "{err}");
+    assert_eq!(err.lines().count(), 1, "{err}");
+    assert!(log.exists() && !v.join(".bp/forge/bp/open-prs.json").exists());
+}
