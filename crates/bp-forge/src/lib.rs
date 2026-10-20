@@ -86,22 +86,34 @@ impl PullRequest {
     /// Green (15, Controls 3): at least one check `SUCCESS`, and every check `SUCCESS`, `NEUTRAL` or `SKIPPED`, as
     /// GitHub passes a required check. A pending check is not green.
     pub fn is_green(&self) -> bool {
-        fn verdict(c: &CheckRun) -> Option<&str> {
-            c.conclusion.as_deref().filter(|s| !s.is_empty()).or(c.state.as_deref())
-        }
         self.status_check_rollup.iter().any(|c| verdict(c) == Some("SUCCESS"))
             && self.status_check_rollup.iter().all(|c| matches!(verdict(c), Some("SUCCESS" | "NEUTRAL" | "SKIPPED")))
     }
 
+    /// A check ended in a way no wait turns green: it needs a fix and a push, not time.
+    pub fn has_failed(&self) -> bool {
+        self.status_check_rollup.iter().any(|c| {
+            matches!(
+                verdict(c),
+                Some("FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "STALE")
+            )
+        })
+    }
+
     /// `reviewer` approved `head` (21: an approval is for one head; a push needs a new one). No other login counts,
-    /// so an empty `reviewer` approves nothing (15, Controls 1).
+    /// so an empty `reviewer` approves nothing (15, Controls 1). Logins ignore case, as GitHub's do.
     pub fn is_approved(&self, head: &str, reviewer: &str) -> bool {
         self.reviews.iter().any(|r| {
             r.state == "APPROVED"
-                && r.author.as_ref().is_some_and(|a| !reviewer.is_empty() && a.login == reviewer)
+                && r.author.as_ref().is_some_and(|a| !reviewer.is_empty() && a.login.eq_ignore_ascii_case(reviewer))
                 && r.commit.as_ref().is_some_and(|c| c.oid == head)
         })
     }
+}
+
+/// A check's verdict: a check run's conclusion once it has one, else a status context's state.
+fn verdict(c: &CheckRun) -> Option<&str> {
+    c.conclusion.as_deref().filter(|s| !s.is_empty()).or(c.state.as_deref())
 }
 
 /// The forge state at one moment.
@@ -146,6 +158,13 @@ impl Snapshot {
     pub fn open_for(&self, slug: &str) -> Option<&PullRequest> {
         self.prs.iter().find(|p| p.is_open() && p.head_ref_name.rsplit('/').next() == Some(slug))
     }
+
+    /// The latest merged pull request of the issue's slug: a `land` that stopped before its vault commit.
+    pub fn merged_for(&self, slug: &str) -> Option<&PullRequest> {
+        let of =
+            |p: &&PullRequest| p.state.as_deref() == Some("MERGED") && p.head_ref_name.rsplit('/').next() == Some(slug);
+        self.prs.iter().filter(of).max_by_key(|p| p.number)
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +197,9 @@ mod tests {
         assert!(pr.is_green() && pr.is_approved("h2", "r"));
         assert!(!pr.is_approved("h3", "r"), "an approval of another head does not count");
         assert!(!pr.is_approved("h2", "a") && !pr.is_approved("h2", ""), "only the reviewer's approval counts");
+        assert!(pr.is_approved("h2", "R"), "logins ignore case");
+        assert_eq!(s.merged_for("0001.a").map(|p| p.number), Some(1));
+        assert!(s.merged_for("0002.b").is_none());
         let (path, _) = Snapshot::from_dir(&dir.path().join("none")).unwrap_err();
         assert!(path.ends_with("none/open-prs.json"), "the error names the file");
     }
@@ -213,6 +235,15 @@ mod tests {
         assert!(!green(r#"[{"conclusion":"SUCCESS"},{"conclusion":""}]"#), "a check run still running");
         assert!(!green(r#"[{"conclusion":"SUCCESS"},{"state":"PENDING"}]"#), "a pending status context");
         assert!(!green(r#"[{"conclusion":"SUCCESS"},{"conclusion":"CANCELLED"}]"#));
+        let failed = |checks: &str| {
+            serde_json::from_str::<PullRequest>(&format!(
+                r#"{{"number":1,"headRefName":"x","headRefOid":"h","statusCheckRollup":{checks}}}"#
+            ))
+            .unwrap()
+            .has_failed()
+        };
+        assert!(failed(r#"[{"conclusion":"SUCCESS"},{"conclusion":"CANCELLED"}]"#) && failed(r#"[{"state":"ERROR"}]"#));
+        assert!(!failed(r#"[{"conclusion":""},{"state":"PENDING"}]"#) && !failed("[]"), "pending is not failed");
     }
 
     #[test]

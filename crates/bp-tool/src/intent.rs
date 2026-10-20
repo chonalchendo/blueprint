@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use bp_change::intents::{self, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
+use bp_change::intents::{self, Block, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
 use bp_forge::Snapshot;
 use bp_vault::{Id, Index, Kind, Refusal, Vault};
 use serde_json::{Map, Value};
@@ -35,6 +35,10 @@ impl World {
 
     fn pr(&self, id: &str) -> Option<&bp_forge::PullRequest> {
         self.forge.as_ref()?.open_for(id.rsplit('/').next()?)
+    }
+
+    fn merged(&self, id: &str) -> Option<&bp_forge::PullRequest> {
+        self.forge.as_ref()?.merged_for(id.rsplit('/').next()?)
     }
 }
 
@@ -121,8 +125,11 @@ fn of(
         .collect();
     let runs = runs(index, id)?;
     let review_heads = index.records(id, Kind::Review)?.iter().filter_map(|r| text(&r.header, "head")).collect();
-    let open = world.pr(id);
-    // The body and the reviewer matter only to needs landing, which needs an open pull request.
+    // A merged pull request under a held claim is a land that stopped before its commit: `land` finishes it, through
+    // the same gates.
+    let held = claims.iter().any(|c| c.released.is_none());
+    let open = world.pr(id).or_else(|| world.merged(id).filter(|_| held));
+    // The body and the reviewer matter only to needs landing, which needs a pull request.
     let (pr, blocks) = match open {
         Some(p) => (Some(pull_request(p, &reviewer(index, id)?)), blocks(vault, id)?),
         None => (None, Vec::new()),
@@ -146,6 +153,7 @@ pub(crate) fn runs(index: &Index, id: &str) -> Result<Vec<intents::Run>, Refusal
             intents::Run {
                 id: r.id.clone(),
                 check: text(&r.header, "check").unwrap_or_default(),
+                check_hash: text(&r.header, "check_hash").unwrap_or_default(),
                 at: text(&r.header, "at").and_then(|t| intents::timestamp(&t)),
                 commit: text(&r.header, "commit").unwrap_or_default(),
                 attempt: r.header.get("attempt").and_then(Value::as_u64).unwrap_or_default(),
@@ -158,11 +166,11 @@ pub(crate) fn runs(index: &Index, id: &str) -> Result<Vec<intents::Run>, Refusal
         .collect())
 }
 
-/// The names of the issue's named `error` blocks: each needs a passing run at the head before a land.
-pub(crate) fn blocks(vault: &Vault, id: &str) -> Result<Vec<String>, Refusal> {
+/// The issue's named `error` blocks: each needs a passing run of its current text at the head before a land.
+pub(crate) fn blocks(vault: &Vault, id: &str) -> Result<Vec<Block>, Refusal> {
     let file = vault.read(&Id::parse(id).expect("the index holds ids"))?;
     let named = bp_check::named(&file.body).into_iter().filter(|c| bp_check::is_error(c));
-    Ok(named.map(|c| c.attrs["name"].clone()).collect())
+    Ok(named.map(|c| Block { name: c.attrs["name"].clone(), hash: bp_check::hash(c) }).collect())
 }
 
 /// The project's reviewer identity, the forge login whose approval alone counts; empty when unset (13, Project).

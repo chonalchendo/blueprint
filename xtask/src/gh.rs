@@ -212,7 +212,8 @@ impl Fake {
         let head = pr["headRefOid"].as_str().unwrap_or_default().to_string();
         // An open pull request's base exists: the refresh closed any whose base is gone.
         let base = pr["baseRefName"].as_str().and_then(|b| heads.get(b)).context("the base branch is gone")?;
-        // GitHub approves an empty diff too, as when a later commit undoes the change; it has no patch id to carry.
+        // An empty diff is approved too, as when a later commit undoes the change; it has no patch id to carry. Whether
+        // GitHub accepts that approval is not yet probed (26, issue 5).
         if let Some(id) = self.patch_id(base, &head)? {
             let mut ids = self.patch_ids()?;
             ids.insert(head.clone(), id.into());

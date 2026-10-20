@@ -10,8 +10,11 @@ use serde_json::{Value, json};
 
 const ISSUE: &str = "projects/bp/issues/a";
 
+const BARE: &str = "projects/bp/issues/bare";
+
 /// The vault, and a directory holding `origin.git`, its clone `code` and the fake `bin/gh`. The fake answers
-/// `api user` with `$FAKE_LOGIN`, `pr list` from `prs.json`, `pr create` with a url, and logs `pr merge`.
+/// `api user` with `$FAKE_LOGIN`, `pr list` from `prs.json`, `pr create` with a url, and logs `pr edit` and
+/// `pr merge`. The vault holds [`ISSUE`], with one block, and [`BARE`], with none.
 fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
     let t = tempfile::tempdir().unwrap();
     let origin = t.path().join("origin.git");
@@ -34,6 +37,7 @@ case "$1 $2" in
   "api user") echo "{{\"login\":\"${{FAKE_LOGIN:-agent}}\"}}" ;;
   "pr list") cat '{t}/prs.json' 2>/dev/null || echo '[]' ;;
   "pr create") echo "$*" > '{t}/created'; echo 'https://forge.invalid/o/r/pull/1' ;;
+  "pr edit") echo "$*" > '{t}/edited' ;;
   "pr merge") echo "$*" > '{t}/merged' ;;
   *) exit 9 ;;
 esac
@@ -48,6 +52,7 @@ esac
         ("shared/.gitkeep", ""),
         ("projects/bp/project.md", &project),
         (&format!("{ISSUE}.md"), issue),
+        (&format!("{BARE}.md"), "---\nkind: issue\ntitle: Bare\nstatus: open\n---\n\nNo block.\n"),
     ]);
     (v, t)
 }
@@ -62,16 +67,22 @@ fn bp(v: &Path, t: &Path, env: &[(&str, &str)], args: &[&str]) -> (Option<i32>, 
 
 /// Pull request 1 at `head`, with `reviews` by (login, head) and `checks` conclusions, as `gh pr list` prints it.
 fn forge(t: &Path, head: &str, reviews: &[(&str, &str)], checks: &[&str]) {
+    forge_as(t, head, reviews, checks, &json!({}));
+}
+
+/// [`forge`], with `over` replacing fields: a base or a state.
+fn forge_as(t: &Path, head: &str, reviews: &[(&str, &str)], checks: &[&str], over: &Value) {
     let reviews: Vec<Value> = reviews
         .iter()
         .map(|(login, at)| json!({ "state": "APPROVED", "author": { "login": login }, "commit": { "oid": at } }))
         .collect();
     let checks: Vec<Value> = checks.iter().map(|c| json!({ "conclusion": c })).collect();
-    let pr = json!([{
+    let mut pr = json!({
         "number": 1, "state": "OPEN", "author": { "login": "agent" }, "baseRefName": "master",
         "headRefName": "bp/a", "headRefOid": head, "reviews": reviews, "statusCheckRollup": checks,
-    }]);
-    std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
+    });
+    pr.as_object_mut().unwrap().extend(over.as_object().unwrap().clone());
+    std::fs::write(t.join("prs.json"), json!([pr]).to_string()).unwrap();
 }
 
 fn commit(w: &Path, args: &[&str], message: &str) -> String {
@@ -114,6 +125,7 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     forge(t, &h, &[("r", &h)], &[]);
     assert_eq!(land(), "checks_pending");
     let bye = commit(&w, &["rm", "-q", "hello.txt"], "bye");
+    git(&w, &["push", "-q", "origin", "HEAD:bp/a"]);
     forge(t, &bye, &[("r", &bye)], &["SUCCESS"]);
     assert_eq!(land(), "evidence_stale", "no run at the head");
     let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
@@ -149,4 +161,100 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     assert_eq!(issue["status"], "resolved");
     assert_eq!(bp(v, t, &[], &["land", ISSUE]).0, Some(3), "a resolved issue");
     assert_eq!(git(v, &["status", "--porcelain"]), "");
+}
+
+/// Cuts [`ISSUE`] with `cut` args, commits `hello.txt` and opens pull request 1; the worktree and the head.
+fn opened(v: &Path, t: &Path, cut: &[&str]) -> (std::path::PathBuf, String) {
+    let (_, out) = bp(v, t, &[], &[&["cut", ISSUE], cut].concat());
+    let w = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    let h = commit(&w, &["add", "hello.txt"], "hello");
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(0));
+    common::bp(v, &["set", "projects/bp/project", "reviewer", "r"]);
+    (w, h)
+}
+
+#[test]
+fn land_gates_a_merged_pull_request_and_keeps_a_branch_with_unmerged_commits() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, h) = opened(v, t, &[]);
+    let land = || bp(v, t, &[], &["land", ISSUE]);
+    let before = commits(v);
+    forge_as(t, &h, &[("r", &h)], &["SUCCESS"], &json!({ "baseRefName": "side" }));
+    let (code, out) = land();
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("base_unmerged")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains(&format!("bp pr {ISSUE} retargets it to master")), "{out}");
+    // Merged by another login's approval outside `land`: the gates hold on a merged head too, and nothing is recorded.
+    forge_as(t, &h, &[("mallory", &h)], &["SUCCESS"], &json!({ "state": "MERGED" }));
+    assert_eq!(land().1["code"], "review_missing");
+    forge_as(t, &h, &[("r", &h)], &["SUCCESS"], &json!({ "state": "MERGED", "baseRefName": "side" }));
+    assert_eq!(land().1["code"], "base_unmerged", "merged into another branch");
+    assert_eq!(
+        (commits(v), common::bp(v, &["show", ISSUE]).1["status"].clone()),
+        (before.clone(), json!("in-progress"))
+    );
+
+    // A land that stopped after the merge: the gates pass again at the merged head, so it finishes without a merge.
+    // A commit after the approved head stays on the kept branch. Logins ignore case.
+    std::fs::write(w.join("later.txt"), "later\n").unwrap();
+    let later = commit(&w, &["add", "later.txt"], "later");
+    common::bp(v, &["set", "projects/bp/project", "reviewer", "R"]);
+    forge_as(t, &h, &[("r", &h)], &["SUCCESS"], &json!({ "state": "MERGED" }));
+    let (code, out) = land();
+    assert_eq!((code, out["status"].as_str(), &out["branch_kept"]), (Some(0), Some("resolved"), &json!(true)), "{out}");
+    assert!(!t.join("merged").exists(), "a merged pull request is not merged again");
+    assert!(!w.exists(), "the worktree goes; its commits stay on the branch");
+    assert_eq!(git(&t.join("code"), &["rev-parse", "bp/a"]).trim(), later);
+    assert_eq!(git(&t.join("origin.git"), &["branch", "--list", "bp/a"]), "", "the forge's copy is the merged head");
+}
+
+#[test]
+fn pr_targets_the_claim_base_and_reruns_until_each_block_passes_as_written() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, out) = bp(v, t, &[], &["cut", BARE]);
+    let wb = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(wb.join("k.txt"), "k\n").unwrap();
+    commit(&wb, &["add", "k.txt"], "k");
+    let (code, out) = bp(v, t, &[], &["pr", BARE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_empty")), "{out}");
+    assert_eq!(git(&t.join("origin.git"), &["branch", "--list", "bp/bare"]), "", "refused before the push");
+
+    let code_dir = t.join("code");
+    git(&code_dir, &["push", "-q", "origin", "master:refs/heads/release-1"]);
+    git(&code_dir, &["fetch", "-q", "origin"]);
+    let (_, h) = opened(v, t, &["--base", "origin/release-1"]);
+    let created = std::fs::read_to_string(t.join("created")).unwrap();
+    assert!(created.starts_with("pr create --head bp/a --base release-1 "), "{created}");
+    forge_as(t, &h, &[("r", &h)], &["SUCCESS"], &json!({ "baseRefName": "master" }));
+    let before = commits(v);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(0), "a base moved off the claim's is retargeted");
+    assert_eq!(std::fs::read_to_string(t.join("edited")).unwrap().trim(), "pr edit 1 --base release-1");
+    forge_as(t, &h, &[("r", &h)], &["SUCCESS"], &json!({ "baseRefName": "release-1" }));
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "a passing run of each block at the head");
+
+    // The human tightens the block after its run: the run no longer counts, and `pr` runs it again.
+    let path = v.join(format!("{ISSUE}.md"));
+    let text = std::fs::read_to_string(&path).unwrap().replace("test -f hello.txt", "test -f hello.txt && true");
+    std::fs::write(&path, text).unwrap();
+    git(v, &["commit", "-qam", "tighten"]);
+    assert_eq!(bp(v, t, &[], &["land", ISSUE]).1["code"], "evidence_stale");
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).1["runs"][0]["verdict"], "pass");
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3));
+
+    // A failed run at the head reruns at the same head, as a flaky block needs no code change.
+    let text = std::fs::read_to_string(&path).unwrap().replace("&& true", "&& test -f never.txt");
+    std::fs::write(&path, text).unwrap();
+    git(v, &["commit", "-qam", "never"]);
+    for attempt in [4, 5] {
+        let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+        assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_failed")), "{out}");
+        assert!(out["subject"].as_str().unwrap().ends_with(&format!("-{attempt}")), "{out}");
+    }
+    assert_eq!(
+        commits(v).parse::<u32>().unwrap(),
+        before.parse::<u32>().unwrap() + 6,
+        "two pr, two edits, two failed pr"
+    );
 }

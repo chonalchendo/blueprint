@@ -47,6 +47,8 @@ pub struct Run {
     pub id: String,
     /// The block's name.
     pub check: String,
+    /// The block's hash when it ran; the run counts for the block only while it matches (26, design change 4).
+    pub check_hash: String,
     /// `at`, Unix seconds.
     pub at: Option<i64>,
     /// The commit the run verified.
@@ -101,7 +103,17 @@ impl IntegrityRun {
     }
 }
 
-/// The forge's view of the issue's open pull request.
+/// A named `error` block of the issue, as its runs name it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Block {
+    /// The block's name.
+    pub name: String,
+    /// The block's hash now, as a run records it.
+    pub hash: String,
+}
+
+/// The forge's view of the issue's pull request: the open one, or the merged one of a held claim, which `land`
+/// finishes.
 #[derive(Debug, Clone, Default)]
 pub struct PullRequest {
     /// The head commit.
@@ -132,13 +144,13 @@ pub struct Issue {
     pub claims: Vec<Claim>,
     /// Run records.
     pub runs: Vec<Run>,
-    /// The names of the issue's `error` blocks; read only while a pull request is open.
-    pub blocks: Vec<String>,
+    /// The issue's named `error` blocks; read only while a pull request is in view.
+    pub blocks: Vec<Block>,
     /// `head` of each review record.
     pub review_heads: Vec<String>,
     /// The `depends` targets.
     pub depends: Vec<Dependency>,
-    /// The open pull request; `None` when there is none or the forge was not read.
+    /// The open pull request, or the merged one of a held claim; `None` when there is none or the forge was not read.
     pub pr: Option<PullRequest>,
     /// A commit after the latest claim's release commit touched the issue file: commit order, not time, so an answer
     /// in the release's own second counts (21, blocked). Read only after an escalated release.
@@ -217,19 +229,22 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
             c.at.is_some_and(|at| now - at > STALE_AFTER && !i.runs.iter().any(|r| r.at.is_none_or(|t| t > at)));
         return Verdict::of(Intent::Working, if stale { "stale" } else { "" });
     };
+    // The forge approval is the gate, not the vault's review record: `land` reads none, so neither does this (21).
+    if pr.approved && pr.green {
+        return match evidence(&i.runs, &pr.head, &i.blocks) {
+            Ok(()) => Verdict::of(Intent::NeedsLanding, ""),
+            Err(Unmet::Failed(r)) => Verdict::of(Intent::Working, format!("{} did not pass at head: bp pr", r.check)),
+            Err(Unmet::Evidence(b)) => Verdict::of(Intent::Working, format!("no run of {b} at head: bp pr")),
+            Err(Unmet::Review | Unmet::Checks) => unreachable!("evidence reads only the runs"),
+        };
+    }
     if !i.review_heads.contains(&pr.head) {
         return Verdict::of(Intent::NeedsReview, "");
     }
     if !pr.green {
         return Verdict::of(Intent::Working, "checks not green");
     }
-    if !pr.approved {
-        return Verdict::of(Intent::NeedsApproval, "");
-    }
-    match landing(pr, &i.runs, &i.blocks) {
-        Ok(()) => Verdict::of(Intent::NeedsLanding, ""),
-        Err(_) => Verdict::NONE,
-    }
+    Verdict::of(Intent::NeedsApproval, "")
 }
 
 /// The first part of needs landing that does not hold, in `land`'s refusal order (26, design change 4).
@@ -241,27 +256,32 @@ pub enum Unmet<'a> {
     Checks,
     /// The latest run of this `error` block at the head did not pass.
     Failed(&'a Run),
-    /// This `error` block has no run at the head.
+    /// This `error` block has no run at the head of its current text: none, or one made before the block changed.
     Evidence(&'a str),
 }
 
-/// Needs landing (21): the reviewer's approval at the head, the forge check green at the head, and a passing run of
-/// each `error` block at the head. `land` refuses on the first part that does not hold, and the `Intents` function
-/// reads the same answer, so the two never disagree (21, rule 1). Issue 5 of 26 adds the earlier head with the
-/// head's patch id.
-pub fn landing<'a>(pr: &PullRequest, runs: &'a [Run], blocks: &'a [String]) -> Result<(), Unmet<'a>> {
+/// Needs landing (21): the reviewer's approval at the head, the forge check green at the head, and the run
+/// [`evidence`]. `land` refuses on the first part that does not hold, and the `Intents` function reads the same
+/// answer, so the two never disagree (21, rule 1). Issue 5 of 26 adds the earlier head with the head's patch id.
+pub fn landing<'a>(pr: &PullRequest, runs: &'a [Run], blocks: &'a [Block]) -> Result<(), Unmet<'a>> {
     if !pr.approved {
         return Err(Unmet::Review);
     }
     if !pr.green {
         return Err(Unmet::Checks);
     }
-    let latest = latest_at(runs, &pr.head);
+    evidence(runs, &pr.head, blocks)
+}
+
+/// The run part of needs landing: the latest run of each `error` check at `head` passed, and each block has one whose
+/// `check_hash` is the block's hash now. `pr` reruns the blocks until this holds.
+pub fn evidence<'a>(runs: &'a [Run], head: &str, blocks: &'a [Block]) -> Result<(), Unmet<'a>> {
+    let latest = latest_at(runs, head);
     if let Some(r) = latest.values().find(|r| !r.passed) {
         return Err(Unmet::Failed(r));
     }
-    match blocks.iter().find(|b| !latest.contains_key(b.as_str())) {
-        Some(b) => Err(Unmet::Evidence(b)),
+    match blocks.iter().find(|b| latest.get(b.name.as_str()).is_none_or(|r| r.check_hash != b.hash)) {
+        Some(b) => Err(Unmet::Evidence(&b.name)),
         None => Ok(()),
     }
 }
@@ -358,6 +378,7 @@ mod tests {
         Run {
             id,
             check: check.into(),
+            check_hash: format!("#{check}"),
             at: Some(at),
             commit: commit.into(),
             attempt: 1,
@@ -365,6 +386,10 @@ mod tests {
             failed,
             passed: !failed,
         }
+    }
+
+    fn block(name: &str) -> Block {
+        Block { name: name.into(), hash: format!("#{name}") }
     }
 
     fn released(at: i64) -> Claim {
@@ -505,7 +530,7 @@ mod tests {
 
     #[test]
     fn landing_refuses_in_order_and_needs_a_passing_run_of_each_error_block() {
-        let blocks = vec!["a".to_string(), "b".to_string()];
+        let blocks = vec![block("a"), block("b")];
         let runs = vec![run("a", NOW, "h", false), run("b", NOW, "h", false)];
         assert_eq!(landing(&pr("h", false, false), &runs, &blocks), Err(Unmet::Review), "the review comes first");
         assert_eq!(landing(&pr("h", false, true), &runs, &blocks), Err(Unmet::Checks));
@@ -517,12 +542,22 @@ mod tests {
         let unrun = [Run { passed: false, ..runs[0].clone() }, runs[1].clone()];
         assert_eq!(landing(&pr("h", true, true), &unrun, &blocks), Err(Unmet::Failed(&unrun[0])), "could not run");
         assert_eq!(landing(&pr("h", true, true), &[], &[]), Ok(()), "an issue with no error block needs no run");
+        let edited = [block("a"), Block { hash: "#a2".into(), ..block("b") }];
+        assert_eq!(landing(&pr("h", true, true), &runs, &edited), Err(Unmet::Evidence("b")), "b changed after its run");
 
         let held = Issue { status: "in-progress".into(), claims: vec![Claim::default()], ..Issue::default() };
         let i = Issue { pr: Some(pr("h", true, true)), review_heads: vec!["h".into()], blocks, runs, ..held };
         assert_eq!(issue(&i, NOW).intent, Some(Intent::NeedsLanding));
-        let stale = Issue { runs: Vec::new(), ..i };
-        assert_eq!(issue(&stale, NOW), Verdict::NONE, "no run at the head: land refuses, so it is not needed");
+        let unread = Issue { review_heads: Vec::new(), ..i.clone() };
+        assert_eq!(
+            issue(&unread, NOW).intent,
+            Some(Intent::NeedsLanding),
+            "land reads no review record, nor does this"
+        );
+        let stale = Issue { runs: Vec::new(), ..i.clone() };
+        assert_eq!(issue(&stale, NOW), Verdict::of(Intent::Working, "no run of a at head: bp pr"), "pr is due again");
+        let unrun = Issue { runs: vec![Run { passed: false, ..i.runs[0].clone() }, i.runs[1].clone()], ..i };
+        assert_eq!(issue(&unrun, NOW), Verdict::of(Intent::Working, "a did not pass at head: bp pr"), "could not run");
     }
 
     #[test]

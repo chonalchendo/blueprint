@@ -55,18 +55,23 @@ fn vault() -> tempfile::TempDir {
             ),
         );
     }
-    // Needs landing: the reviewer's approval, green, and a passing run of the one `error` block at the head. The
-    // twin's approval is the author's, which counts for nothing.
+    // Needs landing: the reviewer's approval, green, and a passing run of the one `error` block's text at the head;
+    // no review record, as `land` reads none. The twin's approval is the author's, which counts for nothing.
     write(r, "projects/bp/project.md", "---\nkind: project\ntitle: Bp\nstatus: active\nreviewer: r\n---\n");
     for slug in ["0009.lands", "0010.twin"] {
         let id = format!("projects/bp/issues/{slug}");
         let block = "## Check\n\n```check shell {name=hello expect=0}\ntrue\n```\n";
+        let hash = bp_check::hash(bp_check::named(&bp_vault::Body::parse(block))[0]);
         write(r, &format!("{id}.md"), &format!("{}\n{block}", issue("in-progress", "")));
-        write(r, &format!("{id}/reviews/cccc.md"), &format!("---\nkind: review\nunder: {id}\nhead: cccc\n---\n"));
+        if slug == "0010.twin" {
+            write(r, &format!("{id}/reviews/cccc.md"), &format!("---\nkind: review\nunder: {id}\nhead: cccc\n---\n"));
+        }
         write(
             r,
             &format!("{id}/runs/hello-cccc-1.md"),
-            &format!("---\nkind: run\nunder: {id}\ncheck: hello\ncommit: cccc\nattempt: 1\nverdict: pass\n---\n"),
+            &format!(
+                "---\nkind: run\nunder: {id}\ncheck: hello\ncheck_hash: {hash}\ncommit: cccc\nattempt: 1\nverdict: pass\n---\n"
+            ),
         );
     }
     write(r, "projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n");

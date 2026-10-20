@@ -98,6 +98,14 @@ pub struct Ran {
     done: Vec<Done>,
 }
 
+/// The block's `check_hash` (13, Run): blake3 of its fence line and text. A run counts for a block only while the
+/// hashes match, so a block edited after its run needs a new one (26, design change 4).
+pub fn hash(check: &Check) -> String {
+    let attrs: Vec<String> = check.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let block = format!("check {} {{{}}}\n{}", check.runner, attrs.join(" "), check.text);
+    blake3::hash(block.as_bytes()).to_hex().to_string()
+}
+
 /// The blocks of a body that have a run key: a slug `name`. The census counts the rest as `check_unnamed`.
 pub fn named(body: &bp_vault::Body) -> Vec<&Check> {
     body.checks.iter().filter(|c| c.attrs.get("name").is_some_and(|n| bp_vault::is_slug(n))).collect()
@@ -306,8 +314,6 @@ fn code_tree(vault: &Vault, repo: &Path) -> Result<(String, std::path::PathBuf),
 /// The run record's text (13, Run; 25, design change 5): the converted fields, then `ended`, the block's hash and
 /// the output's; the body is the verdict's reason and the output's last lines.
 fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
-    let attrs: Vec<String> = d.check.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    let block = format!("check {} {{{}}}\n{}", d.check.runner, attrs.join(" "), d.check.text);
     let mut fields: BTreeMap<String, Value> = BTreeMap::from([
         ("check".into(), d.check.attrs["name"].as_str().into()),
         // The block's kind, so a reader finds the integrity runs without parsing bodies (21, blocked).
@@ -318,7 +324,7 @@ fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
         ("ended".into(), d.ended.as_str().into()),
         ("verdict".into(), d.verdict.as_str().into()),
         ("severity".into(), if judge::is_error(&d.check) { "error" } else { "warn" }.into()),
-        ("check_hash".into(), blake3::hash(block.as_bytes()).to_hex().as_str().into()),
+        ("check_hash".into(), hash(&d.check).into()),
     ]);
     if let Some(evidence) = &d.evidence {
         fields.insert("evidence".into(), evidence.as_str().into());
