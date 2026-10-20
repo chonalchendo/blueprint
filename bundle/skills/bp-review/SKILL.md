@@ -18,7 +18,7 @@ You write nothing: no file, no commit and no record. Pass `--json` to each `bp` 
 Reply in this shape:
 
 - Line 1: `head: <sha>`.
-- Then one table: `| severity | location | finding |`, its separator line, and one row for each finding. A table with no row means no finding. No other line starts with `|`, because the tool counts the table rows as findings.
+- Then the table: `| severity | location | finding |`, its separator line, and one row for each finding. The review body holds exactly one table, the findings table. A table with no row means no finding. No other line starts with `|`, because the tool counts the table rows as findings.
 - `severity` is `error` when the finding must be fixed before the land, else `warn`.
 - `location` is `<path>:<line>` in the diff, or a node id.
 - The finding is one sentence: what is wrong, and what would pass.
