@@ -8,9 +8,8 @@
 //! changed.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
@@ -68,19 +67,7 @@ impl Fake {
         lock.lock().context("lock the fake forge")?;
         let heads = self.heads()?;
         let mut prs = self.load()?;
-        // Each call first refreshes every open pull request from the bare copy and its rollup from
-        // `checks/<head>.json`, as the forge sees a push, a deleted branch and a finished check run without being told.
-        for pr in prs.iter_mut().filter(|p| p["state"] == "OPEN") {
-            // GitHub closes a pull request whose base branch is deleted, for good (15, E7).
-            if !pr["baseRefName"].as_str().is_some_and(|b| heads.contains_key(b)) {
-                pr["state"] = "CLOSED".into();
-                continue;
-            }
-            if let Some(head) = pr["headRefName"].as_str().and_then(|b| heads.get(b)) {
-                pr["headRefOid"] = head.as_str().into();
-            }
-            pr["statusCheckRollup"] = self.rollup(pr["headRefOid"].as_str().unwrap_or_default())?;
-        }
+        self.refresh(&mut prs, &heads)?;
         // Saved before the call too, so a block's snapshot read sees the refresh even when the call fails.
         self.save(&prs)?;
         let out = match args {
@@ -116,13 +103,15 @@ impl Fake {
                 }
                 let number = prs.iter().filter_map(|p| p["number"].as_u64()).max().unwrap_or(0) + 1;
                 let url = format!("{}/pull/{number}", self.repository()?);
-                prs.push(json!({
+                let mut pr = json!({
                     "number": number, "url": url, "state": "OPEN",
                     "title": need(&f, "--title")?, "body": need(&f, "--body")?,
                     "author": { "id": format!("U_{}", self.login), "is_bot": false, "login": self.login, "name": self.login },
                     "baseRefName": base, "headRefName": head, "headRefOid": oid,
-                    "reviews": [], "statusCheckRollup": self.rollup(oid)?,
-                }));
+                    "reviews": [], "statusCheckRollup": self.rollup(oid)?, "pushes": [],
+                });
+                pushed(&mut pr)?;
+                prs.push(pr);
                 format!("{url}\n")
             }
             ["pr", "edit", n, rest @ ..] => {
@@ -157,7 +146,7 @@ impl Fake {
                     bail!("the fake gh reviews with --approve only");
                 }
                 let i = find(&prs, n)?;
-                self.approve(&mut prs[i], &heads)?;
+                self.approve(&mut prs[i])?;
                 String::new()
             }
             _ => bail!(
@@ -169,10 +158,28 @@ impl Fake {
         Ok(out)
     }
 
+    /// Refreshes every open pull request from the bare copy and its rollup from `checks/<head>.json`, first on each
+    /// call, as the forge sees a push, a deleted branch and a finished check run without being told.
+    fn refresh(&self, prs: &mut [Value], heads: &BTreeMap<String, String>) -> Result<()> {
+        for pr in prs.iter_mut().filter(|p| p["state"] == "OPEN") {
+            // GitHub closes a pull request whose base branch is deleted, for good (15, E7).
+            if !pr["baseRefName"].as_str().is_some_and(|b| heads.contains_key(b)) {
+                pr["state"] = "CLOSED".into();
+                continue;
+            }
+            if let Some(head) = pr["headRefName"].as_str().and_then(|b| heads.get(b))
+                && pr["headRefOid"] != head.as_str()
+            {
+                pr["headRefOid"] = head.as_str().into();
+                pushed(pr)?;
+            }
+            pr["statusCheckRollup"] = self.rollup(pr["headRefOid"].as_str().unwrap_or_default())?;
+        }
+        Ok(())
+    }
+
     /// Squashes the head onto the base in the bare copy. Like branch protection, it refuses a base that is not an
-    /// ancestor of the head and a rollup that is not green, and needs another login's approval at the head. It also
-    /// counts one at an earlier head with the head's patch id, the rule `land` uses (15, E7); whether GitHub keeps an
-    /// approval across such a push is not yet probed.
+    /// ancestor of the head and a rollup that is not green, and needs an approval of the latest push ([`approved`]).
     fn merge(&self, pr: &mut Value, heads: &BTreeMap<String, String>, expect: Option<&str>) -> Result<()> {
         let n = &pr["number"];
         if pr["state"] != "OPEN" {
@@ -190,7 +197,7 @@ impl Fake {
         if !green(&pr["statusCheckRollup"]) {
             bail!("Pull request #{n} is not mergeable: Required status check \"fake\" is expected.");
         }
-        if !self.approved(pr, base, &head)? {
+        if !approved(pr) {
             bail!("Pull request #{n} is not mergeable: the base branch policy prohibits the merge.");
         }
         let message = format!("{} (#{n})", pr["title"].as_str().unwrap_or_default());
@@ -200,9 +207,9 @@ impl Fake {
         Ok(())
     }
 
-    /// Records the login's approval at the head, with the head's patch id against the base as it stands now, the
-    /// diff the forge shows the reviewer (15, E7).
-    fn approve(&self, pr: &mut Value, heads: &BTreeMap<String, String>) -> Result<()> {
+    /// Records the login's approval at the head. GitHub documents no refusal of an approval on an empty diff, so the
+    /// fake accepts one, as when a later commit undoes the change (26, issue 5).
+    fn approve(&self, pr: &mut Value) -> Result<()> {
         if pr["state"] != "OPEN" {
             bail!("Pull request #{} is not open", pr["number"]);
         }
@@ -210,15 +217,6 @@ impl Fake {
             bail!("{OWN_APPROVAL}");
         }
         let head = pr["headRefOid"].as_str().unwrap_or_default().to_string();
-        // An open pull request's base exists: the refresh closed any whose base is gone.
-        let base = pr["baseRefName"].as_str().and_then(|b| heads.get(b)).context("the base branch is gone")?;
-        // An empty diff is approved too, as when a later commit undoes the change; it has no patch id to carry. Whether
-        // GitHub accepts that approval is not yet probed (26, issue 5).
-        if let Some(id) = self.patch_id(base, &head)? {
-            let mut ids = self.patch_ids()?;
-            ids.insert(head.clone(), id.into());
-            write(&self.t.join("forge/patch-ids.json"), &Value::Object(ids).to_string())?;
-        }
         let date = Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"]).output().context("run date")?;
         let reviews = pr["reviews"].as_array_mut().context("reviews is a list")?;
         reviews.push(json!({
@@ -227,56 +225,6 @@ impl Fake {
             "includesCreatedEdit": false, "reactionGroups": [], "state": "APPROVED", "commit": { "oid": head },
         }));
         Ok(())
-    }
-
-    fn approved(&self, pr: &Value, base: &str, head: &str) -> Result<bool> {
-        let author = pr["author"]["login"].as_str();
-        let at: Vec<&str> = pr["reviews"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|r| r["state"] == "APPROVED" && r["author"]["login"].as_str().is_some_and(|l| Some(l) != author))
-            .filter_map(|r| r["commit"]["oid"].as_str())
-            .collect();
-        if at.is_empty() {
-            return Ok(false);
-        }
-        if at.contains(&head) {
-            return Ok(true);
-        }
-        let Some(now) = self.patch_id(base, head)? else { return Ok(false) };
-        let ids = self.patch_ids()?;
-        Ok(at.iter().any(|oid| ids.get(*oid).and_then(Value::as_str) == Some(now.as_str())))
-    }
-
-    /// `git patch-id` of the diff from the merge base to `head`: equal for a rebase that keeps the change. An empty
-    /// diff has no id, so two of them never match.
-    fn patch_id(&self, base: &str, head: &str) -> Result<Option<String>> {
-        let diff = self.git(&["diff", &format!("{base}...{head}")])?;
-        if diff.is_empty() {
-            return Ok(None);
-        }
-        let mut child = self
-            .git_cmd(&["patch-id", "--stable"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .context("run git patch-id")?;
-        child.stdin.take().context("patch-id stdin")?.write_all(format!("{diff}\n").as_bytes())?;
-        let out = child.wait_with_output()?;
-        let id = String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or_default().to_string();
-        if !out.status.success() || id.is_empty() {
-            bail!("git patch-id gave no id for {base}...{head}");
-        }
-        Ok(Some(id))
-    }
-
-    fn patch_ids(&self) -> Result<Map<String, Value>> {
-        match std::fs::read_to_string(self.t.join("forge/patch-ids.json")) {
-            Ok(text) => Ok(serde_json::from_str(&text)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
-            Err(e) => Err(e.into()),
-        }
     }
 
     /// The checks at `head`, each filled out to `gh`'s shape: a check run, or a status context when the entry has a
@@ -347,6 +295,10 @@ impl Fake {
         let mut cmd = Command::new("git");
         // `file` alone: the bare copy is a local path, and nothing the fake runs may reach the network.
         cmd.args(args).current_dir(self.t.join("origin.git")).env("GIT_ALLOW_PROTOCOL", "file");
+        // The squash is the forge's commit, as GitHub's is; a runner with no global git identity cannot make it.
+        for (k, v) in [("NAME", "GitHub"), ("EMAIL", "noreply@github.com")] {
+            cmd.env(format!("GIT_AUTHOR_{k}"), v).env(format!("GIT_COMMITTER_{k}"), v);
+        }
         cmd
     }
 
@@ -358,6 +310,28 @@ impl Fake {
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     }
+}
+
+/// Records a push to the head: its pusher and the reviews before it. The fake cannot see who ran `git push`; the
+/// agent's token, the author's, makes every push of a pull request's head, `land`'s restack included.
+fn pushed(pr: &mut Value) -> Result<()> {
+    let reviews = pr["reviews"].as_array().map_or(0, Vec::len);
+    let by = pr["author"]["login"].clone();
+    pr["pushes"].as_array_mut().context("pushes is a list")?.push(json!({ "by": by, "reviews": reviews }));
+    Ok(())
+}
+
+/// A login other than the author and the latest push's pusher approved after that push. With "Require approval of
+/// the most recent reviewable push" and "Dismiss stale pull request approvals" on, an approval before a push counts
+/// for nothing, even when the push keeps the diff (15, Controls 1).
+fn approved(pr: &Value) -> bool {
+    let last = pr["pushes"].as_array().and_then(|p| p.last());
+    let since = last.and_then(|p| p["reviews"].as_u64()).and_then(|n| usize::try_from(n).ok()).unwrap_or(0);
+    let pusher = last.map(|p| &p["by"]);
+    pr["reviews"].as_array().into_iter().flatten().skip(since).any(|r| {
+        let login = &r["author"]["login"];
+        r["state"] == "APPROVED" && login.is_string() && *login != pr["author"]["login"] && Some(login) != pusher
+    })
 }
 
 /// Green as `bp-forge` reads it (15, Controls 3): at least one `SUCCESS`, and every check `SUCCESS`, `NEUTRAL` or
@@ -499,5 +473,40 @@ mod tests {
         assert!(approved.iter().all(Result::is_ok), "{approved:?}");
         let pr = &fake("quokka-agent".into()).load().unwrap()[0];
         assert_eq!(pr["reviews"].as_array().unwrap().len(), N, "one review per call");
+    }
+
+    #[test]
+    fn a_push_after_the_approval_needs_a_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().canonicalize().unwrap();
+        crate::forge::make(&t, "bp", "https://github.invalid/o/r").unwrap();
+        let code = t.join("code");
+        let commit = |text: &str| {
+            std::fs::write(code.join("README.md"), text).unwrap();
+            crate::forge::git(&code, &["commit", "-q", "--no-verify", "-am", text]).unwrap();
+            crate::forge::git(&code, &["push", "-q", "--no-verify", "origin", "bp/p"]).unwrap();
+            let head = Command::new("git").arg("-C").arg(&code).args(["rev-parse", "HEAD"]).output().unwrap();
+            String::from_utf8(head.stdout).unwrap().trim().to_string()
+        };
+        crate::forge::git(&code, &["checkout", "-q", "-b", "bp/p"]).unwrap();
+        let h1 = commit("one\n");
+        let call = |login: &str, args: &[&str]| Fake { t: t.clone(), login: login.into() }.call(args);
+        call("quokka-agent", &["pr", "create", "--head", "bp/p", "--base", "master", "--title", "t", "--body", "b"])
+            .unwrap();
+        let approve = || call("quokka-reviewer", &["pr", "review", "1", "--approve"]).unwrap();
+        approve();
+        let h2 = commit("two\n");
+        for h in [&h1, &h2] {
+            std::fs::write(t.join(format!("forge/checks/{h}.json")), r#"[{"conclusion":"SUCCESS"}]"#).unwrap();
+        }
+        let merge = || call("quokka-agent", &["pr", "merge", "1", "--squash"]);
+        let refused = merge().unwrap_err().to_string();
+        assert!(refused.contains("base branch policy prohibits the merge"), "{refused}");
+        approve();
+        merge().unwrap();
+        assert_eq!(
+            call("quokka-agent", &["pr", "view", "1", "--json", "state"]).unwrap().trim(),
+            r#"{"state":"MERGED"}"#
+        );
     }
 }

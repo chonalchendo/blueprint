@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use bp_change::intents::{self, Block, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
+use bp_change::intents::{self, Base, Block, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
 use bp_forge::Snapshot;
 use bp_vault::{Id, Index, Kind, Refusal, Vault};
 use serde_json::{Map, Value};
@@ -102,12 +102,12 @@ fn of(
     let header = index.header(id)?.expect("a listed row is in the index");
     let mut depends = Vec::new();
     for d in header.get("depends").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-        let target = index.header(d)?;
-        depends.push(Dependency {
-            id: d.to_string(),
-            status: target.as_ref().map(|h| text(h, "status").unwrap_or_default()),
-            open_pr: world.pr(d).is_some(),
-        });
+        let status = index.header(d)?.map(|h| text(&h, "status").unwrap_or_default());
+        let open_pr = world.pr(d).is_some();
+        // The stack test reads the layers below a target only when `cut` would stack on it.
+        let layers =
+            if open_pr && status.as_deref() != Some("resolved") { crate::stack::layers(index, d)? } else { Vec::new() };
+        depends.push(Dependency { id: d.to_string(), status, open_pr, layers });
     }
     let records = index.records(id, Kind::Claim)?;
     let claims: Vec<Claim> = records
@@ -129,17 +129,25 @@ fn of(
     // the same gates.
     let held = claims.iter().any(|c| c.released.is_none());
     let open = world.pr(id).or_else(|| world.merged(id).filter(|_| held));
-    // The body and the reviewer matter only to needs landing, which needs a pull request.
-    let (pr, blocks) = match open {
-        Some(p) => (Some(pull_request(p, &reviewer(index, id)?)), blocks(vault, id)?),
-        None => (None, Vec::new()),
+    // The body, the reviewer and the base matter only to needs landing, which needs a pull request.
+    let (pr, blocks, base) = match open {
+        Some(p) => {
+            let claim = records.iter().zip(&claims).find(|(_, c)| c.released.is_none()).map(|(r, _)| r);
+            let base = match claim {
+                Some(c) => crate::stack::base(index, c)?,
+                None => Base::Unknown,
+            };
+            (Some(pull_request(p, &reviewer(index, id)?)), blocks(vault, id)?, base)
+        }
+        None => (None, Vec::new(), Base::Unknown),
     };
     // Git is asked only when an escalation needs the answer: one process per escalated issue, none otherwise.
     let answered = intents::latest_claim(&claims).filter(|c| c.escalated).is_some_and(|latest| {
         let record = &records[claims.iter().position(|c| std::ptr::eq(c, latest)).expect("the latest is one of them")];
         Id::parse(id).ok().zip(Id::parse(&record.id).ok()).is_some_and(|(id, claim)| vault.touched_after(&id, &claim))
     });
-    let issue = Issue { status: status.into(), claims, runs, blocks, review_heads, depends, pr, answered, integrity };
+    let issue =
+        Issue { status: status.into(), claims, runs, blocks, review_heads, depends, pr, base, answered, integrity };
     Ok(intents::issue(&issue, world.now))
 }
 
@@ -179,13 +187,11 @@ pub(crate) fn reviewer(index: &Index, id: &str) -> Result<String, Refusal> {
     Ok(index.header(&format!("projects/{project}/project"))?.and_then(|h| text(&h, "reviewer")).unwrap_or_default())
 }
 
-/// The forge's pull request as the predicates read it: its head, green, and the reviewer's approval at the head.
+/// The forge's pull request as the predicates read it: its head, its base, green, and the reviewer's approval at the
+/// head.
 pub(crate) fn pull_request(p: &bp_forge::PullRequest, reviewer: &str) -> PullRequest {
-    PullRequest {
-        head: p.head_ref_oid.clone(),
-        green: p.is_green(),
-        approved: p.is_approved(&p.head_ref_oid, reviewer),
-    }
+    let approved = p.approved_heads(reviewer).contains(&p.head_ref_oid.as_str());
+    PullRequest { head: p.head_ref_oid.clone(), base: p.base_ref_name.clone(), green: p.is_green(), approved }
 }
 
 /// One integrity run's header, reduced. A run the check wrote always has these fields; one without them never counts.

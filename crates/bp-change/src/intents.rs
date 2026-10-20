@@ -118,14 +118,29 @@ pub struct Block {
 pub struct PullRequest {
     /// The head commit.
     pub head: String,
+    /// The branch it targets; a snapshot written before milestone 3 lacks it.
+    pub base: Option<String>,
     /// Every check at the head succeeded, and there is at least one.
     pub green: bool,
-    /// The reviewer identity's approving review at the head exists; no other login's counts (15, Controls 1).
+    /// The reviewer identity's approving review at the head exists; no other login's counts, and no earlier head's,
+    /// as the forge requires an approval of the latest push (15, Controls 1).
     pub approved: bool,
 }
 
+/// The branch a held claim's pull request lands on (15, a dependency chain to landed).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Base {
+    /// Not known: a converted claim names no base branch, so no base test applies.
+    #[default]
+    Unknown,
+    /// This branch.
+    Branch(String),
+    /// The claim was cut from this dependency's pull request head, and the dependency is not resolved yet.
+    Unmerged(String),
+}
+
 /// A `depends` target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Dependency {
     /// The target id.
     pub id: String,
@@ -133,6 +148,43 @@ pub struct Dependency {
     pub status: Option<String>,
     /// The target holds an open pull request.
     pub open_pr: bool,
+    /// The stack a dependant would sit on: the target, then each held claim's unresolved `base_issue` below it, at
+    /// most [`STACK_DEPTH`]. Read only for an unresolved target with an open pull request.
+    pub layers: Vec<String>,
+}
+
+/// A stack is at most three layers deep; the cap is a choice, not a measurement (15, a dependency chain to landed).
+pub const STACK_DEPTH: usize = 3;
+
+/// Why an issue cannot be cut on its unresolved dependencies (15, a dependency chain to landed).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unstacked<'a> {
+    /// These hold no open pull request to base on (`dependency_unpushed`).
+    Unpushed(Vec<&'a str>),
+    /// No one stack holds them all (`dependency_split`).
+    Split(Vec<&'a str>),
+    /// The new layer would sit on these, the top first, past the cap (`stack_too_deep`).
+    Deep(&'a [String]),
+}
+
+/// The dependency an issue is cut on: the unresolved one whose stack holds every other; `None` when each is resolved.
+/// `cut` refuses on the error and ready waits on it, so the two never disagree (21, rule 1).
+pub fn stack(depends: &[Dependency]) -> Result<Option<&Dependency>, Unstacked<'_>> {
+    let below: Vec<&Dependency> = depends.iter().filter(|d| d.status.as_deref() != Some("resolved")).collect();
+    let unpushed: Vec<&str> = below.iter().filter(|d| !d.open_pr).map(|d| d.id.as_str()).collect();
+    if !unpushed.is_empty() {
+        return Err(Unstacked::Unpushed(unpushed));
+    }
+    if below.is_empty() {
+        return Ok(None);
+    }
+    let Some(&top) = below.iter().find(|d| below.iter().all(|o| d.layers.contains(&o.id))) else {
+        return Err(Unstacked::Split(below.iter().map(|d| d.id.as_str()).collect()));
+    };
+    if top.layers.len() >= STACK_DEPTH {
+        return Err(Unstacked::Deep(&top.layers));
+    }
+    Ok(Some(top))
 }
 
 /// Everything the issue predicates read. The caller builds it only for a live issue.
@@ -152,6 +204,8 @@ pub struct Issue {
     pub depends: Vec<Dependency>,
     /// The open pull request, or the merged one of a held claim; `None` when there is none or the forge was not read.
     pub pr: Option<PullRequest>,
+    /// The held claim's base; read only while a pull request is in view.
+    pub base: Base,
     /// A commit after the latest claim's release commit touched the issue file: commit order, not time, so an answer
     /// in the release's own second counts (21, blocked). Read only after an escalated release.
     pub answered: bool,
@@ -211,16 +265,16 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
         return Verdict::of(Intent::Blocked, note.clone());
     }
     if i.status == "open" && held.is_none() && i.pr.is_none() {
-        let waits: Vec<&str> = i
-            .depends
-            .iter()
-            .filter(|d| d.status.as_deref() != Some("resolved") && !d.open_pr)
-            .map(|d| d.id.as_str())
-            .collect();
-        return if waits.is_empty() {
-            Verdict::of(Intent::Ready, "")
-        } else {
-            Verdict::of(Intent::Waiting, format!("waits for {}", waits.join(", ")))
+        return match stack(&i.depends) {
+            Ok(_) => Verdict::of(Intent::Ready, ""),
+            Err(Unstacked::Unpushed(waits)) => Verdict::of(Intent::Waiting, format!("waits for {}", waits.join(", "))),
+            Err(Unstacked::Split(ids)) => {
+                Verdict::of(Intent::Waiting, format!("waits for one stack: land all but one of {}", ids.join(", ")))
+            }
+            Err(Unstacked::Deep(layers)) => {
+                let bottom = layers.last().map(String::as_str).unwrap_or_default();
+                Verdict::of(Intent::Waiting, format!("waits for a stack under three layers: land {bottom}"))
+            }
         };
     }
     let Some(pr) = &i.pr else {
@@ -231,11 +285,14 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     };
     // The forge approval is the gate, not the vault's review record: `land` reads none, so neither does this (21).
     if pr.approved && pr.green {
-        return match evidence(&i.runs, &pr.head, &i.blocks) {
+        return match landing(pr, &i.base, &i.runs, &i.blocks) {
             Ok(()) => Verdict::of(Intent::NeedsLanding, ""),
+            // No agent action helps: the human lands the layer below, which reads needs landing itself.
+            Err(Unmet::Unmerged(a)) => Verdict::of(Intent::Waiting, format!("waits for {a} to land")),
+            Err(Unmet::Mismatch(b)) => Verdict::of(Intent::Working, format!("not on {b}: bp pr")),
             Err(Unmet::Failed(r)) => Verdict::of(Intent::Working, format!("{} did not pass at head: bp pr", r.check)),
             Err(Unmet::Evidence(b)) => Verdict::of(Intent::Working, format!("no run of {b} at head: bp pr")),
-            Err(Unmet::Review | Unmet::Checks) => unreachable!("evidence reads only the runs"),
+            Err(Unmet::Review | Unmet::Checks) => unreachable!("approved and green"),
         };
     }
     if !i.review_heads.contains(&pr.head) {
@@ -250,7 +307,12 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
 /// The first part of needs landing that does not hold, in `land`'s refusal order (26, design change 4).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Unmet<'a> {
-    /// No approving review from the reviewer identity at the head.
+    /// The claim was cut from this dependency's head, which has not landed (`base_unmerged`).
+    Unmerged(&'a str),
+    /// The pull request does not target this branch, the claim's base (`base_mismatch`).
+    Mismatch(&'a str),
+    /// No approving review from the reviewer identity at the head; `land` reads the forge again to say whether one
+    /// at an earlier head saw another diff (`diff_changed`).
     Review,
     /// The forge check at the head is not green.
     Checks,
@@ -260,10 +322,15 @@ pub enum Unmet<'a> {
     Evidence(&'a str),
 }
 
-/// Needs landing (21): the reviewer's approval at the head, the forge check green at the head, and the run
-/// [`evidence`]. `land` refuses on the first part that does not hold, and the `Intents` function reads the same
-/// answer, so the two never disagree (21, rule 1). Issue 5 of 26 adds the earlier head with the head's patch id.
-pub fn landing<'a>(pr: &PullRequest, runs: &'a [Run], blocks: &'a [Block]) -> Result<(), Unmet<'a>> {
+/// Needs landing (21): the pull request on the claim's `base`, the reviewer's approval at the head, the forge check
+/// green at the head, and the run [`evidence`], in that order (26, design change 4). `land` refuses on the first part
+/// that does not hold, and the `Intents` function reads the same answer, so the two never disagree (21, rule 1).
+pub fn landing<'a>(pr: &'a PullRequest, base: &'a Base, runs: &'a [Run], blocks: &'a [Block]) -> Result<(), Unmet<'a>> {
+    match base {
+        Base::Unmerged(below) => return Err(Unmet::Unmerged(below)),
+        Base::Branch(b) if pr.base.as_ref().is_some_and(|into| into != b) => return Err(Unmet::Mismatch(b)),
+        _ => {}
+    }
     if !pr.approved {
         return Err(Unmet::Review);
     }
@@ -366,11 +433,14 @@ mod tests {
     }
 
     fn dep(id: &str, status: &str, open_pr: bool) -> Dependency {
-        Dependency { id: id.into(), status: Some(status.into()), open_pr }
+        let layers = if open_pr { vec![id.to_string()] } else { Vec::new() };
+        Dependency { id: id.into(), status: Some(status.into()), open_pr, layers }
     }
 
+    const BASE: Base = Base::Unknown;
+
     fn pr(head: &str, green: bool, approved: bool) -> PullRequest {
-        PullRequest { head: head.into(), green, approved }
+        PullRequest { head: head.into(), base: Some("master".into()), green, approved }
     }
 
     fn run(check: &str, at: i64, commit: &str, failed: bool) -> Run {
@@ -474,7 +544,7 @@ mod tests {
         assert_eq!(issue(&i, NOW), Verdict::of(Intent::Waiting, "waits for a"), "the note names only blockers");
         let i = Issue { claims: vec![released(NOW - 60)], depends: vec![dep("a", "open", false)], ..open() };
         assert_eq!(issue(&i, NOW).intent, Some(Intent::Waiting), "a released claim is no claim");
-        let missing = Dependency { id: "gone".into(), status: None, open_pr: false };
+        let missing = Dependency { id: "gone".into(), status: None, ..Dependency::default() };
         let i = Issue { depends: vec![missing], ..open() };
         assert_eq!(issue(&i, NOW), Verdict::of(Intent::Blocked, "depends on missing gone"));
         let i = Issue { depends: vec![dep("x", "abandoned", false)], ..open() };
@@ -532,18 +602,34 @@ mod tests {
     fn landing_refuses_in_order_and_needs_a_passing_run_of_each_error_block() {
         let blocks = vec![block("a"), block("b")];
         let runs = vec![run("a", NOW, "h", false), run("b", NOW, "h", false)];
-        assert_eq!(landing(&pr("h", false, false), &runs, &blocks), Err(Unmet::Review), "the review comes first");
-        assert_eq!(landing(&pr("h", false, true), &runs, &blocks), Err(Unmet::Checks));
-        assert_eq!(landing(&pr("h", true, true), &runs, &blocks), Ok(()));
-        assert_eq!(landing(&pr("h", true, true), &runs[..1], &blocks), Err(Unmet::Evidence("b")));
-        assert_eq!(landing(&pr("g", true, true), &runs, &blocks), Err(Unmet::Evidence("a")), "only runs at the head");
+        assert_eq!(
+            landing(&pr("h", false, false), &BASE, &runs, &blocks),
+            Err(Unmet::Review),
+            "the review comes first"
+        );
+        assert_eq!(landing(&pr("h", false, true), &BASE, &runs, &blocks), Err(Unmet::Checks));
+        assert_eq!(landing(&pr("h", true, true), &BASE, &runs, &blocks), Ok(()));
+        assert_eq!(landing(&pr("h", true, true), &BASE, &runs[..1], &blocks), Err(Unmet::Evidence("b")));
+        assert_eq!(
+            landing(&pr("g", true, true), &BASE, &runs, &blocks),
+            Err(Unmet::Evidence("a")),
+            "only runs at the head"
+        );
         let failed = [run("a", NOW, "h", true), runs[1].clone()];
-        assert_eq!(landing(&pr("h", true, true), &failed, &blocks), Err(Unmet::Failed(&failed[0])));
+        assert_eq!(landing(&pr("h", true, true), &BASE, &failed, &blocks), Err(Unmet::Failed(&failed[0])));
         let unrun = [Run { passed: false, ..runs[0].clone() }, runs[1].clone()];
-        assert_eq!(landing(&pr("h", true, true), &unrun, &blocks), Err(Unmet::Failed(&unrun[0])), "could not run");
-        assert_eq!(landing(&pr("h", true, true), &[], &[]), Ok(()), "an issue with no error block needs no run");
+        assert_eq!(
+            landing(&pr("h", true, true), &BASE, &unrun, &blocks),
+            Err(Unmet::Failed(&unrun[0])),
+            "could not run"
+        );
+        assert_eq!(landing(&pr("h", true, true), &BASE, &[], &[]), Ok(()), "an issue with no error block needs no run");
         let edited = [block("a"), Block { hash: "#a2".into(), ..block("b") }];
-        assert_eq!(landing(&pr("h", true, true), &runs, &edited), Err(Unmet::Evidence("b")), "b changed after its run");
+        assert_eq!(
+            landing(&pr("h", true, true), &BASE, &runs, &edited),
+            Err(Unmet::Evidence("b")),
+            "b changed after its run"
+        );
 
         let held = Issue { status: "in-progress".into(), claims: vec![Claim::default()], ..Issue::default() };
         let i = Issue { pr: Some(pr("h", true, true)), review_heads: vec!["h".into()], blocks, runs, ..held };
@@ -558,6 +644,58 @@ mod tests {
         assert_eq!(issue(&stale, NOW), Verdict::of(Intent::Working, "no run of a at head: bp pr"), "pr is due again");
         let unrun = Issue { runs: vec![Run { passed: false, ..i.runs[0].clone() }, i.runs[1].clone()], ..i };
         assert_eq!(issue(&unrun, NOW), Verdict::of(Intent::Working, "a did not pass at head: bp pr"), "could not run");
+    }
+
+    #[test]
+    fn ready_and_cut_share_one_stack_test() {
+        let on = |id: &str, layers: &[&str]| Dependency {
+            layers: layers.iter().map(|&l| l.into()).collect(),
+            ..dep(id, "open", true)
+        };
+        assert_eq!(stack(&[dep("a", "resolved", false)]), Ok(None));
+        let (b, a) = (on("b", &["b", "a"]), on("a", &["a"]));
+        assert_eq!(stack(&[a.clone(), b.clone()]).map(|d| d.map(|d| d.id.clone())), Ok(Some("b".into())), "the top");
+        let split = [on("a", &["a"]), on("x", &["x"])];
+        assert_eq!(stack(&split), Err(Unstacked::Split(vec!["a", "x"])));
+        let full = [on("c", &["c", "b", "a"])];
+        assert_eq!(stack(&full), Err(Unstacked::Deep(&full[0].layers)));
+        let i = Issue { depends: split.to_vec(), ..open() };
+        assert_eq!(issue(&i, NOW), Verdict::of(Intent::Waiting, "waits for one stack: land all but one of a, x"));
+        let i = Issue { depends: full.to_vec(), ..open() };
+        assert_eq!(issue(&i, NOW), Verdict::of(Intent::Waiting, "waits for a stack under three layers: land a"));
+        let i = Issue { depends: vec![a, b], ..open() };
+        assert_eq!(issue(&i, NOW).intent, Some(Intent::Ready));
+    }
+
+    #[test]
+    fn landing_reads_the_stack_base_first() {
+        let (master, a) = (Base::Branch("master".into()), "projects/bp/issues/a");
+        let below = Base::Unmerged(a.into());
+        let ok = pr("h", true, true);
+        assert_eq!(landing(&ok, &master, &[], &[]), Ok(()));
+        assert_eq!(landing(&pr("h", false, false), &below, &[], &[]), Err(Unmet::Unmerged(a)), "the base comes first");
+        let stacked = Base::Branch("bp/a".into());
+        assert_eq!(landing(&ok, &stacked, &[], &[]), Err(Unmet::Mismatch("bp/a")));
+        let unread = PullRequest { base: None, ..ok.clone() };
+        assert_eq!(landing(&unread, &stacked, &[], &[]), Ok(()), "a snapshot with no base is not tested");
+        assert_eq!(
+            landing(&pr("h", true, false), &master, &[], &[]),
+            Err(Unmet::Review),
+            "only an approval at the head"
+        );
+
+        let held = Issue {
+            status: "in-progress".into(),
+            claims: vec![Claim::default()],
+            review_heads: vec!["h".into()],
+            ..Issue::default()
+        };
+        let i = Issue { pr: Some(ok.clone()), base: below, ..held.clone() };
+        assert_eq!(issue(&i, NOW), Verdict::of(Intent::Waiting, format!("waits for {a} to land")));
+        let i = Issue { pr: Some(ok), base: master.clone(), ..held.clone() };
+        assert_eq!(issue(&i, NOW).intent, Some(Intent::NeedsLanding));
+        let i = Issue { pr: Some(pr("h", true, false)), base: master, ..held };
+        assert_eq!(issue(&i, NOW).intent, Some(Intent::NeedsApproval), "a push needs a new approval");
     }
 
     #[test]
