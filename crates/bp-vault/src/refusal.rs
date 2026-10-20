@@ -26,6 +26,7 @@ crate::closed_enum! {
         ForgePrecondition = "forge_precondition",
         SchemaNewer = "schema_newer",
         NoVault = "no_vault",
+        NoClone = "no_clone",
         NoNode = "no_node",
         NoSection = "no_section",
         ContextIncomplete = "context_incomplete",

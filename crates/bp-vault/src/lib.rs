@@ -159,17 +159,23 @@ impl Vault {
         File::from_bytes(id.clone(), &blob.stdout)
     }
 
-    /// The commit time of the last commit that touched one file, Unix seconds: its processing time (13). `None`
-    /// when git cannot say, as for a file never committed or a vault outside git.
-    pub fn last_commit(&self, id: &Id) -> Option<i64> {
+    /// Whether the last commit that touched `id` or `after` touched `id` alone: a write to `id` follows the last
+    /// write to `after` in commit order, not time, so a write in the same second counts (21, blocked). `false` when
+    /// git cannot say, as for a vault outside git.
+    pub fn touched_after(&self, id: &Id, after: &Id) -> bool {
+        let (id, after) = (format!("{id}.md"), format!("{after}.md"));
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(&self.root)
             .env("LC_ALL", "C")
-            .args(["log", "-1", "--format=%ct", "--", &format!("./{id}.md")])
-            .output()
-            .ok()?;
-        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+            .args(["log", "-1", "--relative", "--format=", "--name-only", "--"])
+            .args([format!("./{id}"), format!("./{after}")])
+            .output();
+        out.is_ok_and(|o| {
+            let names = String::from_utf8_lossy(&o.stdout).into_owned();
+            let names: Vec<&str> = names.lines().collect();
+            names.contains(&id.as_str()) && !names.contains(&after.as_str())
+        })
     }
 
     /// Every markdown file under `projects/` and `shared/`: the ids, sorted, and the paths that are not ids, without

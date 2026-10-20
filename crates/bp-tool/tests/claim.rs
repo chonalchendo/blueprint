@@ -30,6 +30,7 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
         ("shared/.gitkeep", ""),
         ("projects/bp/project.md", &project),
         (&format!("{ISSUE}.md"), &issue("open")),
+        ("projects/bp/issues/b.md", &issue("open")),
         ("projects/bp/issues/r.md", &issue("resolved")),
     ]);
     (v, t)
@@ -77,7 +78,6 @@ fn cut_claims_in_one_commit_and_a_repeat_exits_3() {
         [&"2026-10-19T08:00:00Z".into(), &"human".into(), &"s1".into(), &out["worktree"], &out["base"], &ISSUE.into()]
     );
     assert!(std::fs::read_to_string(v.join(format!("{ISSUE}.md"))).unwrap().contains("status: in-progress"));
-    assert_eq!(git(v, &["log", "-1", "--format=%cI"]).trim(), "2026-10-19T08:00:00Z", "the commit is the claim's time");
     let before = commits(v);
     let (code, out) = bp(v, t, &[("BP_SESSION", "s1")], &["cut", ISSUE]);
     assert_eq!((code, out["claim"].as_str()), (Some(3), Some(claim)));
@@ -103,7 +103,9 @@ fn cut_refuses_before_anything_moves() {
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("unknown_value")));
     git(t, &["init", "-q", "other"]);
     let (code, out) = common::bp_env(&t.join("other"), &[("BP_VAULT", v.to_str().unwrap())], &["cut", ISSUE]);
-    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "no clone of the project: {out}");
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("no_clone")), "no clone of the project: {out}");
+    let origin = t.join("origin.git").display().to_string();
+    assert!(out["fix"].as_str().unwrap().contains(&origin), "the fix names the repository: {out}");
     assert_eq!(commits(v), "1");
     assert!(!worktree(t).exists());
 }
@@ -145,7 +147,7 @@ fn release_appends_the_release_and_keeps_the_worktree_for_the_next_cut() {
     assert!(text.ends_with("---\n\n## Released\n\nto: 2026-10-19T09:00:00Z\nreason: escalated\n"), "{text}");
     assert!(std::fs::read_to_string(v.join(format!("{ISSUE}.md"))).unwrap().contains("status: open"));
     assert!(w.join("work.txt").exists());
-    assert_eq!(intent(v, "2026-10-19T09:30:00Z"), "blocked", "escalated, and no write since: the commit is at `to`");
+    assert_eq!(intent(v, "2026-10-19T09:30:00Z"), "blocked", "escalated, and no write since");
     let (code, out) = bp(v, t, &later, &["release", ISSUE, "--reason", "dropped"]);
     assert_eq!((code, out["id"].as_str()), (Some(3), Some(ISSUE)), "no active claim");
     let again = [("BP_NOW", "2026-10-19T10:00:00Z")];
@@ -154,4 +156,72 @@ fn release_appends_the_release_and_keeps_the_worktree_for_the_next_cut() {
     assert_eq!(out["base"], cut["base"], "the kept worktree's base is where its branch left master");
     assert_eq!(git(&t.join("code"), &["worktree", "list"]).lines().count(), 2);
     assert_eq!(std::fs::read_dir(v.join(format!("{ISSUE}/claims"))).unwrap().count(), 2);
+}
+
+#[test]
+fn an_answer_in_the_release_second_ends_the_escalation() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    bp(v, t, &[], &["cut", ISSUE]);
+    // Both commits in one second: commit order, not time, says the answer came after.
+    let second = [("GIT_COMMITTER_DATE", "@1792400000 +0000"), ("GIT_AUTHOR_DATE", "@1792400000 +0000")];
+    let (code, _) = bp(v, t, &second, &["release", ISSUE, "--reason", "escalated"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(intent(v, "2026-10-19T09:00:00Z"), "blocked");
+    let (code, _) = bp(v, t, &second, &["set", ISSUE, "severity", "low"]);
+    assert_eq!(code, Some(0));
+    assert_eq!(git(v, &["log", "-2", "--format=%ct"]), "1792400000\n1792400000\n");
+    assert_eq!(intent(v, "2026-10-19T09:00:00Z"), "ready");
+}
+
+#[test]
+fn cut_fetches_with_no_lock_held() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    git(&t.join("code"), &["config", "remote.origin.uploadpack", "sleep 3; git-upload-pack"]);
+    let mut slow = std::process::Command::new(env!("CARGO_BIN_EXE_bp"))
+        .current_dir(t.join("code"))
+        .env("BP_VAULT", v)
+        .env("BP_NOW", "2026-10-19T08:00:00Z")
+        .env_remove("BP_ROLE")
+        .args(["cut", ISSUE, "--json"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let (code, out) = bp(v, t, &[], &["set", "projects/bp/issues/b", "severity", "low"]);
+    assert_eq!(code, Some(0), "another writer goes on while cut fetches: {out}");
+    assert!(slow.try_wait().unwrap().is_none(), "the fetch still runs");
+    assert!(slow.wait().unwrap().success());
+    assert!(std::fs::read_to_string(v.join(format!("{ISSUE}.md"))).unwrap().contains("status: in-progress"));
+}
+
+#[test]
+fn cut_from_a_linked_worktree_places_the_next_beside_it() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    bp(v, t, &[], &["cut", ISSUE]);
+    let env = [("BP_VAULT", v.to_str().unwrap())];
+    let (code, out) = common::bp_env(&worktree(t), &env, &["cut", "projects/bp/issues/b"]);
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(out["worktree"].as_str(), t.canonicalize().unwrap().join("code-worktrees/b").to_str());
+}
+
+#[test]
+fn cut_restores_a_removed_worktree_from_its_branch() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let code_dir = t.join("code");
+    let (_, first) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = worktree(t);
+    git(&code_dir, &["worktree", "remove", "--force", w.to_str().unwrap()]);
+    let (code, out) = bp(v, t, &[], &["cut", ISSUE]);
+    assert_eq!((code, out["worktree"].as_str()), (Some(3), w.to_str()), "a repeat: {out}");
+    assert_eq!(git(&w, &["branch", "--show-current"]).trim(), "bp/a", "the repeat put the worktree back");
+    bp(v, t, &[("BP_NOW", "2026-10-19T09:00:00Z")], &["release", ISSUE, "--reason", "dropped"]);
+    std::fs::remove_dir_all(&w).unwrap();
+    let (code, out) = bp(v, t, &[("BP_NOW", "2026-10-19T10:00:00Z")], &["cut", ISSUE]);
+    assert_eq!((code, out["worktree"].as_str()), (Some(0), w.to_str()), "a kept branch: {out}");
+    assert_eq!(out["base"], first["base"]);
+    assert_eq!(git(&w, &["branch", "--show-current"]).trim(), "bp/a");
 }

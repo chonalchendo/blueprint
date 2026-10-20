@@ -1,6 +1,7 @@
 //! `bp cut <issue>` and `bp release <issue>`: a claim opens and closes, each in one commit with `Bp-Claim` (15, the
-//! repo verbs; 26, design changes 2 and 7). `cut` runs in a clone of the project repository. It fetches, adds the
-//! worktree and the branch at their fixed names, then commits the claim and the issue at `in-progress`. `release`
+//! repo verbs; 26, design changes 2 and 7). `cut` runs in a clone of the project repository. It fetches with no lock
+//! held, then under the lock adds the worktree and the branch at their fixed names and commits the claim and the issue
+//! at `in-progress`. `release`
 //! appends the claim's `## Released` and moves the issue back to `open`; the worktree stays for the next claim.
 
 use std::collections::BTreeMap;
@@ -40,26 +41,23 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
     let vault = Vault::discover(cwd)?;
     let role = crate::set::role()?;
     let session = std::env::var("BP_SESSION").ok().filter(|s| !s.is_empty());
-    let now = crate::clock::now()?;
-    // The lock comes before the reads and stays through the fetch, so no second `cut` claims between the check and
-    // the commit.
-    let mut writer = vault.writer()?;
-    let id = subject(writer.index(), &c.issue)?;
-    let from = crate::clock::instant(now);
-    let claim = crate::record::free(&vault.root, &format!("{id}/{}/{}", Kind::Claim.dir(), from.replace(':', "-")));
-    writer.clean([&id, &claim])?;
-    let text = vault.text(&id)?;
-    let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
+    let index = Index::open(&vault)?;
+    let id = subject(&index, &c.issue)?;
     let (project, slug) = (id.project().unwrap_or_default(), id.as_str().rsplit('/').next().unwrap_or_default());
     let branch = format!("{project}/{slug}");
-    if let Some(repeat) = gate(writer.index(), &id, &file, role.as_str(), session.as_deref(), &branch)? {
-        return Ok(Wrote::Already(repeat));
-    }
-    let top = clone_of(cwd, writer.index(), project)?;
+    let top = clone_of(cwd, &index, project)?;
     let worktree = place(&top, slug)?;
+    // The fetch has no time bound, so it runs with no lock held: every refusal comes before it and holds under the
+    // lock too, as `stamp` checks around its blocks (26, design change 2).
+    vault.clean([&id])?;
+    let check = |index: &Index| gate(index, &id, &vault.text(&id)?, role.as_str(), session.as_deref(), &branch);
+    if let Some(repeat) = check(&index)? {
+        return repeated(&top, &branch, repeat);
+    }
+    drop(index);
     git(&top, &["fetch", "-q", "origin"])?;
     let start = c.base.as_deref().unwrap_or("origin/HEAD");
-    let base = git(&top, &["rev-parse", "--verify", "-q", "--end-of-options", &format!("{start}^{{commit}}")])
+    let start = git(&top, &["rev-parse", "--verify", "-q", "--end-of-options", &format!("{start}^{{commit}}")])
         .map_err(|e| match &c.base {
             Some(b) => Refusal::new(
                 Code::UnknownValue,
@@ -69,15 +67,17 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
             ),
             None => Refusal::failed(e.subject, "origin has no default branch here: git remote set-head origin --auto"),
         })?;
-    let reuse = checked_out(&worktree).as_deref() == Some(&format!("refs/heads/{branch}"));
-    // A kept worktree carries its commits: its base is where its branch left the start, not the start's head.
-    let base = if reuse {
-        git(&worktree, &["merge-base", "HEAD", &base])?
-    } else {
-        let path = worktree.display().to_string();
-        git(&top, &["worktree", "add", "-q", "--no-track", "-b", &branch, &path, &base])?;
-        base
-    };
+    let mut writer = vault.writer()?;
+    let from = crate::clock::instant(crate::clock::now()?);
+    let claim = crate::record::free(&vault.root, &format!("{id}/{}/{}", Kind::Claim.dir(), from.replace(':', "-")));
+    writer.clean([&id, &claim])?;
+    if let Some(repeat) = check(writer.index())? {
+        return repeated(&top, &branch, repeat);
+    }
+    let text = vault.text(&id)?;
+    let added = attach(&top, &worktree, &branch, &start)?;
+    // A kept branch carries its commits: its base is where it left the start, not the start's head.
+    let base = if added == Added::Both { start } else { git(&worktree, &["merge-base", "HEAD", &start])? };
     let mut fields = BTreeMap::from([
         ("from".to_string(), Value::from(from)),
         ("owner".into(), role.as_str().into()),
@@ -102,12 +102,13 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
         (id.clone(), bp_vault::set_field(&text, "status", &"in-progress".into())),
     ]);
     writer.trailer(format!("Bp-Claim: {claim}"));
-    writer.at(now);
     let written = writer.commit("cut", role.as_str(), &format!("cut {id}"), &changes).inspect_err(|_| {
-        // Nothing of a refused cut stays: the worktree and the branch it added go with the claim. Their own failure
-        // is not the error the caller needs.
-        if !reuse {
+        // Nothing of a refused cut stays: what it added goes with the claim. The undo's own failure is not the error
+        // the caller needs.
+        if added != Added::None {
             let _ = git(&top, &["worktree", "remove", "--force", &worktree.display().to_string()]);
+        }
+        if added == Added::Both {
             let _ = git(&top, &["branch", "-D", &branch]);
         }
     })?;
@@ -127,14 +128,13 @@ pub(crate) fn release(cwd: &Path, r: &Release) -> Result<Wrote, Refusal> {
     node_id(&r.issue)?;
     let vault = Vault::discover(cwd)?;
     let role = crate::set::role()?;
-    let now = crate::clock::now()?;
     let mut writer = vault.writer()?;
     let id = subject(writer.index(), &r.issue)?;
     let Some(h) = held(writer.index(), &id)? else { return Ok(Wrote::Already(json!({ "id": id }))) };
     let claim = Id::parse(&h.id).expect("the index holds ids");
     writer.clean([&id, &claim])?;
     let text = vault.text(&id)?;
-    let to = crate::clock::instant(now);
+    let to = crate::clock::instant(crate::clock::now()?);
     let released =
         format!("{}\n\n## Released\n\nto: {to}\nreason: {}\n", vault.text(&claim)?.trim_end_matches('\n'), r.reason);
     let mut changes = BTreeMap::from([(claim.clone(), released)]);
@@ -144,7 +144,6 @@ pub(crate) fn release(cwd: &Path, r: &Release) -> Result<Wrote, Refusal> {
         changes.insert(id.clone(), bp_vault::set_field(&text, "status", &"open".into()));
     }
     writer.trailer(format!("Bp-Claim: {claim}"));
-    writer.at(now);
     let written = writer.commit("release", role.as_str(), &format!("release {id} {}", r.reason), &changes)?;
     Ok(Wrote::Changed(json!({
         "id": id,
@@ -158,11 +157,11 @@ pub(crate) fn release(cwd: &Path, r: &Release) -> Result<Wrote, Refusal> {
 }
 
 /// The claim and status `cut` starts from: the active claim's repeat (exit 3, its fields) or `already_claimed`, then
-/// `illegal_transition` unless the issue is `open`.
+/// `illegal_transition` unless the issue (`text`) is `open`.
 fn gate(
     index: &Index,
     id: &Id,
-    file: &bp_vault::File,
+    text: &str,
     role: &str,
     session: Option<&str>,
     branch: &str,
@@ -170,7 +169,8 @@ fn gate(
     if let Some(h) = held(index, id)? {
         let (owner, held_session) = (field(&h, "owner"), field(&h, "session"));
         if owner.as_deref() == Some(role) && held_session.as_deref() == session {
-            return Ok(Some(json!({ "id": id, "claim": h.id, "branch": branch, "worktree": field(&h, "worktree") })));
+            let (worktree, base) = (field(&h, "worktree"), field(&h, "base"));
+            return Ok(Some(json!({ "id": id, "claim": h.id, "branch": branch, "worktree": worktree, "base": base })));
         }
         let by = owner.unwrap_or_default();
         let by = held_session.map_or(by.clone(), |s| format!("{by}, session {s}"));
@@ -181,6 +181,7 @@ fn gate(
             format!("{} is held by {by}; bp release {id} --reason <escalated|dropped|lost>, then bp cut {id}", h.id),
         ));
     }
+    let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
     let status = file.header.as_ref().filter(|h| h.kind == Kind::Issue).and_then(|h| h.status.clone());
     if status.as_deref() != Some("open") {
         let fix = match status.as_deref() {
@@ -208,15 +209,51 @@ fn clone_of(cwd: &Path, index: &Index, project: &str) -> Result<PathBuf, Refusal
         .header(&format!("projects/{project}/project"))?
         .and_then(|h| h.get("repository")?.as_str().map(str::to_string))
         .unwrap_or_default();
+    // From a linked worktree too, the top is the main worktree's, so a new worktree never nests in another.
     Repo::find(cwd)
         .filter(|r| r.remote().is_some_and(|url| bp_vault::git::same_repository(&url, &repository)))
-        .map(|r| r.top)
+        .and_then(|r| r.main_top())
         .ok_or_else(|| {
-            Refusal::failed(
+            Refusal::new(
+                Code::NoClone,
                 cwd.display().to_string(),
-                format!("a repo verb runs in a clone of {project}'s repository; cd into a clone of {repository:?}"),
+                "a repo verb runs inside a clone of the project's repository (26, design change 2)",
+                format!("cd into a clone of {repository}, or git clone {repository}, then rerun"),
             )
         })
+}
+
+/// A repeat `cut` exits 3 with the claim's fields. A worktree a human removed comes back from its branch first.
+fn repeated(top: &Path, branch: &str, repeat: Value) -> Result<Wrote, Refusal> {
+    if let Some(w) = repeat["worktree"].as_str().map(Path::new).filter(|w| !w.exists()) {
+        attach(top, w, branch, repeat["base"].as_str().unwrap_or_default())?;
+    }
+    Ok(Wrote::Already(repeat))
+}
+
+/// What `attach` added to the clone, so a failed commit takes back only that.
+#[derive(PartialEq)]
+enum Added {
+    None,
+    Worktree,
+    Both,
+}
+
+/// Puts `branch` at `worktree`: a kept worktree stays, a kept branch gets a new worktree, else both start at `start`.
+fn attach(top: &Path, worktree: &Path, branch: &str, start: &str) -> Result<Added, Refusal> {
+    let head = format!("refs/heads/{branch}");
+    if checked_out(worktree).as_deref() == Some(&head) {
+        return Ok(Added::None);
+    }
+    let path = worktree.display().to_string();
+    if git(top, &["rev-parse", "--verify", "-q", &head]).is_err() {
+        git(top, &["worktree", "add", "-q", "--no-track", "-b", branch, &path, start])?;
+        return Ok(Added::Both);
+    }
+    // The branch outlived its worktree. A directory deleted by hand leaves git's record of it, which `prune` drops.
+    git(top, &["worktree", "prune"])?;
+    git(top, &["worktree", "add", "-q", &path, branch])?;
+    Ok(Added::Worktree)
 }
 
 /// The issue's active claim: the latest with no `to` (13, at most one).
@@ -254,6 +291,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
         .arg("-C")
         .arg(dir)
         .env("LC_ALL", "C")
+        // A credential prompt would wait on a terminal no agent reads; the fetch fails instead.
+        .env("GIT_TERMINAL_PROMPT", "0")
         .args(args)
         .output()
         .map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;
