@@ -5,7 +5,7 @@ description: Use when a worker dispatch names an issue whose latest review has a
 
 Task: answer each finding of the latest review on the issue on the `Node:` line of the dispatch. This text calls the issue `<id>`.
 
-Pass `--json` to each `bp` call. On a non-zero exit, read `code` and run `fix` at most once. Escalate when `fix` needs a verb on the `Forbidden:` line. Also escalate when the call fails again after `fix`.
+Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at most once. Exit 3 means the call had nothing to do. Escalate when `fix` needs a verb on the `Forbidden:` line. Also escalate when the call fails again after `fix`.
 
 1. Read the slice: `bp walk <id> --for respond --json`. Its first body is the latest review, with its `id`.
 2. Find the worktree. Run `bp list claim --under <id> --json`, then `bp show <claim> --json` for the last row. Edit and commit only in its `worktree`.

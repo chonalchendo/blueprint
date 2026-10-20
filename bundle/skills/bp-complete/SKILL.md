@@ -5,7 +5,7 @@ description: Use when a worker dispatch names an issue to complete. Claim it, bu
 
 Task: complete the issue on the `Node:` line of the dispatch. This text calls it `<id>`.
 
-Pass `--json` to each `bp` call. On a non-zero exit, read `code` and run `fix` at most once. Escalate when `fix` needs a verb on the `Forbidden:` line. Also escalate when the call fails again after `fix`.
+Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at most once. Exit 3 means the call had nothing to do. Escalate when `fix` needs a verb on the `Forbidden:` line. Also escalate when the call fails again after `fix`.
 
 1. Read the slice: `bp walk <id> --for complete --json`. It holds the issue, its milestone, its target designs and the learnings. Read a node from `ids` with `bp show <node> --json` only when a step needs it.
 2. Claim the issue: `bp cut <id> --json`. Edit and commit only in the `worktree` that it returns.
