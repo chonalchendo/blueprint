@@ -2,8 +2,9 @@
 //! of the weight, ranked by personalized PageRank from the seed, then filled into a token budget first fit.
 //! Records and inbox entries are not walked: a record is evidence about its parent, and an inbox entry is a note.
 //!
-//! The index keeps the walk's graph as one adjacency blob, rebuilt by each refresh that changed a file. The reach
-//! and the rank then run in memory: spike 2 found the adjacency layout, not the language, sets the walk's cost.
+//! The index keeps the walk's graph as one adjacency blob, rebuilt by each refresh that changed a file and kept up
+//! to date by a write. The reach and the rank then run in memory: spike 2 found the adjacency layout, not the
+//! language, sets the walk's cost.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -289,6 +290,71 @@ pub(crate) fn rebuild_graph(conn: &rusqlite::Connection) -> rusqlite::Result<()>
     let blob = Graph { offsets, arcs, walkable }.encode();
     conn.execute("delete from graph", [])?;
     conn.execute("insert into graph values (?1)", [blob])?;
+    Ok(())
+}
+
+/// What the graph holds of one id: its row and whether the walk enters it, and every arc that starts or ends there,
+/// as `src dst type` over ids.
+#[derive(PartialEq, Eq)]
+pub(crate) struct Around {
+    node: Option<(i64, bool)>,
+    arcs: std::collections::BTreeSet<(String, String, String)>,
+}
+
+/// [`Around`] for one id, read inside the write's transaction.
+pub(crate) fn around(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<Around> {
+    let node = conn
+        .prepare_cached("select rowid, kind != 'inbox' from nodes where id = ?1")?
+        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let arcs = conn
+        .prepare_cached(
+            "select a.id, b.id, case l.type when 'body' then 'cites' else l.type end
+             from links l join nodes a on a.id = l.src join nodes b on b.id = l.dst
+             where (l.src = ?1 or l.dst = ?1)
+               and l.type in ('under', 'depends', 'answers', 'targets', 'cites', 'body') and a.rowid != b.rowid",
+        )?
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(Around { node, arcs })
+}
+
+/// Brings the graph up to date after a write took each id from `before` to `after`. A label or a body that moves no
+/// link leaves it as it was, and a new node with no arc, such as an inbox entry, only adds its row; anything else
+/// rebuilds it. Rebuilding on every write cost a fifth of a one-file write (25, issue 9). A node keeps its row
+/// across an edit, so the rows of the stored graph still name the same nodes.
+pub(crate) fn update_graph(conn: &rusqlite::Connection, before: &[Around], after: &[Around]) -> rusqlite::Result<()> {
+    let mut added = Vec::new();
+    for (b, a) in before.iter().zip(after) {
+        match (b.node, a.node) {
+            _ if b.arcs != a.arcs => return rebuild_graph(conn),
+            (x, y) if x == y => {}
+            (None, Some(row)) => added.push(row),
+            _ => return rebuild_graph(conn),
+        }
+    }
+    if added.is_empty() {
+        return Ok(());
+    }
+    let old: Vec<u8> = conn.query_row("select csr from graph", [], |r| r.get(0))?;
+    let blob = Blob::new(&old);
+    let (n, m) = (blob.n, u32_at(&old, 4) as usize);
+    let rows = added.iter().map(|(row, _)| usize::try_from(*row).expect("a rowid is positive"));
+    let grown = rows.clone().map(|r| r + 1).chain([n]).max().expect("the chain holds n");
+    let mut out = Vec::with_capacity(old.len() + 5 * (grown - n));
+    out.extend(u32::try_from(grown).expect("a vault holds fewer than 2^32 nodes").to_le_bytes());
+    out.extend(&old[4..blob.arcs_at]);
+    // Each new row starts and ends its arcs where the last row ended them: at `m`, with none.
+    for _ in n..grown {
+        out.extend(&old[4..8]);
+    }
+    out.extend(&old[blob.arcs_at..]);
+    let walkable = blob.arcs_at + 4 * (grown - n) + 12 * m;
+    out.resize(walkable + grown, 0);
+    for (r, (_, walk)) in rows.zip(&added) {
+        out[walkable + r] = u8::from(*walk);
+    }
+    conn.execute("update graph set csr = ?1", [out])?;
     Ok(())
 }
 

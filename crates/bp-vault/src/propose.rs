@@ -131,13 +131,23 @@ impl Index {
         gone: impl IntoIterator<Item = &'i Id>,
     ) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
+        let mut gone = gone.into_iter().peekable();
+        let moved = gone.peek().is_some();
         for id in gone {
             remove(&tx, id.as_str(), false)?;
         }
+        let around = |tx: &rusqlite::Transaction| -> rusqlite::Result<Vec<_>> {
+            files.iter().map(|f| crate::walk::around(tx, f.id.as_str())).collect()
+        };
+        let before = around(&tx)?;
         for f in files {
             replace(&tx, f)?;
         }
-        crate::walk::rebuild_graph(&tx)?;
+        if moved {
+            crate::walk::rebuild_graph(&tx)?;
+        } else {
+            crate::walk::update_graph(&tx, &before, &around(&tx)?)?;
+        }
         tx.execute("insert or replace into meta values ('fingerprint', ?1)", [fingerprint(root)])?;
         tx.commit()
     }

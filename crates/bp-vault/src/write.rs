@@ -8,6 +8,7 @@
 //! fingerprint, so the next read rehashes nothing. On a failure, or in the next writer after one died, the journal's
 //! pre-images go back. git's own `index.lock` is never deleted.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs::TryLockError;
 use std::io::Write as _;
@@ -31,8 +32,9 @@ const PENDING: &str = "pending";
 pub struct Writer<'v> {
     vault: &'v Vault,
     index: Index,
-    /// The head and the paths `clean` found clean, so `commit` asks git once.
-    clean: Option<(String, Vec<String>)>,
+    /// The head and the paths `clean` found clean, so `commit` asks git once. A cell, so a verb can clean while it
+    /// reads through [`Writer::index`].
+    clean: Cell<Option<(String, Vec<String>)>>,
     _lock: std::fs::File,
 }
 
@@ -115,7 +117,7 @@ impl Vault {
             }
         }
         restore(&self.root)?;
-        Ok(Writer { index: Index::open(self)?, vault: self, clean: None, _lock: lock })
+        Ok(Writer { index: Index::open(self)?, vault: self, clean: Cell::new(None), _lock: lock })
     }
 
     /// Refuses `path_dirty` when a file of `ids` differs from HEAD in the working tree or git's index, or is on disk
@@ -131,16 +133,23 @@ impl Vault {
 }
 
 impl Writer<'_> {
+    /// The index, opened under the lock. A verb reads through it rather than opening a second: `clean` runs `git
+    /// status`, which may rewrite git's index file and so move the fingerprint, and a second open after it would
+    /// rescan every file.
+    pub fn index(&self) -> &Index {
+        &self.index
+    }
+
     /// `Vault::clean`, under the lock; `commit` reuses the head it read.
-    pub fn clean<'i>(&mut self, ids: impl IntoIterator<Item = &'i Id>) -> Result<(), Refusal> {
-        self.clean = Some(clean(&self.vault.root, ids)?);
+    pub fn clean<'i>(&self, ids: impl IntoIterator<Item = &'i Id>) -> Result<(), Refusal> {
+        self.clean.set(Some(clean(&self.vault.root, ids)?));
         Ok(())
     }
 
     /// [`Writer::clean`] over paths relative to the root: a node's directory holds files that are not markdown.
-    pub fn clean_paths(&mut self, paths: Vec<String>) -> Result<(), Refusal> {
+    pub fn clean_paths(&self, paths: Vec<String>) -> Result<(), Refusal> {
         let head = head_if_clean(&self.vault.root, &paths.iter().map(String::as_str).collect::<Vec<_>>())?;
-        self.clean = Some((head, paths));
+        self.clean.set(Some((head, paths)));
         Ok(())
     }
 

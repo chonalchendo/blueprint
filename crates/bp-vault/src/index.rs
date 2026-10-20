@@ -635,6 +635,38 @@ mod tests {
         assert_eq!(refreshed, dump(&Index::open(&v).unwrap()));
     }
 
+    /// 25, issue 9: a write updates the walk's graph in place, or not at all, and the index still equals a rebuild.
+    #[test]
+    fn a_write_keeps_the_graph_equal_to_a_rebuild() {
+        let (_d, v) = vault();
+        let mut index = Index::open(&v).unwrap();
+        let steps = [
+            // A label: no link moves, so the graph stays.
+            ("projects/bp/issues/0001.a", issue("Walk budget", "resolved")),
+            // An inbox entry with no link: one new row.
+            ("shared/inbox/2026-10-20-note", "---\nkind: inbox\ntitle: Note\nstatus: raw\n---\n".into()),
+            // A node the issues' bodies already name: new arcs in, so a rebuild.
+            ("shared/learnings/l", "---\nkind: learning\ntitle: L\nstatus: draft\n---\n".into()),
+            // A body link that moves.
+            ("projects/bp/issues/0002.b", issue("Other", "resolved").replace("[[shared/learnings/l]]", "")),
+            // A new node with links out.
+            ("projects/bp/issues/0003.d", issue("New", "open")),
+        ];
+        for (id, text) in steps {
+            write(&v.root, id, &text);
+            let file = File::parse(crate::Id::parse(id).unwrap(), text.as_bytes()).unwrap();
+            index.apply(&v.root, &[file], []).unwrap();
+            let csr: Vec<u8> = index.conn.query_row("select csr from graph", [], |r| r.get(0)).unwrap();
+            let rows: i64 = index.conn.query_row("select max(rowid) + 1 from nodes", [], |r| r.get(0)).unwrap();
+            assert_eq!(i64::from(u32::from_le_bytes(csr[..4].try_into().unwrap())), rows, "a graph row per node row");
+            let written = dump(&index);
+            drop(index);
+            std::fs::remove_file(v.root.join(".bp/index.db")).unwrap();
+            index = Index::open(&v).unwrap();
+            assert_eq!(written, dump(&index), "after {id}");
+        }
+    }
+
     fn dump(index: &Index) -> Vec<String> {
         let tables = [
             ("files", "id, hash, class"),

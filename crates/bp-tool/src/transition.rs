@@ -75,11 +75,17 @@ pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
     let vault = Vault::discover(cwd)?;
     let role = crate::set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let mut writer = if t.dry_run { None } else { Some(vault.writer()?) };
-    let index = Index::open(&vault)?;
-    let id = subject(&index, &t.id)?;
+    let writer = if t.dry_run { None } else { Some(vault.writer()?) };
+    let opened;
+    let index = if let Some(w) = &writer {
+        w.index()
+    } else {
+        opened = Index::open(&vault)?;
+        &opened
+    };
+    let id = subject(index, &t.id)?;
     // A human's uncommitted edit refuses first, dry run or not, before its text is read (12, Write path).
-    match &mut writer {
+    match &writer {
         Some(w) => w.clean([&id])?,
         None => vault.clean([&id])?,
     }

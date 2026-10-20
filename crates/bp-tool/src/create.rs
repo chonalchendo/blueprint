@@ -51,14 +51,20 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     let id = home(kind, create)?;
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let mut writer = if create.dry_run { None } else { Some(vault.writer()?) };
+    let writer = if create.dry_run { None } else { Some(vault.writer()?) };
+    let opened;
+    let index = if let Some(w) = &writer {
+        w.index()
+    } else {
+        opened = Index::open(&vault)?;
+        &opened
+    };
     // A file at the id that is not committed refuses first, dry run or not, before anything is read or compared
     // (12, Write path).
-    match &mut writer {
+    match &writer {
         Some(w) => w.clean([&id])?,
         None => vault.clean([&id])?,
     }
-    let index = Index::open(&vault)?;
     if let Some(p) = id.project().filter(|_| kind != Kind::Project)
         && index.header(&format!("projects/{p}/project"))?.is_none()
     {
@@ -69,7 +75,7 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
             "bp list project --json",
         ));
     }
-    let under = parent(&vault, &index, kind, &id, under.as_ref())?;
+    let under = parent(&vault, index, kind, &id, under.as_ref())?;
     let header = Header {
         kind,
         title: Some(create.title.clone()),
@@ -87,7 +93,7 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
         format!("---\n{}---\n\n{body}\n", header.emit())
     };
     let new = File::from_bytes(id.clone(), text.as_bytes())?;
-    if let Some(already) = taken(&vault, &index, &id, &new)? {
+    if let Some(already) = taken(&vault, index, &id, &new)? {
         return Ok(already);
     }
     let changes = BTreeMap::from([(id.clone(), text)]);

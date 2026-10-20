@@ -38,10 +38,16 @@ pub(crate) fn rename(cwd: &Path, rename: &Rename) -> Result<Wrote, Refusal> {
     let vault = Vault::discover(cwd)?;
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let mut writer = if rename.dry_run { None } else { Some(vault.writer()?) };
-    let index = Index::open(&vault)?;
+    let writer = if rename.dry_run { None } else { Some(vault.writer()?) };
+    let opened;
+    let index = if let Some(w) = &writer {
+        w.index()
+    } else {
+        opened = Index::open(&vault)?;
+        &opened
+    };
     // The index, not the file system, names the node: a case-blind file system would take a wrong-case id as a file.
-    let old = subject(&index, &rename.id)?;
+    let old = subject(index, &rename.id)?;
     let (dir, was) = old.as_str().rsplit_once('/').expect("an id has three segments");
     let slug = inbox_slug(dir, was, &rename.slug)?;
     if !is_slug(&slug) {
@@ -60,12 +66,12 @@ pub(crate) fn rename(cwd: &Path, rename: &Rename) -> Result<Wrote, Refusal> {
     let mut paths: Vec<String> = renamed.iter().flat_map(|(a, b)| [format!("{a}.md"), format!("{b}.md")]).collect();
     paths.extend(moves.files.iter().flat_map(|(a, b)| [a.clone(), b.clone()]));
     paths.extend(inbound.iter().map(|id| format!("{id}.md")));
-    match &mut writer {
+    match &writer {
         Some(w) => w.clean_paths(paths)?,
         None => vault.clean_paths(&paths)?,
     }
     let text = vault.text(&old)?;
-    admit(&vault, &index, &File::from_bytes(old.clone(), text.as_bytes())?, &new)?;
+    admit(&vault, index, &File::from_bytes(old.clone(), text.as_bytes())?, &new)?;
     let mut names = vec![old.clone()];
     names.extend(index.aliases_of(&old)?.into_iter().filter(|a| *a != old));
     let rewrite = |text: &str| names.iter().fold(text.to_string(), |t, n| retarget(&t, n.as_str(), new.as_str()));

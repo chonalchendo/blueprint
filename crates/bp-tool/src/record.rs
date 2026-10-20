@@ -177,19 +177,25 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     let role = crate::set::role()?;
     let now = crate::clock::now()?;
     // The lock comes before the reads, so the key this write takes is still free when it commits.
-    let mut writer = if r.dry_run { None } else { Some(vault.writer()?) };
-    let index = Index::open(&vault)?;
-    let parent = if kind == Kind::Handoff && r.parent == "shared" { None } else { Some(subject(&index, &r.parent)?) };
+    let writer = if r.dry_run { None } else { Some(vault.writer()?) };
+    let opened;
+    let index = if let Some(w) = &writer {
+        w.index()
+    } else {
+        opened = Index::open(&vault)?;
+        &opened
+    };
+    let parent = if kind == Kind::Handoff && r.parent == "shared" { None } else { Some(subject(index, &r.parent)?) };
     if let Some(p) = &parent {
-        parent_fits(&vault, &index, kind, p)?;
+        parent_fits(&vault, index, kind, p)?;
     }
     let mut fields = BTreeMap::new();
     for (name, ty, _) in &spec.fields {
         let Some(text) = given.get(name) else { continue };
-        fields.insert((*name).to_string(), value(&index, kind, name, ty, text)?);
+        fields.insert((*name).to_string(), value(index, kind, name, ty, text)?);
     }
     if let (Some(design), Some(milestone)) = (&parent, fields.get("milestone").filter(|_| kind == Kind::Delta)) {
-        none_pending(&index, design, milestone)?;
+        none_pending(index, design, milestone)?;
     }
     if let Some(field) = spec.now {
         fields.insert(field.into(), crate::clock::instant(now).into());
@@ -236,7 +242,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
         .chain(parent.clone())
         .chain([id.clone()])
         .collect();
-    match &mut writer {
+    match &writer {
         Some(w) => w.clean(&targets)?,
         None => vault.clean(&targets)?,
     }
