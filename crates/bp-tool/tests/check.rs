@@ -46,6 +46,15 @@ bp-tool -> bp-vault
 ~~~check shell {name=bad expect=maybe}
 true
 ~~~
+~~~check shell {name=nountil expect=fail}
+false
+~~~
+~~~check shell {name=typo expct=1}
+true
+~~~
+~~~check scenario {name=nan measure=count max=3}
+echo NaN
+~~~
 ";
 
 /// The vault, whose issue holds the blocks plus one that proves where a block runs, and the code repository.
@@ -84,6 +93,13 @@ fn each_block_gets_its_verdict_in_one_commit() {
     assert_eq!(exit, Some(2), "{v}");
     assert_eq!(v["code"], "check_failed");
     assert_eq!(v["subject"], format!("{I}/runs/f-{sha}-1"), "the first failed run");
+    assert_eq!(
+        v["commit"].as_str().unwrap(),
+        git(vault, &["rev-parse", "HEAD"]).trim(),
+        "check_failed follows a commit"
+    );
+    assert_eq!(v["runs"].as_array().map(Vec::len), Some(16), "every run travels with the refusal: {v}");
+    assert_eq!(v["runs"][1]["verdict"], "fail");
     for (name, verdict) in [
         ("p", "pass"),
         ("f", "fail"),
@@ -97,6 +113,9 @@ fn each_block_gets_its_verdict_in_one_commit() {
         ("pl", "skipped"),
         ("d", "skipped"),
         ("bad", "could-not-run"),
+        ("nountil", "could-not-run"),
+        ("typo", "could-not-run"),
+        ("nan", "could-not-run"),
         ("place", "pass"),
     ] {
         let run = show(vault, &format!("{I}/runs/{name}-{sha}-1"));
@@ -114,12 +133,14 @@ fn each_block_gets_its_verdict_in_one_commit() {
         (run["at"].as_str(), run["ended"].as_str()),
         (Some("2026-10-19T08:00:00Z"), Some("2026-10-19T08:00:00Z"))
     );
+    assert_eq!(run["severity"], "error");
+    assert_eq!(show(vault, &format!("{I}/runs/w-{sha}-1"))["severity"], "warn");
     for hash in ["check_hash", "evidence"] {
         assert_eq!(run[hash].as_str().map(str::len), Some(64), "{hash}: {run}");
     }
     assert!(show(vault, &format!("{I}/runs/d-{sha}-1")).get("evidence").is_none(), "nothing ran");
     let body = std::fs::read_to_string(vault.join(format!("{I}/runs/sf-{sha}-1.md"))).unwrap();
-    assert!(body.contains("measure 5 over max 3") && body.contains("\n```\n5\n```\n"), "{body}");
+    assert!(body.contains("measure 5 over max 3\n\n## Output\n\n```\n5\n```\n"), "{body}");
 }
 
 #[test]
@@ -165,9 +186,49 @@ fn check_refuses_what_it_cannot_run() {
     let (exit, v) = check(vault, code, &["shared/threads/t"]);
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{v}");
     let (exit, v) = check(vault, code, &[J]);
-    assert_eq!((exit, v["runs"].as_array().map(Vec::len)), (Some(0), Some(0)), "no block, no write: {v}");
+    assert_eq!((exit, v["id"].as_str()), (Some(3), Some(J)), "no block, no write: {v}");
     let elsewhere = tempfile::tempdir().unwrap();
     let (exit, v) = check(vault, elsewhere.path(), &[I]);
     assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "no code repository: {v}");
     assert_eq!(commits(vault), before);
+}
+
+#[test]
+fn a_dirty_code_tree_or_one_inside_the_vault_refuses_before_any_block_runs() {
+    let (vault, code) = setup();
+    let (vault, code) = (vault.path(), code.path());
+    let before = commits(vault);
+    std::fs::write(code.join("untracked.txt"), "new\n").unwrap();
+    let (exit, v) = check(vault, code, &[I]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+    std::fs::remove_file(code.join("untracked.txt")).unwrap();
+    std::fs::write(code.join(".gitignore"), "ignored.txt\n").unwrap();
+    git(code, &["add", ".gitignore"]);
+    git(code, &["commit", "-qm", "ignore"]);
+    std::fs::write(code.join("ignored.txt"), "fine\n").unwrap();
+    let (exit, v) = check(vault, code, &[I, "--name", "p"]);
+    assert_eq!(exit, Some(0), "an ignored file is not dirt: {v}");
+    let before_inside = commits(vault);
+    let (exit, v) = check(vault, &vault.join("projects"), &[I, "--name", "p"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(4), Some("usage")), "inside the vault: {v}");
+    assert_eq!(commits(vault), before_inside);
+    assert_eq!(commits(vault).parse::<u32>().unwrap(), before.parse::<u32>().unwrap() + 1);
+}
+
+#[test]
+fn the_commit_waits_for_a_held_lock() {
+    let (vault, code) = setup();
+    let (vault, code) = (vault.path(), code.path());
+    let lock =
+        std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(vault.join(".bp/lock")).unwrap();
+    lock.lock().unwrap();
+    let held = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(7));
+        drop(lock);
+    });
+    let before: u32 = commits(vault).parse().unwrap();
+    let (exit, v) = check(vault, code, &[I, "--name", "p"]);
+    held.join().unwrap();
+    assert_eq!(exit, Some(0), "past the writer's own 5 s wait: {v}");
+    assert_eq!(commits(vault).parse::<u32>().unwrap(), before + 1);
 }

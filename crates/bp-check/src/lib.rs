@@ -1,12 +1,15 @@
 //! Check runner (15; 25, design changes 4 and 5): runs an owner's check blocks from the code repository, judges each
 //! against its attributes, and writes one run record per block in one commit through the vault's write path. No lock
-//! is held while a block runs, so a block may call `bp`; the lock comes after, for the commit alone.
+//! is held while a block runs, so a block may call `bp`; the lock comes after, for the commit alone, and is waited
+//! for longer than a plain write waits, because the verdicts cost the whole run.
 
 mod judge;
 mod process;
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use bp_vault::{Check, Code, Header, Held, Id, Kind, Refusal, Vault};
 use serde_json::Value;
@@ -25,11 +28,14 @@ bp_vault::closed_enum! {
     }
 }
 
+/// How long the commit waits for `.bp/lock`, in rounds of the writer's own 5 s wait.
+const LOCK_WAIT: Duration = Duration::from_secs(60);
+
 /// The runs one `check` wrote.
 #[derive(Debug)]
 pub struct Checked {
-    /// The vault commit that holds the run records; none when the owner has no named block.
-    pub commit: Option<String>,
+    /// The vault commit that holds the run records.
+    pub commit: String,
     /// One row per block, in body order.
     pub runs: Vec<Run>,
     /// The findings the run records hold.
@@ -69,7 +75,8 @@ struct Done<'b> {
 }
 
 /// Runs the named blocks of `owner`, or the one `only` names, from the git repository that holds `repo`, and commits
-/// one run record per block. `clock` gives the instant, `YYYY-MM-DDTHH:MM:SSZ`; its date decides `until`.
+/// one run record per block; none when the owner has no named block. `clock` gives the instant,
+/// `YYYY-MM-DDTHH:MM:SSZ`; its date decides `until`.
 ///
 /// # Panics
 ///
@@ -81,7 +88,7 @@ pub fn check(
     only: Option<&str>,
     role: &str,
     clock: &dyn Fn() -> String,
-) -> Result<Checked, Refusal> {
+) -> Result<Option<Checked>, Refusal> {
     let file = vault.read(owner)?;
     if !file.header.as_ref().is_some_and(|h| Kind::CHECK_OWNERS.contains(&h.kind)) {
         return Err(Refusal::new(
@@ -91,13 +98,6 @@ pub fn check(
             format!("check the owner of the block: bp show {} --no-body", owner.as_str()),
         ));
     }
-    let code = bp_vault::git::Repo::find(repo).and_then(|r| Some((r.head()?, r.top))).ok_or_else(|| {
-        Refusal::failed(
-            repo.display().to_string(),
-            "a run records the commit it ran at: run bp check from the code repository, which needs a commit",
-        )
-    })?;
-    let (commit, top) = code;
     // A block without a slug name has no run key; the census already counts it as `check_unnamed`.
     let named: Vec<&Check> =
         file.body.checks.iter().filter(|c| c.attrs.get("name").is_some_and(|n| bp_vault::is_slug(n))).collect();
@@ -117,8 +117,9 @@ pub fn check(
         return Err(Refusal::usage(format!("--name {n}"), fix));
     }
     if blocks.is_empty() {
-        return Ok(Checked { commit: None, runs: Vec::new(), findings: Vec::new() });
+        return Ok(None);
     }
+    let (commit, top) = code_tree(vault, repo)?;
     let today = clock()[..10].to_string();
     let done: Vec<Done> = blocks
         .into_iter()
@@ -137,7 +138,7 @@ pub fn check(
             Done { check, at, ended: clock(), verdict, note, ran }
         })
         .collect();
-    let writer = vault.writer()?;
+    let writer = writer(vault, owner, &done)?;
     let mut changes = BTreeMap::new();
     let mut runs = Vec::with_capacity(done.len());
     for d in &done {
@@ -156,7 +157,62 @@ pub fn check(
         runs.push(Run { name: name.to_string(), verdict: d.verdict, id, note: d.note.clone(), error });
     }
     let written = writer.commit("check", role, &format!("check {owner}"), &changes)?;
-    Ok(Checked { commit: Some(written.commit), runs, findings: written.findings })
+    Ok(Some(Checked { commit: written.commit, runs, findings: written.findings }))
+}
+
+/// The code repository's HEAD and top. A run names the commit its blocks ran at, so the tree must be that commit:
+/// clean, untracked files included, and not the vault itself (15, the check grammar).
+fn code_tree(vault: &Vault, repo: &Path) -> Result<(String, std::path::PathBuf), Refusal> {
+    let here = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    if here.starts_with(&vault.root) {
+        return Err(Refusal::usage(
+            here.display().to_string(),
+            format!("run bp check from the code repository, not from inside the vault at {}", vault.root.display()),
+        ));
+    }
+    let (commit, top) = bp_vault::git::Repo::find(repo).and_then(|r| Some((r.head()?, r.top))).ok_or_else(|| {
+        Refusal::failed(
+            repo.display().to_string(),
+            "a run records the commit it ran at: run bp check from the code repository, which needs a commit",
+        )
+    })?;
+    let status = Command::new("git").arg("-C").arg(&top).args(["status", "--porcelain"]).output();
+    match status {
+        Ok(out) if out.status.success() && out.stdout.is_empty() => Ok((commit, top)),
+        Ok(out) if out.status.success() => {
+            let first = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or_default().to_string();
+            Err(Refusal::new(
+                Code::PathDirty,
+                top.display().to_string(),
+                "a run records the commit its blocks ran at, so the code tree is clean (15, the check grammar)",
+                format!("commit or stash the changes in {} (first: {}), then rerun", top.display(), first.trim()),
+            ))
+        }
+        Ok(out) => Err(Refusal::failed(top.display().to_string(), String::from_utf8_lossy(&out.stderr).trim())),
+        Err(e) => Err(Refusal::failed(top.display().to_string(), format!("git did not start: {e}"))),
+    }
+}
+
+/// The writer, waited for up to [`LOCK_WAIT`]. If the lock never frees, the refusal's fix carries every verdict, so
+/// the run is not lost with the commit.
+fn writer<'v>(vault: &'v Vault, owner: &Id, done: &[Done]) -> Result<bp_vault::Writer<'v>, Refusal> {
+    let start = Instant::now();
+    loop {
+        match vault.writer() {
+            Err(r) if r.code == Code::VaultLocked && start.elapsed() < LOCK_WAIT => {}
+            Err(mut r) if r.code == Code::VaultLocked => {
+                let verdicts: Vec<String> =
+                    done.iter().map(|d| format!("{} {}", d.check.attrs["name"], d.verdict)).collect();
+                r.fix = format!(
+                    "the lock stayed held for {} s, so no run was recorded; the verdicts were: {}; rerun bp check {owner} once the other write has finished",
+                    LOCK_WAIT.as_secs(),
+                    verdicts.join(", ")
+                );
+                return Err(r);
+            }
+            other => return other,
+        }
+    }
 }
 
 /// The run record's text (13, Run; 25, design change 5): the converted fields, then `ended`, the block's hash and
@@ -171,10 +227,11 @@ fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
         ("at".into(), d.at.as_str().into()),
         ("ended".into(), d.ended.as_str().into()),
         ("verdict".into(), d.verdict.as_str().into()),
+        ("severity".into(), if judge::is_error(d.check) { "error" } else { "warn" }.into()),
         ("check_hash".into(), blake3::hash(block.as_bytes()).to_hex().as_str().into()),
     ]);
-    if let Some(ran) = &d.ran {
-        fields.insert("evidence".into(), ran.evidence.as_str().into());
+    if let Some(evidence) = d.ran.as_ref().and_then(|r| r.evidence.as_deref()) {
+        fields.insert("evidence".into(), evidence.into());
     }
     let header = Header {
         kind: Kind::Run,
@@ -189,13 +246,14 @@ fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
     format!("---\n{}---\n\n{}", header.emit(), body(&d.note, d.ran.as_ref()))
 }
 
-/// The reason, then the output's tail in a fence longer than any backtick run it holds, so no output line reads as
-/// markdown: a heading, a fence or a wikilink in it stays text.
+/// The reason as the lead, then the output's tail under `## Output`, so `show --no-body` keeps only the reason. The
+/// tail sits in a fence longer than any backtick run it holds, so no output line reads as markdown: a heading, a
+/// fence or a wikilink in it stays text.
 fn body(note: &str, ran: Option<&Ran>) -> String {
     let Some(ran) = ran.filter(|r| !r.tail.is_empty()) else { return format!("{note}\n") };
     let run = ran.tail.iter().flat_map(|l| l.split(|c| c != '`')).map(str::len).max().unwrap_or(0);
     let fence = "`".repeat((run + 1).max(3));
-    let mut parts = vec![note.to_string()];
+    let mut parts = vec![note.to_string(), "## Output".to_string()];
     if ran.dropped > 0 {
         parts.push(format!("The last {} of {} lines of output.", ran.tail.len(), ran.tail.len() + ran.dropped));
     }
@@ -213,12 +271,15 @@ mod tests {
             end: process::End::TimedOut(std::time::Duration::from_secs(1)),
             tail: vec!["## heading".into(), "````".into(), "[[shared/nowhere]]".into()],
             dropped: 2,
-            evidence: String::new(),
+            evidence: None,
         };
         let text = body("why", Some(&ran));
-        assert!(text.starts_with("why\n\nThe last 3 of 5 lines of output.\n\n`````\n"), "{text}");
+        assert!(text.starts_with("why\n\n## Output\n\nThe last 3 of 5 lines of output.\n\n`````\n"), "{text}");
         let parsed = bp_vault::Body::parse(&text);
-        assert!(parsed.sections.is_empty() && parsed.links.is_empty() && parsed.unresolved.is_empty(), "{parsed:?}");
+        assert_eq!(parsed.lead, "why");
+        let headings: Vec<&str> = parsed.sections.iter().map(|s| s.heading.as_str()).collect();
+        assert_eq!(headings, ["Output"], "the heading in the output stays text");
+        assert!(parsed.links.is_empty() && parsed.unresolved.is_empty(), "{parsed:?}");
         assert!(parsed.findings.is_empty(), "{:?}", parsed.findings);
         assert_eq!(body("skipped", None), "skipped\n");
     }

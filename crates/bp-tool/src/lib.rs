@@ -160,7 +160,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Transition(t) => wrote(transition::transition(cwd, t), cli.json, out),
         Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
         Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
-        Verb::Check(c) => finish(check::check(cwd, c), cli.json, out),
+        Verb::Check(c) => check::run(cwd, c, cli.json, out),
     }
 }
 

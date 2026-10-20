@@ -55,6 +55,9 @@ pub(crate) fn is_error(check: &Check) -> bool {
     check.attrs.get("severity").is_none_or(|s| s != "warn")
 }
 
+/// The attributes every kind accepts (15, the check grammar), with `timeout` (25, design change 4).
+const COMMON: [&str; 5] = ["name", "severity", "cwd", "when", "timeout"];
+
 /// Reads one block's attributes. `today` is the clock's UTC date, `YYYY-MM-DD`.
 pub(crate) fn plan(check: &Check, today: &str) -> Plan {
     let attr = |k: &str| check.attrs.get(k).map(String::as_str);
@@ -62,16 +65,31 @@ pub(crate) fn plan(check: &Check, today: &str) -> Plan {
         None | Some("error" | "warn") => {}
         Some(s) => return Plan::Broken(format!("severity={s}: error or warn")),
     }
+    let own: [&str; 2] = match check.runner.as_str() {
+        "shell" => ["expect", "until"],
+        "scenario" => ["measure", "max"],
+        r if LATER.contains(&r) => return Plan::Skip(format!("check {r}: this runner is not built yet")),
+        r => return Plan::Broken(format!("check {r}: the runners are shell, scenario, {}", LATER.join(", "))),
+    };
+    // A typo must not run: `expct=1` would otherwise pass on exit 0.
+    if let Some((k, v)) = check.attrs.iter().find(|(k, _)| !COMMON.contains(&k.as_str()) && !own.contains(&k.as_str()))
+    {
+        let known: Vec<&str> = COMMON.iter().chain(&own).copied().collect();
+        return Plan::Broken(format!(
+            "{k}={v}: not an attribute of check {}; it takes {}",
+            check.runner,
+            known.join(", ")
+        ));
+    }
     match attr("when") {
         None | Some("pr") => {}
         Some("post-land") => return Plan::Skip("when=post-land: it holds only after the merge".into()),
         Some(w) => return Plan::Broken(format!("when={w}: pr or post-land")),
     }
-    let test = match check.runner.as_str() {
-        "shell" => shell(attr("expect"), attr("until"), today),
-        "scenario" => measure(attr("measure"), attr("max")),
-        r if LATER.contains(&r) => return Plan::Skip(format!("check {r}: this runner is not built yet")),
-        r => return Plan::Broken(format!("check {r}: the runners are shell, scenario, {}", LATER.join(", "))),
+    let test = if check.runner == "shell" {
+        shell(attr("expect"), attr("until"), today)
+    } else {
+        measure(attr("measure"), attr("max"))
     };
     let test = match test {
         Ok(t) => t,
@@ -86,7 +104,9 @@ pub(crate) fn plan(check: &Check, today: &str) -> Plan {
     };
     let cwd = match attr("cwd") {
         None | Some("repo") => None,
-        Some(c) if Path::new(c).components().all(|p| matches!(p, Component::Normal(_))) => Some(PathBuf::from(c)),
+        Some(c) if Path::new(c).components().all(|p| matches!(p, Component::Normal(_) | Component::CurDir)) => {
+            Some(PathBuf::from(c))
+        }
         Some(c) => return Plan::Broken(format!("cwd={c}: repo, or a relative path under it")),
     };
     Plan::Run(Spec { test, cwd, timeout })
@@ -101,7 +121,9 @@ fn shell(expect: Option<&str>, until: Option<&str>, today: &str) -> Result<Test,
     match expect.unwrap_or("0") {
         // A quarantine that has lapsed: the block must pass again. Dates of one form compare as text.
         "fail" if until.is_some_and(|u| u <= today) => Ok(Test::Exit(0)),
-        "fail" => Ok(Test::Fails),
+        "fail" if until.is_some() => Ok(Test::Fails),
+        // 15 pairs the two: a quarantine with no end would never ask for the fix.
+        "fail" => Err("expect=fail: a quarantine needs until=<date>, the day it ends".into()),
         e => {
             e.parse::<u8>().map(|n| Test::Exit(i32::from(n))).map_err(|_| format!("expect={e}: an exit code, or fail"))
         }
@@ -134,9 +156,11 @@ pub(crate) fn judge(test: &Test, end: &End) -> (Verdict, String) {
         Test::Fails => (Verdict::Fail, "exit 0: an expect=fail block passed; drop the quarantine".into()),
         Test::Measure { .. } if code != Some(0) => (Verdict::Fail, format!("{exit} before the measure")),
         Test::Measure { max, seconds: true } => compare(seconds, *max),
-        Test::Measure { max, .. } => match last.and_then(|l| l.trim().parse::<f64>().ok()) {
+        Test::Measure { max, .. } => match last.and_then(|l| l.trim().parse::<f64>().ok()).filter(|v| v.is_finite()) {
             Some(value) => compare(value, *max),
-            None => (Verdict::CouldNotRun, format!("the last stdout line is not a number: {:?}", last.unwrap_or(""))),
+            None => {
+                (Verdict::CouldNotRun, format!("the last stdout line is not a finite number: {:?}", last.unwrap_or("")))
+            }
         },
     }
 }
@@ -194,7 +218,10 @@ mod tests {
         let ahead = "name=q expect=fail until=2099-01-01";
         assert_eq!(verdict("shell", ahead, &exited(Some(1), None)), Verdict::Pass);
         assert_eq!(verdict("shell", ahead, &exited(Some(0), None)), Verdict::Fail, "an unexpected pass fails");
-        assert_eq!(verdict("shell", "name=q expect=fail", &exited(Some(1), None)), Verdict::Pass);
+        assert!(
+            matches!(plan(&block("shell", "name=q expect=fail"), TODAY), Plan::Broken(_)),
+            "no until, no quarantine"
+        );
         for lapsed in ["until=2026-10-19", "until=2020-01-01"] {
             assert_eq!(test_of("shell", &format!("name=q expect=fail {lapsed}")), Test::Exit(0), "{lapsed}");
         }
@@ -209,6 +236,9 @@ mod tests {
         assert_eq!(verdict("scenario", s, &exited(Some(1), Some("2"))), Verdict::Fail, "the command must finish");
         assert_eq!(verdict("scenario", s, &exited(Some(0), Some("two"))), Verdict::CouldNotRun);
         assert_eq!(verdict("scenario", s, &exited(Some(0), None)), Verdict::CouldNotRun);
+        for odd in ["NaN", "inf", "-inf", ""] {
+            assert_eq!(verdict("scenario", s, &exited(Some(0), Some(odd))), Verdict::CouldNotRun, "{odd:?}");
+        }
         let wall = "name=w measure=seconds max=1.5";
         assert_eq!(verdict("scenario", wall, &exited(Some(0), Some("0"))), Verdict::Fail, "the wall time is 2 s");
     }
@@ -236,11 +266,18 @@ mod tests {
             ("scenario", "name=s"),
             ("scenario", "name=s max=lots"),
             ("python", "name=a"),
+            ("shell", "name=a colour=red"),
+            ("shell", "name=a expct=1"),
+            ("shell", "name=a max=3"),
+            ("scenario", "name=s max=3 expect=0"),
+            ("shell", "name=a when=post-land colour=red"),
         ] {
             assert!(matches!(plan(&block(runner, attrs), TODAY), Plan::Broken(_)), "{runner} {attrs}");
         }
         let Plan::Run(spec) = plan(&block("shell", "name=a timeout=5 cwd=crates/bp-vault"), TODAY) else { panic!() };
         assert_eq!((spec.timeout, spec.cwd), (Duration::from_secs(5), Some(PathBuf::from("crates/bp-vault"))));
+        let Plan::Run(spec) = plan(&block("shell", "name=a cwd=."), TODAY) else { panic!() };
+        assert_eq!(spec.cwd, Some(PathBuf::from(".")), "the repository root");
         assert_eq!(
             plan(&block("shell", "name=a"), TODAY),
             Plan::Run(Spec { test: Test::Exit(0), cwd: None, timeout: TIMEOUT })
