@@ -171,9 +171,11 @@ fn a_record_cites_only_what_head_holds() {
     let mut issue = std::fs::read_to_string(root.join(format!("{ISSUE}.md"))).unwrap();
     issue.push_str("WIP\n");
     std::fs::write(root.join(format!("{ISSUE}.md")), issue).unwrap();
-    let (exit, v) =
-        bp(root, &["record", "evidence", LEARNING, "--field", "outcome=helped", "--field", &format!("issue={ISSUE}")]);
-    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+    let evidence = ["record", "evidence", LEARNING, "--field", "outcome=helped", "--field", &format!("issue={ISSUE}")];
+    for dry in [&[][..], &["--dry-run"][..]] {
+        let (exit, v) = bp(root, &[&evidence[..], dry].concat());
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{dry:?}: {v}");
+    }
     assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "1");
 }
 

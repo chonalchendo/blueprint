@@ -208,19 +208,88 @@ fn a_body_passes_the_check_rules_as_create_does() {
 }
 
 #[test]
-fn a_body_file_dry_run_writes_nothing_and_a_dirty_target_refuses() {
+fn a_body_file_dry_run_shows_the_body_and_a_dirty_target_refuses() {
     let dir = vault();
     let root = dir.path();
-    let f = body(root, "One change.\n");
+    let f = body(root, "\nOne change.  \r\n\n");
     let (code, v) = bp(root, &["set", ISSUE, "--body-file", &f, "--dry-run"]);
     assert_eq!((code, v["dry_run"].as_bool(), v["field"].as_str()), (Some(0), Some(true), Some("body")), "{v}");
+    assert_eq!(v["body"], "One change.", "the body as it would be stored: {v}");
     assert!(v.get("commit").is_none());
     assert_eq!(git(root, &["status", "--porcelain"]), "");
     let path = root.join(format!("{ISSUE}.md"));
     let edited = std::fs::read_to_string(&path).unwrap() + "HUMAN WORK\n";
     std::fs::write(&path, &edited).unwrap();
-    let (code, v) = bp(root, &["set", ISSUE, "--body-file", &f]);
-    assert_eq!((code, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+    // A dry run refuses what the write refuses (contract.json, write_results.dry_run).
+    for args in [
+        vec!["set", ISSUE, "--body-file", &f],
+        vec!["set", ISSUE, "--body-file", &f, "--dry-run"],
+        vec!["set", ISSUE, "severity", "high", "--dry-run"],
+    ] {
+        let (code, v) = bp(root, &args);
+        assert_eq!((code, v["code"].as_str()), (Some(2), Some("path_dirty")), "{args:?}: {v}");
+    }
     assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
     assert_eq!(commits(root), "1");
+}
+
+#[test]
+fn a_body_file_that_holds_a_header_refuses() {
+    let dir = vault();
+    let root = dir.path();
+    let path = root.join(format!("{ISSUE}.md"));
+    let own = std::fs::read_to_string(&path).unwrap();
+    let f = path.display().to_string();
+    for args in [vec!["set", ISSUE, "--body-file", &f], vec!["set", ISSUE, "--body-file", &f, "--dry-run"]] {
+        let (code, v) = bp(root, &args);
+        assert_eq!((code, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{args:?}: {v}");
+        assert!(v["fix"].as_str().unwrap().starts_with("pass the body only"), "{v}");
+    }
+    let f = body(root, &format!("\u{feff}\r\n{}", own.replace('\n', "\r\n")));
+    let (code, v) = bp(root, &["set", ISSUE, "--body-file", &f]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("schema_invalid")), "a BOM and CRLF hide no header: {v}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), own);
+    // A body that opens with a thematic break holds no `kind`, so it is a body.
+    let f = body(root, "---\nA paragraph between rules.\n---\n");
+    let (code, v) = bp(root, &["set", ISSUE, "--body-file", &f]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(bp(root, &["show", ISSUE]).1["body"], "---\nA paragraph between rules.\n---");
+    assert_eq!(commits(root), "2");
+}
+
+#[test]
+fn an_odd_header_keeps_its_bytes_and_takes_the_new_body() {
+    // A BOM, CRLF, a lone CR (the parser's line end too) and a header closed at end of file. The new body is LF.
+    for (header, old, sep) in [
+        ("\u{feff}---\nkind: issue\ntitle: A\nstatus: open\n---\n", "\nOld lead.\n", ""),
+        ("---\r\nkind: issue\r\ntitle: A\r\nstatus: open\r\n---\r\n", "\r\nOld lead.\r\n", ""),
+        ("---\rkind: issue\rtitle: A\rstatus: open\r---\r", "\rOld lead.\r", "\n"),
+        ("---\nkind: issue\ntitle: A\nstatus: open\n---", "", "\n"),
+    ] {
+        let dir = common::vault(&[("projects/bp/issues/0001.a.md", &format!("{header}{old}")), ("shared/.keep", "")]);
+        let root = dir.path();
+        let f = body(root, "New lead.\n");
+        let (code, v) = bp(root, &["set", ISSUE, "--body-file", &f]);
+        assert_eq!(code, Some(0), "{header:?}: {v}");
+        let text = std::fs::read_to_string(root.join(format!("{ISSUE}.md"))).unwrap();
+        assert_eq!(text, format!("{header}{sep}\nNew lead.\n"), "{header:?}");
+        assert_eq!(bp(root, &["show", ISSUE]).1["lead"], "New lead.", "{header:?}");
+        assert_eq!(bp(root, &["set", ISSUE, "--body-file", &f]).0, Some(3), "{header:?}: the same body");
+        assert_eq!(commits(root), "2");
+    }
+}
+
+#[test]
+fn an_active_convention_takes_a_new_body() {
+    // A convention revises with set --body-file; only a design past draft needs a delta (13).
+    let dir = common::vault(&[
+        ("shared/conventions/convention.c.md", "---\nkind: convention\ntitle: C\nstatus: active\n---\n\nOld rule.\n"),
+        ("projects/.keep", ""),
+    ]);
+    let root = dir.path();
+    let f = body(root, "New rule.\n");
+    let (code, v) = bp(root, &["set", "shared/conventions/convention.c", "--body-file", &f]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["commit"].as_str().unwrap(), git(root, &["rev-parse", "HEAD"]).trim());
+    assert_eq!(bp(root, &["show", "shared/conventions/convention.c"]).1["lead"], "New rule.");
 }

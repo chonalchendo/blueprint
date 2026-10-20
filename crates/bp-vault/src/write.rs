@@ -108,15 +108,18 @@ impl Vault {
         restore(&self.root)?;
         Ok(Writer { index: Index::open(self)?, vault: self, clean: None, _lock: lock })
     }
+
+    /// Refuses `path_dirty` when a file of `ids` differs from HEAD in the working tree or git's index, or is on disk
+    /// though HEAD lacks it. It takes no lock, so a dry run refuses what the write would (`write_results.dry_run`).
+    pub fn clean<'i>(&self, ids: impl IntoIterator<Item = &'i Id>) -> Result<(), Refusal> {
+        clean(&self.root, ids).map(drop)
+    }
 }
 
 impl Writer<'_> {
-    /// Refuses `path_dirty` when a file of `ids` differs from HEAD in the working tree or git's index, or is on disk
-    /// though HEAD lacks it.
+    /// `Vault::clean`, under the lock; `commit` reuses the head it read.
     pub fn clean<'i>(&mut self, ids: impl IntoIterator<Item = &'i Id>) -> Result<(), Refusal> {
-        let paths: Vec<String> = ids.into_iter().map(|id| format!("{id}.md")).collect();
-        let head = head_if_clean(&self.vault.root, &paths.iter().map(String::as_str).collect::<Vec<_>>())?;
-        self.clean = Some((head, paths));
+        self.clean = Some(clean(&self.vault.root, ids)?);
         Ok(())
     }
 
@@ -179,6 +182,13 @@ pub(crate) fn bp_dir(root: &Path) -> Result<PathBuf, Refusal> {
         std::fs::write(&ignore, "*\n").map_err(|e| failed(&ignore, &e))?;
     }
     Ok(dir)
+}
+
+/// The head and the paths of `ids`, once none holds an uncommitted edit.
+fn clean<'i>(root: &Path, ids: impl IntoIterator<Item = &'i Id>) -> Result<(String, Vec<String>), Refusal> {
+    let paths: Vec<String> = ids.into_iter().map(|id| format!("{id}.md")).collect();
+    let head = head_if_clean(root, &paths.iter().map(String::as_str).collect::<Vec<_>>())?;
+    Ok((head, paths))
 }
 
 /// The head's sha, once no path of `paths` holds an uncommitted edit: staged, unstaged, untracked or ignored.

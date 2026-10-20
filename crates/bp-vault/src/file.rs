@@ -1,5 +1,7 @@
 //! One markdown file of the vault: its id, content hash, header and body. A file without a header is an asset.
 
+use yaml_rust2::{Yaml, YamlLoader};
+
 use crate::body::FindingKind;
 use crate::{Body, Header, Id, Kind, Refusal};
 
@@ -63,22 +65,58 @@ pub fn written(text: &str, key: &str) -> Vec<String> {
     split(&text).map_or_else(Vec::new, |(yaml, _)| crate::header::items(yaml, key))
 }
 
-/// The text without a BOM and with LF line endings.
-fn normalise(text: &str) -> String {
+/// The text without a BOM and with LF line endings: a CRLF or a lone CR ends a line, as `lines` reads it.
+pub fn normalise(text: &str) -> String {
     text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// The byte offset in `text` as written where its header ends, the closing `---` line's line end included; `None`
+/// when the text opens with no closed header. A write that keeps the header byte for byte cuts there, so it reads
+/// a BOM, CRLF and a lone CR as the parser does (25, design change 2).
+pub fn header_end(text: &str) -> Option<usize> {
+    bounds(text).map(|(_, _, end)| end)
+}
+
+/// Whether `text` opens with a header: a `---` line, a closing `---` line, and YAML between them that holds `kind`.
+/// A body that only opens with a thematic break holds none.
+pub fn opens_with_header(text: &str) -> bool {
+    let text = normalise(text);
+    split(&text).is_some_and(|(yaml, _)| {
+        matches!(YamlLoader::load_from_str(yaml).ok().as_deref(), Some([Yaml::Hash(map), ..])
+            if map.contains_key(&Yaml::String("kind".into())))
+    })
 }
 
 /// The header's YAML and the body; `None` when the first line is not `---` or no later line is exactly `---`.
 fn split(text: &str) -> Option<(&str, &str)> {
-    let rest = text.strip_prefix("---\n")?;
-    let mut offset = 0;
-    for line in rest.split_inclusive('\n') {
-        if line.trim_end_matches('\n') == "---" {
-            return Some((&rest[..offset], &rest[offset + line.len()..]));
-        }
-        offset += line.len();
-    }
-    None
+    let (yaml, close, body) = bounds(text)?;
+    Some((&text[yaml..close], &text[body..]))
+}
+
+/// The byte offsets of the YAML's start and end and of the body's start, in `text` as written, after any BOM.
+fn bounds(text: &str) -> Option<(usize, usize, usize)> {
+    let bom = text.strip_prefix('\u{feff}').map_or(0, |_| '\u{feff}'.len_utf8());
+    let mut lines = lines(&text[bom..]).map(|(start, line, end)| (bom + start, line, bom + end));
+    // The opening line needs its line end: `---` alone is not a header.
+    let (_, _, yaml) = lines.next().filter(|(_, line, end)| *line == "---" && *end > bom + 3)?;
+    lines.find(|(_, line, _)| *line == "---").map(|(close, _, body)| (yaml, close, body))
+}
+
+/// Each line's start, text without its line end, and the start of the next line. A line ends at LF, CRLF or a lone
+/// CR.
+fn lines(text: &str) -> impl Iterator<Item = (usize, &str, usize)> {
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        let rest = text.get(at..).filter(|r| !r.is_empty())?;
+        let (len, eol) = match rest.find(['\n', '\r']) {
+            Some(i) if rest[i..].starts_with("\r\n") => (i, 2),
+            Some(i) => (i, 1),
+            None => (rest.len(), 0),
+        };
+        let start = at;
+        at += len + eol;
+        Some((start, &rest[..len], at))
+    })
 }
 
 /// A file without a header may sit in `shared/assets/` or in a node's own directory, beside its diagrams (12).
@@ -150,6 +188,31 @@ mod tests {
         }
         let e = File::from_bytes(Id::parse("projects/bp/issues/x").unwrap(), b"---\nkind: \xff\n---\n").unwrap_err();
         assert!(e.fix.contains("UTF-8"));
+    }
+
+    #[test]
+    fn the_header_end_reads_line_ends_as_the_parser_does() {
+        for (text, end) in [
+            ("---\nkind: issue\n---\nBody.\n", 20),
+            ("\u{feff}---\r\nkind: issue\r\n---\r\n\r\nBody.\r\n", 26),
+            ("---\rkind: issue\r---\rBody.\r", 20),
+            ("---\nkind: issue\n---", 19),
+        ] {
+            assert_eq!(header_end(text), Some(end), "{text:?}");
+            assert_eq!(split(&normalise(text)).map(|(yaml, _)| yaml), Some("kind: issue\n"), "{text:?}");
+        }
+        assert_eq!(header_end("---"), None);
+        assert_eq!(header_end("---\nkind: issue\n"), None);
+        assert_eq!(header_end("Body.\n---\n"), None);
+    }
+
+    #[test]
+    fn a_header_holds_kind_and_a_thematic_break_does_not() {
+        assert!(opens_with_header("\u{feff}---\r\nkind: issue\r\ntitle: T\r\n---\r\nBody.\r\n"));
+        assert!(!opens_with_header("---\nA paragraph between rules.\n---\n"));
+        assert!(!opens_with_header("---\ntitle: T\n---\n"));
+        assert!(!opens_with_header("---\n\nBody.\n"));
+        assert!(!opens_with_header("Body.\n\n---\nkind: issue\n---\n"));
     }
 
     #[test]

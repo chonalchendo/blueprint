@@ -24,7 +24,7 @@ use serde::Serialize;
 pub use body::{Body, Check, Finding, FindingKind, Section};
 pub use closed::OutsideSet;
 pub use emit::set_field;
-pub use file::{File, written};
+pub use file::{File, header_end, normalise, opens_with_header, written};
 pub use header::{Header, LINKS, RESERVED, Unresolved};
 pub use id::{Id, SLUG_MAX, is_slug, slug};
 pub use index::{Filter, Hit, Index, Reading, Record, Row};

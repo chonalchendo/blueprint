@@ -245,3 +245,31 @@ fn a_dirty_target_refuses_path_dirty_before_the_comparison() {
     assert_eq!(std::fs::read_to_string(&tracked).unwrap(), edited);
     assert_eq!(commits(root), "1");
 }
+
+#[test]
+fn a_body_file_that_holds_a_header_refuses() {
+    let dir = vault();
+    let root = dir.path();
+    let args = ["create", "issue", "--project", "bp", "--title", "Nested", "--under", M, "--body-file"];
+    let own = root.join("projects/bp/issues/0002.b.md").display().to_string();
+    for dry in [&[][..], &["--dry-run"][..]] {
+        let (code, v) = bp(root, &[&args[..], &[own.as_str()], dry].concat());
+        assert_eq!((code, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{dry:?}: {v}");
+    }
+    let f = body(root, "---\nA paragraph between rules.\n---\n");
+    let (code, v) = bp(root, &[&args[..], &[f.as_str()]].concat());
+    assert_eq!(code, Some(0), "a thematic break holds no kind: {v}");
+    assert_eq!(commits(root), "2");
+}
+
+#[test]
+fn a_dry_run_refuses_a_dirty_target() {
+    let dir = vault();
+    let root = dir.path();
+    let path = root.join("projects/bp/issues/dirty.md");
+    std::fs::write(&path, "HUMAN WORK\n").unwrap();
+    let args = ["create", "issue", "--project", "bp", "--title", "Dirty", "--under", M, "--dry-run"];
+    let (code, v) = bp(root, &args);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "HUMAN WORK\n");
+}

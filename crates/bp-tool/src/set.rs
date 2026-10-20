@@ -40,9 +40,10 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     let role = role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
     let mut writer = if set.dry_run { None } else { Some(vault.writer()?) };
-    // A human's uncommitted edit refuses first, before its text is read (12, Write path).
-    if let Some(w) = &mut writer {
-        w.clean([&id])?;
+    // A human's uncommitted edit refuses first, dry run or not, before its text is read (12, Write path).
+    match &mut writer {
+        Some(w) => w.clean([&id])?,
+        None => vault.clean([&id])?,
     }
     let text = vault.text(&id)?;
     let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
@@ -54,8 +55,8 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
             format!("the file has no header: it is an asset; edit {}", id.path(&vault.root).display()),
         ));
     };
-    let (new, mut result, field) = if let Some(body) = body {
-        let Some(new) = with_body(&id, header, &text, &body)? else {
+    let (new, mut result, field) = if let Some(body) = &body {
+        let Some(new) = with_body(&id, header, &text, body)? else {
             return Ok(Wrote::Already(serde_json::json!({ "id": id })));
         };
         (new, serde_json::json!({ "id": id, "field": "body" }), "body")
@@ -79,6 +80,10 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
         let (_, findings) = Index::open(&vault)?.propose(&vault, &changes)?;
         result["findings"] = serde_json::to_value(findings).expect("a plain struct serialises");
         result["dry_run"] = true.into();
+        // The change a dry run shows: a label's value and was, or the body as it would be stored.
+        if let Some(body) = &body {
+            result["body"] = stored(body).into();
+        }
         return Ok(Wrote::Changed(result));
     };
     let written = writer.commit("set", role.as_str(), &format!("set {id} {field}"), &changes)?;
@@ -91,7 +96,7 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
 /// when the stored body is already that one. A record is append-only, and a design past `draft` changes only through
 /// an accepted delta (13, Design history).
 fn with_body(id: &Id, header: &Header, text: &str, body: &str) -> Result<Option<String>, Refusal> {
-    if let Some(fix) = schema::owner(header.kind, id, "body").filter(|_| header.kind.is_record()) {
+    if let Some(fix) = schema::owner(header.kind, id, "body") {
         return Err(Refusal::new(
             Code::NotALabel,
             format!("{id} body"),
@@ -108,15 +113,7 @@ fn with_body(id: &Id, header: &Header, text: &str, body: &str) -> Result<Option<
             format!("bp record delta {id} --field milestone=<milestone> --body-file <f>"),
         ));
     }
-    // The header ends at its closing `---` line, terminator included, after any BOM.
-    let mut end = text.strip_prefix('\u{feff}').map_or(0, |_| '\u{feff}'.len_utf8());
-    for (n, line) in text[end..].split_inclusive('\n').enumerate() {
-        end += line.len();
-        if n > 0 && line.trim_end_matches(['\n', '\r']) == "---" {
-            break;
-        }
-    }
-    let (head, old) = text.split_at(end);
+    let (head, old) = text.split_at(bp_vault::header_end(text).expect("the file parsed with a header"));
     let body = stored(body);
     if stored(old) == body {
         return Ok(None);
