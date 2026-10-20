@@ -100,14 +100,17 @@ impl PullRequest {
         })
     }
 
-    /// `reviewer` approved `head` (21: an approval is for one head; a push needs a new one). No other login counts,
-    /// so an empty `reviewer` approves nothing (15, Controls 1). Logins ignore case, as GitHub's do.
-    pub fn is_approved(&self, head: &str, reviewer: &str) -> bool {
-        self.reviews.iter().any(|r| {
-            r.state == "APPROVED"
-                && r.author.as_ref().is_some_and(|a| !reviewer.is_empty() && a.login.eq_ignore_ascii_case(reviewer))
-                && r.commit.as_ref().is_some_and(|c| c.oid == head)
-        })
+    /// The heads `reviewer` approved, in review order. No other login counts, so an empty `reviewer` approved nothing
+    /// (15, Controls 1). Logins ignore case, as GitHub's do.
+    pub fn approved_heads(&self, reviewer: &str) -> Vec<&str> {
+        self.reviews
+            .iter()
+            .filter(|r| {
+                r.state == "APPROVED"
+                    && r.author.as_ref().is_some_and(|a| !reviewer.is_empty() && a.login.eq_ignore_ascii_case(reviewer))
+            })
+            .filter_map(|r| Some(r.commit.as_ref()?.oid.as_str()))
+            .collect()
     }
 }
 
@@ -194,10 +197,9 @@ mod tests {
         assert!(s.open_for("0001.a").is_none(), "a merged pull request is not open");
         let pr = s.open_for("0002.b").unwrap();
         assert_eq!(pr.head_ref_oid, "h2");
-        assert!(pr.is_green() && pr.is_approved("h2", "r"));
-        assert!(!pr.is_approved("h3", "r"), "an approval of another head does not count");
-        assert!(!pr.is_approved("h2", "a") && !pr.is_approved("h2", ""), "only the reviewer's approval counts");
-        assert!(pr.is_approved("h2", "R"), "logins ignore case");
+        assert!(pr.is_green() && pr.approved_heads("r") == ["h2", "old"]);
+        assert!(pr.approved_heads("a").is_empty() && pr.approved_heads("").is_empty(), "only the reviewer's counts");
+        assert_eq!(pr.approved_heads("R"), ["h2", "old"], "logins ignore case");
         assert_eq!(s.merged_for("0001.a").map(|p| p.number), Some(1));
         assert!(s.merged_for("0002.b").is_none());
         let (path, _) = Snapshot::from_dir(&dir.path().join("none")).unwrap_err();
@@ -216,7 +218,7 @@ mod tests {
         assert_eq!(pr.author.as_ref().unwrap().login, "bdehamer");
         let authors: Vec<_> = pr.reviews.iter().map(|r| r.author.as_ref().unwrap().login.as_str()).collect();
         assert_eq!(authors, ["copilot-pull-request-reviewer", "babakks"]);
-        assert!(pr.reviews[1].state == "APPROVED" && pr.is_approved(head, "babakks"));
+        assert!(pr.reviews[1].state == "APPROVED" && pr.approved_heads("babakks") == [head]);
         assert!(pr.is_green(), "27 skipped and 12 successful checks are green, as on GitHub");
     }
 
@@ -254,6 +256,6 @@ mod tests {
         .unwrap();
         assert!(!pr.is_green());
         let pr: PullRequest = serde_json::from_str(r#"{"number":1,"headRefName":"x","headRefOid":"h"}"#).unwrap();
-        assert!(!pr.is_green() && !pr.is_approved("h", "r") && pr.is_open());
+        assert!(!pr.is_green() && pr.approved_heads("r").is_empty() && pr.is_open());
     }
 }

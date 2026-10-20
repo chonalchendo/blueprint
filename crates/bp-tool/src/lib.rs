@@ -12,6 +12,7 @@ mod record;
 mod rename;
 mod schema;
 mod set;
+mod stack;
 mod stamp;
 mod transition;
 mod walk;

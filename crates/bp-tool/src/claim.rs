@@ -22,7 +22,7 @@ pub struct Cut {
     /// The issue, for example `projects/bp/issues/cut-and-release`.
     pub issue: String,
     /// The commit to cut from, any ref git resolves; origin's default branch when absent. An origin branch it names is
-    /// the one the pull request targets.
+    /// the one the pull request targets. An issue whose dependency holds an open pull request is cut from its head.
     #[arg(long)]
     pub base: Option<String>,
 }
@@ -55,9 +55,13 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
     if let Some(repeat) = check(&index)? {
         return repeated(&top, &branch, repeat);
     }
+    let stacked = crate::stack::below(&top, &index, &id, c.base.as_deref())?;
     drop(index);
     git(&top, &["fetch", "-q", "origin"])?;
-    let start = c.base.as_deref().unwrap_or("origin/HEAD");
+    let start = match &stacked {
+        Some((_, pr)) => pr.head_ref_oid.as_str(),
+        None => c.base.as_deref().unwrap_or("origin/HEAD"),
+    };
     let start = git(&top, &["rev-parse", "--verify", "-q", "--end-of-options", &format!("{start}^{{commit}}")])
         .map_err(|e| match &c.base {
             Some(b) => Refusal::new(
@@ -70,8 +74,9 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
         })?;
     // The pull request targets the origin branch `--base` names, else origin's default: never a branch it lacks.
     let named = c.base.as_deref().and_then(|b| git(&top, &["rev-parse", "--symbolic-full-name", b]).ok());
-    let base_branch = match named.as_deref().and_then(|r| r.strip_prefix("refs/remotes/origin/")) {
-        Some(b) if b != "HEAD" => b.to_string(),
+    let base_branch = match (&stacked, named.as_deref().and_then(|r| r.strip_prefix("refs/remotes/origin/"))) {
+        (Some((_, pr)), _) => pr.head_ref_name.clone(),
+        (None, Some(b)) if b != "HEAD" => b.to_string(),
         _ => default_branch(&top)?,
     };
     let mut writer = vault.writer()?;
@@ -94,6 +99,10 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
     ]);
     if let Some(s) = &session {
         fields.insert("session".into(), s.as_str().into());
+    }
+    let base_issue = stacked.map(|(below, _)| below);
+    if let Some(below) = &base_issue {
+        fields.insert("base_issue".into(), below.as_str().into());
     }
     let header = Header {
         kind: Kind::Claim,
@@ -128,6 +137,7 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
         "worktree": worktree,
         "base": base,
         "base_branch": base_branch,
+        "base_issue": base_issue,
         "commit": written.commit,
         "findings": written.findings,
     })))
@@ -182,9 +192,10 @@ fn gate(
         let (owner, held_session) = (field(&h, "owner"), field(&h, "session"));
         if owner.as_deref() == Some(role) && held_session.as_deref() == session {
             let (worktree, base, base_branch) = (field(&h, "worktree"), field(&h, "base"), field(&h, "base_branch"));
-            return Ok(Some(
-                json!({ "id": id, "claim": h.id, "branch": branch, "worktree": worktree, "base": base, "base_branch": base_branch }),
-            ));
+            return Ok(Some(json!({
+                "id": id, "claim": h.id, "branch": branch, "worktree": worktree, "base": base,
+                "base_branch": base_branch, "base_issue": field(&h, "base_issue"),
+            })));
         }
         let by = owner.unwrap_or_default();
         let by = held_session.map_or(by.clone(), |s| format!("{by}, session {s}"));

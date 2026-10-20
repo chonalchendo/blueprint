@@ -121,7 +121,7 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     common::bp(v, &["set", "projects/bp/project", "reviewer", "r"]);
     assert_eq!(land(), "review_missing", "the author's approval does not count");
     forge(t, &h, &[("r", "old")], &["SUCCESS"]);
-    assert_eq!(land(), "review_missing", "an approval of another head does not count");
+    assert_eq!(land(), "diff_changed", "an approval of a head the clone lacks carries nothing");
     forge(t, &h, &[("r", &h)], &[]);
     assert_eq!(land(), "checks_pending");
     let bye = commit(&w, &["rm", "-q", "hello.txt"], "bye");
@@ -139,7 +139,10 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     git(&w, &["revert", "--no-edit", "HEAD"]);
     let back = git(&w, &["rev-parse", "HEAD"]).trim().to_string();
     assert_eq!(bp(v, t, &[], &["pr", ISSUE]).1["runs"][0]["verdict"], "pass");
-    forge(t, &back, &[("r", &back)], &["SUCCESS", "SKIPPED"]);
+    forge(t, &back, &[("r", &bye)], &["SUCCESS", "SKIPPED"]);
+    assert_eq!(land(), "diff_changed", "an approval of an empty diff carries nothing");
+    // `back` holds the diff the reviewer approved at `h`, so the approval carries (15, E7).
+    forge(t, &back, &[("r", &h), ("r", &bye)], &["SUCCESS", "SKIPPED"]);
     let (code, out) = bp(v, t, &[], &["land", ISSUE]);
     assert_eq!((code, out["status"].as_str()), (Some(0), Some("resolved")), "{out}");
     let merged = std::fs::read_to_string(t.join("merged")).unwrap();

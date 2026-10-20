@@ -8,9 +8,8 @@
 //! changed.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
@@ -157,7 +156,7 @@ impl Fake {
                     bail!("the fake gh reviews with --approve only");
                 }
                 let i = find(&prs, n)?;
-                self.approve(&mut prs[i], &heads)?;
+                self.approve(&mut prs[i])?;
                 String::new()
             }
             _ => bail!(
@@ -170,9 +169,9 @@ impl Fake {
     }
 
     /// Squashes the head onto the base in the bare copy. Like branch protection, it refuses a base that is not an
-    /// ancestor of the head and a rollup that is not green, and needs another login's approval at the head. It also
-    /// counts one at an earlier head with the head's patch id, the rule `land` uses (15, E7); whether GitHub keeps an
-    /// approval across such a push is not yet probed.
+    /// ancestor of the head and a rollup that is not green, and needs another login's approval. That approval may sit
+    /// at any earlier head: with "Dismiss stale pull request approvals when new commits are pushed" off, GitHub's
+    /// default, a push dismisses no approval (26, issue 5). So `land`'s patch-id rule is stricter than this forge.
     fn merge(&self, pr: &mut Value, heads: &BTreeMap<String, String>, expect: Option<&str>) -> Result<()> {
         let n = &pr["number"];
         if pr["state"] != "OPEN" {
@@ -190,7 +189,7 @@ impl Fake {
         if !green(&pr["statusCheckRollup"]) {
             bail!("Pull request #{n} is not mergeable: Required status check \"fake\" is expected.");
         }
-        if !self.approved(pr, base, &head)? {
+        if !approved(pr) {
             bail!("Pull request #{n} is not mergeable: the base branch policy prohibits the merge.");
         }
         let message = format!("{} (#{n})", pr["title"].as_str().unwrap_or_default());
@@ -200,9 +199,9 @@ impl Fake {
         Ok(())
     }
 
-    /// Records the login's approval at the head, with the head's patch id against the base as it stands now, the
-    /// diff the forge shows the reviewer (15, E7).
-    fn approve(&self, pr: &mut Value, heads: &BTreeMap<String, String>) -> Result<()> {
+    /// Records the login's approval at the head. GitHub documents no refusal of an approval on an empty diff, so the
+    /// fake accepts one, as when a later commit undoes the change (26, issue 5).
+    fn approve(&self, pr: &mut Value) -> Result<()> {
         if pr["state"] != "OPEN" {
             bail!("Pull request #{} is not open", pr["number"]);
         }
@@ -210,15 +209,6 @@ impl Fake {
             bail!("{OWN_APPROVAL}");
         }
         let head = pr["headRefOid"].as_str().unwrap_or_default().to_string();
-        // An open pull request's base exists: the refresh closed any whose base is gone.
-        let base = pr["baseRefName"].as_str().and_then(|b| heads.get(b)).context("the base branch is gone")?;
-        // An empty diff is approved too, as when a later commit undoes the change; it has no patch id to carry. Whether
-        // GitHub accepts that approval is not yet probed (26, issue 5).
-        if let Some(id) = self.patch_id(base, &head)? {
-            let mut ids = self.patch_ids()?;
-            ids.insert(head.clone(), id.into());
-            write(&self.t.join("forge/patch-ids.json"), &Value::Object(ids).to_string())?;
-        }
         let date = Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"]).output().context("run date")?;
         let reviews = pr["reviews"].as_array_mut().context("reviews is a list")?;
         reviews.push(json!({
@@ -227,56 +217,6 @@ impl Fake {
             "includesCreatedEdit": false, "reactionGroups": [], "state": "APPROVED", "commit": { "oid": head },
         }));
         Ok(())
-    }
-
-    fn approved(&self, pr: &Value, base: &str, head: &str) -> Result<bool> {
-        let author = pr["author"]["login"].as_str();
-        let at: Vec<&str> = pr["reviews"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|r| r["state"] == "APPROVED" && r["author"]["login"].as_str().is_some_and(|l| Some(l) != author))
-            .filter_map(|r| r["commit"]["oid"].as_str())
-            .collect();
-        if at.is_empty() {
-            return Ok(false);
-        }
-        if at.contains(&head) {
-            return Ok(true);
-        }
-        let Some(now) = self.patch_id(base, head)? else { return Ok(false) };
-        let ids = self.patch_ids()?;
-        Ok(at.iter().any(|oid| ids.get(*oid).and_then(Value::as_str) == Some(now.as_str())))
-    }
-
-    /// `git patch-id` of the diff from the merge base to `head`: equal for a rebase that keeps the change. An empty
-    /// diff has no id, so two of them never match.
-    fn patch_id(&self, base: &str, head: &str) -> Result<Option<String>> {
-        let diff = self.git(&["diff", &format!("{base}...{head}")])?;
-        if diff.is_empty() {
-            return Ok(None);
-        }
-        let mut child = self
-            .git_cmd(&["patch-id", "--stable"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .context("run git patch-id")?;
-        child.stdin.take().context("patch-id stdin")?.write_all(format!("{diff}\n").as_bytes())?;
-        let out = child.wait_with_output()?;
-        let id = String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or_default().to_string();
-        if !out.status.success() || id.is_empty() {
-            bail!("git patch-id gave no id for {base}...{head}");
-        }
-        Ok(Some(id))
-    }
-
-    fn patch_ids(&self) -> Result<Map<String, Value>> {
-        match std::fs::read_to_string(self.t.join("forge/patch-ids.json")) {
-            Ok(text) => Ok(serde_json::from_str(&text)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
-            Err(e) => Err(e.into()),
-        }
     }
 
     /// The checks at `head`, each filled out to `gh`'s shape: a check run, or a status context when the entry has a
@@ -358,6 +298,15 @@ impl Fake {
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     }
+}
+
+/// Another login than the author approved, at any head.
+fn approved(pr: &Value) -> bool {
+    pr["reviews"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|r| r["state"] == "APPROVED" && r["author"]["login"].as_str().is_some_and(|l| pr["author"]["login"] != l))
 }
 
 /// Green as `bp-forge` reads it (15, Controls 3): at least one `SUCCESS`, and every check `SUCCESS`, `NEUTRAL` or

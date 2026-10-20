@@ -118,10 +118,42 @@ pub struct Block {
 pub struct PullRequest {
     /// The head commit.
     pub head: String,
+    /// The branch it targets; a snapshot written before milestone 3 lacks it.
+    pub base: Option<String>,
     /// Every check at the head succeeded, and there is at least one.
     pub green: bool,
-    /// The reviewer identity's approving review at the head exists; no other login's counts (15, Controls 1).
-    pub approved: bool,
+    /// The reviewer identity's approving review; no other login's counts (15, Controls 1).
+    pub approval: Approval,
+}
+
+/// Where the reviewer identity approved (15, E7).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Approval {
+    /// Nowhere.
+    #[default]
+    None,
+    /// At the head.
+    Head,
+    /// Only at earlier heads, `reviewed` the latest. It counts when `carried`: one of them has the head's patch id,
+    /// the diff against the base as it stood at review time, so a rebase that keeps the change keeps the approval.
+    Earlier {
+        /// The latest approved head.
+        reviewed: String,
+        /// An approved head's patch id is the head's.
+        carried: bool,
+    },
+}
+
+/// The branch a held claim's pull request lands on (15, a dependency chain to landed).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Base {
+    /// Not known: a converted claim names no base branch, so no base test applies.
+    #[default]
+    Unknown,
+    /// This branch.
+    Branch(String),
+    /// The claim was cut from this dependency's pull request head, and the dependency is not resolved yet.
+    Unmerged(String),
 }
 
 /// A `depends` target.
@@ -152,6 +184,8 @@ pub struct Issue {
     pub depends: Vec<Dependency>,
     /// The open pull request, or the merged one of a held claim; `None` when there is none or the forge was not read.
     pub pr: Option<PullRequest>,
+    /// The held claim's base; read only while a pull request is in view.
+    pub base: Base,
     /// A commit after the latest claim's release commit touched the issue file: commit order, not time, so an answer
     /// in the release's own second counts (21, blocked). Read only after an escalated release.
     pub answered: bool,
@@ -230,12 +264,16 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
         return Verdict::of(Intent::Working, if stale { "stale" } else { "" });
     };
     // The forge approval is the gate, not the vault's review record: `land` reads none, so neither does this (21).
-    if pr.approved && pr.green {
-        return match evidence(&i.runs, &pr.head, &i.blocks) {
+    // An approval whose diff changed since counts for nothing: the head needs a new one.
+    let approved = matches!(pr.approval, Approval::Head | Approval::Earlier { carried: true, .. });
+    if approved && pr.green {
+        return match landing(pr, &i.base, &i.runs, &i.blocks) {
             Ok(()) => Verdict::of(Intent::NeedsLanding, ""),
+            Err(Unmet::Unmerged(a)) => Verdict::of(Intent::Working, format!("base unmerged: bp land {a} first")),
+            Err(Unmet::Mismatch(b)) => Verdict::of(Intent::Working, format!("not on {b}: bp pr")),
             Err(Unmet::Failed(r)) => Verdict::of(Intent::Working, format!("{} did not pass at head: bp pr", r.check)),
             Err(Unmet::Evidence(b)) => Verdict::of(Intent::Working, format!("no run of {b} at head: bp pr")),
-            Err(Unmet::Review | Unmet::Checks) => unreachable!("evidence reads only the runs"),
+            Err(Unmet::Review | Unmet::Checks | Unmet::DiffChanged(_)) => unreachable!("approved and green"),
         };
     }
     if !i.review_heads.contains(&pr.head) {
@@ -250,7 +288,11 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
 /// The first part of needs landing that does not hold, in `land`'s refusal order (26, design change 4).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Unmet<'a> {
-    /// No approving review from the reviewer identity at the head.
+    /// The claim was cut from this dependency's head, which has not landed (`base_unmerged`).
+    Unmerged(&'a str),
+    /// The pull request does not target this branch, the claim's base (`base_mismatch`).
+    Mismatch(&'a str),
+    /// No approving review from the reviewer identity, at the head or an earlier head.
     Review,
     /// The forge check at the head is not green.
     Checks,
@@ -258,19 +300,31 @@ pub enum Unmet<'a> {
     Failed(&'a Run),
     /// This `error` block has no run at the head of its current text: none, or one made before the block changed.
     Evidence(&'a str),
+    /// The approval sits at this earlier head, whose patch id is not the head's (`diff_changed`).
+    DiffChanged(&'a str),
 }
 
-/// Needs landing (21): the reviewer's approval at the head, the forge check green at the head, and the run
-/// [`evidence`]. `land` refuses on the first part that does not hold, and the `Intents` function reads the same
-/// answer, so the two never disagree (21, rule 1). Issue 5 of 26 adds the earlier head with the head's patch id.
-pub fn landing<'a>(pr: &PullRequest, runs: &'a [Run], blocks: &'a [Block]) -> Result<(), Unmet<'a>> {
-    if !pr.approved {
+/// Needs landing (21): the pull request on the claim's `base`, the reviewer's approval, the forge check green at the
+/// head, the run [`evidence`], and the approval's patch id, in that order (26, design change 4). `land` refuses on
+/// the first part that does not hold, and the `Intents` function reads the same answer, so the two never disagree
+/// (21, rule 1).
+pub fn landing<'a>(pr: &'a PullRequest, base: &'a Base, runs: &'a [Run], blocks: &'a [Block]) -> Result<(), Unmet<'a>> {
+    match base {
+        Base::Unmerged(below) => return Err(Unmet::Unmerged(below)),
+        Base::Branch(b) if pr.base.as_ref().is_some_and(|into| into != b) => return Err(Unmet::Mismatch(b)),
+        _ => {}
+    }
+    if pr.approval == Approval::None {
         return Err(Unmet::Review);
     }
     if !pr.green {
         return Err(Unmet::Checks);
     }
-    evidence(runs, &pr.head, blocks)
+    evidence(runs, &pr.head, blocks)?;
+    match &pr.approval {
+        Approval::Earlier { reviewed, carried: false } => Err(Unmet::DiffChanged(reviewed)),
+        _ => Ok(()),
+    }
 }
 
 /// The run part of needs landing: the latest run of each `error` check at `head` passed, and each block has one whose
@@ -369,8 +423,11 @@ mod tests {
         Dependency { id: id.into(), status: Some(status.into()), open_pr }
     }
 
+    const BASE: Base = Base::Unknown;
+
     fn pr(head: &str, green: bool, approved: bool) -> PullRequest {
-        PullRequest { head: head.into(), green, approved }
+        let approval = if approved { Approval::Head } else { Approval::None };
+        PullRequest { head: head.into(), base: Some("master".into()), green, approval }
     }
 
     fn run(check: &str, at: i64, commit: &str, failed: bool) -> Run {
@@ -532,18 +589,34 @@ mod tests {
     fn landing_refuses_in_order_and_needs_a_passing_run_of_each_error_block() {
         let blocks = vec![block("a"), block("b")];
         let runs = vec![run("a", NOW, "h", false), run("b", NOW, "h", false)];
-        assert_eq!(landing(&pr("h", false, false), &runs, &blocks), Err(Unmet::Review), "the review comes first");
-        assert_eq!(landing(&pr("h", false, true), &runs, &blocks), Err(Unmet::Checks));
-        assert_eq!(landing(&pr("h", true, true), &runs, &blocks), Ok(()));
-        assert_eq!(landing(&pr("h", true, true), &runs[..1], &blocks), Err(Unmet::Evidence("b")));
-        assert_eq!(landing(&pr("g", true, true), &runs, &blocks), Err(Unmet::Evidence("a")), "only runs at the head");
+        assert_eq!(
+            landing(&pr("h", false, false), &BASE, &runs, &blocks),
+            Err(Unmet::Review),
+            "the review comes first"
+        );
+        assert_eq!(landing(&pr("h", false, true), &BASE, &runs, &blocks), Err(Unmet::Checks));
+        assert_eq!(landing(&pr("h", true, true), &BASE, &runs, &blocks), Ok(()));
+        assert_eq!(landing(&pr("h", true, true), &BASE, &runs[..1], &blocks), Err(Unmet::Evidence("b")));
+        assert_eq!(
+            landing(&pr("g", true, true), &BASE, &runs, &blocks),
+            Err(Unmet::Evidence("a")),
+            "only runs at the head"
+        );
         let failed = [run("a", NOW, "h", true), runs[1].clone()];
-        assert_eq!(landing(&pr("h", true, true), &failed, &blocks), Err(Unmet::Failed(&failed[0])));
+        assert_eq!(landing(&pr("h", true, true), &BASE, &failed, &blocks), Err(Unmet::Failed(&failed[0])));
         let unrun = [Run { passed: false, ..runs[0].clone() }, runs[1].clone()];
-        assert_eq!(landing(&pr("h", true, true), &unrun, &blocks), Err(Unmet::Failed(&unrun[0])), "could not run");
-        assert_eq!(landing(&pr("h", true, true), &[], &[]), Ok(()), "an issue with no error block needs no run");
+        assert_eq!(
+            landing(&pr("h", true, true), &BASE, &unrun, &blocks),
+            Err(Unmet::Failed(&unrun[0])),
+            "could not run"
+        );
+        assert_eq!(landing(&pr("h", true, true), &BASE, &[], &[]), Ok(()), "an issue with no error block needs no run");
         let edited = [block("a"), Block { hash: "#a2".into(), ..block("b") }];
-        assert_eq!(landing(&pr("h", true, true), &runs, &edited), Err(Unmet::Evidence("b")), "b changed after its run");
+        assert_eq!(
+            landing(&pr("h", true, true), &BASE, &runs, &edited),
+            Err(Unmet::Evidence("b")),
+            "b changed after its run"
+        );
 
         let held = Issue { status: "in-progress".into(), claims: vec![Claim::default()], ..Issue::default() };
         let i = Issue { pr: Some(pr("h", true, true)), review_heads: vec!["h".into()], blocks, runs, ..held };
@@ -558,6 +631,38 @@ mod tests {
         assert_eq!(issue(&stale, NOW), Verdict::of(Intent::Working, "no run of a at head: bp pr"), "pr is due again");
         let unrun = Issue { runs: vec![Run { passed: false, ..i.runs[0].clone() }, i.runs[1].clone()], ..i };
         assert_eq!(issue(&unrun, NOW), Verdict::of(Intent::Working, "a did not pass at head: bp pr"), "could not run");
+    }
+
+    #[test]
+    fn landing_reads_the_stack_base_first_and_the_patch_id_last() {
+        let (master, a) = (Base::Branch("master".into()), "projects/bp/issues/a");
+        let below = Base::Unmerged(a.into());
+        let ok = pr("h", true, true);
+        assert_eq!(landing(&ok, &master, &[], &[]), Ok(()));
+        assert_eq!(landing(&pr("h", false, false), &below, &[], &[]), Err(Unmet::Unmerged(a)), "the base comes first");
+        let stacked = Base::Branch("bp/a".into());
+        assert_eq!(landing(&ok, &stacked, &[], &[]), Err(Unmet::Mismatch("bp/a")));
+        let unread = PullRequest { base: None, ..ok.clone() };
+        assert_eq!(landing(&unread, &stacked, &[], &[]), Ok(()), "a snapshot with no base is not tested");
+        let earlier =
+            |carried| PullRequest { approval: Approval::Earlier { reviewed: "g".into(), carried }, ..ok.clone() };
+        assert_eq!(landing(&earlier(true), &master, &[], &[]), Ok(()), "the approval carries across a rebase");
+        assert_eq!(landing(&earlier(false), &master, &[], &[]), Err(Unmet::DiffChanged("g")));
+        let red = PullRequest { green: false, ..earlier(false) };
+        assert_eq!(landing(&red, &master, &[], &[]), Err(Unmet::Checks), "the patch id comes last");
+
+        let held = Issue {
+            status: "in-progress".into(),
+            claims: vec![Claim::default()],
+            review_heads: vec!["h".into()],
+            ..Issue::default()
+        };
+        let i = Issue { pr: Some(ok.clone()), base: below, ..held.clone() };
+        assert_eq!(issue(&i, NOW), Verdict::of(Intent::Working, format!("base unmerged: bp land {a} first")));
+        let i = Issue { pr: Some(earlier(true)), base: master.clone(), ..held.clone() };
+        assert_eq!(issue(&i, NOW).intent, Some(Intent::NeedsLanding));
+        let i = Issue { pr: Some(earlier(false)), base: master, ..held };
+        assert_eq!(issue(&i, NOW).intent, Some(Intent::NeedsApproval), "a changed diff needs a new approval");
     }
 
     #[test]
