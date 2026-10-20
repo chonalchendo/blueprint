@@ -19,14 +19,7 @@ const KEEP: usize = 16;
 pub fn run() -> Result<PathBuf> {
     let src = std::env::var_os("BP_VAULT").context("set BP_VAULT to the vault to copy")?;
     let src = Path::new(&src).canonicalize().with_context(|| format!("read BP_VAULT {}", src.display()))?;
-    let parent = std::env::temp_dir().join("bp-scratch");
-    std::fs::create_dir_all(&parent).with_context(|| format!("create {}", parent.display()))?;
-    prune(&parent)?;
-    let out = Command::new("mktemp").arg("-d").arg(parent.join("XXXXXXXX")).output().context("run mktemp -d")?;
-    if !out.status.success() {
-        bail!("mktemp -d exited {}", out.status);
-    }
-    let dir = PathBuf::from(String::from_utf8(out.stdout).context("mktemp printed a path")?.trim());
+    let dir = fresh(&std::env::temp_dir().join("bp-scratch"), KEEP)?;
     let parts: Vec<PathBuf> =
         ["projects", "shared", ".bp"].iter().map(|p| src.join(p)).filter(|p| p.exists()).collect();
     if !parts.iter().any(|p| p.ends_with("projects")) {
@@ -47,8 +40,19 @@ pub fn run() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Deletes all but the newest `KEEP - 1` copies, by the time each was made.
-fn prune(parent: &Path) -> Result<()> {
+/// A new empty directory under `parent`, after deleting all but the newest `keep - 1` there.
+pub(crate) fn fresh(parent: &Path, keep: usize) -> Result<PathBuf> {
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    prune(parent, keep)?;
+    let out = Command::new("mktemp").arg("-d").arg(parent.join("XXXXXXXX")).output().context("run mktemp -d")?;
+    if !out.status.success() {
+        bail!("mktemp -d exited {}", out.status);
+    }
+    Ok(PathBuf::from(String::from_utf8(out.stdout).context("mktemp printed a path")?.trim()))
+}
+
+/// Deletes all but the newest `keep - 1` directories under `parent`, by the time each was made.
+fn prune(parent: &Path, keep: usize) -> Result<()> {
     let mut copies: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(parent)?
         .filter_map(|e| {
             let e = e.ok()?;
@@ -56,14 +60,14 @@ fn prune(parent: &Path) -> Result<()> {
         })
         .collect();
     copies.sort_unstable_by(|a, b| b.0.cmp(&a.0));
-    for (_, old) in copies.iter().skip(KEEP - 1) {
+    for (_, old) in copies.iter().skip(keep - 1) {
         // A copy another run deletes first is already gone, which is the goal.
         let _ = std::fs::remove_dir_all(old);
     }
     Ok(())
 }
 
-fn run_in(dir: &Path, cmd: &mut Command) -> Result<()> {
+pub(crate) fn run_in(dir: &Path, cmd: &mut Command) -> Result<()> {
     // Stdout carries the directory alone.
     let status = cmd
         .current_dir(dir)

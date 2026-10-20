@@ -1,11 +1,16 @@
 //! Forge adapter: pull request, reviews, check runs, branch base; the write calls sit behind the write feature.
 //!
-//! This milestone holds the snapshot: the forge state the `Intents` function reads, loaded from a directory of
-//! `gh` JSON (`open-prs.json` plus `pr-<n>.json`). The live `gh` reads land with the repo verbs.
+//! The snapshot is the forge state the `Intents` function reads, loaded from a directory of `gh` JSON
+//! (`open-prs.json` plus `pr-<n>.json`). [`Gh`] reads the live forge into the same types. A test swaps the `gh` on
+//! `PATH`, not a trait (26, design change 1).
+
+mod gh;
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+pub use gh::Gh;
 
 /// One pull request as `gh pr view --json` writes it.
 #[derive(Debug, Clone, Deserialize)]
@@ -17,6 +22,12 @@ pub struct PullRequest {
     pub head_ref_name: String,
     /// The head commit.
     pub head_ref_oid: String,
+    /// The branch it merges into; a snapshot written before milestone 3 lacks it.
+    #[serde(default)]
+    pub base_ref_name: Option<String>,
+    /// Who opened it: the agent's token, whose approval the forge refuses (15, E3).
+    #[serde(default)]
+    pub author: Option<Author>,
     /// `OPEN`, `MERGED` or `CLOSED`; `gh pr list` omits it for open pull requests.
     #[serde(default)]
     pub state: Option<String>,
@@ -31,11 +42,21 @@ pub struct PullRequest {
 /// One review.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Review {
+    /// Who reviewed. `land` counts the reviewer identity's review only, so it reads the author, not only the state.
+    #[serde(default)]
+    pub author: Option<Author>,
     /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`.
     pub state: String,
     /// The commit the review was left on.
     #[serde(default)]
     pub commit: Option<Commit>,
+}
+
+/// A forge account as `gh` writes it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Author {
+    /// The login.
+    pub login: String,
 }
 
 /// A commit as `gh` writes it.
@@ -152,6 +173,24 @@ mod tests {
         assert!(!pr.is_approved("h3"), "an approval of another head does not count");
         let (path, _) = Snapshot::from_dir(&dir.path().join("none")).unwrap_err();
         assert!(path.ends_with("none/open-prs.json"), "the error names the file");
+    }
+
+    #[test]
+    fn parses_real_gh_pr_view_output() {
+        // The capture asked for five fields (`gh pr view 14722 --json author,baseRefName,headRefOid,reviews,
+        // statusCheckRollup` on cli/cli); `Gh` also asks for the number and the head branch.
+        let mut v: serde_json::Value = serde_json::from_str(include_str!("../testdata/pr-view.json")).unwrap();
+        v["number"] = 14722.into();
+        v["headRefName"] = "release-create-help".into();
+        let pr: PullRequest = serde_json::from_value(v).unwrap();
+        let head = "9e1e1c929f882fd93e1c67ea520a4529352aab9a";
+        assert_eq!(pr.head_ref_oid, head);
+        assert_eq!(pr.base_ref_name.as_deref(), Some("trunk"));
+        assert_eq!(pr.author.as_ref().unwrap().login, "bdehamer");
+        let authors: Vec<_> = pr.reviews.iter().map(|r| r.author.as_ref().unwrap().login.as_str()).collect();
+        assert_eq!(authors, ["copilot-pull-request-reviewer", "babakks"]);
+        assert!(pr.reviews[1].state == "APPROVED" && pr.is_approved(head));
+        assert!(!pr.status_check_rollup.is_empty() && pr.status_check_rollup.iter().all(|c| c.conclusion.is_some()));
     }
 
     #[test]
