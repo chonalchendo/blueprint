@@ -1,8 +1,11 @@
 //! `cargo xtask <check>`. `deps`, the crate rule: exit 0 when the rule holds, 2 with one line per violation.
 //! `bench`, the call budget: prints the largest ratio last. `scratch`, a writable copy of `$BP_VAULT`: prints its
-//! directory. `lines`, the file cap: exit 2 with one line per non-test file over 500 lines.
+//! directory. `lines`, the file cap: exit 2 with one line per non-test file over 500 lines. `forge <project>`, a fake
+//! forge for a repo block: prints its directory. `gh`, the fake `gh` that directory's shim runs.
 
 mod bench;
+mod forge;
+mod gh;
 mod lines;
 mod scratch;
 
@@ -29,8 +32,10 @@ fn main() -> ExitCode {
                 }
             };
         }
-        Some("scratch") => {
-            return match scratch::run() {
+        Some("gh") => return gh::run(&args[1..]),
+        Some(verb @ ("scratch" | "forge")) => {
+            let made = if verb == "scratch" { scratch::run() } else { forge::run(&args[1..]) };
+            return match made {
                 Ok(dir) => {
                     println!("{}", dir.display());
                     ExitCode::SUCCESS
@@ -43,7 +48,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch"
+                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project>"
             );
             return ExitCode::from(4);
         }
