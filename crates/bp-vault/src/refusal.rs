@@ -44,6 +44,7 @@ crate::closed_enum! {
         EvidenceStale = "evidence_stale",
         ReviewerInvalid = "reviewer_invalid",
         ChecksChanged = "checks_changed",
+        RoleForbidden = "role_forbidden",
     }
 }
 

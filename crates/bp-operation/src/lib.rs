@@ -94,6 +94,24 @@ impl Action {
     }
 }
 
+/// The read verbs, open to every role and to any subagent: a read writes nothing, and the role is a label, not a gate
+/// (27, design change 3), so a denied read would cost a turn and protect nothing.
+pub const READ_VERBS: [&str; 5] = ["where", "show", "list", "search", "walk"];
+
+impl Role {
+    /// The write verbs the role runs: the union of its rows' verbs in 21 (rule 6), less the read verbs. The role hook
+    /// denies any verb outside these and `READ_VERBS`; a dispatch template's forbidden list is the complement of both.
+    /// `None` for the human, whom no list bounds: the forge is the gate.
+    pub fn verbs(self) -> Option<&'static [&'static str]> {
+        Some(match self {
+            Self::Session => &["create", "set", "link", "record", "transition", "release"],
+            Self::Worker => &["cut", "check", "record", "pr", "release"],
+            Self::Reviewer | Self::Researcher => &[],
+            Self::Human => return None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +123,16 @@ mod tests {
         }
         assert_eq!("complete".parse::<Action>().unwrap().budget(), 15_000);
         assert!("land".parse::<Action>().is_err(), "a human act reads a page, not a walk");
+    }
+
+    #[test]
+    fn only_the_human_runs_the_human_acts() {
+        for &r in Role::ALL {
+            let verbs = r.verbs();
+            assert_eq!(verbs.is_none(), r == Role::Human, "{r}");
+            let verbs = verbs.unwrap_or_default();
+            assert!(verbs.iter().all(|v| !["stamp", "land"].contains(v) && !READ_VERBS.contains(v)), "{r}");
+        }
+        assert!(Role::Reviewer.verbs().unwrap().is_empty(), "the session records the review (21)");
     }
 }

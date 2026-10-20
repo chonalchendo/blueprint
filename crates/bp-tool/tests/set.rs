@@ -293,3 +293,27 @@ fn an_active_convention_takes_a_new_body() {
     assert_eq!(v["commit"].as_str().unwrap(), git(root, &["rev-parse", "HEAD"]).trim());
     assert_eq!(bp(root, &["show", "shared/conventions/convention.c"]).1["lead"], "New rule.");
 }
+
+#[test]
+fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
+    let dir = vault();
+    let root = dir.path();
+    // Ids that name nothing: the role refuses first, so no other refusal shows.
+    let acts: [&[&str]; 4] = [
+        &["stamp", "projects/bp/milestones/none"],
+        &["land", "projects/bp/issues/none"],
+        &["transition", "projects/bp/milestones/none", "approved"],
+        &["transition", "projects/bp/designs/none", "active", "--dry-run"],
+    ];
+    for role in ["session", "worker", "reviewer", "researcher"] {
+        for act in acts {
+            let (code, v) = bp_env(root, &[("BP_ROLE", role)], act);
+            assert_eq!((code, v["code"].as_str()), (Some(2), Some("role_forbidden")), "{role} {act:?}: {v}");
+        }
+    }
+    let (_, v) = bp_env(root, &[("BP_ROLE", "worker")], &["transition", "projects/bp/designs/none", "draft"]);
+    assert_eq!(v["code"], "no_node", "another move is not the human's: {v}");
+    let (_, v) = bp_env(root, &[("BP_ROLE", "")], &["transition", "projects/bp/designs/product", "active"]);
+    assert!(v["commit"].is_string(), "the human activates: {v}");
+    assert!(git(root, &["log", "-1", "--format=%B"]).lines().any(|l| l == "Bp-Role: human"));
+}

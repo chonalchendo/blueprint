@@ -38,7 +38,8 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
     let t = dir.path();
     write(t, "CLAUDE.md", "# Mine\n\nKeep this line.\n");
     std::fs::create_dir_all(t.join(".claude")).unwrap();
-    let mine = r#"{"model": "x", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "mine.sh"}]}]}}"#;
+    let mine = r#"{"model": "x", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "mine.sh"}]}]},
+        "permissions": {"allow": ["Bash(ls *)", "Bash(export BP_ROLE=old)"]}}"#;
     write(t, ".claude/settings.local.json", mine);
     assert_eq!(checked(t), "ok", "a clone with no bp- entry is not checked");
     let (wrote, v) = install(t, Target::Claude).unwrap();
@@ -54,6 +55,14 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
     let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(pre[0]["hooks"][0]["command"], "mine.sh", "the user's entry stays first");
     assert!(pre[1]["hooks"][0]["command"].as_str().unwrap().ends_with("/.claude/hooks/bp-guard.sh"));
+    // Each of Blueprint's hooks blocks when its script cannot start; the user's entry is not touched.
+    assert!(pre[0]["hooks"][0].get("onFailure").is_none());
+    let groups = settings["hooks"].as_object().unwrap().values().flat_map(|g| g.as_array().unwrap());
+    let ours: Vec<&serde_json::Value> = groups.map(|g| &g["hooks"][0]).filter(|h| h["command"] != "mine.sh").collect();
+    assert_eq!(ours.len(), 4);
+    assert!(ours.iter().all(|h| h["onFailure"] == "block"), "{ours:?}");
+    let allow = &settings["permissions"]["allow"];
+    assert_eq!(allow, &serde_json::json!(["Bash(ls *)", "Bash(export BP_ROLE=*)"]), "an older rule of ours goes");
     let manifest: serde_json::Value = serde_json::from_str(&read(t, ".claude/skills/bundle.json")).unwrap();
     assert_eq!((manifest["tool_version"].as_str(), &manifest["files"]), (Some(bp_install::VERSION), &v["files"]));
     let exclude = read(t, ".git/info/exclude");
@@ -78,13 +87,14 @@ fn check_catches_each_drift_and_install_repairs_it() {
     install(t, Target::Claude).unwrap();
     let (skill, settings, manifest) =
         (".claude/skills/bp-complete/SKILL.md", ".claude/settings.local.json", ".claude/skills/bundle.json");
-    let edits: [(Edit, &str); 6] = [
+    let edits: [(Edit, &str); 7] = [
         (&|t| write(t, skill, &(read(t, skill) + "\n")), skill),
         (
             &|t| write(t, "CLAUDE.md", &read(t, "CLAUDE.md").replace("<!-- bp:end -->", "x\n<!-- bp:end -->")),
             "CLAUDE.md#bp",
         ),
         (&|t| write(t, settings, &read(t, settings).replace("SessionEnd", "Gone")), "settings.local.json#hooks"),
+        (&|t| write(t, settings, &read(t, settings).replace("BP_ROLE=*", "BP_ROLE=x")), "settings.local.json#hooks"),
         (&|t| write(t, manifest, &read(t, manifest).replace(bp_install::VERSION, "0.0.0-quokka")), manifest),
         (&|t| std::fs::remove_file(t.join(manifest)).unwrap(), ".claude/skills"),
         // A bundle that an older binary of the same version wrote: the skill and its manifest entry agree, and the
@@ -195,6 +205,7 @@ fn codex_writes_its_own_paths_and_creates_an_excluded_agents_file() {
         hooks.contains("--git-common-dir)/..\\\"/.codex/hooks/bp-start.sh"),
         "the main top, from any worktree: {hooks}"
     );
+    assert!(!hooks.contains("onFailure") && !hooks.contains("permissions"), "both are Claude Code's: {hooks}");
     assert!(read(t, "AGENTS.md").starts_with("<!-- bp:begin -->\n"));
     assert!(read(t, ".git/info/exclude").lines().any(|l| l == "/AGENTS.md"), "a file the install creates is its own");
     assert_eq!(checked(t), "ok");

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SessionStart: walks the latest seed of a handoff with its kind's first action, else the project for shape (17, Hooks).
-# The walk's JSON goes to stdout, which the harness adds to the session's context. A refusal is context too.
+# The walk's JSON goes to the session's context as `additionalContext`: stdout that is one JSON object is read as the
+# hook's output, not as context. A refusal is context too. The line that names `jq` is plain text, which is context.
 command -v jq > /dev/null || { echo "bp-start: jq is not installed, so the last seed is not walked; install jq"; exit 0; }
 here=$(bp where --json 2> /dev/null) || exit 0
 vault=$(jq -r '.vault' <<< "$here")
@@ -23,5 +24,6 @@ if [ -n "$seed" ]; then
 else
     seed=projects/$project/project
 fi
-bp walk "$seed" --for "$action" --json
+walk=$(bp walk "$seed" --for "$action" --json)
+jq -cn --arg walk "$walk" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $walk}}'
 exit 0
