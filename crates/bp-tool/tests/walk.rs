@@ -315,3 +315,29 @@ fn distil_needs_a_citing_learning_that_search_finds_by_its_cue() {
     learning("cued", "cue: quokkas nap at noon\n");
     assert_eq!(done(d.path(), None, SEED, "distil"), true);
 }
+
+#[test]
+fn respond_holds_the_latest_review_by_its_time_not_its_id() {
+    let d = vault();
+    let review = |head: &str, at: &str, finding: &str| {
+        let text = format!(
+            "---\nkind: review\nunder: {SEED}\nhead: {head}\nat: {at}\n---\n\n| severity | finding |\n|---|---|\n| major | {finding} |\n"
+        );
+        write(d.path(), &format!("{SEED}/reviews/{head}.md"), &text);
+    };
+    review("ffff", "2026-10-16T00:00:00Z", "older");
+    review("aaaa", "2026-10-17T00:00:00Z", "newer");
+    let (code, v) = walk(d.path(), &[SEED, "--for", "respond"]);
+    assert_eq!(code, Some(0), "{v}");
+    let first = &v["bodies"][0];
+    assert_eq!(
+        (first["id"].as_str(), first["kind"].as_str()),
+        (Some(&*format!("{SEED}/reviews/aaaa")), Some("review"))
+    );
+    assert!(first["body"].as_str().unwrap().contains("| major | newer |") && first["header"]["head"] == "aaaa", "{v}");
+    assert_eq!(ids(&v["bodies"]).iter().filter(|i| i.contains("/reviews/")).count(), 1, "only the latest: {v}");
+    let (_, v) = walk(d.path(), &[SEED, "--for", "respond", "--ids"]);
+    assert_eq!(v["ids"][0]["id"], format!("{SEED}/reviews/aaaa"), "{v}");
+    let (_, v) = walk(d.path(), &[SEED, "--for", "complete"]);
+    assert!(!ids(&v["bodies"]).iter().any(|i| i.contains("/reviews/")), "complete answers no review: {v}");
+}

@@ -8,7 +8,7 @@ use bp_change::{MilestoneStatus, intents};
 use bp_operation::Action;
 use bp_reasoning::ThreadStatus;
 use bp_vault::git::Repo;
-use bp_vault::{Body, Filter, Id, Index, Kind, Refusal};
+use bp_vault::{Body, Filter, Id, Index, Kind, Refusal, Vault};
 use serde_json::{Map, Value};
 
 use crate::claim::{field, held};
@@ -22,7 +22,7 @@ const RETRIEVAL: usize = 10;
 /// Whether the action's Stop column holds for the seed `id`, whose header the walk read. A stop that reads the forge
 /// sets `forge_age` to its snapshot's age; one that reads none leaves it `None`.
 pub(crate) fn done(
-    root: &Path,
+    vault: &Vault,
     index: &Index,
     id: &Id,
     header: &Map<String, Value>,
@@ -47,19 +47,29 @@ pub(crate) fn done(
             if intents::latest_claim(&claims).is_some_and(|c| c.escalated) {
                 return Ok(true);
             }
-            match open_head(root, index, id, forge_age)? {
-                Some((pr, Some(worktree))) => Repo::find(&worktree).and_then(|r| r.head()) == Some(pr),
+            // An open pull request is not done until each error block passes at its head: `pr` opens one even
+            // when it refuses `check_failed` (27, issue 8).
+            match open_head(&vault.root, index, id, forge_age)? {
+                Some((pr, Some(worktree))) => {
+                    Repo::find(&worktree).and_then(|r| r.head()).as_ref() == Some(&pr)
+                        && intents::evidence(
+                            &crate::intent::runs(index, id.as_str())?,
+                            &pr,
+                            &crate::intent::blocks(vault, id.as_str())?,
+                        )
+                        .is_ok()
+                }
                 _ => false,
             }
         }
-        Action::Review => match open_head(root, index, id, forge_age)? {
+        Action::Review => match open_head(&vault.root, index, id, forge_age)? {
             Some((pr, _)) => index
                 .records(id.as_str(), Kind::Review)?
                 .iter()
                 .any(|r| field(r, "head").as_deref() == Some(pr.as_str())),
             None => false,
         },
-        Action::Respond => responded(root, index, id, forge_age)?,
+        Action::Respond => responded(&vault.root, index, id, forge_age)?,
         Action::TriageDrift => {
             // An integrity run checks the vault, not a design: 21's drifted reads drift runs only.
             let failed = index.records(id.as_str(), Kind::Run)?.into_iter().filter(|r| {

@@ -72,7 +72,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         // A stop reads a few rows, and `list` opens its own read transaction.
         drop(reading);
         let mut forge_age = None;
-        let done = crate::done::done(&vault.root, &index, &id, &header, action, &mut forge_age)?;
+        let done = crate::done::done(&vault, &index, &id, &header, action, &mut forge_age)?;
         return Ok(serde_json::json!({ "id": id, "for": action, "done": done, "forge_age": forge_age }));
     }
     context(&vault, &index, &id, action)?;
@@ -94,20 +94,31 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             intents.push(serde_json::json!({ "id": r.id, "intent": intent, "note": verdict.note }));
         }
     }
+    // The latest record of each kind the action answers, latest by its time field, as `index.records` orders them.
+    let mut records = Vec::new();
+    for kind in action.records() {
+        if let Some(r) = index.records(id.as_str(), *kind)?.pop() {
+            records.push(serde_json::json!({ "id": r.id, "kind": kind, "header": r.header, "body": r.body }));
+        }
+    }
     let line =
         |r: &bp_vault::Reached| serde_json::json!({ "id": r.id, "kind": r.kind, "title": r.title, "rank": r.rank });
     if walk.ids {
         // The map keeps the fill's order: conventions close the tail (21).
         let (conventions, rest): (Vec<_>, Vec<_>) = reached.iter().partition(|r| r.kind == Kind::Convention);
-        let ids: Vec<Value> = rest.into_iter().chain(conventions).map(line).collect();
+        let answered = records.iter().map(|r| serde_json::json!({ "id": r["id"], "kind": r["kind"] }));
+        let ids: Vec<Value> = answered.chain(rest.into_iter().chain(conventions).map(line)).collect();
         return Ok(serde_json::json!({ "seed": id, "for": action, "ids": ids, "intents": intents }));
     }
     let budget = walk.budget.unwrap_or_else(|| action.budget());
-    // The intents are named items, always sent, so they spend the budget before the fill does.
-    let named = serde_json::to_string(&intents).expect("plain JSON serialises").len().div_ceil(4);
+    // The intents and the answered records are always sent, so they spend the budget before the fill does.
+    let named = [serde_json::to_string(&intents), serde_json::to_string(&records)]
+        .into_iter()
+        .map(|s| s.expect("plain JSON serialises").len().div_ceil(4))
+        .sum::<usize>();
     let f = bp_vault::fill(&reached, action.bodies(), budget.saturating_sub(named));
     let by_id = |want: &String| reached.iter().find(|r| &r.id == want).expect("the fill chose from the reached");
-    let mut bodies = Vec::with_capacity(f.bodies.len());
+    let mut bodies = records;
     for b in &f.bodies {
         let mut v = line(by_id(b));
         v["body"] = index.body(b)?.into();
