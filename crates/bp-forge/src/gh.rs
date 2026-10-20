@@ -130,6 +130,7 @@ mod tests {
   "pr list") echo '[{"number":3,"headRefName":"bp/q","headRefOid":"h","baseRefName":"master","author":{"login":"quokka-agent"}}]' ;;
   "pr view") echo '{"number":3,"headRefName":"bp/q","headRefOid":"h","reviews":[{"state":"APPROVED","author":{"login":"r"},"commit":{"oid":"h"}}]}' ;;
   "pr create") echo 'https://github.com/o/r/pull/3' ;;
+  "pr edit") [ "$*" = "pr edit 3 --base master" ] || exit 9 ;;
   *) [ "$*" = "pr merge 3 --squash --match-head-commit h" ] || exit 9 ;;
 esac"#,
         );
@@ -144,6 +145,8 @@ esac"#,
         #[cfg(feature = "write")]
         {
             assert_eq!(gh.create("bp/q", "master", "t", "b").unwrap(), 3);
+            gh.retarget(3, "master").unwrap();
+            assert_eq!(gh.retarget(3, "bp/p").unwrap_err().code, Code::CouldNotRun, "the fake exits 9");
             gh.merge(3, "h").unwrap();
             assert_eq!(gh.merge(3, "other").unwrap_err().code, Code::CouldNotRun, "the fake exits 9");
         }

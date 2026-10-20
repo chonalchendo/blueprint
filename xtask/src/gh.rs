@@ -2,10 +2,14 @@
 //! answers the six calls of `bp-forge` and `pr review --approve`, and fails any other. Its login is `FAKE_GH_LOGIN`,
 //! default `quokka-agent`. The branches live in the bare copy `T/origin.git`; the pull requests live in `T/forge`, a
 //! snapshot directory of 24, so a block reads or edits them as files. It never reaches the network.
+//!
+//! One call at a time holds `T/forge/lock`, as the forge serialises its own writes. Without it, six `pr create` calls
+//! at once made one pull request, and a reader saw half a file. Each file is written by a rename, and only when it
+//! changed.
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -37,6 +41,21 @@ const OWN_APPROVAL: &str =
 /// A timestamp for the fields the fake has no real time for, so `pr view` matches `gh`'s shape key for key.
 const EPOCH: &str = "1970-01-01T00:00:00Z";
 
+/// The fields a pull request holds here, so `--json` fails an unknown field before it reads a row, as `gh` does.
+const STORED: [&str; 11] = [
+    "number",
+    "url",
+    "state",
+    "title",
+    "body",
+    "author",
+    "baseRefName",
+    "headRefName",
+    "headRefOid",
+    "reviews",
+    "statusCheckRollup",
+];
+
 struct Fake {
     t: PathBuf,
     login: String,
@@ -44,11 +63,19 @@ struct Fake {
 
 impl Fake {
     fn call(&self, args: &[&str]) -> Result<String> {
+        let lock =
+            std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(self.t.join("forge/lock"))?;
+        lock.lock().context("lock the fake forge")?;
         let heads = self.heads()?;
         let mut prs = self.load()?;
-        // Each call first refreshes every open head from the bare copy and its rollup from `checks/<head>.json`, as
-        // the forge sees a push and a finished check run without being told.
+        // Each call first refreshes every open pull request from the bare copy and its rollup from
+        // `checks/<head>.json`, as the forge sees a push, a deleted branch and a finished check run without being told.
         for pr in prs.iter_mut().filter(|p| p["state"] == "OPEN") {
+            // GitHub closes a pull request whose base branch is deleted, for good (15, E7).
+            if !pr["baseRefName"].as_str().is_some_and(|b| heads.contains_key(b)) {
+                pr["state"] = "CLOSED".into();
+                continue;
+            }
             if let Some(head) = pr["headRefName"].as_str().and_then(|b| heads.get(b)) {
                 pr["headRefOid"] = head.as_str().into();
             }
@@ -60,18 +87,19 @@ impl Fake {
             ["api", "user"] => format!("{}\n", json!({ "login": self.login })),
             ["pr", "list", rest @ ..] => {
                 let f = flags(rest, &["--head", "--state", "--json"], &[])?;
+                let fields = fields(&f)?;
                 let state = f.get("--state").copied().unwrap_or("open").to_ascii_uppercase();
                 let rows: Vec<Value> = prs
                     .iter()
                     .filter(|p| state == "ALL" || p["state"] == state.as_str())
                     .filter(|p| f.get("--head").is_none_or(|h| p["headRefName"] == *h))
-                    .map(|p| select(p, need(&f, "--json")?))
-                    .collect::<Result<_>>()?;
+                    .map(|p| select(p, &fields))
+                    .collect();
                 format!("{}\n", Value::Array(rows))
             }
             ["pr", "view", n, rest @ ..] => {
-                let f = flags(rest, &["--json"], &[])?;
-                format!("{}\n", select(&prs[find(&prs, n)?], need(&f, "--json")?)?)
+                let fields = fields(&flags(rest, &["--json"], &[])?)?;
+                format!("{}\n", select(&prs[find(&prs, n)?], &fields))
             }
             ["pr", "create", rest @ ..] => {
                 let f = flags(rest, &["--head", "--base", "--title", "--body"], &[])?;
@@ -142,8 +170,9 @@ impl Fake {
     }
 
     /// Squashes the head onto the base in the bare copy. Like branch protection, it refuses a base that is not an
-    /// ancestor of the head, and needs another login's approval at the head, or at an earlier head with the head's
-    /// patch id (15, E7).
+    /// ancestor of the head and a rollup that is not green, and needs another login's approval at the head. It also
+    /// counts one at an earlier head with the head's patch id, the rule `land` uses (15, E7); whether GitHub keeps an
+    /// approval across such a push is not yet probed.
     fn merge(&self, pr: &mut Value, heads: &BTreeMap<String, String>, expect: Option<&str>) -> Result<()> {
         let n = &pr["number"];
         if pr["state"] != "OPEN" {
@@ -155,8 +184,11 @@ impl Fake {
         }
         let base_ref = pr["baseRefName"].as_str().unwrap_or_default().to_string();
         let base = heads.get(&base_ref).with_context(|| format!("base branch {base_ref} does not exist"))?;
-        if !self.git_ok(&["merge-base", "--is-ancestor", base, &head])? {
+        if !self.git_cmd(&["merge-base", "--is-ancestor", base, &head]).status().context("run git")?.success() {
             bail!("Pull request #{n} is not mergeable: the head branch is not up to date with the base branch.");
+        }
+        if !green(&pr["statusCheckRollup"]) {
+            bail!("Pull request #{n} is not mergeable: Required status check \"fake\" is expected.");
         }
         if !self.approved(pr, base, &head)? {
             bail!("Pull request #{n} is not mergeable: the base branch policy prohibits the merge.");
@@ -168,7 +200,8 @@ impl Fake {
         Ok(())
     }
 
-    /// Records the login's approval at the head, with the head's patch id for a later head to match.
+    /// Records the login's approval at the head, with the head's patch id against the base as it stands now, the
+    /// diff the forge shows the reviewer (15, E7).
     fn approve(&self, pr: &mut Value, heads: &BTreeMap<String, String>) -> Result<()> {
         if pr["state"] != "OPEN" {
             bail!("Pull request #{} is not open", pr["number"]);
@@ -177,17 +210,17 @@ impl Fake {
             bail!("{OWN_APPROVAL}");
         }
         let head = pr["headRefOid"].as_str().unwrap_or_default().to_string();
-        if let Some(base) = pr["baseRefName"].as_str().and_then(|b| heads.get(b)) {
-            let mut ids = self.patch_ids()?;
-            ids.insert(head.clone(), self.patch_id(base, &head)?.into());
-            std::fs::write(self.t.join("forge/patch-ids.json"), Value::Object(ids).to_string())?;
-        }
-        let at = now()?;
+        // An open pull request's base exists: the refresh closed any whose base is gone.
+        let base = pr["baseRefName"].as_str().and_then(|b| heads.get(b)).context("the base branch is gone")?;
+        let mut ids = self.patch_ids()?;
+        ids.insert(head.clone(), self.patch_id(base, &head)?.into());
+        write(&self.t.join("forge/patch-ids.json"), &Value::Object(ids).to_string())?;
+        let date = Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"]).output().context("run date")?;
         let reviews = pr["reviews"].as_array_mut().context("reviews is a list")?;
         reviews.push(json!({
             "id": format!("PRR_fake{}", reviews.len() + 1), "author": { "login": self.login },
-            "authorAssociation": "MEMBER", "body": "", "submittedAt": at, "includesCreatedEdit": false,
-            "reactionGroups": [], "state": "APPROVED", "commit": { "oid": head },
+            "authorAssociation": "MEMBER", "body": "", "submittedAt": String::from_utf8_lossy(&date.stdout).trim(),
+            "includesCreatedEdit": false, "reactionGroups": [], "state": "APPROVED", "commit": { "oid": head },
         }));
         Ok(())
     }
@@ -201,14 +234,18 @@ impl Fake {
             .filter(|r| r["state"] == "APPROVED" && r["author"]["login"].as_str().is_some_and(|l| Some(l) != author))
             .filter_map(|r| r["commit"]["oid"].as_str())
             .collect();
-        if at.contains(&head) || at.is_empty() {
-            return Ok(!at.is_empty());
+        if at.is_empty() {
+            return Ok(false);
+        }
+        if at.contains(&head) {
+            return Ok(true);
         }
         let (ids, now) = (self.patch_ids()?, self.patch_id(base, head)?);
         Ok(at.iter().any(|oid| ids.get(*oid).and_then(Value::as_str) == Some(now.as_str())))
     }
 
-    /// `git patch-id` of the diff from the merge base to `head`: equal for a rebase that keeps the change.
+    /// `git patch-id` of the diff from the merge base to `head`: equal for a rebase that keeps the change. A failed
+    /// run or an empty diff has no id, so two of them never match.
     fn patch_id(&self, base: &str, head: &str) -> Result<String> {
         let diff = self.git(&["diff", &format!("{base}...{head}")])?;
         let mut child = self
@@ -219,7 +256,11 @@ impl Fake {
             .context("run git patch-id")?;
         child.stdin.take().context("patch-id stdin")?.write_all(format!("{diff}\n").as_bytes())?;
         let out = child.wait_with_output()?;
-        Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or_default().to_string())
+        let id = String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or_default().to_string();
+        if !out.status.success() || id.is_empty() {
+            bail!("git patch-id gave no id for {base}...{head}: the diff is empty or git failed");
+        }
+        Ok(id)
     }
 
     fn patch_ids(&self) -> Result<Map<String, Value>> {
@@ -230,7 +271,8 @@ impl Fake {
         }
     }
 
-    /// The check runs at `head`, each filled out to `gh`'s check run shape.
+    /// The checks at `head`, each filled out to `gh`'s shape: a check run, or a status context when the entry has a
+    /// `state` and no `conclusion`.
     fn rollup(&self, head: &str) -> Result<Value> {
         let path = self.t.join(format!("forge/checks/{head}.json"));
         let runs: Vec<Map<String, Value>> = match std::fs::read_to_string(&path) {
@@ -238,16 +280,19 @@ impl Fake {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
-        let template = json!({
+        let run = json!({
             "__typename": "CheckRun", "completedAt": EPOCH, "conclusion": "", "detailsUrl": "", "name": "fake",
             "startedAt": EPOCH, "status": "COMPLETED", "workflowName": "fake",
         });
+        let context = json!({ "__typename": "StatusContext", "context": "fake", "startedAt": EPOCH, "state": "", "targetUrl": "" });
         Ok(runs
             .into_iter()
             .map(|given| {
-                let mut run = template.as_object().cloned().unwrap_or_default();
-                run.extend(given);
-                Value::Object(run)
+                let template =
+                    if given.contains_key("state") && !given.contains_key("conclusion") { &context } else { &run };
+                let mut check = template.as_object().cloned().unwrap_or_default();
+                check.extend(given);
+                Value::Object(check)
             })
             .collect())
     }
@@ -270,11 +315,10 @@ impl Fake {
     /// Writes each pull request back and rewrites `open-prs.json`.
     fn save(&self, prs: &[Value]) -> Result<()> {
         for pr in prs {
-            std::fs::write(self.t.join(format!("forge/pr-{}.json", pr["number"])), format!("{pr}\n"))?;
+            write(&self.t.join(format!("forge/pr-{}.json", pr["number"])), &format!("{pr}\n"))?;
         }
         let open: Vec<&Value> = prs.iter().filter(|p| p["state"] == "OPEN").collect();
-        std::fs::write(self.t.join("forge/open-prs.json"), format!("{}\n", json!(open)))?;
-        Ok(())
+        write(&self.t.join("forge/open-prs.json"), &format!("{}\n", json!(open)))
     }
 
     /// Each branch of the bare copy and its commit.
@@ -306,11 +350,29 @@ impl Fake {
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     }
+}
 
-    /// Whether a git call that answers by its exit code said yes.
-    fn git_ok(&self, args: &[&str]) -> Result<bool> {
-        Ok(self.git_cmd(args).status().context("run git")?.success())
+/// Green as `bp-forge` reads it (15, Controls 3): at least one `SUCCESS`, and every check `SUCCESS`, `NEUTRAL` or
+/// `SKIPPED`. A pending check run has an empty conclusion. Written again here, so the oracle does not share the code
+/// it tests.
+fn green(rollup: &Value) -> bool {
+    let verdicts: Vec<&str> = rollup
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|c| c["conclusion"].as_str().filter(|s| !s.is_empty()).or(c["state"].as_str()).unwrap_or_default())
+        .collect();
+    verdicts.contains(&"SUCCESS") && verdicts.iter().all(|v| ["SUCCESS", "NEUTRAL", "SKIPPED"].contains(v))
+}
+
+/// Writes `text` unless the file holds it already, through a rename, so a reader never sees half a file.
+fn write(path: &Path, text: &str) -> Result<()> {
+    if std::fs::read_to_string(path).is_ok_and(|old| old == text) {
+        return Ok(());
     }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("rename onto {}", path.display()))
 }
 
 /// `--name value` pairs and bare `--name` switches. Any other word fails, so a call the fake does not model fails
@@ -330,13 +392,17 @@ fn flags<'a>(words: &[&'a str], valued: &[&str], switches: &[&str]) -> Result<BT
     Ok(out)
 }
 
-fn now() -> Result<String> {
-    let out = Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"]).output().context("run date")?;
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
 fn need<'a>(f: &BTreeMap<&str, &'a str>, flag: &str) -> Result<&'a str> {
     f.get(flag).copied().with_context(|| format!("the fake gh needs {flag}"))
+}
+
+/// The `--json` fields, each one the fake stores.
+fn fields<'a>(f: &BTreeMap<&str, &'a str>) -> Result<Vec<&'a str>> {
+    let fields: Vec<&str> = need(f, "--json")?.split(',').collect();
+    if let Some(bad) = fields.iter().find(|x| !STORED.contains(x)) {
+        bail!("Unknown JSON field: {bad:?}");
+    }
+    Ok(fields)
 }
 
 fn find(prs: &[Value], n: &str) -> Result<usize> {
@@ -347,12 +413,8 @@ fn find(prs: &[Value], n: &str) -> Result<usize> {
 }
 
 /// The `--json` fields of one pull request, in `gh`'s shape.
-fn select(pr: &Value, fields: &str) -> Result<Value> {
-    let mut out = Map::new();
-    for field in fields.split(',') {
-        out.insert(field.into(), pr.get(field).with_context(|| format!("Unknown JSON field: {field:?}"))?.clone());
-    }
-    Ok(Value::Object(out))
+fn select(pr: &Value, fields: &[&str]) -> Value {
+    Value::Object(fields.iter().map(|&f| (f.to_string(), pr[f].clone())).collect())
 }
 
 #[cfg(test)]
@@ -360,13 +422,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_flag_the_fake_does_not_model_fails() {
+    fn a_flag_or_field_the_fake_does_not_model_fails() {
         let f = flags(&["--head", "bp/q", "--squash"], &["--head"], &["--squash"]).unwrap();
         assert_eq!((f["--head"], f.contains_key("--squash")), ("bp/q", true));
         assert!(flags(&["--merge"], &[], &["--squash"]).is_err(), "an unmodelled switch");
         assert!(flags(&["--head"], &["--head"], &[]).is_err(), "a flag with no value");
-        let pr = json!({ "number": 1, "headRefOid": "h" });
-        assert_eq!(select(&pr, "headRefOid").unwrap(), json!({ "headRefOid": "h" }));
-        assert!(select(&pr, "mergeable").is_err(), "an unknown field fails as in gh");
+        assert!(fields(&flags(&[], &["--json"], &[]).unwrap()).is_err(), "no --json, even with no rows");
+        let f = flags(&["--json", "headRefOid"], &["--json"], &[]).unwrap();
+        assert_eq!(
+            select(&json!({ "number": 1, "headRefOid": "h" }), &fields(&f).unwrap()),
+            json!({ "headRefOid": "h" })
+        );
+        let f = flags(&["--json", "number,mergeable"], &["--json"], &[]).unwrap();
+        assert!(fields(&f).is_err(), "an unknown field fails as in gh");
+    }
+
+    #[test]
+    fn green_passes_success_neutral_and_skipped_only() {
+        let g = |checks: Value| green(&checks);
+        assert!(g(json!([{ "conclusion": "SUCCESS" }, { "conclusion": "SKIPPED" }, { "conclusion": "NEUTRAL" }])));
+        assert!(g(json!([{ "conclusion": "", "state": "SUCCESS" }])), "a status context");
+        assert!(!g(json!([])) && !g(json!([{ "conclusion": "SKIPPED" }])), "no success");
+        assert!(!g(json!([{ "conclusion": "SUCCESS" }, { "conclusion": "", "status": "IN_PROGRESS" }])), "pending");
+        assert!(!g(json!([{ "conclusion": "SUCCESS" }, { "conclusion": "FAILURE" }])));
+        assert!(!g(json!([{ "conclusion": "SUCCESS" }, { "state": "PENDING" }])));
+    }
+
+    #[test]
+    fn concurrent_calls_serialise() {
+        const N: usize = 6;
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().canonicalize().unwrap();
+        crate::forge::make(&t, "bp", "https://github.invalid/o/r").unwrap();
+        let code = t.join("code");
+        for i in 0..N {
+            let branch = format!("bp/c{i}");
+            crate::forge::git(&code, &["checkout", "-q", "-B", &branch, "master"]).unwrap();
+            std::fs::write(code.join("README.md"), format!("{i}\n")).unwrap();
+            crate::forge::git(&code, &["commit", "-q", "--no-verify", "-am", &branch]).unwrap();
+            crate::forge::git(&code, &["push", "-q", "--no-verify", "origin", &branch]).unwrap();
+        }
+        let fake = |login: String| Fake { t: t.clone(), login };
+        let all = |calls: Vec<(String, Vec<String>)>| {
+            std::thread::scope(|s| {
+                let runs: Vec<_> = calls
+                    .into_iter()
+                    .map(|(login, args)| {
+                        let fake = fake(login);
+                        s.spawn(move || fake.call(&args.iter().map(String::as_str).collect::<Vec<_>>()))
+                    })
+                    .collect();
+                runs.into_iter().map(|r| r.join().unwrap().map_err(|e| format!("{e:#}"))).collect::<Vec<_>>()
+            })
+        };
+        let create = |i: usize| -> Vec<String> {
+            ["pr", "create", "--head", &format!("bp/c{i}"), "--base", "master", "--title", "t", "--body", "b"]
+                .map(String::from)
+                .to_vec()
+        };
+        let made = all((0..N).map(|i| ("quokka-agent".to_string(), create(i))).collect());
+        assert!(made.iter().all(Result::is_ok), "{made:?}");
+        let prs = fake("quokka-agent".into()).load().unwrap();
+        let numbers: Vec<_> = prs.iter().map(|p| p["number"].as_u64().unwrap()).collect();
+        assert_eq!(numbers, (1..=N as u64).collect::<Vec<_>>(), "one pull request per call");
+
+        let review = ["pr", "review", "1", "--approve"].map(String::from).to_vec();
+        let approved = all((0..N).map(|i| (format!("reviewer-{i}"), review.clone())).collect());
+        assert!(approved.iter().all(Result::is_ok), "{approved:?}");
+        let pr = &fake("quokka-agent".into()).load().unwrap()[0];
+        assert_eq!(pr["reviews"].as_array().unwrap().len(), N, "one review per call");
     }
 }

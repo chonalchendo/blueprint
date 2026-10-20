@@ -69,7 +69,7 @@ pub struct Commit {
 /// One check run (`conclusion`) or status context (`state`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CheckRun {
-    /// The check run's conclusion.
+    /// The check run's conclusion; empty while it runs.
     #[serde(default)]
     pub conclusion: Option<String>,
     /// The status context's state.
@@ -83,13 +83,14 @@ impl PullRequest {
         self.state.as_deref().is_none_or(|s| s == "OPEN")
     }
 
-    /// At least one check, and every check succeeded.
+    /// Green (15, Controls 3): at least one check `SUCCESS`, and every check `SUCCESS`, `NEUTRAL` or `SKIPPED`, as
+    /// GitHub passes a required check. A pending check is not green.
     pub fn is_green(&self) -> bool {
-        !self.status_check_rollup.is_empty()
-            && self
-                .status_check_rollup
-                .iter()
-                .all(|c| c.conclusion.as_deref().or(c.state.as_deref()) == Some("SUCCESS"))
+        fn verdict(c: &CheckRun) -> Option<&str> {
+            c.conclusion.as_deref().filter(|s| !s.is_empty()).or(c.state.as_deref())
+        }
+        self.status_check_rollup.iter().any(|c| verdict(c) == Some("SUCCESS"))
+            && self.status_check_rollup.iter().all(|c| matches!(verdict(c), Some("SUCCESS" | "NEUTRAL" | "SKIPPED")))
     }
 
     /// Some review approved `head` (21: an approval is for one head; a push needs a new one).
@@ -177,12 +178,10 @@ mod tests {
 
     #[test]
     fn parses_real_gh_pr_view_output() {
-        // The capture asked for five fields (`gh pr view 14722 --json author,baseRefName,headRefOid,reviews,
-        // statusCheckRollup` on cli/cli); `Gh` also asks for the number and the head branch.
-        let mut v: serde_json::Value = serde_json::from_str(include_str!("../testdata/pr-view.json")).unwrap();
-        v["number"] = 14722.into();
-        v["headRefName"] = "release-create-help".into();
-        let pr: PullRequest = serde_json::from_value(v).unwrap();
+        // `gh pr view 14722 --repo cli/cli --json` with `FIELDS`, 2026-10-20.
+        let pr: PullRequest = serde_json::from_str(include_str!("../testdata/pr-view.json")).unwrap();
+        assert_eq!((pr.number, pr.head_ref_name.as_str()), (14722, "bdehamer-release-create-atomicity-help"));
+        assert!(!pr.is_open(), "merged");
         let head = "9e1e1c929f882fd93e1c67ea520a4529352aab9a";
         assert_eq!(pr.head_ref_oid, head);
         assert_eq!(pr.base_ref_name.as_deref(), Some("trunk"));
@@ -190,7 +189,24 @@ mod tests {
         let authors: Vec<_> = pr.reviews.iter().map(|r| r.author.as_ref().unwrap().login.as_str()).collect();
         assert_eq!(authors, ["copilot-pull-request-reviewer", "babakks"]);
         assert!(pr.reviews[1].state == "APPROVED" && pr.is_approved(head));
-        assert!(!pr.status_check_rollup.is_empty() && pr.status_check_rollup.iter().all(|c| c.conclusion.is_some()));
+        assert!(pr.is_green(), "27 skipped and 12 successful checks are green, as on GitHub");
+    }
+
+    #[test]
+    fn green_needs_a_success_and_no_check_failed_or_pending() {
+        let green = |checks: &str| {
+            let pr: PullRequest = serde_json::from_str(&format!(
+                r#"{{"number":1,"headRefName":"x","headRefOid":"h","statusCheckRollup":{checks}}}"#
+            ))
+            .unwrap();
+            pr.is_green()
+        };
+        assert!(green(r#"[{"conclusion":"SUCCESS"},{"conclusion":"NEUTRAL"},{"conclusion":"SKIPPED"}]"#));
+        assert!(green(r#"[{"state":"SUCCESS"}]"#), "a status context");
+        assert!(!green(r#"[{"conclusion":"SKIPPED"}]"#), "no success");
+        assert!(!green(r#"[{"conclusion":"SUCCESS"},{"conclusion":""}]"#), "a check run still running");
+        assert!(!green(r#"[{"conclusion":"SUCCESS"},{"state":"PENDING"}]"#), "a pending status context");
+        assert!(!green(r#"[{"conclusion":"SUCCESS"},{"conclusion":"CANCELLED"}]"#));
     }
 
     #[test]
