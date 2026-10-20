@@ -18,34 +18,65 @@ pub struct File {
     pub body: Body,
 }
 
+/// Why a file does not parse: the error, and whether the text reads but breaks a rule of its kind's schema rather
+/// than failing to read at all (bytes, the header's lines, YAML). The census stores `why`; a verb refuses with
+/// `Refusal::schema`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Broken {
+    /// The error.
+    pub why: String,
+    /// The text reads, and a schema rule refuses it.
+    pub rule: bool,
+}
+
+impl Broken {
+    pub(crate) fn unread(why: impl Into<String>) -> Self {
+        Self { why: why.into(), rule: false }
+    }
+
+    pub(crate) fn rule(why: impl Into<String>) -> Self {
+        Self { why: why.into(), rule: true }
+    }
+}
+
 impl File {
-    /// Parses a file's bytes. Refuses non-UTF-8, an unclosed header, a header outside its kind's schema, a path that
-    /// does not fit the kind, and a record whose `under` is not the parent its path names.
+    /// Parses a file's bytes, refusing `schema_invalid` with the by-hand fix when it does not parse (`File::parse`).
     pub fn from_bytes(id: Id, bytes: &[u8]) -> Result<Self, Refusal> {
+        let subject = id.as_str().to_owned();
+        Self::parse(id, bytes).map_err(|b| Refusal::schema(&subject, &b))
+    }
+
+    /// Parses a file's bytes. Fails on non-UTF-8, an unclosed header, a header outside its kind's schema, a path that
+    /// does not fit the kind, and a record whose `under` is not the parent its path names.
+    pub fn parse(id: Id, bytes: &[u8]) -> Result<Self, Broken> {
         let hash = blake3::hash(bytes).to_hex().to_string();
-        let text = std::str::from_utf8(bytes).map_err(|e| Refusal::schema(id.as_str(), format!("not UTF-8: {e}")))?;
+        let text = std::str::from_utf8(bytes).map_err(|e| Broken::unread(format!("not UTF-8: {e}")))?;
         let text = normalise(text);
         let Some((yaml, body)) = split(&text) else {
             if text.starts_with("---\n") {
-                return Err(Refusal::schema(id.as_str(), "the closing --- is missing"));
+                return Err(Broken::unread("the closing --- is missing"));
             }
             if !is_asset(&id) {
-                return Err(Refusal::schema(
-                    id.as_str(),
+                return Err(Broken::unread(
                     "no header: the first line is not `---`, and a file without a header belongs in shared/assets/ \
                      or a node's own directory",
                 ));
             }
             return Ok(Self { id, hash, header: None, body: Body::parse(&text) });
         };
-        let header = Header::parse(yaml, id.as_str())?;
+        let header = Header::parse(yaml)?;
         if !header.kind.fits(&id) {
-            return Err(Refusal::schema(id.as_str(), format!("the path does not fit the kind `{}`", header.kind)));
+            return Err(Broken::rule(format!("the path does not fit the kind `{}`", header.kind)));
         }
         let parent = header.kind.parent(&id);
         if header.kind.is_record() && header.under != parent {
-            let want = parent.as_ref().map_or("no parent", Id::as_str);
-            return Err(Refusal::schema(id.as_str(), format!("a {} record names `under: {want}`", header.kind)));
+            let name = |id: Option<&Id>| id.map_or("nothing", Id::as_str).to_string();
+            return Err(Broken::rule(format!(
+                "a {} record must name `under: {}`; it names `{}`",
+                header.kind,
+                name(parent.as_ref()),
+                name(header.under.as_ref())
+            )));
         }
         let mut body = Body::parse(body);
         if !Kind::CHECK_OWNERS.contains(&header.kind) {

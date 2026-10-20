@@ -69,7 +69,7 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
             "bp list project --json",
         ));
     }
-    let under = parent(&index, kind, &id, under.as_ref())?;
+    let under = parent(&vault, &index, kind, &id, under.as_ref())?;
     let header = Header {
         kind,
         title: Some(create.title.clone()),
@@ -253,7 +253,7 @@ fn taken(vault: &Vault, index: &Index, id: &Id, new: &File) -> Result<Option<Wro
 /// The parent rule (13): a kind with a spine has a parent of a kind it allows, in its own project, and a kind
 /// without one has none. Returns the parent's real id, so an alias given as `--under` is written as the node it
 /// names.
-fn parent(index: &Index, kind: Kind, id: &Id, under: Option<&Id>) -> Result<Option<Id>, Refusal> {
+fn parent(vault: &Vault, index: &Index, kind: Kind, id: &Id, under: Option<&Id>) -> Result<Option<Id>, Refusal> {
     let allowed = schema::parents(kind);
     let names: Vec<&str> = allowed.iter().map(|k| k.as_str()).collect();
     let refuse = |fix: String| {
@@ -274,11 +274,16 @@ fn parent(index: &Index, kind: Kind, id: &Id, under: Option<&Id>) -> Result<Opti
         return Err(refuse(format!("kind {kind} has no parent; drop --under")));
     }
     let Some((target, parent)) = resolve(index, under)? else {
+        // A parent that does not parse resolves to nothing too, but its fix is the file's repair (25, issue 8).
+        let fix = vault.unparsed(under).map_or_else(
+            || format!("point --under at an id that exists: bp search {}", search_terms(under)),
+            |e| e.fix,
+        );
         return Err(Refusal::new(
             Code::UnresolvedLink,
             format!("{id} under {under}"),
             "a write adds no link that resolves to nothing in the proposed tree (12, Write path)",
-            format!("point --under at an id that exists: bp search {}", search_terms(under)),
+            fix,
         ));
     };
     if !allowed.contains(&parent) {

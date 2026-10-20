@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 use serde_json::Value;
-use yaml_rust2::{Yaml, YamlLoader};
+use yaml_rust2::{ScanError, Yaml, YamlLoader};
 
-use crate::{DesignLevel, Id, Kind, Refusal};
+use crate::{Broken, DesignLevel, Id, Kind};
 
 /// The closed set of link fields on nodes (12, the kind schemas). Every value is a path id. `carries` is not one:
 /// it is derived from sidecars and check blocks, never stored (13). A record's `→` fields are its kind's own
@@ -70,15 +70,14 @@ pub struct Header {
 }
 
 impl Header {
-    /// Parses the YAML between the `---` lines. `subject` names the file in a refusal.
-    pub fn parse(yaml: &str, subject: &str) -> Result<Self, Refusal> {
-        let bad = |why: String| Refusal::schema(subject, why);
-        let docs = YamlLoader::load_from_str(yaml).map_err(|e| bad(e.to_string()))?;
-        let Some(Yaml::Hash(map)) = docs.first() else { return Err(bad("the header is not a map".into())) };
-        let kind = map.get(&Yaml::String("kind".into())).ok_or_else(|| bad("`kind` is missing".into()))?;
-        let kind = kind.as_str().ok_or_else(|| bad("`kind` is not text".into()))?;
+    /// Parses the YAML between the `---` lines.
+    pub fn parse(yaml: &str) -> Result<Self, Broken> {
+        let docs = YamlLoader::load_from_str(yaml).map_err(|e| Broken::unread(yaml_error(&e)))?;
+        let Some(Yaml::Hash(map)) = docs.first() else { return Err(Broken::unread("the header is not a map")) };
+        let kind = map.get(&Yaml::String("kind".into())).ok_or_else(|| Broken::rule("`kind` is missing"))?;
+        let kind = kind.as_str().ok_or_else(|| Broken::rule("`kind` is not text"))?;
         let mut header = Self {
-            kind: kind.parse::<Kind>().map_err(|e| bad(e.to_string()))?,
+            kind: kind.parse::<Kind>().map_err(|e| Broken::rule(e.to_string()))?,
             title: None,
             status: None,
             under: None,
@@ -88,8 +87,11 @@ impl Header {
             fields: BTreeMap::new(),
         };
         for (key, value) in map {
-            let Some(key) = key.as_str() else { return Err(bad(format!("the key {key:?} is not text"))) };
-            let text = || value.as_str().map(str::to_string).ok_or_else(|| bad(format!("`{key}` is not text")));
+            let Some(key) = key.as_str() else {
+                return Err(Broken::rule(format!("the key `{}` is not text", undebug(&format!("{key:?}")))));
+            };
+            let text =
+                || value.as_str().map(str::to_string).ok_or_else(|| Broken::rule(format!("`{key}` is not text")));
             match key {
                 "kind" => {}
                 "title" => header.title = Some(text()?),
@@ -99,11 +101,11 @@ impl Header {
                     Err(_) => header.unresolved.push(Unresolved { field: key.into(), text: text()? }),
                 },
                 "aliases" => {
-                    header.aliases = texts(value).ok_or_else(|| bad("`aliases` holds a non-text item".into()))?;
+                    header.aliases = texts(value).ok_or_else(|| Broken::rule("`aliases` holds a non-text item"))?;
                 }
                 k if LINKS.contains(&k) || header.kind.record_links().contains(&k) => {
                     let mut ids = Vec::new();
-                    for t in texts(value).ok_or_else(|| bad(format!("`{k}` holds a non-text item")))? {
+                    for t in texts(value).ok_or_else(|| Broken::rule(format!("`{k}` holds a non-text item")))? {
                         match Id::parse(&t) {
                             Ok(id) => ids.push(id),
                             Err(_) => header.unresolved.push(Unresolved { field: k.into(), text: t }),
@@ -111,10 +113,10 @@ impl Header {
                     }
                     header.links.insert(k.into(), ids);
                 }
-                k if RESERVED.contains(&k) => return Err(bad(format!("`{k}` is a reserved name"))),
+                k if RESERVED.contains(&k) => return Err(Broken::rule(format!("`{k}` is a reserved name"))),
                 k if DERIVED.contains(&k) => {
                     // A design's path names the value; no other kind has the field at all (13).
-                    return Err(bad(match header.kind {
+                    return Err(Broken::rule(match header.kind {
                         Kind::Design => format!("`{k}` comes from the path, not the header; delete the line"),
                         other => {
                             let a = if other.as_str().starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
@@ -129,9 +131,9 @@ impl Header {
         }
         // A node is named and has a state; a record is evidence about its parent and has neither (13, rule 4).
         match (header.kind.is_record(), &header.title, &header.status) {
-            (false, None, _) => Err(bad(format!("`kind: {}` is a node: it needs a `title`", header.kind))),
+            (false, None, _) => Err(Broken::rule(format!("`kind: {}` is a node: it needs a `title`", header.kind))),
             (true, Some(_), _) | (true, _, Some(_)) => {
-                Err(bad(format!("`kind: {}` is a record: it has no `title` or `status`", header.kind)))
+                Err(Broken::rule(format!("`kind: {}` is a record: it has no `title` or `status`", header.kind)))
             }
             _ => Ok(header),
         }
@@ -211,6 +213,22 @@ fn json(value: &Yaml) -> Value {
     }
 }
 
+/// A YAML error as a reader of the fix wants it. yaml-rust2 names a duplicated key by its Rust debug form
+/// (`String("title")`), which the reader should not have to decode.
+fn yaml_error(e: &ScanError) -> String {
+    let info = e.info();
+    let info = info
+        .strip_suffix(": duplicated key in mapping")
+        .map_or_else(|| info.to_string(), |key| format!("the key `{}` appears twice", undebug(key)));
+    // The header's YAML starts on the file's second line, after the opening `---`; the reader edits the file.
+    format!("{info} at line {} of the file", e.marker().line() + 1)
+}
+
+/// A YAML value's debug form without the variant: `String("title")` is `title`, `Integer(1)` is `1`.
+fn undebug(text: &str) -> &str {
+    text.split_once('(').and_then(|(_, inner)| inner.strip_suffix(')')).map_or(text, |inner| inner.trim_matches('"'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,7 +237,6 @@ mod tests {
     fn reads_universal_fields_links_and_the_rest() {
         let h = Header::parse(
             "kind: issue\ntitle: T\nstatus: open\nunder: projects/bp/milestones/m\ncites: [\"projects/a/designs/b\", \"[[milestone.anvil.x]]\"]\ndepends: projects/a/issues/e\nseverity: high\ntags: [\"domain/x\"]\ncost_diff: 53\n",
-            "f",
         )
         .unwrap();
         assert_eq!(h.kind, Kind::Issue);
@@ -237,14 +254,14 @@ mod tests {
 
     #[test]
     fn a_design_reads_its_kind_and_scope_from_its_path() {
-        let h = Header::parse("kind: design\ntitle: T\nstatus: draft\n", "f").unwrap();
+        let h = Header::parse("kind: design\ntitle: T\nstatus: draft\n").unwrap();
         let j = h.to_json(&Id::parse("projects/bp/designs/data-model").unwrap());
         assert_eq!((j["design_kind"].as_str(), j["scope"].as_str()), (Some("data-model"), Some("system")));
     }
 
     #[test]
     fn a_legacy_under_is_unresolved_not_an_id() {
-        let h = Header::parse("kind: issue\ntitle: T\nunder: '[[milestone.anvil.x]]'\n", "f").unwrap();
+        let h = Header::parse("kind: issue\ntitle: T\nunder: '[[milestone.anvil.x]]'\n").unwrap();
         assert_eq!(h.under, None);
         assert_eq!(h.unresolved[0].field, "under");
     }
@@ -254,6 +271,7 @@ mod tests {
         for (yaml, why) in [
             ("title: T\n", "`kind` is missing"),
             ("- a\n", "not a map"),
+            ("kind: issue\ntitle: A\ntitle: B\n", "the key `title` appears twice at line 4 of the file"),
             ("kind: session\n", "not a Kind value"),
             ("kind: issue\nstatus: 1\n", "`status` is not text"),
             ("kind: issue\ncites: [1]\n", "non-text item"),
@@ -263,9 +281,8 @@ mod tests {
             ("kind: issue\ntitle: T\nscope: system\n", "`scope` is not a field of an issue; delete the line"),
             ("kind: milestone\ntitle: T\ndesign_kind: system\n", "`design_kind` is not a field of a milestone"),
         ] {
-            let e = Header::parse(yaml, "f").unwrap_err();
-            assert_eq!(e.code, crate::Code::SchemaInvalid, "{yaml}");
-            assert!(e.fix.contains(why), "{yaml}: {}", e.fix);
+            let e = Header::parse(yaml).unwrap_err();
+            assert!(e.why.contains(why), "{yaml}: {}", e.why);
         }
     }
 }

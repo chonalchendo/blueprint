@@ -83,13 +83,15 @@ impl Refusal {
         }
     }
 
-    /// A file breaks its kind's schema.
-    pub fn schema(subject: impl Into<String>, why: impl std::fmt::Display) -> Self {
+    /// A file does not parse. No verb rewrites a file it cannot parse, so the one fix, whatever the verb, is a human's
+    /// edit (25, issue 8).
+    pub fn schema(id: &str, broken: &crate::Broken) -> Self {
+        let what = if broken.rule { "breaks its kind's schema" } else { "does not parse" };
         Self::new(
             Code::SchemaInvalid,
-            subject,
+            id,
             "a file holds its kind's schema (12, the kind schemas)",
-            format!("fix the file: {why}"),
+            format!("the file {what} ({}); edit {id}.md by hand, then git commit it", broken.why),
         )
     }
 }

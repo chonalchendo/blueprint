@@ -80,7 +80,8 @@ impl Index {
             }
             self.conn
                 .prepare_cached(
-                    "select exists (select 1 from files where id = ?1) or exists (select 1 from aliases where alias = ?1)",
+                    "select exists (select 1 from files where id = ?1 and class != 'broken') \
+                     or exists (select 1 from aliases where alias = ?1)",
                 )
                 .and_then(|mut st| st.query_row([target.as_str()], |r| r.get(0)))
                 .map_err(|e| failed(Path::new(".bp/index.db"), &e))

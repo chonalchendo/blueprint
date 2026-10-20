@@ -10,15 +10,19 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::fingerprint::{fingerprint, still};
-use crate::{Counts, File, FindingKind, Id, Kind, Refusal, Vault};
+use crate::{Broken, BrokenFile, Code, Counts, File, FindingKind, Id, Kind, Refusal, Vault};
 
 mod insert;
+use insert::broken;
 pub(crate) use insert::{remove, replace};
 
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
 /// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
 /// bump to the same number still differ.
-const SCHEMA: i64 = 6;
+const SCHEMA: i64 = 7;
+
+/// What is wrong with a markdown file whose path is not an id.
+const STRAY: &str = "the path is not an id: projects/<project>/<kind>/<slug> or shared/<kind>/<slug>";
 
 pub(crate) fn schema() -> String {
     format!("{SCHEMA}-{}", &blake3::hash(TABLES.as_bytes()).to_hex()[..12])
@@ -40,7 +44,7 @@ create table aliases (alias text not null, id text not null);
 create index aliases_alias on aliases (alias);
 create table checks (src text not null);
 create index checks_src on checks (src);
-create table findings (src text not null, kind text not null);
+create table findings (src text not null, kind text not null, detail text not null);
 create index findings_src on findings (src);
 create index links_src on links (src, type, dst);
 create index links_dst on links (dst, type, src);
@@ -144,7 +148,7 @@ impl Index {
     }
 
     fn refresh_or_fail(&mut self, vault: &Vault, print: &str, path: &Path) -> Result<(), Refusal> {
-        // A bad header keeps its own refusal; anything else is the index failing.
+        // A refusal from the walk of the files keeps its code; anything else is the index failing.
         self.refresh(vault, print).map_err(|e| match e.downcast::<Refusal>() {
             Ok(refusal) => *refusal,
             Err(e) => failed(path, &e),
@@ -184,14 +188,22 @@ impl Index {
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
         let mut changed = rebuilt;
-        for id in vault.ids()? {
-            let bytes = std::fs::read(id.path(&vault.root))?;
+        let (ids, strays) = vault.ids()?;
+        let files =
+            ids.into_iter().map(|id| (id.as_str().to_string(), Some(id))).chain(strays.into_iter().map(|s| (s, None)));
+        for (key, id) in files {
+            let bytes = std::fs::read(vault.root.join(format!("{key}.md")))?;
             let hash = blake3::hash(&bytes).to_hex().to_string();
-            if known.remove(id.as_str()).as_deref() == Some(hash.as_str()) {
+            if known.remove(&key).as_deref() == Some(hash.as_str()) {
                 continue;
             }
             changed = true;
-            replace(&tx, &File::from_bytes(id, &bytes)?)?;
+            // A stray has no id, so nothing parses it. The index holds it under its path as a broken file, which the
+            // census names and which blocks no other file (25, issue 8).
+            match id.ok_or_else(|| Broken::unread(STRAY)).and_then(|id| File::parse(id, &bytes)) {
+                Ok(file) => replace(&tx, &file)?,
+                Err(e) => broken(&tx, &key, &hash, &e.why)?,
+            }
         }
         for gone in known.keys() {
             changed = true;
@@ -214,6 +226,10 @@ impl Index {
                 check_blocks: self.conn.query_row("select count(*) from checks", [], count)?,
                 ..Counts::default()
             };
+            let mut st = self.conn.prepare("select src || '.md', detail from findings where kind = ?1 order by 1")?;
+            c.broken = st
+                .query_map([Code::SchemaInvalid.as_str()], |r| Ok(BrokenFile { path: r.get(0)?, detail: r.get(1)? }))?
+                .collect::<rusqlite::Result<_>>()?;
             for (table, into) in [("nodes", &mut c.nodes), ("records", &mut c.records)] {
                 let mut st = self.conn.prepare(&format!("select kind, count(*) from {table} group by kind"))?;
                 for row in st.query_map([], |r| Ok((r.get::<_, String>(0)?, count_at(r, 1)?)))? {
@@ -235,29 +251,32 @@ impl Index {
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
-    /// Body findings per kind, every kind present, zero or not.
+    /// Findings per kind, every kind present, zero or not: the body findings, and `schema_invalid` for each file that
+    /// does not parse.
     ///
     /// # Panics
     ///
     /// Never: the index stores only kinds of the closed set.
-    pub fn body_findings(&self) -> Result<BTreeMap<&'static str, usize>, Refusal> {
-        let mut counts: BTreeMap<&'static str, usize> = FindingKind::ALL.iter().map(|k| (k.as_str(), 0)).collect();
+    pub fn findings(&self) -> Result<BTreeMap<&'static str, usize>, Refusal> {
+        let kinds = FindingKind::ALL.iter().map(|k| k.as_str()).chain([Code::SchemaInvalid.as_str()]);
+        let mut counts: BTreeMap<&'static str, usize> = kinds.map(|k| (k, 0)).collect();
         let run = || -> rusqlite::Result<Vec<(String, usize)>> {
             let mut st = self.conn.prepare("select kind, count(*) from findings group by kind")?;
             st.query_map([], |r| Ok((r.get(0)?, count_at(r, 1)?)))?.collect()
         };
         for (kind, n) in run().map_err(|e| failed(Path::new(".bp/index.db"), &e))? {
-            let kind: FindingKind = kind.parse().expect("the index stores closed finding kinds");
-            counts.insert(kind.as_str(), n);
+            let (&kind, _) = counts.get_key_value(kind.as_str()).expect("the index stores closed finding kinds");
+            counts.insert(kind, n);
         }
         Ok(counts)
     }
 
     /// Links that resolve to no file and no alias (contract code `unresolved_link`): targets that are not path ids,
-    /// and path ids that name nothing.
+    /// and path ids that name nothing or a file that does not parse.
     pub fn unresolved(&self) -> Result<usize, Refusal> {
         let sql = "select (select count(*) from unresolved) + (select count(*) from links l where not exists \
-                   (select 1 from files f where f.id = l.dst) and not exists (select 1 from aliases a where a.alias = l.dst))";
+                   (select 1 from files f where f.id = l.dst and f.class != 'broken') \
+                   and not exists (select 1 from aliases a where a.alias = l.dst))";
         self.conn.query_row(sql, [], count).map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
@@ -614,21 +633,23 @@ mod tests {
     fn dump(index: &Index) -> Vec<String> {
         let tables = [
             ("files", "id, hash, class"),
-            ("nodes", "id, kind, title, status, project, under, header"),
-            ("records", "id, kind, project, under, header"),
+            ("nodes", "id, kind, title, status, project, under, header, tokens, design_kind, scope"),
+            ("records", "id, kind, project, under, header, body"),
             ("links", "src, type, dst"),
             ("fts", "id, title, body"),
             ("unresolved", "src, field, text"),
             ("aliases", "alias, id"),
             ("checks", "src"),
-            ("findings", "src, kind"),
+            ("findings", "src, kind, detail"),
         ];
         let mut out = Vec::new();
         for (table, cols) in tables {
             let mut st = index.conn.prepare(&format!("select {cols} from {table} order by {cols}")).unwrap();
             let n = st.column_count();
             let rows = st
-                .query_map([], |r| (0..n).map(|i| r.get::<_, Option<String>>(i)).collect::<rusqlite::Result<Vec<_>>>())
+                .query_map([], |r| {
+                    (0..n).map(|i| r.get::<_, rusqlite::types::Value>(i)).collect::<rusqlite::Result<Vec<_>>>()
+                })
                 .unwrap();
             out.extend(rows.map(|r| format!("{table} {:?}", r.unwrap())));
         }
@@ -636,12 +657,47 @@ mod tests {
         out
     }
 
+    /// 25, issue 8: a file that does not parse is one finding and no node, a link to it resolves to nothing, and a
+    /// refresh equals a rebuild both when the file breaks and when a human repairs it.
     #[test]
-    fn a_bad_header_keeps_its_refusal() {
+    fn a_file_that_does_not_parse_is_a_finding() {
         let (_d, v) = vault();
-        write(&v.root, "projects/bp/issues/0009.bad", "---\ntitle: no kind\n---\n");
-        let e = Index::open(&v).err().unwrap();
-        assert_eq!((e.code, e.exit), (crate::Code::SchemaInvalid, 2));
+        let b = "projects/bp/issues/0002.b";
+        let cites_b = format!("---\nkind: issue\ntitle: C\nstatus: open\ncites: [\"{b}\"]\n---\n");
+        write(&v.root, "projects/bp/issues/0003.c", &cites_b);
+        let whole = Index::open(&v).unwrap().unresolved().unwrap();
+        // An in-place edit: the census's reconcile reads it.
+        write(&v.root, b, "---\nkind: issue\ntitle: B\ntitle: again\nstatus: open\n---\n");
+        // A markdown file whose path is not an id is held the same way, under its path.
+        let stray = v.root.join("shared/notes.md");
+        std::fs::write(&stray, "# notes\n").unwrap();
+        let mut index = Index::open(&v).unwrap();
+        index.reconcile(&v).unwrap();
+        assert_eq!(index.findings().unwrap()["schema_invalid"], 2);
+        let c = index.counts().unwrap();
+        let broken: Vec<(&str, &str)> = c.broken.iter().map(|f| (f.path.as_str(), f.detail.as_str())).collect();
+        assert_eq!(
+            broken,
+            [(&*format!("{b}.md"), "the key `title` appears twice at line 4 of the file"), ("shared/notes.md", STRAY)]
+        );
+        assert_eq!((c.files, c.nodes["issue"]), (7, 3), "the files are counted, their nodes are not");
+        assert!(index.header(b).unwrap().is_none());
+        assert!(index.list(&all("issue")).unwrap().0.iter().all(|r| r.id != b));
+        assert!(index.search(&["Other".into()], None, None, 10).unwrap().is_empty());
+        // B's own three broken links go with its node; C's cite of B is now a fourth kind of nothing.
+        assert_eq!(index.unresolved().unwrap(), whole - 3 + 1);
+        let refreshed = dump(&index);
+        std::fs::remove_file(v.root.join(".bp/index.db")).unwrap();
+        assert_eq!(refreshed, dump(&Index::open(&v).unwrap()));
+        write(&v.root, b, &issue("Other", "resolved"));
+        std::fs::remove_file(&stray).unwrap();
+        let mut index = Index::open(&v).unwrap();
+        index.reconcile(&v).unwrap();
+        assert_eq!((index.findings().unwrap()["schema_invalid"], index.unresolved().unwrap()), (0, whole));
+        assert!(index.header(b).unwrap().is_some());
+        let refreshed = dump(&index);
+        std::fs::remove_file(v.root.join(".bp/index.db")).unwrap();
+        assert_eq!(refreshed, dump(&Index::open(&v).unwrap()));
     }
 
     #[test]

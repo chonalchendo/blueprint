@@ -39,12 +39,14 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     let _reading = index.reading()?;
     let id = subject(&index, &walk.id)?;
     let header = index.header(id.as_str())?.ok_or_else(|| {
-        Refusal::new(
-            Code::NoNode,
-            id.as_str(),
-            "an id names a markdown file under the vault root",
-            format!("bp search {}", id.as_str().rsplit('/').next().unwrap_or_default().replace(['-', '.'], " ")),
-        )
+        vault.unparsed(&id).unwrap_or_else(|| {
+            Refusal::new(
+                Code::NoNode,
+                id.as_str(),
+                "an id names a markdown file under the vault root",
+                format!("bp search {}", id.as_str().rsplit('/').next().unwrap_or_default().replace(['-', '.'], " ")),
+            )
+        })
     })?;
     let kind: Kind = header["kind"].as_str().and_then(|k| k.parse().ok()).expect("the index stores closed kinds");
     if !action.seed().contains(&kind) {
@@ -56,7 +58,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             format!("{action} walks from: {}; bp list {} --json", kinds.join(", "), kinds[0]),
         ));
     }
-    context(&index, &id, action)?;
+    context(&vault, &index, &id, action)?;
     let mut reached = index.reach(id.as_str(), usize::from(walk.depth))?;
     if let Some(project) = id.project() {
         for c in index.cited_conventions(&format!("projects/{project}/project"))? {
@@ -101,7 +103,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
 
 /// The context the action cannot run without (21, rule 3): every required link from the seed names a node of its
 /// kind with a body, and at least one does.
-fn context(index: &Index, id: &Id, action: Action) -> Result<(), Refusal> {
+fn context(vault: &Vault, index: &Index, id: &Id, action: Action) -> Result<(), Refusal> {
     for req in action.requires() {
         let targets: Vec<String> = index
             .links_of(id.as_str(), req.field)?
@@ -121,7 +123,10 @@ fn context(index: &Index, id: &Id, action: Action) -> Result<(), Refusal> {
         }
         for t in &targets {
             match index.tokens_of(t)? {
-                None => return Err(missing(format!("the {} {t} is absent", req.kind))),
+                None => {
+                    let unparsed = Id::parse(t).ok().and_then(|t| vault.unparsed(&t));
+                    return Err(unparsed.unwrap_or_else(|| missing(format!("the {} {t} is absent", req.kind))));
+                }
                 Some(0) => return Err(missing(format!("the {} {t} is empty", req.kind))),
                 Some(_) => {}
             }

@@ -360,7 +360,7 @@ pub(crate) fn unknown(what: &str, value: &str, fix: String) -> Refusal {
 }
 
 /// The counts, and the findings the reader keeps instead of ignoring: statuses outside their kind's set, link
-/// targets that are not ids, and the body findings.
+/// targets that are not ids, the body findings, and files that do not parse.
 fn census(index: &Index) -> Result<Value, Refusal> {
     let mut v = serde_json::to_value(index.counts()?).expect("a plain struct serialises");
     let outside: usize = index
@@ -370,7 +370,7 @@ fn census(index: &Index) -> Result<Value, Refusal> {
         .map(|(_, _, n)| n)
         .sum();
     let mut findings = serde_json::json!({ "status_outside_set": outside, "unresolved_link": index.unresolved()? });
-    for (kind, n) in index.body_findings()? {
+    for (kind, n) in index.findings()? {
         findings[kind] = n.into();
     }
     v["findings"] = findings;
