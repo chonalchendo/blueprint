@@ -127,6 +127,9 @@ pub fn check(
         return Ok(None);
     }
     let (commit, top) = code_tree(vault, repo)?;
+    if blocks.iter().any(|c| c.runner == "integrity") {
+        integrity::clean(vault, owner)?;
+    }
     let today = clock()[..10].to_string();
     let done: Vec<Done> = blocks
         .into_iter()

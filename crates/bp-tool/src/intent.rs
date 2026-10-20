@@ -1,6 +1,9 @@
 //! Composes the `Intents` function's inputs from the index and the forge snapshot. The function itself is pure
 //! and lives in `bp-change`; this is the IO around it (23, rule 2).
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+
 use bp_change::intents::{self, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
 use bp_forge::Snapshot;
 use bp_vault::{Id, Index, Kind, Refusal, Vault};
@@ -35,27 +38,60 @@ impl World {
     }
 }
 
-/// The intent of one issue or milestone. A milestone's intent reads only its status, so the clock and the forge
-/// are read, and `world` given, only when an issue is in view.
-pub fn row(
-    vault: &Vault,
-    index: &Index,
-    world: Option<&World>,
-    kind: Kind,
-    id: &str,
-    status: Option<&str>,
-) -> Result<Verdict, Refusal> {
-    let status = status.unwrap_or_default();
-    match kind {
-        Kind::Issue => {
-            of(vault, index, world.expect("the caller reads the world when an issue is in view"), id, status)
+/// What one call reads to compute intents: the index, the world when an issue is in view, and each project's
+/// counting integrity run, read once per project (24, call budget).
+pub struct Intents<'a> {
+    vault: &'a Vault,
+    index: &'a Index,
+    /// The clock and the forge, read only when an issue is in view.
+    pub world: Option<World>,
+    integrity: RefCell<BTreeMap<String, Option<IntegrityRun>>>,
+}
+
+impl<'a> Intents<'a> {
+    /// Reads the world only when `issues` are in view: a milestone's intent needs neither the clock nor the forge.
+    pub fn new(vault: &'a Vault, index: &'a Index, issues: bool) -> Result<Self, Refusal> {
+        let world = if issues { Some(World::read()?) } else { None };
+        Ok(Self { vault, index, world, integrity: RefCell::default() })
+    }
+
+    /// The intent of one issue or milestone.
+    pub fn row(&self, kind: Kind, id: &str, status: Option<&str>) -> Result<Verdict, Refusal> {
+        let status = status.unwrap_or_default();
+        match kind {
+            Kind::Issue => of(
+                self.vault,
+                self.index,
+                self.world.as_ref().expect("the caller reads the world when an issue is in view"),
+                id,
+                status,
+                self.integrity(id)?,
+            ),
+            _ => Ok(intents::milestone(status, self.integrity(id)?)),
         }
-        _ => Ok(intents::milestone(status)),
+    }
+
+    /// The blocked note of the project's counting integrity run, when it failed and names `id` (21, blocked).
+    fn integrity(&self, id: &str) -> Result<Option<String>, Refusal> {
+        let Some(project) = Id::parse(id).ok().and_then(|i| i.project().map(str::to_string)) else { return Ok(None) };
+        let mut cache = self.integrity.borrow_mut();
+        if !cache.contains_key(&project) {
+            let runs: Vec<IntegrityRun> = self.index.integrity_runs(&project)?.iter().map(integrity_run).collect();
+            cache.insert(project.clone(), IntegrityRun::counting(&runs).cloned());
+        }
+        Ok(cache[&project].as_ref().and_then(|r| r.blocks(id)))
     }
 }
 
 /// The intent of one issue.
-fn of(vault: &Vault, index: &Index, world: &World, id: &str, status: &str) -> Result<Verdict, Refusal> {
+fn of(
+    vault: &Vault,
+    index: &Index,
+    world: &World,
+    id: &str,
+    status: &str,
+    integrity: Option<String>,
+) -> Result<Verdict, Refusal> {
     if !intents::is_live_issue(status) {
         return Ok(Verdict::NONE);
     }
@@ -107,32 +143,29 @@ fn of(vault: &Vault, index: &Index, world: &World, id: &str, status: &str) -> Re
         Some(c) if c.escalated => Id::parse(id).ok().and_then(|id| vault.last_commit(&id)),
         _ => None,
     };
-    let integrity = integrity(index, id)?;
     let issue = Issue { status: status.into(), claims, runs, review_heads, depends, pr, changed, integrity };
     Ok(intents::issue(&issue, world.now))
 }
 
-/// The project's latest integrity run, when it failed and names the issue (21, blocked; 25, issue 11).
-fn integrity(index: &Index, id: &str) -> Result<Option<String>, Refusal> {
-    let runs: Vec<IntegrityRun> = index
-        .integrity_runs(id)?
-        .into_iter()
-        .map(|h| IntegrityRun {
-            id: text(&h, "id").unwrap_or_default(),
-            at: text(&h, "at").and_then(|t| intents::timestamp(&t)),
-            attempt: h.get("attempt").and_then(Value::as_u64).unwrap_or_default(),
-            failed: text(&h, "verdict").as_deref() == Some("fail"),
-            names: h
-                .get("names")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect(),
-        })
-        .collect();
-    Ok(intents::integrity_names(&runs, id).map(str::to_string))
+/// One integrity run's header, reduced. A run the check wrote always has these fields; one without them never counts.
+fn integrity_run(h: &Map<String, Value>) -> IntegrityRun {
+    IntegrityRun {
+        id: text(h, "id").unwrap_or_default(),
+        owner: text(h, "under").unwrap_or_default(),
+        check: text(h, "check").unwrap_or_default(),
+        at: text(h, "at").and_then(|t| intents::timestamp(&t)),
+        attempt: h.get("attempt").and_then(Value::as_u64).unwrap_or_default(),
+        error: text(h, "severity").as_deref() == Some("error"),
+        verdict: text(h, "verdict").unwrap_or_default(),
+        names: h
+            .get("names")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    }
 }
 
 fn text(m: &Map<String, Value>, k: &str) -> Option<String> {

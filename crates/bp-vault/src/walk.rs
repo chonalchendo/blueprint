@@ -8,8 +8,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use rusqlite::OptionalExtension;
+
 use crate::index::{count_at, failed};
-use crate::{Index, Kind, Refusal};
+use crate::{Id, Index, Kind, Refusal};
 
 /// The forward weight of each link the walk follows, as `analysis/walk3.py` reads them. A body wikilink counts as a
 /// cite, and one link type between two nodes counts once. `targets` takes the weight of `answers`; walk3 had no
@@ -21,6 +23,42 @@ const DAMPING: f64 = 0.85;
 const ITERATIONS: usize = 50;
 /// The characters an id line adds beyond its id, kind and title: the JSON keys, quotes and a full-precision rank.
 const ID_LINE_CHARS: usize = 56;
+
+/// One required link from a seed: at least one target of `field` must be a node of `kind` with a body (21, rule 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Requires {
+    /// The seed's link field.
+    pub field: &'static str,
+    /// The kind its target must be.
+    pub kind: Kind,
+}
+
+/// What `complete` needs of an issue: its `under` milestone and a cited design. The integrity check fails a live
+/// issue that lacks either through the same [`Index::context_gap`], so `blocked` holds before a walk could refuse.
+pub const ISSUE_CONTEXT: [Requires; 2] =
+    [Requires { field: "under", kind: Kind::Milestone }, Requires { field: "cites", kind: Kind::Design }];
+
+/// Why a requirement does not hold: no target of its kind, or the first such target that is absent or empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gap {
+    /// No target of the kind.
+    None,
+    /// A target of the kind's path that no node or alias holds.
+    Absent(String),
+    /// A node of the kind with an empty body.
+    Empty(String),
+}
+
+impl Gap {
+    /// The gap in one line, as the walk's refusal and the integrity finding both say it.
+    pub fn detail(&self, req: Requires) -> String {
+        match self {
+            Self::None => format!("no {} under `{}`", req.kind, req.field),
+            Self::Absent(t) => format!("the {} {t} is absent", req.kind),
+            Self::Empty(t) => format!("the {} {t} is empty", req.kind),
+        }
+    }
+}
 
 /// One reached node, in rank order.
 #[derive(Debug, Clone)]
@@ -172,11 +210,36 @@ impl Index {
             .map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
-    /// The targets of one link field of a node, as written, whether or not a node holds them.
-    pub fn links_of(&self, id: &str, field: &str) -> Result<Vec<String>, Refusal> {
-        let run = || -> rusqlite::Result<Vec<String>> {
-            let mut st = self.conn.prepare_cached("select dst from links where src = ?1 and type = ?2")?;
-            st.query_map([id, field], |r| r.get(0))?.collect()
+    /// The one predicate of 21 rule 3, which the walk and the integrity check share: `None` when `req.field` names at
+    /// least one node of `req.kind` and each such target resolves, through an alias if need be (13, rule 1), to a
+    /// node with a body. Otherwise the first gap, in link order.
+    pub fn context_gap(&self, id: &str, req: Requires) -> Result<Option<Gap>, Refusal> {
+        let run = || -> rusqlite::Result<Option<Gap>> {
+            let targets: Vec<String> = self
+                .conn
+                .prepare_cached("select dst from links where src = ?1 and type = ?2 order by rowid")?
+                .query_map([id, req.field], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut resolve = self.conn.prepare_cached(
+                "select kind, tokens from nodes where id = ?1 union all select n.kind, n.tokens from aliases a \
+                 join nodes n on n.id = a.id where a.alias = ?1 limit 1",
+            )?;
+            let mut any = false;
+            for t in targets {
+                let node: Option<(String, i64)> = resolve.query_row([&t], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                match node {
+                    Some((kind, tokens)) if kind == req.kind.as_str() => {
+                        if tokens == 0 {
+                            return Ok(Some(Gap::Empty(t)));
+                        }
+                        any = true;
+                    }
+                    None if Id::parse(&t).is_ok_and(|i| req.kind.fits(&i)) => return Ok(Some(Gap::Absent(t))),
+                    // A target of another kind is not this requirement's, present or not.
+                    Some(_) | None => {}
+                }
+            }
+            Ok((!any).then_some(Gap::None))
         };
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }

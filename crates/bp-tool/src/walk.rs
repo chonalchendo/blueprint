@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use bp_operation::Action;
-use bp_vault::{Code, Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Code, Gap, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
@@ -67,10 +67,10 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             }
         }
     }
-    let world = if reached.iter().any(|r| r.kind == Kind::Issue) { Some(intent::World::read()?) } else { None };
+    let read = intent::Intents::new(&vault, &index, reached.iter().any(|r| r.kind == Kind::Issue))?;
     let mut intents = Vec::new();
     for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone)) {
-        let verdict = intent::row(&vault, &index, world.as_ref(), r.kind, &r.id, r.status.as_deref())?;
+        let verdict = read.row(r.kind, &r.id, r.status.as_deref())?;
         if let Some(intent) = verdict.intent {
             intents.push(serde_json::json!({ "id": r.id, "intent": intent, "note": verdict.note }));
         }
@@ -101,36 +101,22 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     }))
 }
 
-/// The context the action cannot run without (21, rule 3): every required link from the seed names a node of its
-/// kind with a body, and at least one does.
+/// The context the action cannot run without (21, rule 3), by the predicate the integrity check shares: a target
+/// that does not parse refuses as itself, so the fix names the parse error.
 fn context(vault: &Vault, index: &Index, id: &Id, action: Action) -> Result<(), Refusal> {
     for req in action.requires() {
-        let targets: Vec<String> = index
-            .links_of(id.as_str(), req.field)?
-            .into_iter()
-            .filter(|t| Id::parse(t).is_ok_and(|t| req.kind.fits(&t)))
-            .collect();
-        let missing = |what: String| {
-            Refusal::new(
-                Code::ContextIncomplete,
-                format!("{id} --for {action}"),
-                "a walk refuses when a kind its action requires is absent or empty (21, rule 3)",
-                format!("{what}; bp show {id} --no-body"),
-            )
-        };
-        if targets.is_empty() {
-            return Err(missing(format!("no {} under `{}`", req.kind, req.field)));
+        let Some(gap) = index.context_gap(id.as_str(), *req)? else { continue };
+        if let Gap::Absent(t) = &gap
+            && let Some(unparsed) = Id::parse(t).ok().and_then(|t| vault.unparsed(&t))
+        {
+            return Err(unparsed);
         }
-        for t in &targets {
-            match index.tokens_of(t)? {
-                None => {
-                    let unparsed = Id::parse(t).ok().and_then(|t| vault.unparsed(&t));
-                    return Err(unparsed.unwrap_or_else(|| missing(format!("the {} {t} is absent", req.kind))));
-                }
-                Some(0) => return Err(missing(format!("the {} {t} is empty", req.kind))),
-                Some(_) => {}
-            }
-        }
+        return Err(Refusal::new(
+            Code::ContextIncomplete,
+            format!("{id} --for {action}"),
+            "a walk refuses when a kind its action requires is absent or empty (21, rule 3)",
+            format!("{}; bp show {id} --no-body", gap.detail(*req)),
+        ));
     }
     Ok(())
 }

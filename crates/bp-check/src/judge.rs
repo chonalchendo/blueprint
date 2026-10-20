@@ -69,6 +69,8 @@ pub(crate) fn plan(check: &Check, today: &str) -> Plan {
     let own: &[&str] = match check.runner.as_str() {
         "shell" => &["expect", "until"],
         "scenario" => &["measure", "max"],
+        // It runs in process over the vault, so `cwd`, `timeout` and `when` would ask nothing of it; a `when` that
+        // skipped it would read as no run at all (15, the integrity row).
         "integrity" => &[],
         r if LATER.contains(&r) => return Plan::Skip(format!("check {r}: this runner is not built yet")),
         r => {
@@ -78,10 +80,11 @@ pub(crate) fn plan(check: &Check, today: &str) -> Plan {
             ));
         }
     };
+    let common: &[&str] = if check.runner == "integrity" { &COMMON[..2] } else { &COMMON };
     // A typo must not run: `expct=1` would otherwise pass on exit 0.
-    if let Some((k, v)) = check.attrs.iter().find(|(k, _)| !COMMON.contains(&k.as_str()) && !own.contains(&k.as_str()))
+    if let Some((k, v)) = check.attrs.iter().find(|(k, _)| !common.contains(&k.as_str()) && !own.contains(&k.as_str()))
     {
-        let known: Vec<&str> = COMMON.iter().chain(own).copied().collect();
+        let known: Vec<&str> = common.iter().chain(own).copied().collect();
         return Plan::Broken(format!(
             "{k}={v}: not an attribute of check {}; it takes {}",
             check.runner,
@@ -93,7 +96,6 @@ pub(crate) fn plan(check: &Check, today: &str) -> Plan {
         Some("post-land") => return Plan::Skip("when=post-land: it holds only after the merge".into()),
         Some(w) => return Plan::Broken(format!("when={w}: pr or post-land")),
     }
-    // It runs in process over the vault, so `cwd` and `timeout` ask nothing of it.
     if check.runner == "integrity" {
         return Plan::Integrity;
     }
@@ -286,8 +288,10 @@ mod tests {
             assert!(matches!(plan(&block(runner, attrs), TODAY), Plan::Broken(_)), "{runner} {attrs}");
         }
         assert_eq!(plan(&block("integrity", "name=i severity=warn"), TODAY), Plan::Integrity);
-        assert!(matches!(plan(&block("integrity", "name=i when=post-land"), TODAY), Plan::Skip(_)));
-        assert!(matches!(plan(&block("integrity", "name=i expect=0"), TODAY), Plan::Broken(_)), "no shell attribute");
+        for attr in ["when=post-land", "when=pr", "cwd=x", "timeout=5", "expect=0"] {
+            let broken = plan(&block("integrity", &format!("name=i {attr}")), TODAY);
+            assert!(matches!(&broken, Plan::Broken(w) if w.ends_with("it takes name, severity")), "{attr}: {broken:?}");
+        }
         let Plan::Run(spec) = plan(&block("shell", "name=a timeout=5 cwd=crates/bp-vault"), TODAY) else { panic!() };
         assert_eq!((spec.timeout, spec.cwd), (Duration::from_secs(5), Some(PathBuf::from("crates/bp-vault"))));
         let Plan::Run(spec) = plan(&block("shell", "name=a cwd=."), TODAY) else { panic!() };

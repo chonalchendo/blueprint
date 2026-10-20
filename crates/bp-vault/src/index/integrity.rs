@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value};
 
 use super::{failed, object};
-use crate::{Code, Index, Refusal, Vault};
+use crate::{Code, ISSUE_CONTEXT, Index, Refusal, Vault};
 
 /// One way a file of the project breaks a vault rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,38 +25,34 @@ pub struct Fault {
 }
 
 impl Index {
-    /// Every fault of `project`, rule by rule (25, issue 11), each rule's in id order.
+    /// Every fault of `project`, rule by rule (25, issue 11), each rule's in id order; then the faults with no node,
+    /// last, so a run's output tail keeps them: no record names them. `Err` when git cannot list the tracked files.
     pub fn integrity(&self, vault: &Vault, project: &str) -> Result<Vec<Fault>, Refusal> {
         let prefix = format!("projects/{project}/");
+        let tracked = tracked(&vault.root)?;
         let mut out = Vec::new();
         self.broken_files(&prefix, &mut out)?;
-        self.links_to_nothing(&vault.root, project, &mut out)?;
+        self.links_to_nothing(&tracked, project, &mut out)?;
         self.issues_without_context(project, &mut out)?;
         self.designs_off_the_spine(project, &mut out)?;
-        self.case_twins(&vault.root, &prefix, &mut out)?;
+        self.case_twins(&tracked, &prefix, &mut out)?;
         out.dedup();
+        out.sort_by_key(|f| !f.node);
         Ok(out)
     }
 
-    /// The integrity runs of `id`'s project, in no order, when any run names `id`: the headers of the run records
-    /// whose check is of kind `integrity`, each with its `id`. None when no run names it, since then none blocks it;
-    /// that probe is one index lookup, so a walk over many issues pays nothing for the rule (24, call budget).
-    pub fn integrity_runs(&self, id: &str) -> Result<Vec<Map<String, Value>>, Refusal> {
+    /// Every integrity run of `project`: its header with `id` and `under`, in no order. One lookup through the
+    /// index on kind, project and check kind, so a call reads it once, not once per issue (24, call budget).
+    pub fn integrity_runs(&self, project: &str) -> Result<Vec<Map<String, Value>>, Refusal> {
         let run = || -> rusqlite::Result<Vec<Map<String, Value>>> {
-            let named: bool = self
-                .conn
-                .prepare_cached("select exists (select 1 from links where dst = ?1 and type = 'names')")?
-                .query_row([id], |r| r.get(0))?;
-            if !named {
-                return Ok(Vec::new());
-            }
             let mut st = self.conn.prepare_cached(
-                "select id, header from records where kind = 'run' and project = ?1 \
+                "select id, under, header from records where kind = 'run' and project = ?1 \
                  and json_extract(header, '$.check_kind') = 'integrity'",
             )?;
-            st.query_map([crate::Id::from_trusted(id.to_string()).project()], |r| {
-                let mut header = object(&r.get::<_, String>(1)?);
+            st.query_map([project], |r| {
+                let mut header = object(&r.get::<_, String>(2)?);
                 header.insert("id".into(), Value::String(r.get(0)?));
+                header.insert("under".into(), r.get::<_, Option<String>>(1)?.map_or(Value::Null, Value::String));
                 Ok(header)
             })?
             .collect()
@@ -74,25 +70,33 @@ impl Index {
     }
 
     /// Rule 2: a header link, body wikilink or root-relative markdown link from a node of the project that resolves
-    /// to nothing. A markdown link names an asset more often than a node, so it resolves against the files too.
-    fn links_to_nothing(&self, root: &Path, project: &str, out: &mut Vec<Fault>) -> Result<(), Refusal> {
+    /// to nothing. A markdown link names an asset more often than a node, so it resolves against the tracked files
+    /// too: exactly, so the verdict is the same on every file system and at the run's commit.
+    fn links_to_nothing(&self, tracked: &BTreeSet<String>, project: &str, out: &mut Vec<Fault>) -> Result<(), Refusal> {
         let mut found: Vec<(String, String)> = Vec::new();
         let sql = "select u.src, u.field || ' ' || u.text || ': not an id' from unresolved u \
                    join nodes n on n.id = u.src where n.project = ?1";
         found.extend(self.pairs(sql, [project])?);
-        let sql = "select l.src, l.type || ' ' || l.dst || ': resolves to nothing' from links l \
-                   join nodes n on n.id = l.src where n.project = ?1 \
+        let sql = "select l.src, l.type || ' ' || l.dst from links l join nodes n on n.id = l.src where n.project = ?1 \
                    and not exists (select 1 from files f where f.id = l.dst and f.class != 'broken') \
                    and not exists (select 1 from aliases a where a.alias = l.dst)";
-        found.extend(self.pairs(sql, [project])?);
+        for (src, link) in self.pairs(sql, [project])? {
+            let dst = link.split_once(' ').map_or("", |(_, d)| d);
+            found.push((src, format!("{link}: {}", self.miss(dst, tracked)?)));
+        }
         let sql = "select m.src, m.target from markdown m join nodes n on n.id = m.src where n.project = ?1";
         for (src, target) in self.pairs(sql, [project])? {
-            let resolves = match target.strip_suffix(".md") {
-                Some(id) => self.known(id)?,
-                None => self.known(&target)? || root.join(&target).exists(),
+            let why = if target.split('/').any(|s| s == "..") {
+                Some("a `..` segment leaves the path the link names".to_string())
+            } else {
+                let resolves = match target.strip_suffix(".md") {
+                    Some(id) => self.known(id)?,
+                    None => self.known(&target)? || tracked.contains(&target),
+                };
+                if resolves { None } else { Some(self.miss(target.strip_suffix(".md").unwrap_or(&target), tracked)?) }
             };
-            if !resolves {
-                found.push((src, format!("markdown /{target}: resolves to nothing")));
+            if let Some(why) = why {
+                found.push((src, format!("markdown /{target}: {why}")));
             }
         }
         found.sort();
@@ -101,82 +105,72 @@ impl Index {
         Ok(())
     }
 
-    /// Rule 3 (21, rule 3): an open or in-progress issue whose `under` is no milestone that exists, or that cites no
-    /// design that exists. A walk for `complete` would refuse it.
+    /// Rule 3 (21, rule 3): an open or in-progress issue that a walk for `complete` refuses, by the walk's own
+    /// predicate: its `under` milestone or a cited design is absent or empty, or it cites none.
     fn issues_without_context(&self, project: &str, out: &mut Vec<Fault>) -> Result<(), Refusal> {
-        // The issue, its `under`, and whether that is a milestone and whether it cites a design.
-        type Row = (String, Option<String>, bool, bool);
-        let run = || -> rusqlite::Result<Vec<Row>> {
+        let run = || -> rusqlite::Result<Vec<String>> {
             let mut st = self.conn.prepare(
-                "select i.id, i.under,
-                   exists (select 1 from nodes m where m.id = i.under and m.kind = 'milestone')
-                   or exists (select 1 from aliases a join nodes m on m.id = a.id
-                              where a.alias = i.under and m.kind = 'milestone'),
-                   exists (select 1 from links l join nodes d on d.id = l.dst
-                           where l.src = i.id and l.type = 'cites' and d.kind = 'design')
-                   or exists (select 1 from links l join aliases a on a.alias = l.dst join nodes d on d.id = a.id
-                              where l.src = i.id and l.type = 'cites' and d.kind = 'design')
-                 from nodes i where i.kind = 'issue' and i.project = ?1 and i.status in ('open', 'in-progress')
-                 order by i.id",
+                "select id from nodes where kind = 'issue' and project = ?1 and status in ('open', 'in-progress') \
+                 order by id",
             )?;
-            st.query_map([project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect()
+            st.query_map([project], |r| r.get(0))?.collect()
         };
-        for (id, under, milestone, design) in run().map_err(|e| failed(Path::new(".bp/index.db"), &e))? {
-            if !milestone {
-                let detail = under.map_or_else(
-                    || "no `under` milestone".to_string(),
-                    |u| format!("`under` {u} is no milestone that exists"),
-                );
-                out.push(Fault { rule: "issue", id: id.clone(), detail, node: true });
-            }
-            if !design {
-                out.push(Fault { rule: "issue", id, detail: "cites no design that exists".into(), node: true });
+        for id in run().map_err(|e| failed(Path::new(".bp/index.db"), &e))? {
+            for req in ISSUE_CONTEXT {
+                if let Some(gap) = self.context_gap(&id, req)? {
+                    out.push(Fault { rule: "issue", id: id.clone(), detail: gap.detail(req), node: true });
+                }
             }
         }
         Ok(())
     }
 
-    /// Rule 4 (13, Design: the spine): a container design sits under a system design; a component under a
-    /// container or a system design.
+    /// Rule 4 (13, Design: the spine): a product sits under the project; a system under a product; a data model, a
+    /// glossary and a container under a system; a component under a container or a system; each parent in the
+    /// design's own project.
     fn designs_off_the_spine(&self, project: &str, out: &mut Vec<Fault>) -> Result<(), Refusal> {
-        // The design, its level, its `under` and that parent's level.
-        type Row = (String, String, Option<String>, Option<String>);
+        // The design, its level, its `under`, and that parent's level (a design's, else its kind) and project.
+        type Row = (String, String, Option<String>, Option<String>, Option<String>);
         let run = || -> rusqlite::Result<Vec<Row>> {
             let mut st = self.conn.prepare(
-                "select d.id, d.design_kind, d.under,
-                   coalesce((select p.design_kind from nodes p where p.id = d.under and p.kind = 'design'),
-                            (select p.design_kind from aliases a join nodes p on p.id = a.id
-                             where a.alias = d.under and p.kind = 'design'))
-                 from nodes d where d.kind = 'design' and d.project = ?1
-                 and d.design_kind in ('container', 'component') order by d.id",
+                "select d.id, d.design_kind, d.under, coalesce(p.design_kind, p.kind), p.project from nodes d
+                 left join nodes p on p.id = coalesce((select n.id from nodes n where n.id = d.under),
+                                                      (select a.id from aliases a where a.alias = d.under))
+                 where d.kind = 'design' and d.project = ?1 order by d.id",
             )?;
-            st.query_map([project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect()
+            st.query_map([project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect()
         };
-        for (id, level, under, parent) in run().map_err(|e| failed(Path::new(".bp/index.db"), &e))? {
-            let (fits, want) = match level.as_str() {
-                "container" => (parent.as_deref() == Some("system"), "a system design"),
-                _ => (matches!(parent.as_deref(), Some("container" | "system")), "a container or a system design"),
+        for (id, level, under, parent, home) in run().map_err(|e| failed(Path::new(".bp/index.db"), &e))? {
+            let (want, said): (&[&str], &str) = match level.as_str() {
+                "product" => (&["project"], "the project"),
+                "system" => (&["product"], "a product design"),
+                "component" => (&["container", "system"], "a container or a system design"),
+                _ => (&["system"], "a system design"),
             };
-            if !fits {
-                let parent = match (under, parent) {
-                    (None, _) => "no `under`".to_string(),
-                    (Some(u), Some(p)) => format!("`under` {u} is a {p} design"),
-                    (Some(u), None) => format!("`under` {u} is no design"),
-                };
-                let detail = format!("{parent}; a {level} sits under {want}");
-                out.push(Fault { rule: "level", id, detail, node: true });
-            }
+            let wrong = match (under, parent, home) {
+                (None, ..) => "no `under`".to_string(),
+                (Some(u), None, _) => format!("`under` {u} is no node"),
+                (Some(u), Some(_), h) if h.as_deref() != Some(project) => {
+                    format!("`under` {u} is outside projects/{project}")
+                }
+                (Some(_), Some(p), _) if want.contains(&p.as_str()) => continue,
+                (Some(u), Some(p), _) => format!("`under` {u} is a {p}"),
+            };
+            let detail = format!("{wrong}; a {level} design sits under {said} of its project");
+            out.push(Fault { rule: "level", id, detail, node: true });
         }
         Ok(())
     }
 
     /// Rule 5 (13, rule 1): two paths of the project that differ only by case. The default macOS file system holds
-    /// only one of them, so git's tree is read beside the index's files.
-    fn case_twins(&self, root: &Path, prefix: &str, out: &mut Vec<Fault>) -> Result<(), Refusal> {
-        let sql = "select id || '.md', class from files where substr(id, 1, length(?1)) = ?1";
+    /// only one of them, so git's tree is read beside the index's files; the project's prefix matches in any case,
+    /// so a twin of the project's own directory counts.
+    fn case_twins(&self, tracked: &BTreeSet<String>, prefix: &str, out: &mut Vec<Fault>) -> Result<(), Refusal> {
+        let sql = "select id || '.md', class from files where lower(substr(id, 1, length(?1))) = lower(?1)";
         let files: BTreeMap<String, String> = self.pairs(sql, [prefix])?.into_iter().collect();
         let mut paths: BTreeSet<String> = files.keys().cloned().collect();
-        paths.extend(tracked(root, prefix));
+        let ours = |p: &&String| p.get(..prefix.len()).is_some_and(|h| h.eq_ignore_ascii_case(prefix));
+        paths.extend(tracked.iter().filter(ours).cloned());
         out.extend(twins(&paths).into_iter().map(|(path, others)| {
             let node = files.get(&path).is_some_and(|class| class != "broken");
             let id = path.strip_suffix(".md").map_or_else(|| path.clone(), str::to_string);
@@ -196,6 +190,21 @@ impl Index {
             .map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
+    /// Why a link to `id` resolves to nothing: a file, an alias or a tracked path that differs only by case names
+    /// the fix, as `show` would resolve it (13, rule 1); else nothing holds it.
+    fn miss(&self, id: &str, tracked: &BTreeSet<String>) -> Result<String, Refusal> {
+        let held: Option<String> = self
+            .conn
+            .prepare_cached(
+                "select id from files where id = ?1 collate nocase and class != 'broken' \
+                 union all select alias from aliases where alias = ?1 collate nocase limit 1",
+            )
+            .and_then(|mut st| st.query_row([id], |r| r.get(0)).optional())
+            .map_err(|e| failed(Path::new(".bp/index.db"), &e))?;
+        let held = held.or_else(|| tracked.iter().find(|p| p.eq_ignore_ascii_case(id)).cloned());
+        Ok(held.map_or_else(|| "resolves to nothing".into(), |h| format!("differs only by case from {h}")))
+    }
+
     fn pairs(&self, sql: &str, p: impl rusqlite::Params) -> Result<Vec<(String, String)>, Refusal> {
         let run = || -> rusqlite::Result<Vec<(String, String)>> {
             let mut st = self.conn.prepare(sql)?;
@@ -205,11 +214,17 @@ impl Index {
     }
 }
 
-/// The paths git tracks under `prefix`; none when the vault is not a git repository.
-fn tracked(root: &Path, prefix: &str) -> Vec<String> {
-    let out = Command::new("git").arg("-C").arg(root).args(["ls-files", "-z", "--", prefix]).output();
-    let Some(out) = out.ok().filter(|o| o.status.success()) else { return Vec::new() };
-    String::from_utf8_lossy(&out.stdout).split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
+/// Every path git tracks in the vault. A run names the vault's head with a clean project tree, so these are the
+/// files the run's commit holds.
+fn tracked(root: &Path) -> Result<BTreeSet<String>, Refusal> {
+    let out = Command::new("git").arg("-C").arg(root).args(["ls-files", "-z"]).output();
+    match out {
+        Ok(o) if o.status.success() => {
+            Ok(String::from_utf8_lossy(&o.stdout).split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect())
+        }
+        Ok(o) => Err(Refusal::failed("git ls-files", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(Refusal::failed("git ls-files", format!("git did not start: {e}"))),
+    }
 }
 
 /// Each path that shares its lowercase form with another, with those others.
@@ -231,7 +246,7 @@ fn twins(paths: &BTreeSet<String>) -> Vec<(String, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Index;
+    use crate::{Gap, Index};
 
     fn write(root: &Path, rel: &str, text: &str) {
         let path = root.join(rel);
@@ -243,13 +258,25 @@ mod tests {
         format!("---\nkind: {kind}\ntitle: T\nstatus: open\n{extra}---\n\nBody.\n")
     }
 
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = Command::new("git").arg("-C").arg(root).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
     /// A clean project `bp` and a project `ex` that breaks every rule, so a fault of `bp` would be out of scope.
     fn vault() -> (tempfile::TempDir, Vault) {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
         for p in ["bp", "ex"] {
             write(r, &format!("projects/{p}/project.md"), &node("project", ""));
-            write(r, &format!("projects/{p}/designs/system.md"), &node("design", ""));
+            write(
+                r,
+                &format!("projects/{p}/designs/product.md"),
+                &node("design", &format!("under: projects/{p}/project\n")),
+            );
+            let under = format!("under: projects/{p}/designs/product\n");
+            write(r, &format!("projects/{p}/designs/system.md"), &node("design", &under));
             write(r, &format!("projects/{p}/milestones/m.md"), &node("milestone", ""));
             let cites = format!("under: projects/{p}/milestones/m\ncites: [projects/{p}/designs/system]\n");
             write(r, &format!("projects/{p}/issues/ok.md"), &node("issue", &cites));
@@ -258,13 +285,23 @@ mod tests {
         }
         write(r, "projects/bp/designs/system/diagrams/d.html", "<p/>\n");
         write(r, "shared/threads/t.md", &node("thread", "cites: [shared/nowhere/x]\n"));
+        git(r, &["init", "-q"]);
         let v = Vault { root: r.to_path_buf() };
         (dir, v)
     }
 
+    /// The faults of `project`, every file on disk tracked first: integrity reads the tracked set.
+    fn all(v: &Vault, project: &str) -> Vec<Fault> {
+        git(&v.root, &["add", "-A"]);
+        Index::open(v).unwrap().integrity(v, project).unwrap()
+    }
+
     fn faults(v: &Vault, project: &str) -> Vec<(&'static str, String, bool)> {
-        let index = Index::open(v).unwrap();
-        index.integrity(v, project).unwrap().into_iter().map(|f| (f.rule, f.id, f.node)).collect()
+        all(v, project).into_iter().map(|f| (f.rule, f.id, f.node)).collect()
+    }
+
+    fn details(v: &Vault, project: &str, rule: &str) -> Vec<(String, String)> {
+        all(v, project).into_iter().filter(|f| f.rule == rule).map(|f| (f.id, f.detail)).collect()
     }
 
     #[test]
@@ -274,64 +311,86 @@ mod tests {
     }
 
     #[test]
-    fn rule_1_a_file_that_does_not_parse() {
+    fn rule_1_a_file_that_does_not_parse_and_faults_with_no_node_come_last() {
         let (_d, v) = vault();
         write(&v.root, "projects/ex/issues/bad.md", "---\nkind: [\n---\n");
         write(&v.root, "projects/ex/Notes.md", "# stray\n");
+        write(&v.root, "projects/ex/issues/zz.md", &node("issue", ""));
+        let found = faults(&v, "ex");
+        let tail: Vec<_> = found.iter().skip_while(|f| f.2).cloned().collect();
         let want =
             [("broken", "projects/ex/Notes.md".into(), false), ("broken", "projects/ex/issues/bad.md".into(), false)];
-        assert_eq!(faults(&v, "ex"), want);
+        assert_eq!(tail, want, "the output's tail keeps what no record names: {found:?}");
+        assert!(found.len() > 2 && found[0].2, "{found:?}");
     }
 
     #[test]
     fn rule_2_a_link_that_resolves_to_nothing() {
         let (_d, v) = vault();
         let links = "under: projects/ex/milestones/m\ncites: [projects/ex/designs/system, projects/ex/designs/gone, '[[old]]']\n";
-        let body = "[[projects/ex/issues/nope]] [[projects/ex/issues/ok]] [a](/projects/ex/designs/system/diagrams/d.html) \
-                    [b](/projects/bp/designs/system/diagrams/d.html#x) [c](/projects/ex/issues/ok.md) \
-                    [d](/projects/ex/issues/missing.md) `[e](/projects/ex/in/code)`\n";
-        let text = node("issue", links).replace("Body.\n", body);
-        write(&v.root, "projects/ex/issues/links.md", &text);
+        let body = "[[projects/ex/issues/nope]] [[projects/ex/issues/ok]] [[projects/ex/designs/SYSTEM]] \
+                    [a](/projects/ex/designs/system/diagrams/d.html) [b](/projects/bp/designs/system/diagrams/d.html#x) \
+                    [B](/projects/bp/designs/system/diagrams/D.html) [c](/projects/ex/issues/ok.md) \
+                    [d](/projects/ex/issues/missing.md) [t](/projects/../../etc/hosts) [u](/projects/ex/untracked.html) \
+                    `[e](/projects/ex/in/code)`\n";
+        write(&v.root, "projects/ex/issues/links.md", &node("issue", links).replace("Body.\n", body));
+        git(&v.root, &["add", "-A"]);
+        // On disk but not in git: the run's commit would not hold it.
+        write(&v.root, "projects/ex/untracked.html", "<p/>\n");
         let index = Index::open(&v).unwrap();
         let details: Vec<String> = index.integrity(&v, "ex").unwrap().into_iter().map(|f| f.detail).collect();
         assert_eq!(
             details,
             [
+                "body projects/ex/designs/SYSTEM: differs only by case from projects/ex/designs/system",
                 "body projects/ex/issues/nope: resolves to nothing",
                 "cites [[old]]: not an id",
                 "cites projects/ex/designs/gone: resolves to nothing",
+                "markdown /projects/../../etc/hosts: a `..` segment leaves the path the link names",
+                "markdown /projects/bp/designs/system/diagrams/D.html: differs only by case from projects/bp/designs/system/diagrams/d.html",
                 "markdown /projects/ex/designs/system/diagrams/d.html: resolves to nothing",
                 "markdown /projects/ex/issues/missing.md: resolves to nothing",
+                "markdown /projects/ex/untracked.html: resolves to nothing",
             ]
         );
     }
 
     #[test]
-    fn rule_3_a_live_issue_without_its_milestone_or_a_cited_design() {
+    fn rule_3_is_the_walks_predicate_with_aliases_and_empty_targets() {
         let (_d, v) = vault();
         write(&v.root, "projects/ex/issues/bare.md", &node("issue", ""));
         let wrong = "under: projects/ex/designs/system\ncites: [projects/ex/milestones/m]\n";
         write(&v.root, "projects/ex/issues/wrong.md", &node("issue", wrong));
         let done = "under: projects/ex/designs/system\n";
         write(&v.root, "projects/ex/issues/done.md", &node("issue", done).replace("status: open", "status: resolved"));
-        let aliased = "under: projects/ex/milestones/old-m\ncites: [projects/ex/designs/system]\n";
+        let aliased = "under: projects/ex/milestones/old-m\ncites: [projects/ex/designs/containers/old-c]\n";
         write(&v.root, "projects/ex/issues/aliased.md", &node("issue", aliased));
         write(&v.root, "projects/ex/milestones/m.md", &node("milestone", "aliases: [old-m]\n"));
-        let index = Index::open(&v).unwrap();
-        let found: Vec<(String, String)> = index
-            .integrity(&v, "ex")
-            .unwrap()
-            .into_iter()
-            .filter(|f| f.rule == "issue")
-            .map(|f| (f.id, f.detail))
-            .collect();
+        let c = "under: projects/ex/designs/system\naliases: [old-c]\n";
+        write(&v.root, "projects/ex/designs/containers/c.md", &node("design", c));
+        let empty = "under: projects/ex/milestones/m\ncites: [projects/ex/designs/containers/e]\n";
+        write(&v.root, "projects/ex/issues/empty.md", &node("issue", empty));
+        let e = node("design", "under: projects/ex/designs/system\n").replace("Body.\n", "");
+        write(&v.root, "projects/ex/designs/containers/e.md", &e);
+        let one = "under: projects/ex/milestones/m\ncites: [projects/ex/designs/system, projects/ex/designs/components/gone]\n";
+        write(&v.root, "projects/ex/issues/one.md", &node("issue", one));
         let want = [
-            ("projects/ex/issues/bare", "no `under` milestone"),
-            ("projects/ex/issues/bare", "cites no design that exists"),
-            ("projects/ex/issues/wrong", "`under` projects/ex/designs/system is no milestone that exists"),
-            ("projects/ex/issues/wrong", "cites no design that exists"),
+            ("projects/ex/issues/bare", "no milestone under `under`"),
+            ("projects/ex/issues/bare", "no design under `cites`"),
+            ("projects/ex/issues/empty", "the design projects/ex/designs/containers/e is empty"),
+            ("projects/ex/issues/one", "the design projects/ex/designs/components/gone is absent"),
+            ("projects/ex/issues/wrong", "no milestone under `under`"),
+            ("projects/ex/issues/wrong", "no design under `cites`"),
         ];
-        assert_eq!(found, want.map(|(a, b)| (a.to_string(), b.to_string())), "a resolved issue and an alias pass");
+        let found = details(&v, "ex", "issue");
+        assert_eq!(
+            found,
+            want.map(|(a, b)| (a.to_string(), b.to_string())),
+            "an alias and a resolved issue pass; each cited design must hold"
+        );
+        let index = Index::open(&v).unwrap();
+        let gap = index.context_gap("projects/ex/issues/empty", ISSUE_CONTEXT[1]).unwrap();
+        assert_eq!(gap, Some(Gap::Empty("projects/ex/designs/containers/e".into())), "the walk reads the same gap");
     }
 
     #[test]
@@ -340,21 +399,38 @@ mod tests {
         let under = |u: &str| node("design", &format!("under: {u}\n"));
         write(&v.root, "projects/ex/designs/containers/bad.md", &under("projects/ex/project"));
         write(&v.root, "projects/ex/designs/containers/orphan.md", &node("design", ""));
+        write(&v.root, "projects/ex/designs/containers/other.md", &under("projects/bp/designs/system"));
         write(&v.root, "projects/ex/designs/components/ok-c.md", &under("projects/ex/designs/containers/c"));
         write(&v.root, "projects/ex/designs/components/ok-s.md", &under("projects/ex/designs/system"));
         write(&v.root, "projects/ex/designs/components/bad.md", &under("projects/ex/designs/components/ok-c"));
         write(&v.root, "projects/ex/designs/data-model.md", &under("projects/ex/project"));
-        let index = Index::open(&v).unwrap();
-        let found: Vec<String> =
-            index.integrity(&v, "ex").unwrap().into_iter().filter(|f| f.rule == "level").map(|f| f.id).collect();
-        assert_eq!(
-            found,
-            [
-                "projects/ex/designs/components/bad",
-                "projects/ex/designs/containers/bad",
-                "projects/ex/designs/containers/orphan"
-            ]
-        );
+        write(&v.root, "projects/ex/designs/glossary.md", &under("projects/ex/designs/system"));
+        write(&v.root, "projects/ex/designs/system.md", &under("projects/ex/designs/nowhere"));
+        let found = details(&v, "ex", "level");
+        let want = [
+            (
+                "components/bad",
+                "`under` projects/ex/designs/components/ok-c is a component; a component design sits under a container or a system design of its project",
+            ),
+            (
+                "containers/bad",
+                "`under` projects/ex/project is a project; a container design sits under a system design of its project",
+            ),
+            ("containers/orphan", "no `under`; a container design sits under a system design of its project"),
+            (
+                "containers/other",
+                "`under` projects/bp/designs/system is outside projects/ex; a container design sits under a system design of its project",
+            ),
+            (
+                "data-model",
+                "`under` projects/ex/project is a project; a data-model design sits under a system design of its project",
+            ),
+            (
+                "system",
+                "`under` projects/ex/designs/nowhere is no node; a system design sits under a product design of its project",
+            ),
+        ];
+        assert_eq!(found, want.map(|(a, b)| (format!("projects/ex/designs/{a}"), b.to_string())));
     }
 
     #[test]
@@ -380,19 +456,30 @@ mod tests {
             ]
         );
         assert_eq!(found[0].1, ["projects/ex/issues/a.md"]);
-        // git holds both twins on any file system; the default macOS one holds only one of them on disk.
+        // git holds both twins on any file system; the default macOS one holds only one of them on disk. A twin of
+        // the project's own directory counts too.
         let (_d, v) = vault();
-        let git = |args: &[&str]| {
-            let out = Command::new("git").arg("-C").arg(&v.root).args(args).output().unwrap();
-            assert!(out.status.success(), "git {args:?}");
-            String::from_utf8(out.stdout).unwrap()
-        };
-        git(&["init", "-q"]);
-        let blob = git(&["hash-object", "-w", "projects/ex/issues/ok.md"]);
-        git(&["add", "projects/ex/issues/ok.md"]);
-        git(&["update-index", "--add", "--cacheinfo", &format!("100644,{},projects/ex/issues/OK.md", blob.trim())]);
-        let want =
-            [("case", "projects/ex/issues/OK".to_string(), false), ("case", "projects/ex/issues/ok".to_string(), true)];
-        assert_eq!(faults(&v, "ex"), want, "only the parsed twin can be a run's edge");
+        git(&v.root, &["add", "-A"]);
+        let blob = git(&v.root, &["hash-object", "-w", "projects/ex/issues/ok.md"]);
+        for twin in ["projects/ex/issues/OK.md", "projects/Ex/issues/ok.md"] {
+            git(&v.root, &["update-index", "--add", "--cacheinfo", &format!("100644,{},{twin}", blob.trim())]);
+        }
+        let found = Index::open(&v).unwrap().integrity(&v, "ex").unwrap();
+        let found: Vec<_> = found.into_iter().map(|f| (f.rule, f.id, f.node)).collect();
+        let want = [
+            ("case", "projects/ex/issues/ok".to_string(), true),
+            ("case", "projects/Ex/issues/ok".to_string(), false),
+            ("case", "projects/ex/issues/OK".to_string(), false),
+        ];
+        assert_eq!(found, want, "only the parsed twin can be a run's edge, and it leads");
+    }
+
+    #[test]
+    fn a_vault_git_cannot_read_could_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = Vault { root: dir.path().to_path_buf() };
+        write(&v.root, "projects/ex/project.md", &node("project", ""));
+        let e = Index::open(&v).unwrap().integrity(&v, "ex").unwrap_err();
+        assert_eq!(e.code, Code::CouldNotRun, "not a vault with no twins: {e:?}");
     }
 }

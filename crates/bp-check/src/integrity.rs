@@ -3,8 +3,9 @@
 //! `blocked` reads the run instead of the rules (21).
 
 use std::collections::BTreeSet;
+use std::process::Command;
 
-use bp_vault::{Fault, Id, Index, Vault};
+use bp_vault::{Code, Fault, Id, Index, Refusal, Vault};
 
 use crate::Verdict;
 use crate::process::Tail;
@@ -22,6 +23,28 @@ pub(crate) struct Ran {
     pub(crate) evidence: String,
     /// The failing nodes, sorted: only parsed files, since a run that names a broken one adds a broken link.
     pub(crate) names: Vec<Id>,
+}
+
+/// Refuses `path_dirty` when the owner's project holds a change git has not committed, untracked files included:
+/// the run names the vault's head, so that commit must hold every fault the run names (25, issue 11).
+pub(crate) fn clean(vault: &Vault, owner: &Id) -> Result<(), Refusal> {
+    let project = owner.project().expect("a check owner is a project's design, issue or milestone");
+    let dir = format!("projects/{project}/");
+    let out = Command::new("git").arg("-C").arg(&vault.root).args(["status", "--porcelain", "--", &dir]).output();
+    match out {
+        Ok(o) if o.status.success() && o.stdout.is_empty() => Ok(()),
+        Ok(o) if o.status.success() => {
+            let first = String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or_default().trim().to_string();
+            Err(Refusal::new(
+                Code::PathDirty,
+                dir.clone(),
+                "an integrity run names the vault's head, so the project's files are committed (15, the check grammar)",
+                format!("commit or restore the changes under {dir} (first: {first}), then rerun bp check {owner}"),
+            ))
+        }
+        Ok(o) => Err(Refusal::failed(dir, String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => Err(Refusal::failed(dir, format!("git did not start: {e}"))),
+    }
 }
 
 /// Runs the rules over `owner`'s project. `Err` is why it could not run.
@@ -53,7 +76,11 @@ fn judge(project: &str, commit: String, faults: &[Fault]) -> Ran {
         (Verdict::Pass, format!("no file of projects/{project} breaks a vault rule"))
     } else {
         let nodes = faults.iter().map(|f| f.id.as_str()).collect::<BTreeSet<_>>().len();
-        (Verdict::Fail, format!("{} findings on {nodes} files of projects/{project}", faults.len()))
+        let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+        (
+            Verdict::Fail,
+            format!("{} on {} of projects/{project}", plural(faults.len(), "finding"), plural(nodes, "file")),
+        )
     };
     Ran {
         verdict,
@@ -94,6 +121,7 @@ mod tests {
         assert_eq!(ran.evidence, want.finalize().to_hex().to_string());
         let clean = judge("bp", "abc".into(), &[]);
         assert_eq!((clean.verdict, clean.names.len(), clean.tail.len()), (Verdict::Pass, 0, 0));
+        assert_eq!(judge("bp", "abc".into(), &faults[1..2]).note, "1 finding on 1 file of projects/bp");
     }
 
     #[test]

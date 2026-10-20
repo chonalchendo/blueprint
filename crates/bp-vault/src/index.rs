@@ -39,6 +39,7 @@ create index nodes_kind on nodes (kind, project, status);
 create table records (id text primary key, kind text not null, project text, under text, header text not null,
   body text not null);
 create index records_under on records (under, kind);
+create index records_check on records (kind, project, json_extract(header, '$.check_kind'));
 create table links (src text not null, type text not null, dst text not null);
 create table unresolved (src text not null, field text not null, text text not null);
 create index unresolved_src on unresolved (src);
