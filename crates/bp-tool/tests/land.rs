@@ -14,7 +14,7 @@ const BARE: &str = "projects/bp/issues/bare";
 
 /// The vault, and a directory holding `origin.git`, its clone `code` and the fake `bin/gh`. The fake answers
 /// `api user` with `$FAKE_LOGIN`, `pr list` from `prs.json`, `pr create` with a url, and logs `pr edit` and
-/// `pr merge`. The vault holds [`ISSUE`], with one block, and [`BARE`], with none.
+/// `pr merge`. It keeps the body in `body` and prints it as JSON, escaping only newlines: a body holds no quote. The vault holds [`ISSUE`], with one block, and [`BARE`], with none.
 fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
     let t = tempfile::tempdir().unwrap();
     let origin = t.path().join("origin.git");
@@ -36,8 +36,9 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
 case "$1 $2" in
   "api user") echo "{{\"login\":\"${{FAKE_LOGIN:-agent}}\"}}" ;;
   "pr list") cat '{t}/prs.json' 2>/dev/null || echo '[]' ;;
-  "pr create") echo "$*" > '{t}/created'; echo 'https://forge.invalid/o/r/pull/1' ;;
-  "pr edit") echo "$*" > '{t}/edited' ;;
+  "pr create") echo "$*" > '{t}/created'; shift 9; printf '%s' "$1" > '{t}/body'; echo 'https://forge.invalid/o/r/pull/1' ;;
+  "pr edit") if [ "$4" = --body ]; then printf '%s' "$5" > '{t}/body'; else echo "$*" > '{t}/edited'; fi ;;
+  "pr view") printf '{{"body":"'; awk 'BEGIN {{ ORS = "\\n" }} {{ print }}' '{t}/body'; printf '"}}' ;;
   "pr merge") echo "$*" > '{t}/merged' ;;
   *) exit 9 ;;
 esac
@@ -246,6 +247,9 @@ fn pr_targets_the_claim_base_and_reruns_until_each_block_passes_as_written() {
     git(v, &["commit", "-qam", "tighten"]);
     assert_eq!(bp(v, t, &[], &["land", ISSUE]).1["code"], "evidence_stale");
     assert_eq!(bp(v, t, &[], &["pr", ISSUE]).1["runs"][0]["verdict"], "pass");
+    let body = std::fs::read_to_string(t.join("body")).unwrap();
+    assert!(body.contains(&format!("| {ISSUE} | hello | changed | `")), "the body names the block: {body}");
+    assert!(!body.contains("test -f"), "and never its text: {body}");
     assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3));
 
     // A failed run at the head reruns at the same head, as a flaky block needs no code change.

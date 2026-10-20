@@ -47,6 +47,15 @@ impl Gh {
         self.json(&["pr", "view", &number.to_string(), "--json", FIELDS])
     }
 
+    /// The pull request's body (`gh pr view --json body`), which `pr` keeps current.
+    pub fn body(&self, number: u64) -> Result<String, Refusal> {
+        #[derive(Deserialize)]
+        struct Body {
+            body: String,
+        }
+        self.json::<Body>(&["pr", "view", &number.to_string(), "--json", "body"]).map(|b| b.body)
+    }
+
     /// Opens a pull request of `head` into `base` and returns its number, the last segment of the url `gh` prints.
     #[cfg(feature = "write")]
     pub fn create(&self, head: &str, base: &str, title: &str, body: &str) -> Result<u64, Refusal> {
@@ -62,6 +71,12 @@ impl Gh {
     #[cfg(feature = "write")]
     pub fn retarget(&self, number: u64, base: &str) -> Result<(), Refusal> {
         self.run(&["pr", "edit", &number.to_string(), "--base", base]).map(drop)
+    }
+
+    /// Replaces the pull request's body (`gh pr edit --body`).
+    #[cfg(feature = "write")]
+    pub fn describe(&self, number: u64, body: &str) -> Result<(), Refusal> {
+        self.run(&["pr", "edit", &number.to_string(), "--body", body]).map(drop)
     }
 
     /// Squash-merges the pull request, only while its head is `head`: a push after the reads makes the forge refuse.
@@ -133,9 +148,9 @@ mod tests {
             r#"case "$1 $2" in
   "api user") echo '{"login":"quokka-agent","id":1}' ;;
   "pr list") echo '[{"number":3,"headRefName":"bp/q","headRefOid":"h","baseRefName":"master","author":{"login":"quokka-agent"}}]' ;;
-  "pr view") echo '{"number":3,"headRefName":"bp/q","headRefOid":"h","reviews":[{"state":"APPROVED","author":{"login":"r"},"commit":{"oid":"h"}}]}' ;;
+  "pr view") [ "$5" = body ] && { echo '{"body":"b"}'; exit; }; echo '{"number":3,"headRefName":"bp/q","headRefOid":"h","reviews":[{"state":"APPROVED","author":{"login":"r"},"commit":{"oid":"h"}}]}' ;;
   "pr create") echo 'https://github.com/o/r/pull/3' ;;
-  "pr edit") [ "$*" = "pr edit 3 --base master" ] || exit 9 ;;
+  "pr edit") [ "$*" = "pr edit 3 --base master" ] || [ "$*" = "pr edit 3 --body b" ] || exit 9 ;;
   *) [ "$*" = "pr merge 3 --squash --match-head-commit h" ] || exit 9 ;;
 esac"#,
         );
@@ -147,10 +162,12 @@ esac"#,
         );
         let pr = gh.pr(3).unwrap();
         assert_eq!(pr.reviews[0].author.as_ref().unwrap().login, "r");
+        assert_eq!(gh.body(3).unwrap(), "b");
         #[cfg(feature = "write")]
         {
             assert_eq!(gh.create("bp/q", "master", "t", "b").unwrap(), 3);
             gh.retarget(3, "master").unwrap();
+            gh.describe(3, "b").unwrap();
             assert_eq!(gh.retarget(3, "bp/p").unwrap_err().code, Code::CouldNotRun, "the fake exits 9");
             gh.merge(3, "h").unwrap();
             assert_eq!(gh.merge(3, "other").unwrap_err().code, Code::CouldNotRun, "the fake exits 9");

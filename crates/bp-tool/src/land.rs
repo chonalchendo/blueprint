@@ -1,10 +1,10 @@
 //! `bp pr <issue>` and `bp land <issue>`: the pull request and its merge (15, the repo verbs; 26, design changes 3,
 //! 4 and 6). `pr` runs the issue's blocks at the worktree's head with no lock held, pushes that head, opens or
-//! retargets the pull request and commits the runs. `land` reads the forge with no lock held and refuses on the
-//! reviewer, the base, the approval at the head, the forge check and the run evidence, in that order, for a pull
-//! request already merged too. It merges at the head it read and moves each layer cut from it onto the base. Then it
-//! removes the worktree and a branch the merged head holds, and commits the claim's release and the issue at
-//! `resolved`; the result names each moved layer's next step.
+//! retargets the pull request, keeps its body current with what it carries (27, design change 8) and commits the
+//! runs. `land` reads the forge with no lock held and refuses on the reviewer, the base, the approval at the head,
+//! the forge check and the run evidence, in that order, for a pull request already merged too. It merges at the head
+//! it read and moves each layer cut from it onto the base. Then it removes the worktree and a branch the merged head
+//! holds, and commits the claim's release and the issue at `resolved`; the result names each moved layer's next step.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -94,11 +94,23 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     let head = git(&c.worktree, &["rev-parse", "HEAD"])?;
     let open = gh.prs_for_head(&c.branch)?.into_iter().find(PullRequest::is_open);
     let runs = crate::intent::runs(&index, id.as_str())?;
-    // A failed, unrun or stale block at the head runs again; only passing evidence of each block is a repeat.
+    let carried = crate::carry::read(&vault, &index, &id, c.claim.as_str())?;
+    let body = carried.body();
+    // The forge's body, read once: a stale one is rewritten at any head.
+    let stale = open.as_ref().map(|o| gh.body(o.number).map(|b| b != body)).transpose()?.unwrap_or(true);
+    // A failed, unrun or stale block at the head runs again; only passing evidence of each block and a current body
+    // is a repeat.
     if let Some(o) = open.as_ref().filter(|o| o.head_ref_oid == head && o.base_ref_name.as_ref() == Some(&c.target))
         && intents::evidence(&runs, &head, &blocks).is_ok()
+        && !stale
     {
-        return Ok(Opened::Wrote(Wrote::Already(json!({ "id": id, "pull_request": o.number, "head": head }))));
+        return Ok(Opened::Wrote(Wrote::Already(json!({
+            "id": id,
+            "pull_request": o.number,
+            "head": head,
+            "deltas": carried.deltas,
+            "check_changes": carried.changes(),
+        }))));
     }
     let base = c.target.clone();
     let title = index.header(id.as_str())?.and_then(|h| h.get("title")?.as_str().map(str::to_string));
@@ -121,8 +133,11 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
             gh.retarget(o.number, &base)?;
             o.number
         }
-        None => gh.create(&c.branch, &base, &title, id.as_str())?,
+        None => gh.create(&c.branch, &base, &title, &body)?,
     };
+    if open.is_some() && stale {
+        gh.describe(number, &body)?;
+    }
     let writer = ran.writer(&vault, &format!("bp pr {id}"))?;
     let (changes, runs) = ran.records(&vault);
     let written = writer.commit("pr", role.as_str(), &format!("pr {id}"), &changes)?;
@@ -136,6 +151,8 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
         "branch": c.branch,
         "base": base,
         "runs": crate::check::rows(&runs),
+        "deltas": carried.deltas,
+        "check_changes": carried.changes(),
         "commit": written.commit,
         "findings": written.findings,
     }))))

@@ -1,6 +1,7 @@
 //! The tool: the 18 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
 //! `--json`; diagnostics go to stderr.
 
+mod carry;
 mod check;
 mod claim;
 mod clock;
