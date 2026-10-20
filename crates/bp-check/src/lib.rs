@@ -3,6 +3,7 @@
 //! is held while a block runs, so a block may call `bp`; the lock comes after, for the commit alone, and is waited
 //! for longer than a plain write waits, because the verdicts cost the whole run.
 
+mod integrity;
 mod judge;
 mod process;
 
@@ -15,7 +16,6 @@ use bp_vault::{Check, Code, Header, Held, Id, Kind, Refusal, Vault};
 use serde_json::Value;
 
 use crate::judge::Plan;
-use crate::process::Ran;
 
 bp_vault::closed_enum! {
     /// A run's verdict (13, Run). A failure to run differs from a violation (15, E6).
@@ -71,7 +71,14 @@ struct Done<'b> {
     ended: String,
     verdict: Verdict,
     note: String,
-    ran: Option<Ran>,
+    /// The last lines of output and the count of lines before them.
+    tail: Vec<String>,
+    dropped: usize,
+    evidence: Option<String>,
+    /// The commit the run names when it is not the code's: an integrity run's vault head.
+    commit: Option<String>,
+    /// The nodes an integrity run failed.
+    names: Vec<Id>,
 }
 
 /// Runs the named blocks of `owner`, or the one `only` names, from the git repository that holds `repo`, and commits
@@ -120,22 +127,49 @@ pub fn check(
         return Ok(None);
     }
     let (commit, top) = code_tree(vault, repo)?;
+    if blocks.iter().any(|c| c.runner == "integrity") {
+        integrity::clean(vault, owner)?;
+    }
     let today = clock()[..10].to_string();
     let done: Vec<Done> = blocks
         .into_iter()
         .map(|check| {
             let at = clock();
-            let (verdict, note, ran) = match judge::plan(check, &today) {
-                Plan::Skip(why) => (Verdict::Skipped, why, None),
-                Plan::Broken(why) => (Verdict::CouldNotRun, why, None),
+            let done = |verdict, note| Done {
+                check,
+                at: at.clone(),
+                ended: String::new(),
+                verdict,
+                note,
+                tail: Vec::new(),
+                dropped: 0,
+                evidence: None,
+                commit: None,
+                names: Vec::new(),
+            };
+            let mut d = match judge::plan(check, &today) {
+                Plan::Skip(why) => done(Verdict::Skipped, why),
+                Plan::Broken(why) => done(Verdict::CouldNotRun, why),
                 Plan::Run(spec) => {
                     let dir = spec.cwd.as_ref().map_or_else(|| top.clone(), |d| top.join(d));
                     let ran = process::run(&check.text, &dir, &vault.root, spec.timeout);
                     let (verdict, note) = judge::judge(&spec.test, &ran.end);
-                    (verdict, note, Some(ran))
+                    Done { tail: ran.tail, dropped: ran.dropped, evidence: ran.evidence, ..done(verdict, note) }
                 }
+                Plan::Integrity => match integrity::run(vault, owner) {
+                    Ok(ran) => Done {
+                        tail: ran.tail,
+                        dropped: ran.dropped,
+                        evidence: Some(ran.evidence),
+                        commit: Some(ran.commit),
+                        names: ran.names,
+                        ..done(ran.verdict, ran.note)
+                    },
+                    Err(why) => done(Verdict::CouldNotRun, why),
+                },
             };
-            Done { check, at, ended: clock(), verdict, note, ran }
+            d.ended = clock();
+            d
         })
         .collect();
     let writer = writer(vault, owner, &done)?;
@@ -143,6 +177,7 @@ pub fn check(
     let mut runs = Vec::with_capacity(done.len());
     for d in &done {
         let name = d.check.attrs["name"].as_str();
+        let commit = d.commit.as_deref().unwrap_or(&commit);
         // The first free attempt, read under the lock: a run is never overwritten (15, the run record).
         let mut attempt = 1_u32;
         let id = loop {
@@ -152,7 +187,7 @@ pub fn check(
             }
             attempt += 1;
         };
-        changes.insert(id.clone(), record(owner, &commit, attempt, d));
+        changes.insert(id.clone(), record(owner, commit, attempt, d));
         let error = judge::is_error(d.check);
         runs.push(Run { name: name.to_string(), verdict: d.verdict, id, note: d.note.clone(), error });
     }
@@ -222,6 +257,8 @@ fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
     let block = format!("check {} {{{}}}\n{}", d.check.runner, attrs.join(" "), d.check.text);
     let mut fields: BTreeMap<String, Value> = BTreeMap::from([
         ("check".into(), d.check.attrs["name"].as_str().into()),
+        // The block's kind, so a reader finds the integrity runs without parsing bodies (21, blocked).
+        ("check_kind".into(), d.check.runner.as_str().into()),
         ("commit".into(), commit.into()),
         ("attempt".into(), attempt.into()),
         ("at".into(), d.at.as_str().into()),
@@ -230,8 +267,12 @@ fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
         ("severity".into(), if judge::is_error(d.check) { "error" } else { "warn" }.into()),
         ("check_hash".into(), blake3::hash(block.as_bytes()).to_hex().as_str().into()),
     ]);
-    if let Some(evidence) = d.ran.as_ref().and_then(|r| r.evidence.as_deref()) {
-        fields.insert("evidence".into(), evidence.into());
+    if let Some(evidence) = &d.evidence {
+        fields.insert("evidence".into(), evidence.as_str().into());
+    }
+    let mut links = BTreeMap::new();
+    if !d.names.is_empty() {
+        links.insert("names".to_string(), d.names.clone());
     }
     let header = Header {
         kind: Kind::Run,
@@ -239,25 +280,27 @@ fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
         status: None,
         under: Some(owner.clone()),
         aliases: Vec::new(),
-        links: BTreeMap::new(),
+        links,
         unresolved: Vec::new(),
         fields,
     };
-    format!("---\n{}---\n\n{}", header.emit(), body(&d.note, d.ran.as_ref()))
+    format!("---\n{}---\n\n{}", header.emit(), body(&d.note, &d.tail, d.dropped))
 }
 
 /// The reason as the lead, then the output's tail under `## Output`, so `show --no-body` keeps only the reason. The
 /// tail sits in a fence longer than any backtick run it holds, so no output line reads as markdown: a heading, a
 /// fence or a wikilink in it stays text.
-fn body(note: &str, ran: Option<&Ran>) -> String {
-    let Some(ran) = ran.filter(|r| !r.tail.is_empty()) else { return format!("{note}\n") };
-    let run = ran.tail.iter().flat_map(|l| l.split(|c| c != '`')).map(str::len).max().unwrap_or(0);
+fn body(note: &str, tail: &[String], dropped: usize) -> String {
+    if tail.is_empty() {
+        return format!("{note}\n");
+    }
+    let run = tail.iter().flat_map(|l| l.split(|c| c != '`')).map(str::len).max().unwrap_or(0);
     let fence = "`".repeat((run + 1).max(3));
     let mut parts = vec![note.to_string(), "## Output".to_string()];
-    if ran.dropped > 0 {
-        parts.push(format!("The last {} of {} lines of output.", ran.tail.len(), ran.tail.len() + ran.dropped));
+    if dropped > 0 {
+        parts.push(format!("The last {} of {} lines of output.", tail.len(), tail.len() + dropped));
     }
-    parts.push(format!("{fence}\n{}\n{fence}", ran.tail.join("\n")));
+    parts.push(format!("{fence}\n{}\n{fence}", tail.join("\n")));
     parts.join("\n\n") + "\n"
 }
 
@@ -267,13 +310,8 @@ mod tests {
 
     #[test]
     fn output_stays_text_in_the_body() {
-        let ran = Ran {
-            end: process::End::TimedOut(std::time::Duration::from_secs(1)),
-            tail: vec!["## heading".into(), "````".into(), "[[shared/nowhere]]".into()],
-            dropped: 2,
-            evidence: None,
-        };
-        let text = body("why", Some(&ran));
+        let tail = ["## heading".to_string(), "````".into(), "[[shared/nowhere]]".into()];
+        let text = body("why", &tail, 2);
         assert!(text.starts_with("why\n\n## Output\n\nThe last 3 of 5 lines of output.\n\n`````\n"), "{text}");
         let parsed = bp_vault::Body::parse(&text);
         assert_eq!(parsed.lead, "why");
@@ -281,6 +319,6 @@ mod tests {
         assert_eq!(headings, ["Output"], "the heading in the output stays text");
         assert!(parsed.links.is_empty() && parsed.unresolved.is_empty(), "{parsed:?}");
         assert!(parsed.findings.is_empty(), "{:?}", parsed.findings);
-        assert_eq!(body("skipped", None), "skipped\n");
+        assert_eq!(body("skipped", &[], 0), "skipped\n");
     }
 }

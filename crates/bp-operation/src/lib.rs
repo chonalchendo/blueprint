@@ -2,6 +2,8 @@
 //! actions an agent runs, what each one's walk returns (21, the action rows), and the roles a commit names.
 
 use bp_vault::Kind;
+/// The required links moved to the vault, so the integrity check reads the same ones (21, rule 3).
+pub use bp_vault::Requires;
 
 bp_vault::closed_enum! {
     /// The actions an agent runs from a walk (21). Human acts (approve, land, stamp) read a page, not a walk.
@@ -28,16 +30,6 @@ bp_vault::closed_enum! {
         Researcher = "researcher",
         Human = "human",
     }
-}
-
-/// One required link from the seed: every target of `field` of this kind must hold a body, and at least one must
-/// exist. A missing one refuses `context_incomplete`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Requires {
-    /// The seed's link field.
-    pub field: &'static str,
-    /// The kind its target must be.
-    pub kind: Kind,
 }
 
 /// Every node kind: a record is evidence about its parent, so no walk starts from one.
@@ -91,11 +83,9 @@ impl Action {
     /// The links from the seed whose targets the action cannot run without: an issue's milestone and the designs
     /// it targets.
     pub fn requires(self) -> &'static [Requires] {
-        const MILESTONE: Requires = Requires { field: "under", kind: Kind::Milestone };
-        const DESIGNS: Requires = Requires { field: "cites", kind: Kind::Design };
         match self {
-            Self::Complete => &[MILESTONE, DESIGNS],
-            Self::Review | Self::Respond => &[DESIGNS],
+            Self::Complete => &bp_vault::ISSUE_CONTEXT,
+            Self::Review | Self::Respond => &bp_vault::ISSUE_CONTEXT[1..],
             _ => &[],
         }
     }

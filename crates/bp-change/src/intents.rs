@@ -5,7 +5,7 @@
 //! Predicates whose records do not exist yet (dispositions, drift runs, finish-line runs, concern answers,
 //! waivers) never hold; they arrive with the milestones that write those records.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -57,6 +57,45 @@ pub struct Run {
     pub failed: bool,
 }
 
+/// An integrity run of a project, reduced (25, issue 11).
+#[derive(Debug, Clone, Default)]
+pub struct IntegrityRun {
+    /// The run record's id.
+    pub id: String,
+    /// The node that owns the block.
+    pub owner: String,
+    /// The block's name.
+    pub check: String,
+    /// `at`, Unix seconds.
+    pub at: Option<i64>,
+    /// The attempt at its commit.
+    pub attempt: u64,
+    /// The block's severity is `error`.
+    pub error: bool,
+    /// The verdict.
+    pub verdict: String,
+    /// The nodes it failed.
+    pub names: BTreeSet<String>,
+}
+
+impl IntegrityRun {
+    /// The project's run that `blocked` reads (21): the latest `error` run that passed or failed. A run that could
+    /// not run or was skipped says nothing about the vault, and a `warn` run never blocks. Integrity is vault state,
+    /// so the latest is the latest across commits: the highest `at`, then attempt, then id, so a tie is decided.
+    pub fn counting(runs: &[Self]) -> Option<&Self> {
+        runs.iter()
+            .filter(|r| r.error && matches!(r.verdict.as_str(), "pass" | "fail"))
+            .max_by(|a, b| (a.at, a.attempt, &a.id).cmp(&(b.at, b.attempt, &b.id)))
+    }
+
+    /// The blocked note when this run failed and names `id`: the run, and the rerun that clears it once the node is
+    /// fixed, since a run older than the fix still blocks (12, a fresh clone).
+    pub fn blocks(&self, id: &str) -> Option<String> {
+        (self.verdict == "fail" && self.names.contains(id))
+            .then(|| format!("integrity: {}; rerun bp check {} --name {}", self.id, self.owner, self.check))
+    }
+}
+
 /// The forge's view of the issue's open pull request.
 #[derive(Debug, Clone, Default)]
 pub struct PullRequest {
@@ -96,6 +135,9 @@ pub struct Issue {
     pub pr: Option<PullRequest>,
     /// The issue file's last commit, Unix seconds (13: processing time). Read only after an escalated release.
     pub changed: Option<i64>,
+    /// The note of the project's counting integrity run, when it failed and names the issue
+    /// ([`IntegrityRun::blocks`]).
+    pub integrity: Option<String>,
 }
 
 /// One node's intent and its note.
@@ -155,6 +197,9 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
             Some(_) => {}
         }
     }
+    if let Some(note) = &i.integrity {
+        return Verdict::of(Intent::Blocked, note.clone());
+    }
     if i.status == "open" && held.is_none() && i.pr.is_none() {
         let waits: Vec<&str> = i
             .depends
@@ -186,9 +231,17 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     Verdict::of(Intent::NeedsLanding, "")
 }
 
-/// The intent of one milestone. Derivation and acceptance need finish-line run records, which arrive later.
-pub fn milestone(status: &str) -> Verdict {
-    match status.parse() {
+/// The intent of one milestone; `integrity` is the blocked note of a failed integrity run that names it
+/// ([`IntegrityRun::blocks`]). Blocked comes first, for a milestone not yet done or abandoned. Derivation and
+/// acceptance need finish-line run records, which arrive later.
+pub fn milestone(status: &str, integrity: Option<String>) -> Verdict {
+    let status = status.parse();
+    if matches!(status, Ok(MilestoneStatus::Planned | MilestoneStatus::Approved))
+        && let Some(note) = integrity
+    {
+        return Verdict::of(Intent::Blocked, note);
+    }
+    match status {
         Ok(MilestoneStatus::Planned) => Verdict::of(Intent::NeedsMilestoneApproval, ""),
         _ => Verdict::NONE,
     }
@@ -259,6 +312,43 @@ mod tests {
 
     fn released(at: i64) -> Claim {
         Claim { at: Some(at), released: Some(at + 60), escalated: false }
+    }
+
+    #[test]
+    fn the_latest_error_integrity_run_that_passed_or_failed_counts() {
+        let a = "projects/bp/issues/a";
+        let run = |id: &str, at: i64, attempt: u64, verdict: &str| IntegrityRun {
+            id: id.into(),
+            owner: "projects/bp/milestones/m".into(),
+            check: "integrity".into(),
+            at: Some(at),
+            attempt,
+            error: true,
+            verdict: verdict.into(),
+            names: if verdict == "fail" { BTreeSet::from([a.to_string()]) } else { BTreeSet::new() },
+        };
+        let latest = |runs: &[IntegrityRun]| IntegrityRun::counting(runs).map(|r| r.id.clone());
+        let failed = run("r1", NOW, 1, "fail");
+        let note = "integrity: r1; rerun bp check projects/bp/milestones/m --name integrity";
+        assert_eq!(failed.blocks(a).as_deref(), Some(note));
+        assert_eq!(failed.blocks("projects/bp/issues/b"), None, "only the named node");
+        assert_eq!(latest(&[]), None);
+        assert_eq!(latest(&[failed.clone(), run("r2", NOW + 60, 1, "pass")]).as_deref(), Some("r2"), "a pass clears");
+        for skip in ["could-not-run", "skipped", "timed-out"] {
+            let runs = [failed.clone(), run("r2", NOW + 60, 1, skip)];
+            assert_eq!(latest(&runs).as_deref(), Some("r1"), "{skip} says nothing about the vault");
+        }
+        let warn = IntegrityRun { error: false, ..run("r2", NOW + 60, 1, "pass") };
+        assert_eq!(latest(&[failed.clone(), warn]).as_deref(), Some("r1"), "a warn run never counts");
+        let rerun = [run("r2", NOW, 2, "pass"), failed.clone()];
+        assert_eq!(latest(&rerun).as_deref(), Some("r2"), "one second: the highest attempt");
+        let tie = [run("b-run", NOW, 1, "pass"), run("a-run", NOW, 1, "fail")];
+        assert_eq!(latest(&tie).as_deref(), Some("b-run"), "then the id, whatever the read order");
+        let i = Issue { integrity: failed.blocks(a), ..open() };
+        assert_eq!(issue(&i, NOW), Verdict::of(Intent::Blocked, note));
+        assert_eq!(milestone("planned", failed.blocks(a)), Verdict::of(Intent::Blocked, note));
+        assert_eq!(milestone("approved", failed.blocks(a)).intent, Some(Intent::Blocked));
+        assert_eq!(milestone("done", failed.blocks(a)), Verdict::NONE, "a done milestone has nothing left to do");
     }
 
     #[test]
@@ -369,9 +459,9 @@ mod tests {
 
     #[test]
     fn milestones() {
-        assert_eq!(milestone("planned").intent, Some(Intent::NeedsMilestoneApproval));
-        assert_eq!(milestone("approved").intent, None);
-        assert_eq!(milestone("in-progress").intent, None);
+        assert_eq!(milestone("planned", None).intent, Some(Intent::NeedsMilestoneApproval));
+        assert_eq!(milestone("approved", None).intent, None);
+        assert_eq!(milestone("in-progress", None).intent, None);
         assert!(is_live_issue("in-progress") && !is_live_issue("abandoned"));
     }
 }

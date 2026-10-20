@@ -324,10 +324,10 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     if !matches!(kind_value, Kind::Issue | Kind::Milestone) {
         return Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }));
     }
-    let world = if kind_value == Kind::Issue { Some(intent::World::read()?) } else { None };
+    let intents = intent::Intents::new(&vault, &index, kind_value == Kind::Issue)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
-        let verdict = intent::row(&vault, &index, world.as_ref(), kind_value, &row.id, row.status.as_deref())?;
+        let verdict = intents.row(kind_value, &row.id, row.status.as_deref())?;
         if ready && verdict.intent != Some(bp_change::intents::Intent::Ready) {
             continue;
         }
@@ -341,7 +341,7 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     let total = if ready { out.len() } else { total };
     out.truncate(list.limit);
     let mut result = serde_json::json!({ "rows": out, "total": total, "truncated": total > out.len() });
-    if let Some(w) = world {
+    if let Some(w) = intents.world {
         result["forge"] = if w.forge.is_some() { "snapshot" } else { "not read" }.into();
     }
     Ok(result)

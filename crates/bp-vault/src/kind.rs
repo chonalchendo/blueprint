@@ -92,7 +92,8 @@ impl Kind {
         }
     }
 
-    /// A record's `→` fields (13): each holds one id and is an edge in the index, as a node's links are.
+    /// A record's `→` fields (13): each holds one id, or a list for a [`Kind::record_list`] field, and is an edge in
+    /// the index, as a node's links are.
     pub fn record_links(self) -> &'static [&'static str] {
         match self {
             Self::Delta => &["milestone", "cause", "authorized_by", "version"],
@@ -101,9 +102,15 @@ impl Kind {
             Self::Evidence => &["issue"],
             Self::Handoff => &["resumes"],
             Self::Claim => &["base_issue"],
-            Self::Run => &["opens"],
+            Self::Run => &["opens", "names"],
             _ => &[],
         }
+    }
+
+    /// A record's `→` field that holds a list, so it reads as one even with one id: an integrity run's `names`, the
+    /// nodes it failed (25, issue 11).
+    pub fn record_list(self, field: &str) -> bool {
+        self == Self::Run && field == "names"
     }
 
     /// The field that holds a record's own instant: records under one parent are read in its order (13, rule 1).

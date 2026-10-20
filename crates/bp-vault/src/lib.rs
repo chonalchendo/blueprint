@@ -28,11 +28,11 @@ pub use emit::set_field;
 pub use file::{Broken, File, header_end, normalise, opens_with_header, written};
 pub use header::{Header, LINKS, RESERVED, Unresolved};
 pub use id::{Id, SLUG_MAX, is_slug, slug};
-pub use index::{Filter, Hit, Index, Reading, Record, Row};
+pub use index::{Fault, Filter, Hit, Index, Reading, Record, Row};
 pub use kind::{DesignLevel, Kind};
 pub use refusal::{Code, Refusal};
 pub use rename::retarget;
-pub use walk::{Fill, Reached, fill};
+pub use walk::{Fill, Gap, ISSUE_CONTEXT, Reached, Requires, fill};
 pub use write::{Held, Moves, Writer, Written};
 // The macro's expansion names serde through this crate, so a domain crate needs no serde dependency of its own.
 #[doc(hidden)]
