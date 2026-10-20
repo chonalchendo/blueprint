@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use bp_change::intents::{self, Base, Block, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
 use bp_forge::Snapshot;
-use bp_vault::{Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::{Map, Value};
 
 /// The clock and the forge one call reads.
@@ -110,19 +110,7 @@ fn of(
         depends.push(Dependency { id: d.to_string(), status, open_pr, layers });
     }
     let records = index.records(id, Kind::Claim)?;
-    let claims: Vec<Claim> = records
-        .iter()
-        .map(|c| {
-            let release = intents::release(&c.body);
-            let to = release.get("to").filter(|t| !t.is_empty());
-            Claim {
-                at: text(&c.header, "from").and_then(|t| intents::timestamp(&t)),
-                // A `to` that is not a timestamp still releases; it reads as the latest time, so an escalation stays blocked.
-                released: to.map(|t| intents::timestamp(t).unwrap_or(i64::MAX)),
-                escalated: to.is_some() && release.get("reason").map(String::as_str) == Some("escalated"),
-            }
-        })
-        .collect();
+    let claims = claims(&records);
     let runs = runs(index, id)?;
     let review_heads = index.records(id, Kind::Review)?.iter().filter_map(|r| text(&r.header, "head")).collect();
     // A merged pull request under a held claim is a land that stopped before its commit: `land` finishes it, through
@@ -149,6 +137,23 @@ fn of(
     let issue =
         Issue { status: status.into(), claims, runs, blocks, review_heads, depends, pr, base, answered, integrity };
     Ok(intents::issue(&issue, world.now))
+}
+
+/// The claim records, reduced: the one reading of a release that blocked and `walk --done` share (21, rule 1).
+pub(crate) fn claims(records: &[Record]) -> Vec<Claim> {
+    records
+        .iter()
+        .map(|c| {
+            let release = intents::release(&c.body);
+            let to = release.get("to").filter(|t| !t.is_empty());
+            Claim {
+                at: text(&c.header, "from").and_then(|t| intents::timestamp(&t)),
+                // A `to` that is not a timestamp still releases; it reads as the latest time, so an escalation stays blocked.
+                released: to.map(|t| intents::timestamp(t).unwrap_or(i64::MAX)),
+                escalated: to.is_some() && release.get("reason").map(String::as_str) == Some("escalated"),
+            }
+        })
+        .collect()
 }
 
 /// The issue's run records, reduced.

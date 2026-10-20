@@ -149,28 +149,134 @@ fn done_answers_the_stop_column_with_no_slice() {
     write(d.path(), &format!("{n}.md"), &fin);
     let derived = |d: &Path| walk(d, &[n, "--for", "derive", "--done"]).1["done"].clone();
     assert_eq!(derived(d.path()), false);
-    let issue = format!("---\nkind: issue\ntitle: C\nstatus: open\nunder: {n}\n---\n\n## Check\n\n{}", block("fin"));
-    write(d.path(), "projects/bp/issues/0003.covers.md", &issue);
+    let issue = |section: &str| {
+        format!("---\nkind: issue\ntitle: C\nstatus: open\nunder: {n}\n---\n\n## {section}\n\n{}", block("fin"))
+    };
+    write(d.path(), "projects/bp/issues/0003.notes.md", &issue("Notes"));
+    assert_eq!(derived(d.path()), false, "a block outside the issue's Check covers nothing");
+    write(d.path(), "projects/bp/issues/0004.covers.md", &issue("Check"));
     assert_eq!(derived(d.path()), true, "an issue's block covers the finish line");
     std::fs::remove_file(d.path().join("projects/bp/milestones/m.md")).unwrap();
     let (_, v) = walk(d.path(), &["projects/bp/designs/system", "--for", "shape", "--done"]);
     assert_eq!(v["done"], false, "no milestone is planned: {v}");
 }
 
+/// `walk <seed> --for <action> --done`'s answer, with the forge snapshot at `forge` when one is given.
+fn done(root: &Path, forge: Option<&Path>, seed: &str, action: &str) -> Value {
+    // A record added by hand under a node shows at the next commit (12, Index), and this vault has no git: drop the
+    // index so each answer reads the files as they are.
+    let _ = std::fs::remove_dir_all(root.join(".bp"));
+    let mut cmd = Command::cargo_bin("bp").unwrap();
+    cmd.current_dir(root).env_remove("BP_VAULT").env("BP_NOW", "2026-10-18T00:00:00Z").env_remove("BP_FORGE_SNAPSHOT");
+    if let Some(f) = forge {
+        cmd.env("BP_FORGE_SNAPSHOT", f);
+    }
+    let out = cmd.args(["walk", seed, "--for", action, "--done", "--json"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(out.status.success(), "{v}");
+    v["done"].clone()
+}
+
 #[test]
-fn deliberate_is_done_when_the_thread_is_closed_and_a_decision_cites_it() {
+fn deliberate_needs_the_thread_closed_and_a_decision_citing_it() {
     let d = vault();
-    let thread = "projects/bp/threads/why";
-    let at = |status: &str| format!("---\nkind: thread\ntitle: Why\nstatus: {status}\n---\n\nThe question.\n");
-    write(d.path(), &format!("{thread}.md"), &at("open"));
-    let done = |d: &Path| walk(d, &[thread, "--for", "deliberate", "--done"]).1["done"].clone();
-    assert_eq!(done(d.path()), false);
-    write(d.path(), &format!("{thread}.md"), &at("closed"));
-    assert_eq!(done(d.path()), false, "no decision cites it yet");
-    let decision = format!("---\nkind: decision\ntitle: Because\nstatus: accepted\n---\n\nFrom [[{thread}]].\n");
-    write(d.path(), "projects/bp/decisions/because.md", &decision);
-    assert_eq!(done(d.path()), true);
-    let (code, v) = walk(d.path(), &[thread, "--for", "deliberate"]);
+    let thread = |slug: &str, status: &str| {
+        let id = format!("projects/bp/threads/{slug}");
+        write(d.path(), &format!("{id}.md"), &format!("---\nkind: thread\ntitle: T\nstatus: {status}\n---\n\nWhy?\n"));
+        id
+    };
+    let decide = |slug: &str, thread: &str| {
+        let text = format!("---\nkind: decision\ntitle: D\nstatus: accepted\n---\n\nFrom [[{thread}]].\n");
+        write(d.path(), &format!("projects/bp/decisions/{slug}.md"), &text);
+    };
+    let open = thread("open", "open");
+    decide("early", &open);
+    assert_eq!(done(d.path(), None, &open, "deliberate"), false, "an open thread is not done, cited or not");
+    let closed = thread("closed", "closed");
+    assert_eq!(done(d.path(), None, &closed, "deliberate"), false, "no decision cites it yet");
+    decide("because", &closed);
+    assert_eq!(done(d.path(), None, &closed, "deliberate"), true);
+    let (code, v) = walk(d.path(), &[&closed, "--for", "deliberate"]);
     assert_eq!((code, v["budget"].as_u64()), (Some(0), Some(8000)), "{v}");
     assert!(ids(&v["bodies"]).contains(&"projects/bp/decisions/because"), "a decision is a body: {v}");
+}
+
+#[test]
+fn complete_is_done_when_the_latest_claim_is_released_escalated() {
+    let d = vault();
+    let claim = format!(
+        "---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n\n## Released\n\nto: 2026-10-16T01:00:00Z\nreason: escalated\n"
+    );
+    write(d.path(), &format!("{SEED}/claims/c.md"), &claim);
+    assert_eq!(done(d.path(), None, SEED, "complete"), true);
+}
+
+#[test]
+fn review_and_respond_read_the_open_pull_request_head() {
+    let d = vault();
+    let forge = tempfile::tempdir().unwrap();
+    let head = |h: &str| {
+        let dir = forge.path().join(h);
+        let pr = format!(r#"[{{"number":1,"headRefName":"bp/0001.seed","headRefOid":"{h}"}}]"#);
+        write(&dir, "open-prs.json", &pr);
+        dir
+    };
+    let (one, two) = (head("aaaa"), head("bbbb"));
+    write(
+        d.path(),
+        &format!("{SEED}/claims/c.md"),
+        &format!("---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n"),
+    );
+    assert_eq!(done(d.path(), Some(&one), SEED, "review"), false, "no review at the head");
+    let table = "| severity | finding |\n|---|---|\n| major | one |\n| minor | two |\n";
+    let review = format!("{SEED}/reviews/aaaa");
+    write(d.path(), &format!("{review}.md"), &format!("---\nkind: review\nunder: {SEED}\nhead: aaaa\n---\n\n{table}"));
+    assert_eq!(done(d.path(), Some(&one), SEED, "review"), true);
+    assert_eq!(done(d.path(), Some(&two), SEED, "review"), false, "the review is at an older head");
+    let answer = |n: u64, how: &str| {
+        let text = format!("---\nkind: disposition\nunder: {review}\nfinding: {n}\nas: {how}\n---\n");
+        write(d.path(), &format!("{review}/dispositions/{n}.md"), &text);
+    };
+    answer(1, "declined");
+    answer(99, "declined");
+    assert_eq!(done(d.path(), Some(&one), SEED, "respond"), false, "finding 2 has no disposition; 99 is no finding");
+    answer(2, "fixed");
+    assert_eq!(done(d.path(), Some(&one), SEED, "respond"), false, "a fix moves the head");
+    assert_eq!(done(d.path(), Some(&two), SEED, "respond"), true);
+}
+
+#[test]
+fn triage_drift_needs_a_citation_for_each_failed_drift_run() {
+    let d = vault();
+    let s = "projects/bp/designs/system";
+    let run = |key: &str, kind: &str| {
+        let id = format!("{s}/runs/{key}-aaaa-1");
+        let text = format!(
+            "---\nkind: run\nunder: {s}\ncheck: {key}\ncheck_kind: {kind}\ncommit: aaaa\nattempt: 1\nverdict: fail\n---\n"
+        );
+        write(d.path(), &format!("{id}.md"), &text);
+        id
+    };
+    run("vault", "integrity");
+    assert_eq!(done(d.path(), None, s, "triage-drift"), true, "an integrity run is no drift run");
+    let drift = run("drift", "shell");
+    assert_eq!(done(d.path(), None, s, "triage-drift"), false);
+    let thread = format!("---\nkind: thread\ntitle: T\nstatus: open\n---\n\nWhy did [[{drift}]] fail?\n");
+    write(d.path(), "projects/bp/threads/drift.md", &thread);
+    assert_eq!(done(d.path(), None, s, "triage-drift"), true);
+}
+
+#[test]
+fn distil_needs_a_citing_learning_that_search_finds_by_its_cue() {
+    let d = vault();
+    let learning = |slug: &str, cue: &str| {
+        let text = format!(
+            "---\nkind: learning\ntitle: Quokkas nap\nstatus: draft\n{cue}cites: [{SEED}]\n---\n\nQuokkas nap at noon.\n"
+        );
+        write(d.path(), &format!("shared/learnings/{slug}.md"), &text);
+    };
+    learning("bare", "");
+    assert_eq!(done(d.path(), None, SEED, "distil"), false, "a learning with no cue reads false, title or not");
+    learning("cued", "cue: quokkas nap at noon\n");
+    assert_eq!(done(d.path(), None, SEED, "distil"), true);
 }

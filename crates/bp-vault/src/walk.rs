@@ -204,6 +204,25 @@ impl Index {
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
+    /// The nodes and records of `kinds` that link to `id` or to one of its aliases, in a header field or the body.
+    /// One indexed join: a stop calls it, and [`Index::inbound`]'s text scans cost several times the call budget.
+    pub fn citing(&self, id: &Id, kinds: &[Kind]) -> Result<Vec<Id>, Refusal> {
+        let kinds = serde_json::Value::from(kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>()).to_string();
+        let run = || -> rusqlite::Result<Vec<Id>> {
+            self.conn
+                .prepare_cached(
+                    "with kinds as (select value from json_each(?2))
+                     select distinct l.src from links l where (l.dst = ?1 or l.dst in (select alias from aliases where id = ?1))
+                     and (exists (select 1 from nodes n where n.id = l.src and n.kind in kinds)
+                       or exists (select 1 from records r where r.id = l.src and r.kind in kinds))
+                     order by l.src",
+                )?
+                .query_map([id.as_str(), kinds.as_str()], |r| r.get(0).map(Id::from_trusted))?
+                .collect()
+        };
+        run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
+    }
+
     /// A node's body as the index holds it.
     pub fn body(&self, id: &str) -> Result<String, Refusal> {
         self.conn

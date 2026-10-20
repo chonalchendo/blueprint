@@ -2,14 +2,14 @@
 //! 11). A skill's `Stop:` line calls it, so it reads no slice; it reads only what its row's Stop column names.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::PathBuf;
 
 use bp_change::{MilestoneStatus, intents};
 use bp_forge::{Gh, PullRequest};
 use bp_operation::Action;
 use bp_reasoning::ThreadStatus;
 use bp_vault::git::Repo;
-use bp_vault::{Filter, Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Body, Filter, Id, Index, Kind, Refusal};
 use serde_json::{Map, Value};
 
 use crate::claim::{branch, field, held};
@@ -21,16 +21,11 @@ const BATCH: usize = 3;
 const RETRIEVAL: usize = 10;
 
 /// Whether the action's Stop column holds for the seed `id`, whose header the walk read.
-pub(crate) fn done(
-    vault: &Vault,
-    index: &Index,
-    id: &Id,
-    header: &Map<String, Value>,
-    action: Action,
-) -> Result<bool, Refusal> {
-    let status = header.get("status").and_then(Value::as_str);
+pub(crate) fn done(index: &Index, id: &Id, header: &Map<String, Value>, action: Action) -> Result<bool, Refusal> {
+    let text = |k: &str| header.get(k).and_then(Value::as_str);
     Ok(match action {
-        // The seed is in the index, so it parsed. A capture and a returned report are their one call.
+        // Call-shaped stops with no record predicate (21, rule 4): research ends when the dispatch returns, capture
+        // with its one call, and design when the session writes a node whose id the walk cannot know before.
         Action::Design | Action::Capture | Action::Research => true,
         Action::Shape => {
             let planned = Some(MilestoneStatus::Planned.as_str());
@@ -39,17 +34,18 @@ pub(crate) fn done(
             let f = Filter { kind: Kind::Milestone, status: planned, project: Some(project), under: None, limit: 1 };
             index.list(&f)?.1 > 0
         }
-        Action::Derive => derived(vault, index, id)?,
+        Action::Derive => derived(index, id)?,
         Action::Complete => {
-            // The records sort by time, so the last claim is the latest.
-            let claims = index.records(id.as_str(), Kind::Claim)?;
-            let escalated = claims.last().is_some_and(|c| {
-                let r = intents::release(&c.body);
-                r.get("to").is_some_and(|t| !t.is_empty()) && r.get("reason").map(String::as_str) == Some("escalated")
-            });
-            escalated || heads(index, id)?.is_some_and(|(pr, local)| pr == local)
+            let claims = crate::intent::claims(&index.records(id.as_str(), Kind::Claim)?);
+            if intents::latest_claim(&claims).is_some_and(|c| c.escalated) {
+                return Ok(true);
+            }
+            match open_head(index, id)? {
+                Some((pr, Some(worktree))) => Repo::find(&worktree).and_then(|r| r.head()) == Some(pr),
+                _ => false,
+            }
         }
-        Action::Review => match heads(index, id)? {
+        Action::Review => match open_head(index, id)? {
             Some((pr, _)) => index
                 .records(id.as_str(), Kind::Review)?
                 .iter()
@@ -58,31 +54,32 @@ pub(crate) fn done(
         },
         Action::Respond => responded(index, id)?,
         Action::TriageDrift => {
-            let failed = index
-                .records(id.as_str(), Kind::Run)?
-                .into_iter()
-                .filter(|r| matches!(field(r, "verdict").as_deref(), Some("fail" | "timed-out")));
+            // An integrity run checks the vault, not a design: 21's drifted reads drift runs only.
+            let failed = index.records(id.as_str(), Kind::Run)?.into_iter().filter(|r| {
+                matches!(field(r, "verdict").as_deref(), Some("fail" | "timed-out"))
+                    && field(r, "check_kind").as_deref() != Some("integrity")
+            });
             for r in failed {
                 let run = Id::parse(&r.id).expect("the index holds ids");
-                if citing(index, &run, &[Kind::Delta, Kind::Thread])?.is_empty() {
+                if index.citing(&run, &[Kind::Delta, Kind::Thread])?.is_empty() {
                     return Ok(false);
                 }
             }
             true
         }
         Action::Deliberate => {
-            status == Some(ThreadStatus::Closed.as_str())
-                && !citing(index, id, &[Kind::Decision, Kind::Learning])?.is_empty()
+            text("status") == Some(ThreadStatus::Closed.as_str())
+                && !index.citing(id, &[Kind::Decision, Kind::Learning])?.is_empty()
         }
         Action::Distil => {
-            let learnings = match header.get("kind").and_then(Value::as_str) {
+            let learnings = match text("kind") {
                 Some("learning") => vec![id.clone()],
-                _ => citing(index, id, &[Kind::Learning])?,
+                _ => index.citing(id, &[Kind::Learning])?,
             };
             for l in learnings {
                 let h = index.header(l.as_str())?.unwrap_or_default();
-                // A converted learning has no cue yet; its title is the line a search would try first.
-                let cue = h.get("cue").or_else(|| h.get("title")).and_then(Value::as_str).unwrap_or_default();
+                // A learning with no cue has nothing to retrieve it by: the stop stays false until the agent sets one.
+                let cue = h.get("cue").and_then(Value::as_str).unwrap_or_default();
                 if !cue.trim().is_empty()
                     && index.search(&[cue.to_string()], None, None, RETRIEVAL)?.iter().any(|hit| hit.id == l.as_str())
                 {
@@ -94,9 +91,9 @@ pub(crate) fn done(
     })
 }
 
-/// The batch is full or the finish line is covered: each named block of the milestone has a namesake in an issue
-/// under it.
-fn derived(vault: &Vault, index: &Index, id: &Id) -> Result<bool, Refusal> {
+/// The batch is full or the finish line is covered: each named block in the milestone's `## Finish line` has a
+/// namesake in the `## Check` of an issue under it (21, needs derivation).
+fn derived(index: &Index, id: &Id) -> Result<bool, Refusal> {
     let f = Filter { kind: Kind::Issue, status: None, project: None, under: Some(id.as_str()), limit: usize::MAX >> 1 };
     let (issues, _) = index.list(&f)?;
     if issues.iter().filter(|i| intents::is_live_issue(i.status.as_deref().unwrap_or_default())).count() >= BATCH {
@@ -104,46 +101,54 @@ fn derived(vault: &Vault, index: &Index, id: &Id) -> Result<bool, Refusal> {
     }
     let mut covered = BTreeSet::new();
     for i in &issues {
-        let file = vault.read(&Id::parse(&i.id).expect("the index holds ids"))?;
-        covered.extend(bp_check::named(&file.body).into_iter().map(|c| c.attrs["name"].clone()));
+        covered.extend(names(&index.body(&i.id)?, "Check"));
     }
-    Ok(bp_check::named(&vault.read(id)?.body).iter().all(|c| covered.contains(&c.attrs["name"])))
+    Ok(names(&index.body(id.as_str())?, "Finish line").is_subset(&covered))
 }
 
-/// Every finding of the latest review has a disposition, and the head moved if one is `fixed`.
+/// The names of the named blocks in the body's sections under `heading`.
+fn names(body: &str, heading: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for s in Body::parse(body).sections_named(heading) {
+        out.extend(bp_check::named(&Body::parse(&s.text)).into_iter().map(|c| c.attrs["name"].clone()));
+    }
+    out
+}
+
+/// Every finding of the latest review has a disposition, matched by its index, and the head moved if one is `fixed`.
 fn responded(index: &Index, id: &Id) -> Result<bool, Refusal> {
-    let (Some((pr, _)), Some(review)) = (heads(index, id)?, index.records(id.as_str(), Kind::Review)?.pop()) else {
+    let (Some((pr, _)), Some(review)) = (open_head(index, id)?, index.records(id.as_str(), Kind::Review)?.pop()) else {
         return Ok(false);
     };
-    // The findings are the rows of the body's table, after its header and separator lines (13, Review).
-    let findings = review.body.lines().filter(|l| l.trim_start().starts_with('|')).count().saturating_sub(2);
+    // The findings are the rows of the body's table, after its header and separator lines, counted from 1 (21,
+    // respond). A disposition for an index past the last row answers nothing.
+    let rows = review.body.lines().filter(|l| l.trim_start().starts_with('|')).count().saturating_sub(2);
     let dispositions = index.records(&review.id, Kind::Disposition)?;
     let answered: BTreeSet<u64> = dispositions.iter().filter_map(|d| d.header.get("finding")?.as_u64()).collect();
     let fixed = dispositions.iter().any(|d| field(d, "as").as_deref() == Some("fixed"));
-    Ok(answered.len() >= findings && !(fixed && field(&review, "head") == Some(pr)))
+    Ok((1..=rows as u64).all(|n| answered.contains(&n)) && !(fixed && field(&review, "head") == Some(pr)))
 }
 
-/// The open pull request's head and the held claim's worktree head. The forge comes from the snapshot when one is
-/// set, as the intents read it, else from `gh` in the worktree; with no worktree there is no claim head to compare.
-fn heads(index: &Index, id: &Id) -> Result<Option<(String, String)>, Refusal> {
+/// The head of the issue's open pull request while a claim is held, and the claim's worktree when this machine has
+/// it. The forge comes from the snapshot when one is set, as the intents read it. Else `gh` reads it in the worktree,
+/// and with no worktree nothing does: a temporary step that issue 5 of 27 removes.
+fn open_head(index: &Index, id: &Id) -> Result<Option<(String, Option<PathBuf>)>, Refusal> {
     let Some(claim) = held(index, id)? else { return Ok(None) };
-    let Some(worktree) = field(&claim, "worktree") else { return Ok(None) };
-    let Some(local) = Repo::find(Path::new(&worktree)).and_then(|r| r.head()) else { return Ok(None) };
-    let open = match crate::intent::World::read()?.forge {
-        Some(s) => s.open_for(id.as_str().rsplit('/').next().unwrap_or_default()).cloned(),
-        None => Gh::new(&worktree).prs_for_head(&branch(id))?.into_iter().find(PullRequest::is_open),
+    let worktree = field(&claim, "worktree").map(PathBuf::from).filter(|w| w.is_dir());
+    let open = if let Some(s) = crate::intent::World::read()?.forge {
+        s.open_for(id.as_str().rsplit('/').next().unwrap_or_default()).cloned()
+    } else if let Some(dir) = &worktree {
+        let prs = Gh::new(dir).prs_for_head(&branch(id)).map_err(|mut r| {
+            r.fix = format!(
+                "{}; until the forge snapshot lands (27, issue 5), `walk --done` reads the forge through gh, so \
+                 offline it cannot answer: rerun online, or set BP_FORGE_SNAPSHOT",
+                r.fix
+            );
+            r
+        })?;
+        prs.into_iter().find(PullRequest::is_open)
+    } else {
+        None
     };
-    Ok(open.map(|p| (p.head_ref_oid, local)))
-}
-
-/// The files of `kinds` that name `id`.
-fn citing(index: &Index, id: &Id, kinds: &[Kind]) -> Result<Vec<Id>, Refusal> {
-    let mut out = Vec::new();
-    for i in index.inbound(id)? {
-        let kind = index.header(i.as_str())?.and_then(|h| h.get("kind")?.as_str().map(str::to_string));
-        if kind.is_some_and(|k| kinds.iter().any(|w| w.as_str() == k)) {
-            out.push(i);
-        }
-    }
-    Ok(out)
+    Ok(open.map(|p| (p.head_ref_oid, worktree)))
 }
