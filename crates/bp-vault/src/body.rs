@@ -67,8 +67,12 @@ crate::closed_enum! {
         DuplicateHeading = "duplicate_heading",
         CheckUnnamed = "check_unnamed",
         CheckMalformed = "check_malformed",
+        Placeholder = "placeholder",
     }
 }
+
+/// The mark on each slot of a body template (13, rule 5). It renders as text: not HTML, not a link.
+pub const PLACEHOLDER: &str = "TODO(bp):";
 
 /// A body finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -77,7 +81,7 @@ pub struct Finding {
     pub kind: FindingKind,
     /// The line in the body where it starts, from 1.
     pub line: usize,
-    /// The heading, the fence's first line, or the check's info string.
+    /// The heading, the fence's first line, the check's info string, or the placeholder's line.
     pub detail: String,
 }
 
@@ -173,6 +177,12 @@ impl Body {
             if CHECK_SECTIONS.contains(&h.as_str()) {
                 body.empty_checks.extend(empty_checks(h, range.start..end, &subheadings, &blocks));
             }
+        }
+        // A check block's text is a slot too; any other code may quote the placeholder.
+        let quoted: Vec<&Range<usize>> = code.iter().filter(|c| !blocks.contains(&c.start)).collect();
+        for (at, _) in text.match_indices(PLACEHOLDER).filter(|(at, _)| !quoted.iter().any(|c| c.contains(at))) {
+            let detail = slot_line(text, at).to_string();
+            body.findings.push(Finding { kind: FindingKind::Placeholder, line: line(at), detail });
         }
         body.findings.sort_by_key(|f| f.line);
         for (target, at) in wikilinks(text) {
@@ -270,6 +280,13 @@ fn check_header(rest: &str, line: usize, findings: &mut Vec<Finding>) -> Check {
         }
     }
     Check { runner: runner.trim().to_string(), attrs: map, text: String::new() }
+}
+
+/// The line that holds byte `at`, trimmed.
+fn slot_line(text: &str, at: usize) -> &str {
+    let start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+    text[start..end].trim()
 }
 
 /// Every `[[target]]`, `[[target|label]]` or `[[target#section]]`, as written, with its byte offset.
@@ -375,6 +392,17 @@ mod tests {
         let b = Body::parse("```check shell {name=x}trailing\n```\n\n```check {name=a name=b \"q\"}\n```\n");
         let kinds: Vec<FindingKind> = b.findings.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, [FindingKind::CheckMalformed; 4], "{:?}", b.findings);
+    }
+
+    #[test]
+    fn a_placeholder_outside_quoted_code_is_a_finding() {
+        let text = "TODO(bp): Lead.\n\n- TODO(bp): rule\n\n`TODO(bp): quoted` and <!-- TODO(bp): hidden -->\n\n\
+                    ```text\nTODO(bp): an example\n```\n\n```check shell {name=replace-me}\nTODO(bp): a command\n```\n";
+        let b = Body::parse(text);
+        let found: Vec<(FindingKind, usize, &str)> =
+            b.findings.iter().map(|f| (f.kind, f.line, f.detail.as_str())).collect();
+        let want = [(1, "TODO(bp): Lead."), (3, "- TODO(bp): rule"), (12, "TODO(bp): a command")];
+        assert_eq!(found, want.map(|(l, d)| (FindingKind::Placeholder, l, d)), "a check block's text is a slot");
     }
 
     #[test]

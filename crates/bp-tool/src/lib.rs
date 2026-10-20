@@ -197,7 +197,7 @@ fn wrote(result: Result<Wrote, Refusal>, json: bool, out: &mut impl std::io::Wri
     }
 }
 
-/// A write verb's result: what it wrote (exit 0), or the id of what the vault already held (exit 3).
+/// A write verb's result (exit 0), or the id of what the vault already held (exit 3).
 enum Wrote {
     Changed(Value),
     Already(Value),

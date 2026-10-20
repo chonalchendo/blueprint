@@ -1,5 +1,6 @@
 //! `bp create <kind>`: one node from flags, keyed by its slug, one commit (15, create). A retried create that
-//! finds its own node exits 3 instead of making a second (14).
+//! finds its own node exits 3 instead of making a second (14). With `--template` it prints the kind's body template
+//! and writes nothing.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -10,14 +11,15 @@ use clap::Args;
 use crate::link::{resolve, search_terms};
 use crate::{Wrote, clock, kind_arg, node_id, schema, set};
 
-/// `bp create <kind> --title <t> [--slug <s>] [--under <id>] [--body-file <f>] [--project <p>] [--dry-run]`.
+/// `bp create <kind> --title <t> [--slug <s>] [--under <id>] [--body-file <f>] [--project <p>] [--dry-run]`, or
+/// `bp create <kind> --template`.
 #[derive(Args)]
 pub struct Create {
     /// The node kind: project, design, milestone, issue, thread, decision, convention, learning, inbox.
     pub kind: String,
     /// The title; the slug comes from it unless `--slug` names one.
-    #[arg(long)]
-    pub title: String,
+    #[arg(long, required_unless_present = "template")]
+    pub title: Option<String>,
     /// The slug: the last segment of the id, or `containers/<slug>` and `components/<slug>` for a design.
     /// Lowercase ASCII letters, digits, `-` and `.`, at most 80 characters; an inbox slug gains the date.
     #[arg(long)]
@@ -34,6 +36,9 @@ pub struct Create {
     /// Validate and print what would be written; write nothing.
     #[arg(long)]
     pub dry_run: bool,
+    /// Print the kind's body template, a file of the bundle, as `{kind, template}`; write nothing.
+    #[arg(long, conflicts_with_all = ["title", "slug", "under", "body_file", "project", "dry_run"])]
+    pub template: bool,
 }
 
 pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
@@ -44,11 +49,16 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
             format!("kind {kind} is a record, written by its own verb: bp record {kind} <parent>, bp check or bp cut"),
         ));
     };
-    schema::title(&format!("create {kind} title"), &create.title)?;
+    if create.template {
+        let template = bp_install::template(kind).expect("create refused a record kind first");
+        return Ok(Wrote::Changed(serde_json::json!({ "kind": kind, "template": template })));
+    }
+    let title = create.title.as_deref().expect("clap requires --title without --template");
+    schema::title(&format!("create {kind} title"), title)?;
     let under = create.under.as_deref().map(node_id).transpose()?;
     let body = create.body_file.as_deref().map(body_file).transpose()?.unwrap_or_default();
     let vault = Vault::discover(cwd)?;
-    let id = home(kind, create)?;
+    let id = home(kind, title, create)?;
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
     let writer = if create.dry_run { None } else { Some(vault.writer()?) };
@@ -73,7 +83,7 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     let under = parent(&vault, index, kind, &id, under.as_ref())?;
     let header = Header {
         kind,
-        title: Some(create.title.clone()),
+        title: Some(title.into()),
         status: Some(status.into()),
         under,
         aliases: Vec::new(),
@@ -109,7 +119,7 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
 /// `--slug` or the title. A slug is lowercase ASCII letters, digits, `-` and `.`, at most 80 characters; an inbox
 /// slug starts with the UTC date, override or not (13, rule 1). A `--slug` outside the grammar refuses; it is never
 /// cut or rewritten.
-fn home(kind: Kind, create: &Create) -> Result<Id, Refusal> {
+fn home(kind: Kind, title: &str, create: &Create) -> Result<Id, Refusal> {
     let schema = |fix: String| {
         Refusal::new(
             Code::SchemaInvalid,
@@ -121,14 +131,14 @@ fn home(kind: Kind, create: &Create) -> Result<Id, Refusal> {
     };
     let date = if kind == Kind::Inbox { Some(clock::date(clock::now()?)) } else { None };
     // A letter outside ASCII would split its word: `Café` mints `caf`.
-    let foreign = create.title.chars().any(|c| !c.is_ascii() && c.is_alphabetic());
+    let foreign = title.chars().any(|c| !c.is_ascii() && c.is_alphabetic());
     let minted = match &date {
         _ if foreign => String::new(),
         Some(d) => {
-            let words = bp_vault::slug(&create.title, SLUG_MAX - d.len() - 1);
+            let words = bp_vault::slug(title, SLUG_MAX - d.len() - 1);
             if words.is_empty() { words } else { format!("{d}-{words}") }
         }
-        None => bp_vault::slug(&create.title, SLUG_MAX),
+        None => bp_vault::slug(title, SLUG_MAX),
     };
     // A refused `--slug` shows what the title mints instead.
     let example = match (create.slug.as_deref().and_then(|s| s.rsplit_once('/')), minted.is_empty()) {
