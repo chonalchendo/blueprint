@@ -21,7 +21,7 @@ pub use integrity::Fault;
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
 /// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
 /// bump to the same number still differ.
-const SCHEMA: i64 = 9;
+const SCHEMA: i64 = 10;
 
 /// What is wrong with a markdown file whose path is not an id.
 const STRAY: &str = "the path is not an id: projects/<project>/<kind>/<slug> or shared/<kind>/<slug>";

@@ -1,9 +1,9 @@
-<The language, tool or style that this convention governs.>
+TODO(bp): The purpose of this rule set, in one sentence.
 
 ## Rules
 
-- <One rule, in one sentence, with an example.>
+- TODO(bp): One rule, in one sentence, with an example.
 
 ## Reason
 
-<Why these rules apply.>
+TODO(bp): Why these rules apply.

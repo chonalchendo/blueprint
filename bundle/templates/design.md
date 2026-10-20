@@ -1,13 +1,15 @@
-<One sentence: what this part does.>
+TODO(bp): One sentence: what this part does.
 
 ## Scope
 
-<What this part does, and why. Name its interface: what it takes and what it gives.>
+TODO(bp): What this part does, and why. Name its interface: what it takes and what it gives.
 
 ## Out of scope
 
-<What this part does not do, and the part that does it.>
+TODO(bp): What this part does not do, and the part that does it.
 
 ## Constraints
 
-<The decisions and conventions that this part obeys. Link each one.>
+TODO(bp): The decisions and conventions that this part obeys. Put their ids in the `cites` header.
+
+TODO(bp): A check that this design carries goes in a `## Checks` section, one fenced block for each check. Delete this line when the design carries none.

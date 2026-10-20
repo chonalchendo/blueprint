@@ -31,7 +31,3 @@ serde_json.workspace = true
 [dev-dependencies]
 assert_cmd.workspace = true
 tempfile.workspace = true
-
-# The edge is declared ahead of its first use, so the crate rule holds it from the start.
-[package.metadata.cargo-machete]
-ignored = ["bp-install"]

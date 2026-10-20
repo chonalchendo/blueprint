@@ -41,23 +41,6 @@ pub struct Create {
     pub template: bool,
 }
 
-/// One body template per node kind, in `bundle/templates/`. The binary embeds them, so a template needs no install;
-/// `install` does not copy them (27, design change 7).
-fn template(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Project => include_str!("../../../bundle/templates/project.md"),
-        Kind::Design => include_str!("../../../bundle/templates/design.md"),
-        Kind::Milestone => include_str!("../../../bundle/templates/milestone.md"),
-        Kind::Issue => include_str!("../../../bundle/templates/issue.md"),
-        Kind::Thread => include_str!("../../../bundle/templates/thread.md"),
-        Kind::Decision => include_str!("../../../bundle/templates/decision.md"),
-        Kind::Convention => include_str!("../../../bundle/templates/convention.md"),
-        Kind::Learning => include_str!("../../../bundle/templates/learning.md"),
-        Kind::Inbox => include_str!("../../../bundle/templates/inbox.md"),
-        _ => unreachable!("a record kind has no first status, so create refused it first"),
-    }
-}
-
 pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     let kind = kind_arg(&create.kind)?;
     let Some(status) = schema::first_status(kind) else {
@@ -67,7 +50,8 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
         ));
     };
     if create.template {
-        return Ok(Wrote::Changed(serde_json::json!({ "kind": kind, "template": template(kind) })));
+        let template = bp_install::template(kind).expect("create refused a record kind first");
+        return Ok(Wrote::Changed(serde_json::json!({ "kind": kind, "template": template })));
     }
     let title = create.title.as_deref().expect("clap requires --title without --template");
     schema::title(&format!("create {kind} title"), title)?;

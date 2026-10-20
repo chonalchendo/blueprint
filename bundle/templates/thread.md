@@ -1,13 +1,13 @@
-<The question, in one sentence.>
+TODO(bp): The question, in one sentence.
 
 ## Read
 
-<What you read. Link each source.>
+TODO(bp): What you read. Link each source.
 
 ## Tried
 
-<What you tried, and what happened.>
+TODO(bp): What you tried, and what happened.
 
 ## Compared
 
-<The options, and how each one compares with the others.>
+TODO(bp): The options, and how each one compares with the others.

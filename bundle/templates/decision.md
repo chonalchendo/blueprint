@@ -1,13 +1,13 @@
-<The choice, in one sentence.>
+TODO(bp): The choice, in one sentence.
 
 ## Reason
 
-<Why this choice is correct. Give the evidence.>
+TODO(bp): Why this choice is correct. Give the evidence.
 
 ## Options rejected
 
-<Each option that you did not choose, and why.>
+TODO(bp): Each option that you did not choose, and why.
 
-## Enforced by
+## Enforcement
 
-<The check or the review that enforces this decision.>
+TODO(bp): The check or the review that enforces this decision.

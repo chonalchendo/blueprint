@@ -9,12 +9,13 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value};
 
 use super::{failed, object};
-use crate::{Code, ISSUE_CONTEXT, Index, Refusal, Vault};
+use crate::{Code, FindingKind, ISSUE_CONTEXT, Index, Refusal, Vault};
 
 /// One way a file of the project breaks a vault rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fault {
-    /// The rule, as the run's output names it: `broken`, `link`, `issue`, `level` or `case`.
+    /// The rule, as the run's output names it: `broken`, `link`, `issue`, `level`, `case` or
+    /// `placeholder`.
     pub rule: &'static str,
     /// The node's id; for a file that does not parse, or a path no file holds, the path.
     pub id: String,
@@ -41,6 +42,7 @@ impl Index {
         self.issues_without_context(project, &mut out)?;
         self.designs_off_the_spine(project, &mut out)?;
         self.case_twins(&tracked, &prefix, &mut out)?;
+        self.unfilled(project, &mut out)?;
         out.dedup();
         out.sort_by_key(|f| !f.node);
         Ok(out)
@@ -180,6 +182,15 @@ impl Index {
             let id = path.strip_suffix(".md").map_or_else(|| path.clone(), str::to_string);
             Fault { rule: "case", id, detail: format!("differs only by case from {}", others.join(", ")), node }
         }));
+        Ok(())
+    }
+
+    /// Rule 6 (13, rule 5): a node of the project that holds a body template's unfilled slot.
+    fn unfilled(&self, project: &str, out: &mut Vec<Fault>) -> Result<(), Refusal> {
+        let sql = "select f.src, f.detail from findings f join nodes n on n.id = f.src \
+                   where f.kind = ?1 and n.project = ?2 order by f.src";
+        let found = self.pairs(sql, params![FindingKind::Placeholder.as_str(), project])?;
+        out.extend(found.into_iter().map(|(id, detail)| Fault { rule: "placeholder", id, detail, node: true }));
         Ok(())
     }
 
@@ -476,6 +487,17 @@ mod tests {
             ("case", "projects/ex/issues/OK".to_string(), false),
         ];
         assert_eq!(found, want, "only the parsed twin can be a run's edge, and it leads");
+    }
+
+    #[test]
+    fn rule_6_a_node_that_holds_a_placeholder() {
+        let (_d, v) = vault();
+        let slot = node("thread", "").replace("Body.\n", "Lead.\n\nTODO(bp): the question.\n\n`TODO(bp): quoted`\n");
+        write(&v.root, "projects/ex/threads/slot.md", &slot);
+        write(&v.root, "projects/bp/threads/slot.md", &slot);
+        let found = details(&v, "ex", "placeholder");
+        let want = [("projects/ex/threads/slot".to_string(), "TODO(bp): the question.".to_string())];
+        assert_eq!(found, want, "one fault per slot, and only the project's own");
     }
 
     #[test]

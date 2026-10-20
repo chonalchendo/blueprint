@@ -275,24 +275,35 @@ fn a_dry_run_refuses_a_dirty_target() {
 }
 
 #[test]
-fn a_template_writes_nothing_and_a_body_from_it_holds_no_finding() {
+fn a_template_writes_nothing_and_each_unfilled_slot_is_a_finding() {
     let dir = vault();
     let root = dir.path();
     let template = |kind: &str| {
         let (code, v) = bp(root, &["create", kind, "--template"]);
         assert_eq!((code, v["kind"].as_str()), (Some(0), Some(kind)), "{v}");
-        body(root, v["template"].as_str().unwrap())
+        v["template"].as_str().unwrap().to_string()
     };
-    let issue = template("issue");
-    let milestone = template("milestone");
+    let (issue, milestone) = (template("issue"), template("milestone"));
     assert_eq!(commits(root), "1");
     let s = "projects/bp/designs/system";
-    let args = ["create", "milestone", "--project", "bp", "--title", "Tm", "--under", s, "--body-file", &milestone];
-    let (code, v) = bp(root, &args);
-    assert_eq!((code, v["findings"].as_array().map(Vec::len)), (Some(0), Some(0)), "{v}");
-    let args = ["create", "issue", "--project", "bp", "--title", "Ti", "--under", M, "--body-file", &issue];
-    let (code, v) = bp(root, &args);
-    assert_eq!((code, v["findings"].as_array().map(Vec::len)), (Some(0), Some(0)), "{v}");
+    let codes = |v: &serde_json::Value| -> Vec<String> {
+        v["findings"].as_array().unwrap().iter().map(|f| f["code"].as_str().unwrap().to_string()).collect()
+    };
+    let path = |name: &str, text: &str| {
+        let path = root.join(".bp").join(name);
+        std::fs::write(&path, text).unwrap();
+        path.display().to_string()
+    };
+    let (m, i) = (path("m.md", &milestone), path("i.md", &issue));
+    let (code, v) =
+        bp(root, &["create", "milestone", "--project", "bp", "--title", "Tm", "--under", s, "--body-file", &m]);
+    assert_eq!((code, codes(&v)), (Some(0), vec!["placeholder".to_string(); 4]), "a verbatim template: {v}");
+    let (code, v) = bp(root, &["create", "issue", "--project", "bp", "--title", "Ti", "--under", M, "--body-file", &i]);
+    assert_eq!((code, codes(&v)), (Some(0), vec!["placeholder".to_string(); 3]), "{v}");
+    let filled = path("f.md", &issue.replace("TODO(bp): ", "Filled: "));
+    let (code, v) =
+        bp(root, &["create", "issue", "--project", "bp", "--title", "Tf", "--under", M, "--body-file", &filled]);
+    assert_eq!((code, codes(&v)), (Some(0), vec![]), "a filled template: {v}");
     let (code, v) = bp(root, &["create", "run", "--template"]);
     assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "a record has no template: {v}");
 }
