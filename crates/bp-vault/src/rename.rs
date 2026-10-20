@@ -1,6 +1,7 @@
 //! What a rename reads and rewrites (12, A rename): the files that mention a node, found in the index, and each
 //! one's text with every whole mention of the old id replaced and every other byte kept.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::index::failed;
@@ -22,20 +23,37 @@ impl Index {
     /// any other mention of one of those ids in a header or body, code and prose included (12, A rename). A stored
     /// text that holds the id as part of a longer one is a candidate too; [`retarget`] leaves it as it was.
     pub fn inbound(&self, id: &Id) -> Result<Vec<Id>, Refusal> {
+        let mut names = vec![id.clone()];
+        names.extend(self.aliases_of(id)?);
         let run = || -> rusqlite::Result<Vec<Id>> {
             // `0` follows `/`, so the range holds exactly the ids under the directory, and the index serves it. A
             // path under the directory holds the id, so the text scans need only the names.
-            self.conn
+            let mut out: BTreeSet<String> = self
+                .conn
                 .prepare_cached(
-                    "with names(n) as (select ?1 union select alias from aliases where id = ?1) \
-                     select src from links where dst in (select n from names) or (dst > ?1 || '/' and dst < ?1 || '0') \
-                     union select f.id from fts f, names where instr(f.body, n) > 0 \
-                     union select x.id from nodes x, names where instr(x.header, n) > 0 \
-                     union select r.id from records r, names where instr(r.body, n) > 0 or instr(r.header, n) > 0 \
-                     order by 1",
+                    "select src from links where dst = ?1 or dst in (select alias from aliases where id = ?1) \
+                     or (dst > ?1 || '/' and dst < ?1 || '0')",
                 )?
-                .query_map([id.as_str()], |r| r.get(0).map(Id::from_trusted))?
-                .collect()
+                .query_map([id.as_str()], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut text = self.conn.prepare_cached(
+                "select id from fts where fts match ?2 and instr(body, ?1) > 0 \
+                 union select id from nodes where instr(header, ?1) > 0 \
+                 union select id from records where instr(body, ?1) > 0 or instr(header, ?1) > 0",
+            )?;
+            for n in &names {
+                // The bodies are most of the index's text, so the full-text index picks the candidates and `instr`
+                // keeps the exact ones. An id's inner tokens stand between its own separators, so every text that
+                // holds the id holds them in order whatever is around it; the first and last may run into a
+                // neighbouring word. An id has three segments, so it has an inner token.
+                let tokens: Vec<&str> =
+                    n.as_str().split(|c: char| !c.is_ascii_alphanumeric()).filter(|t| !t.is_empty()).collect();
+                let phrase = format!("body : \"{}\"", tokens[1..tokens.len() - 1].join(" "));
+                for found in text.query_map([n.as_str(), phrase.as_str()], |r| r.get(0))? {
+                    out.insert(found?);
+                }
+            }
+            Ok(out.into_iter().map(Id::from_trusted).collect())
         };
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }

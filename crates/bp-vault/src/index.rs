@@ -47,6 +47,7 @@ create table markdown (src text not null, target text not null);
 create index markdown_src on markdown (src);
 create table aliases (alias text not null, id text not null);
 create index aliases_alias on aliases (alias);
+create index aliases_id on aliases (id);
 create table checks (src text not null);
 create index checks_src on checks (src);
 create table findings (src text not null, kind text not null, detail text not null);
@@ -636,34 +637,74 @@ mod tests {
     }
 
     /// 25, issue 9: a write updates the walk's graph in place, or not at all, and the index still equals a rebuild.
+    /// Each step names the way the update must go, so a change that rebuilds on every write fails; the stored graph
+    /// must equal one rebuilt over the same rows, byte for byte.
     #[test]
     fn a_write_keeps_the_graph_equal_to_a_rebuild() {
+        use crate::walk::Updated::{Grown, Kept, Rebuilt};
         let (_d, v) = vault();
         let mut index = Index::open(&v).unwrap();
+        let learning = |aliases: &str| format!("---\nkind: learning\ntitle: L\nstatus: draft\n{aliases}---\n");
+        let (issue_a, issue_b, issue_d, l) = (
+            "projects/bp/issues/0001.a",
+            "projects/bp/issues/0002.b",
+            "projects/bp/issues/0003.d",
+            "shared/learnings/l",
+        );
+        let to_m = |text: String| text.replace("[[shared/learnings/l]]", "[[shared/learnings/m]]");
         let steps = [
             // A label: no link moves, so the graph stays.
-            ("projects/bp/issues/0001.a", issue("Walk budget", "resolved")),
-            // An inbox entry with no link: one new row.
-            ("shared/inbox/2026-10-20-note", "---\nkind: inbox\ntitle: Note\nstatus: raw\n---\n".into()),
+            (vec![(issue_a, issue("Walk budget", "resolved"))], None, Kept),
+            // An inbox entry with no link: one new row, which the walk does not enter.
+            (
+                vec![("shared/inbox/2026-10-20-note", "---\nkind: inbox\ntitle: Note\nstatus: raw\n---\n".into())],
+                None,
+                Grown,
+            ),
+            // A walkable node that no link names: one new row the walk enters.
+            (vec![("shared/learnings/k", learning(""))], None, Grown),
             // A node the issues' bodies already name: new arcs in, so a rebuild.
-            ("shared/learnings/l", "---\nkind: learning\ntitle: L\nstatus: draft\n---\n".into()),
-            // A body link that moves.
-            ("projects/bp/issues/0002.b", issue("Other", "resolved").replace("[[shared/learnings/l]]", "")),
+            (vec![(l, learning(""))], None, Rebuilt),
+            // A body link that goes.
+            (vec![(issue_b, issue("Other", "resolved").replace("[[shared/learnings/l]]", ""))], None, Rebuilt),
             // A new node with links out.
-            ("projects/bp/issues/0003.d", issue("New", "open")),
+            (vec![(issue_d, issue("New", "open"))], None, Rebuilt),
+            // A rename that rewrites every link to the node: it keeps its row, so no arc moves.
+            (
+                vec![
+                    ("shared/learnings/m", learning("aliases: [\"l\"]\n")),
+                    (issue_a, to_m(issue("Walk budget", "resolved"))),
+                    (issue_d, to_m(issue("New", "open"))),
+                    ("projects/ex/issues/0001.c", to_m(issue("Elsewhere", "open"))),
+                ],
+                Some(("shared/learnings/m", l)),
+                Kept,
+            ),
         ];
-        for (id, text) in steps {
-            write(&v.root, id, &text);
-            let file = File::parse(crate::Id::parse(id).unwrap(), text.as_bytes()).unwrap();
-            index.apply(&v.root, &[file], []).unwrap();
-            let csr: Vec<u8> = index.conn.query_row("select csr from graph", [], |r| r.get(0)).unwrap();
-            let rows: i64 = index.conn.query_row("select max(rowid) + 1 from nodes", [], |r| r.get(0)).unwrap();
-            assert_eq!(i64::from(u32::from_le_bytes(csr[..4].try_into().unwrap())), rows, "a graph row per node row");
+        for (files, moved, way) in steps {
+            let moved: BTreeMap<crate::Id, crate::Id> =
+                moved.iter().map(|(n, o)| (crate::Id::parse(n).unwrap(), crate::Id::parse(o).unwrap())).collect();
+            for old in moved.values() {
+                std::fs::remove_file(old.path(&v.root)).unwrap();
+            }
+            let files: Vec<File> = files
+                .iter()
+                .map(|(id, text)| {
+                    write(&v.root, id, text);
+                    File::parse(crate::Id::parse(id).unwrap(), text.as_bytes()).unwrap()
+                })
+                .collect();
+            let step = files[0].id.to_string();
+            assert_eq!(index.apply(&v.root, &files, &moved).unwrap(), way, "{step}");
+            let csr = || -> Vec<u8> { index.conn.query_row("select csr from graph", [], |r| r.get(0)).unwrap() };
+            let stored = csr();
+            crate::walk::rebuild_graph(&index.conn).unwrap();
+            assert_eq!(stored, csr(), "{step}: the graph equals one rebuilt over the same rows");
             let written = dump(&index);
             drop(index);
             std::fs::remove_file(v.root.join(".bp/index.db")).unwrap();
             index = Index::open(&v).unwrap();
-            assert_eq!(written, dump(&index), "after {id}");
+            assert_eq!(written, dump(&index), "{step}: the index equals a rebuild from nothing");
         }
     }
 

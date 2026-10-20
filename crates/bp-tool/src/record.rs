@@ -178,13 +178,8 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     let now = crate::clock::now()?;
     // The lock comes before the reads, so the key this write takes is still free when it commits.
     let writer = if r.dry_run { None } else { Some(vault.writer()?) };
-    let opened;
-    let index = if let Some(w) = &writer {
-        w.index()
-    } else {
-        opened = Index::open(&vault)?;
-        &opened
-    };
+    let mut opened = None;
+    let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
     let parent = if kind == Kind::Handoff && r.parent == "shared" { None } else { Some(subject(index, &r.parent)?) };
     if let Some(p) = &parent {
         parent_fits(&vault, index, kind, p)?;

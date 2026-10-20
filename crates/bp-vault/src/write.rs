@@ -9,7 +9,7 @@
 //! pre-images go back. git's own `index.lock` is never deleted.
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::TryLockError;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -67,6 +67,28 @@ pub struct Moves {
     pub ids: BTreeMap<Id, Id>,
     /// Each file that is not markdown, as its old and new paths under the root.
     pub files: Vec<(String, String)>,
+}
+
+impl Moves {
+    /// `paths` as git takes them, sorted: a path under a moved node's old directory goes as that directory, and one
+    /// under its new directory too when `new` is set. A rename moves every file under the old directory, so the
+    /// directory names the same files, and git matches one pathspec, not one per file (25, issue 9: a 95-path
+    /// rename). The new directory stands for its files only once the rename is admitted: before, `status` would
+    /// report a directory HEAD holds as dirty files, which 12 refuses as taken.
+    pub fn pathspecs(&self, paths: &[impl AsRef<str>], new: bool) -> Vec<String> {
+        let dirs: BTreeSet<&str> = self
+            .ids
+            .iter()
+            .flat_map(|(to, from)| [Some(from.as_str()), new.then_some(to.as_str())])
+            .flatten()
+            .collect();
+        let specs: BTreeSet<&str> = paths
+            .iter()
+            .map(AsRef::as_ref)
+            .map(|p| p.match_indices('/').map(|(i, _)| &p[..i]).find(|d| dirs.contains(d)).unwrap_or(p))
+            .collect();
+        specs.into_iter().map(str::to_string).collect()
+    }
 }
 
 /// The journal's first line: the head the write started from, and each path with its pre-image's length, or none
@@ -133,9 +155,8 @@ impl Vault {
 }
 
 impl Writer<'_> {
-    /// The index, opened under the lock. A verb reads through it rather than opening a second: `clean` runs `git
-    /// status`, which may rewrite git's index file and so move the fingerprint, and a second open after it would
-    /// rescan every file.
+    /// The index, opened under the lock. A verb reads through it rather than opening a second, so it reads the
+    /// index no other write can move before this one commits, and opens it once.
     pub fn index(&self) -> &Index {
         &self.index
     }
@@ -181,11 +202,14 @@ impl Writer<'_> {
         let mut paths: Vec<String> = changes.keys().map(|id| format!("{id}.md")).collect();
         paths.extend(gone.iter().cloned());
         paths.extend(moves.files.iter().flat_map(|(from, to)| [from.clone(), to.clone()]));
-        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let checked = moves.pathspecs(&paths, false);
         let head = match self.clean.take() {
-            Some((head, clean)) if paths.iter().all(|p| clean.iter().any(|c| c == p)) => head,
-            _ => head_if_clean(root, &paths)?,
+            Some((head, clean)) if checked.iter().all(|p| clean.contains(p)) => head,
+            _ => head_if_clean(root, &checked.iter().map(String::as_str).collect::<Vec<_>>())?,
         };
+        let specs = moves.pathspecs(&paths, true);
+        let specs: Vec<&str> = specs.iter().map(String::as_str).collect();
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
         let (files, findings) = self.index.propose_moving(self.vault, changes, &moves.ids)?;
         journal(root, head, &paths)?;
         let trailers = format!("Bp-Verb: {verb}\nBp-Role: {role}");
@@ -194,6 +218,8 @@ impl Writer<'_> {
         let mut new: Vec<&str> =
             paths.iter().zip(changes.keys()).filter(|(_, id)| !id.path(root).exists()).map(|(p, _)| *p).collect();
         new.extend(moves.files.iter().map(|(_, to)| to.as_str()));
+        let new = moves.pathspecs(&new, true);
+        let new: Vec<&str> = new.iter().map(String::as_str).collect();
         let done = changes
             .iter()
             .try_for_each(|(id, text)| put(&id.path(root), text.as_bytes(), false))
@@ -211,7 +237,7 @@ impl Writer<'_> {
             .and_then(
                 |()| if new.is_empty() { Ok(String::new()) } else { git(root, &[&["add", "--"], &new[..]].concat()) },
             )
-            .and_then(|_| git(root, &[&["commit", "-q", "-m", subject, "-m", &trailers, "--"], &paths[..]].concat()));
+            .and_then(|_| git(root, &[&["commit", "-q", "-m", subject, "-m", &trailers, "--"], &specs[..]].concat()));
         if let Err(e) = done {
             // The caller sees the failure, not a second refusal from the undo. An undo that fails keeps the journal,
             // and the next writer tries again.
@@ -229,7 +255,7 @@ impl Writer<'_> {
             prune(root, p);
         }
         // The head moved, so an update that fails here costs the next read one refresh and loses nothing.
-        let _ = self.index.apply(root, &files, moves.ids.values());
+        let _ = self.index.apply(root, &files, &moves.ids);
         Ok(Written { commit, findings })
     }
 }
@@ -366,11 +392,14 @@ fn put(path: &Path, bytes: &[u8], sync: bool) -> Result<(), Refusal> {
 }
 
 /// Runs git in the vault and returns its stdout. It branches on the exit code alone; `LC_ALL=C` keeps the text in
-/// a refusal readable whatever the locale, and literal pathspecs keep `a[1].md` from naming `a1.md`.
+/// a refusal readable whatever the locale, and literal pathspecs keep `a[1].md` from naming `a1.md`. Without
+/// `--no-optional-locks`, `status` rewrites git's index after a commit, which moves the fingerprint, so the next
+/// call after a refused or no-op write would rescan every file; `add` and `commit` still lock it.
 fn git(root: &Path, args: &[&str]) -> Result<String, Refusal> {
     let out = Command::new("git")
         .arg("-C")
         .arg(root)
+        .arg("--no-optional-locks")
         .env("LC_ALL", "C")
         .env("GIT_LITERAL_PATHSPECS", "1")
         .args(args)

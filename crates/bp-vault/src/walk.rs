@@ -253,8 +253,15 @@ fn reached(r: &rusqlite::Row) -> rusqlite::Result<Reached> {
     Ok(Reached { id: r.get(0)?, kind, title: r.get(2)?, status: r.get(3)?, rank: 0.0, tokens: count_at(r, 4)? })
 }
 
-/// Rebuilds the walk's graph from `links` and `nodes`. A refresh that changed any file runs it: row numbers move when
-/// a node is parsed again, so a partial update would point at stale rows.
+/// The walk's arcs as `src row, dst row, type`: one per link type between two nodes, a body wikilink read as a cite.
+/// [`rebuild_graph`] reads them all and [`around`] those of one id, so the two cannot drift apart.
+const ARCS: &str = "select a.rowid, b.rowid, case l.type when 'body' then 'cites' else l.type end
+    from links l join nodes a on a.id = l.src join nodes b on b.id = l.dst
+    where l.type in ('under', 'depends', 'answers', 'targets', 'cites', 'body') and a.rowid != b.rowid";
+
+/// Rebuilds the walk's graph from `links` and `nodes`. A refresh that changed any file runs it, because it may
+/// delete nodes and parse files no write named; a write updates the graph in place when no arc moves
+/// ([`update_graph`]).
 pub(crate) fn rebuild_graph(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     let n: i64 = conn.query_row("select coalesce(max(rowid), 0) + 1 from nodes", [], |r| r.get(0))?;
     let n = usize::try_from(n).expect("a rowid is positive");
@@ -262,13 +269,9 @@ pub(crate) fn rebuild_graph(conn: &rusqlite::Connection) -> rusqlite::Result<()>
     for row in conn.prepare("select rowid from nodes where kind != 'inbox'")?.query_map([], |r| r.get::<_, i64>(0))? {
         walkable[usize::try_from(row?).expect("a rowid is positive")] = true;
     }
-    // One arc per link type between two nodes, a body wikilink read as a cite; then summed per pair and direction.
+    // Each arc once, then summed per pair and direction.
     let mut typed = std::collections::BTreeSet::new();
-    let mut st = conn.prepare(
-        "select a.rowid, b.rowid, case l.type when 'body' then 'cites' else l.type end
-         from links l join nodes a on a.id = l.src join nodes b on b.id = l.dst
-         where l.type in ('under', 'depends', 'answers', 'targets', 'cites', 'body') and a.rowid != b.rowid",
-    )?;
+    let mut st = conn.prepare(ARCS)?;
     for row in st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)))? {
         typed.insert(row?);
     }
@@ -294,11 +297,12 @@ pub(crate) fn rebuild_graph(conn: &rusqlite::Connection) -> rusqlite::Result<()>
 }
 
 /// What the graph holds of one id: its row and whether the walk enters it, and every arc that starts or ends there,
-/// as `src dst type` over ids.
+/// as `src dst type` over rows. Rows, not ids, because the graph stores rows: a renamed node keeps its row, so a
+/// rename that rewrites every link to it moves no arc.
 #[derive(PartialEq, Eq)]
 pub(crate) struct Around {
     node: Option<(i64, bool)>,
-    arcs: std::collections::BTreeSet<(String, String, String)>,
+    arcs: std::collections::BTreeSet<(i64, i64, String)>,
 }
 
 /// [`Around`] for one id, read inside the write's transaction.
@@ -308,33 +312,44 @@ pub(crate) fn around(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<
         .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
     let arcs = conn
-        .prepare_cached(
-            "select a.id, b.id, case l.type when 'body' then 'cites' else l.type end
-             from links l join nodes a on a.id = l.src join nodes b on b.id = l.dst
-             where (l.src = ?1 or l.dst = ?1)
-               and l.type in ('under', 'depends', 'answers', 'targets', 'cites', 'body') and a.rowid != b.rowid",
-        )?
+        .prepare_cached(&format!("{ARCS} and (l.src = ?1 or l.dst = ?1)"))?
         .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(Around { node, arcs })
 }
 
-/// Brings the graph up to date after a write took each id from `before` to `after`. A label or a body that moves no
-/// link leaves it as it was, and a new node with no arc, such as an inbox entry, only adds its row; anything else
-/// rebuilds it. Rebuilding on every write cost a fifth of a one-file write (25, issue 9). A node keeps its row
-/// across an edit, so the rows of the stored graph still name the same nodes.
-pub(crate) fn update_graph(conn: &rusqlite::Connection, before: &[Around], after: &[Around]) -> rusqlite::Result<()> {
+/// Which way [`update_graph`] went.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Updated {
+    /// No row or arc moved: the stored graph stands.
+    Kept,
+    /// New rows with no arc were appended.
+    Grown,
+    /// An arc moved, or a row went: the graph was rebuilt.
+    Rebuilt,
+}
+
+/// Brings the graph up to date after a write took each id from `before` to `after`. A label, a body that moves no
+/// link, or a rename that rewrites every link to the node leaves it as it was, and a new node with no arc, such as
+/// an inbox entry, only adds its row; anything else rebuilds it. Rebuilding on every write cost a fifth of a
+/// one-file write (25, issue 9). A node keeps its row across an edit and a rename, so the stored rows still name the
+/// same nodes.
+pub(crate) fn update_graph(
+    conn: &rusqlite::Connection,
+    before: &[Around],
+    after: &[Around],
+) -> rusqlite::Result<Updated> {
     let mut added = Vec::new();
     for (b, a) in before.iter().zip(after) {
         match (b.node, a.node) {
-            _ if b.arcs != a.arcs => return rebuild_graph(conn),
+            _ if b.arcs != a.arcs => return rebuild_graph(conn).map(|()| Updated::Rebuilt),
             (x, y) if x == y => {}
             (None, Some(row)) => added.push(row),
-            _ => return rebuild_graph(conn),
+            _ => return rebuild_graph(conn).map(|()| Updated::Rebuilt),
         }
     }
     if added.is_empty() {
-        return Ok(());
+        return Ok(Updated::Kept);
     }
     let old: Vec<u8> = conn.query_row("select csr from graph", [], |r| r.get(0))?;
     let blob = Blob::new(&old);
@@ -355,7 +370,7 @@ pub(crate) fn update_graph(conn: &rusqlite::Connection, before: &[Around], after
         out[walkable + r] = u8::from(*walk);
     }
     conn.execute("update graph set csr = ?1", [out])?;
-    Ok(())
+    Ok(Updated::Grown)
 }
 
 /// Personalized PageRank from the seed, `rows[0]`, over the reached nodes in `rows` order; `at` maps a row to its

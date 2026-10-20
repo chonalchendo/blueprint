@@ -30,7 +30,12 @@ pub(crate) struct Ran {
 pub(crate) fn clean(vault: &Vault, owner: &Id) -> Result<(), Refusal> {
     let project = owner.project().expect("a check owner is a project's design, issue or milestone");
     let dir = format!("projects/{project}/");
-    let out = Command::new("git").arg("-C").arg(&vault.root).args(["status", "--porcelain", "--", &dir]).output();
+    // `--no-optional-locks`: a plain `status` rewrites git's index, which moves the vault's fingerprint (12, Index).
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&vault.root)
+        .args(["--no-optional-locks", "status", "--porcelain", "--", &dir])
+        .output();
     match out {
         Ok(o) if o.status.success() && o.stdout.is_empty() => Ok(()),
         Ok(o) if o.status.success() => {
