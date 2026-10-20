@@ -3,7 +3,7 @@
 //! else 2 with `check_failed` naming the first failed run. That is the one refusal that follows a commit, so its
 //! envelope adds the commit and every run. An owner with no named block exits 3: nothing ran, nothing was written.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bp_vault::{Code, Refusal, Vault};
@@ -86,7 +86,16 @@ pub(crate) fn failed(
 
 fn check(cwd: &Path, c: &Check) -> Result<(bp_vault::Id, Option<bp_check::Checked>), Refusal> {
     let vault = Vault::discover(cwd)?;
-    let owner = crate::subject(&bp_vault::Index::open(&vault)?, &c.id)?;
+    let index = bp_vault::Index::open(&vault)?;
+    let owner = crate::subject(&index, &c.id)?;
+    // A held claim's blocks run in its worktree, as `pr` runs them: an agent's shell may sit in the clone, whose head
+    // is the base (27, issue 8). Else the blocks run where the caller stands.
+    let worktree = crate::claim::held(&index, &owner)?
+        .and_then(|claim| crate::claim::field(&claim, "worktree"))
+        .map(PathBuf::from)
+        .filter(|w| w.is_dir());
+    drop(index);
+    let cwd = worktree.as_deref().unwrap_or(cwd);
     let role = crate::set::role()?;
     // A bad `BP_NOW` refuses here, before any block runs; after that the clock cannot fail.
     let start = crate::clock::now()?;

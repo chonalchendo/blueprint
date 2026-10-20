@@ -183,6 +183,46 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     assert_eq!(git(v, &["status", "--porcelain"]), "");
 }
 
+/// `check` on an issue with a held claim runs at the claim's worktree head, as `pr` does, wherever the caller stands.
+#[test]
+fn check_runs_the_blocks_in_the_held_claims_worktree() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    let h = commit(&w, &["add", "hello.txt"], "hello");
+    let (code, out) = bp(v, t, &[], &["check", ISSUE]);
+    assert_eq!((code, &out["runs"][0]["verdict"]), (Some(0), &json!("pass")), "run from the clone root: {out}");
+    assert!(out["runs"][0]["id"].as_str().unwrap().starts_with(&format!("{ISSUE}/runs/hello-{h}")), "{out}");
+}
+
+/// Complete's stop: a pull request at the claim's head, and a passing run of each error block there. `pr` opens the
+/// pull request even when it refuses `check_failed`, so the open pull request alone is no stop (27, issue 8).
+#[test]
+fn complete_stops_when_each_error_block_passes_at_the_head() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let done = || bp(v, t, &[], &["walk", ISSUE, "--for", "complete", "--done"]).1["done"].clone();
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("other.txt"), "hi\n").unwrap();
+    let h = commit(&w, &["add", "other.txt"], "other");
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str(), &out["pull_request"]), (Some(2), Some("check_failed"), &json!(1)), "{out}");
+    forge(t, &h, &[], &[]);
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_failed")), "the snapshot now holds it: {out}");
+    assert_eq!(done(), false, "the pull request is open at the head, and its block failed there");
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    let fixed = commit(&w, &["add", "hello.txt"], "hello");
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, &out["runs"][0]["verdict"]), (Some(0), &json!("pass")), "{out}");
+    forge(t, &fixed, &[], &[]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "the repeat refreshes the snapshot");
+    assert_eq!(done(), true);
+}
+
 /// Cuts [`ISSUE`] with `cut` args, commits `hello.txt` and opens pull request 1; the worktree and the head.
 fn opened(v: &Path, t: &Path, cut: &[&str]) -> (std::path::PathBuf, String) {
     let (_, out) = bp(v, t, &[], &[&["cut", ISSUE], cut].concat());

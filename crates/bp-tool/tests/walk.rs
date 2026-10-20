@@ -204,13 +204,14 @@ fn deliberate_needs_the_thread_closed_and_a_decision_citing_it() {
 }
 
 #[test]
-fn complete_is_done_when_the_latest_claim_is_released_escalated() {
+fn complete_and_respond_are_done_when_the_latest_claim_is_released_escalated() {
     let d = vault();
     let claim = format!(
         "---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n\n## Released\n\nto: 2026-10-16T01:00:00Z\nreason: escalated\n"
     );
     write(d.path(), &format!("{SEED}/claims/c.md"), &claim);
     assert_eq!(done(d.path(), None, SEED, "complete"), true);
+    assert_eq!(done(d.path(), None, SEED, "respond"), true, "no claim is held, so no head is in view to move");
 }
 
 #[test]
@@ -314,4 +315,30 @@ fn distil_needs_a_citing_learning_that_search_finds_by_its_cue() {
     assert_eq!(done(d.path(), None, SEED, "distil"), false, "a learning with no cue reads false, title or not");
     learning("cued", "cue: quokkas nap at noon\n");
     assert_eq!(done(d.path(), None, SEED, "distil"), true);
+}
+
+#[test]
+fn respond_holds_the_latest_review_by_its_time_not_its_id() {
+    let d = vault();
+    let review = |head: &str, at: &str, finding: &str| {
+        let text = format!(
+            "---\nkind: review\nunder: {SEED}\nhead: {head}\nat: {at}\n---\n\n| severity | finding |\n|---|---|\n| major | {finding} |\n"
+        );
+        write(d.path(), &format!("{SEED}/reviews/{head}.md"), &text);
+    };
+    review("ffff", "2026-10-16T00:00:00Z", "older");
+    review("aaaa", "2026-10-17T00:00:00Z", "newer");
+    let (code, v) = walk(d.path(), &[SEED, "--for", "respond"]);
+    assert_eq!(code, Some(0), "{v}");
+    let first = &v["bodies"][0];
+    assert_eq!(
+        (first["id"].as_str(), first["kind"].as_str()),
+        (Some(&*format!("{SEED}/reviews/aaaa")), Some("review"))
+    );
+    assert!(first["body"].as_str().unwrap().contains("| major | newer |") && first["header"]["head"] == "aaaa", "{v}");
+    assert_eq!(ids(&v["bodies"]).iter().filter(|i| i.contains("/reviews/")).count(), 1, "only the latest: {v}");
+    let (_, v) = walk(d.path(), &[SEED, "--for", "respond", "--ids"]);
+    assert_eq!(v["ids"][0]["id"], format!("{SEED}/reviews/aaaa"), "{v}");
+    let (_, v) = walk(d.path(), &[SEED, "--for", "complete"]);
+    assert!(!ids(&v["bodies"]).iter().any(|i| i.contains("/reviews/")), "complete answers no review: {v}");
 }

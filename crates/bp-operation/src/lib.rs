@@ -83,6 +83,15 @@ impl Action {
         }
     }
 
+    /// The record kinds under the seed whose latest record the walk returns as a body, ahead of the fill: respond
+    /// answers the latest review, which no link reaches (21, the context column).
+    pub fn records(self) -> &'static [Kind] {
+        match self {
+            Self::Respond => &[Kind::Review],
+            _ => &[],
+        }
+    }
+
     /// The links from the seed whose targets the action cannot run without: an issue's milestone and the designs
     /// it targets.
     pub fn requires(self) -> &'static [Requires] {
