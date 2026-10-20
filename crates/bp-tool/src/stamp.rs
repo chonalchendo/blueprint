@@ -3,6 +3,8 @@
 //! `check_failed`. Otherwise one commit holds the runs, a waiver per waived block, each carried delta's body in its
 //! design with the delta's `## Accepted`, the version record and the milestone at `done`, with `Bp-Version` and one
 //! `Bp-Delta` per delta. A local tag `blueprint/<project>/<n>` names the commit; the human pushes it (07, Deployment).
+//! After the finish line it runs the block of each open waiver of the project, which a pass closes (27, design change
+//! 10).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -13,6 +15,7 @@ use bp_vault::{Body, Check, Code, DeltaState, File, Filter, Header, Id, Index, K
 use clap::Args;
 use serde_json::{Value, json};
 
+use crate::waiver::{self, Reask};
 use crate::{Wrote, finish, subject};
 
 /// `bp stamp <milestone> [--waive <name> --reason <why>]...`.
@@ -20,7 +23,8 @@ use crate::{Wrote, finish, subject};
 pub struct Stamp {
     /// The milestone: `approved`, and every issue under it resolved or abandoned.
     pub milestone: String,
-    /// A finish-line block not to run, recorded as a waiver. Give each its own `--reason`, in the same order.
+    /// A finish-line block not to run, recorded as a waiver; or `<milestone>/<name>`, an open waiver of the project,
+    /// waived again. Give each its own `--reason`, in the same order.
     #[arg(long, value_name = "NAME")]
     pub waive: Vec<String>,
     /// Why the block of the matching `--waive` is waived, in one line.
@@ -28,35 +32,26 @@ pub struct Stamp {
     pub reason: Vec<String>,
 }
 
-/// What a stamp did: wrote or found done, or committed the runs of a failed block.
+/// What a stamp did: wrote or found done, or committed the runs of a failed block, which `waive` names.
 enum Stamped {
     Wrote(Wrote),
-    Failed { at: usize, commit: String, runs: Vec<bp_check::Run> },
+    Failed { at: usize, commit: String, runs: Vec<bp_check::Run>, waive: String },
 }
 
 pub(crate) fn run(cwd: &Path, s: &Stamp, json: bool, out: &mut impl std::io::Write) -> ExitCode {
     match stamp(cwd, s) {
         Ok(Stamped::Wrote(w)) => crate::wrote(Ok(w), json, out),
-        Ok(Stamped::Failed { at, commit, runs }) => {
-            let run = &runs[at];
+        Ok(Stamped::Failed { at, commit, runs, waive }) => {
             let m = &s.milestone;
-            let then = format!("rerun bp stamp {m}, or waive it: bp stamp {m} --waive {} --reason <why>", run.name);
-            crate::check::failed(run, &then, &commit, crate::check::rows(&runs), None, json, out)
+            let then = format!("rerun bp stamp {m}, or waive it: bp stamp {m} --waive {waive} --reason <why>");
+            crate::check::failed(&runs[at], &then, &commit, crate::check::rows(&runs), None, json, out)
         }
         Err(refusal) => finish::<Value>(Err(refusal), json, out),
     }
 }
 
 fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
-    if s.waive.len() != s.reason.len() {
-        return Err(Refusal::usage("--waive", "give each --waive <name> its own --reason <why>, in the same order"));
-    }
-    if s.reason.iter().any(|r| r.trim().is_empty() || r.contains(['\n', '\r'])) {
-        return Err(Refusal::usage("--reason", "give each reason as one line of text"));
-    }
-    if let Some(w) = s.waive.iter().enumerate().find_map(|(i, w)| s.waive[..i].contains(w).then_some(w)) {
-        return Err(Refusal::usage(format!("--waive {w}"), "waive each block once"));
-    }
+    waiver::usage(s)?;
     let vault = Vault::discover(cwd)?;
     let role = crate::set::role()?;
     let now = crate::clock::now()?;
@@ -66,7 +61,7 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
     // Every refusal comes before the blocks run, which may take minutes: a human's uncommitted edit to a path the
     // stamp writes, and a tag already taken. Each holds under the lock too.
     vault.clean([&id])?;
-    let read = match gate(&vault, &index, &id, &s.waive)? {
+    let read = match gate(&vault, &index, &id, &s.waive, now)? {
         Gated::Open(g) => g,
         Gated::Done(done) => return retag(&vault, &index, &id, done),
     };
@@ -78,28 +73,45 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
     let skip: Vec<&str> = s.waive.iter().map(String::as_str).collect();
     let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
     let ran = bp_check::run(&vault, &id, cwd, None, &skip, &clock)?;
-    let mut writer = match &ran {
+    // An open waiver waived again runs nothing.
+    let mut asked = Vec::new();
+    for r in read.reasked.iter().filter(|r| !s.waive.contains(&r.key())) {
+        asked.extend(bp_check::run(&vault, &r.milestone, cwd, Some(&r.name), &[], &clock)?.map(|ran| (r, ran)));
+    }
+    let mut writer = match ran.as_ref().or(asked.first().map(|(_, ran)| ran)) {
         Some(r) => r.writer(&vault, &format!("bp stamp {id}"))?,
         None => vault.writer()?,
     };
     // Another write may have landed while the blocks ran: the gate holds under the lock too.
-    let held = match gate(&vault, writer.index(), &id, &s.waive)? {
+    let held = match gate(&vault, writer.index(), &id, &s.waive, now)? {
         Gated::Open(g) => g,
         Gated::Done(done) => return Ok(Stamped::Wrote(Wrote::Already(done))),
     };
-    let (mut changes, runs) = ran.map(|r| r.records(&vault)).unwrap_or_default();
+    let (mut changes, mut runs) = ran.map(|r| r.records(&vault)).unwrap_or_default();
+    // Each re-asked waiver and the place of its one run among `runs`.
+    let mut reasked = Vec::new();
+    for (r, ran) in &asked {
+        let (records, rows) = ran.records(&vault);
+        changes.extend(records);
+        reasked.push((*r, runs.len()));
+        runs.extend(rows);
+    }
     if let Some(at) = runs.iter().position(bp_check::Run::failed) {
         let written = writer.commit("stamp", role.as_str(), &format!("stamp {id}"), &changes)?;
-        return Ok(Stamped::Failed { at, commit: written.commit, runs });
+        let waive = reasked.iter().find(|(_, i)| *i == at).map_or_else(|| runs[at].name.clone(), |(r, _)| r.key());
+        return Ok(Stamped::Failed { at, commit: written.commit, runs, waive });
     }
-    // The stamp accepts what its blocks ran against: the finish line, and the deltas it cleaned before them.
-    if held.finish != read.finish || held.deltas != read.deltas {
+    // The stamp accepts what its blocks ran against: the finish line, the deltas it cleaned before them, and the
+    // open waivers.
+    if held.finish != read.finish || held.deltas != read.deltas || held.reasked != read.reasked {
         return Err(Refusal::new(
             Code::EvidenceStale,
             id.as_str(),
-            "stamp accepts the finish line its blocks ran and the deltas it read before them (26, design change 5)",
+            "stamp accepts the finish line its blocks ran, the deltas it read before them and the open waivers it ran \
+             (26, design change 5; 27, design change 10)",
             format!(
-                "the finish line or a carried delta changed while the blocks ran, so nothing was committed; rerun bp stamp {id}"
+                "the finish line, a carried delta or an open waiver changed while the blocks ran, so nothing was \
+                 committed; rerun bp stamp {id}"
             ),
         ));
     }
@@ -111,14 +123,7 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
     // `version` is a wikilink, so the index holds the delta's edge to its version (13, Delta).
     let close = format!("## Accepted\n\naccepted_at: {accepted_at}\nversion: [[{version}]]\n");
     let deltas = accept(&vault, &held.deltas, &close, &mut changes)?;
-    let mut waivers = Vec::new();
-    for (name, reason) in s.waive.iter().zip(&s.reason) {
-        // `valid_until` stays empty, so the next stamp of the project asks again (13, Waiver).
-        let waiver = crate::record::free(&vault.root, &format!("{id}/waivers/{name}"));
-        let fields = [("reason", reason.as_str().into()), ("decided_at", accepted_at.as_str().into())];
-        changes.insert(waiver.clone(), record(Kind::Waiver, &id, &[], fields));
-        waivers.push(waiver);
-    }
+    let waivers = waiver::write(&vault, &id, s, &accepted_at, &mut changes);
     let mut manifest = serde_json::Map::new();
     for design in &held.designs {
         let hash = match changes.get(design) {
@@ -152,6 +157,7 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
         "commit": written.commit,
         "runs": crate::check::rows(&runs),
         "waivers": waivers,
+        "reasked": reasked.iter().map(|(r, i)| json!({ "waiver": r.waiver, "verdict": runs[*i].verdict })).collect::<Vec<_>>(),
         "deltas": deltas,
         "findings": written.findings,
     }))))
@@ -213,12 +219,14 @@ fn retag(vault: &Vault, index: &Index, id: &Id, done: Value) -> Result<Stamped, 
     }))))
 }
 
-/// What the gate read: the finish line's named blocks, each design of the project, and each proposed delta the
-/// milestone carries. The blocks run against the first two reads, so the read under the lock must equal them.
+/// What the gate read: the finish line's named blocks, each design of the project, each proposed delta the
+/// milestone carries, and each open waiver of the project. The blocks run against these reads, so the read under the
+/// lock must equal them.
 struct Gate {
     finish: Vec<Check>,
     designs: Vec<Id>,
     deltas: Vec<Carried>,
+    reasked: Vec<Reask>,
 }
 
 /// A proposed delta the milestone carries: its design, its id and its body, the proposed design body.
@@ -236,9 +244,9 @@ enum Gated {
 }
 
 /// The refusals before a stamp runs anything, and again under the lock: the subject is a milestone, `approved`, each
-/// waived name is a named block of its finish line, every file of its project parses, and every issue under it is
-/// resolved or abandoned (21, needs acceptance).
-fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String]) -> Result<Gated, Refusal> {
+/// waived name is a named block of its finish line or an open waiver of the project (`waiver::refuse`), every file
+/// of its project parses, and every issue under it is resolved or abandoned (21, needs acceptance).
+fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Result<Gated, Refusal> {
     let file = vault.read(id)?;
     let Some(header) = file.header.as_ref().filter(|h| h.kind == Kind::Milestone) else {
         return Err(Refusal::new(
@@ -266,16 +274,9 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String]) -> Result<Gated
         ));
     }
     let finish: Vec<Check> = bp_check::named(&file.body).into_iter().cloned().collect();
-    let names: Vec<&str> = finish.iter().map(|c| c.attrs["name"].as_str()).collect();
-    if let Some(w) = waive.iter().find(|w| !names.contains(&w.as_str())) {
-        return Err(Refusal::new(
-            Code::UnknownValue,
-            format!("waive {w}"),
-            "a waiver names a block of the milestone's finish line (13, Waiver)",
-            format!("waive one of the blocks of {id}: {}", names.join(", ")),
-        ));
-    }
     let project = id.project().expect("a milestone sits under a project");
+    let reasked = waiver::open(vault, index, project, now)?;
+    waiver::refuse(id, &finish, &reasked, waive)?;
     // A file that does not parse is in no list, so an open issue it holds would pass the next refusal unseen.
     if let Some((path, why)) = index.broken(project)?.into_iter().next() {
         return Err(Refusal::new(
@@ -313,11 +314,16 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String]) -> Result<Gated
             }
         }
     }
-    Ok(Gated::Open(Gate { finish, designs, deltas }))
+    Ok(Gated::Open(Gate { finish, designs, deltas, reasked }))
 }
 
 /// A record's text: its header under `under`, with one id per `→` field, and no body.
-fn record<const N: usize>(kind: Kind, under: &Id, links: &[(&str, &Id)], fields: [(&str, Value); N]) -> String {
+pub(crate) fn record<const N: usize>(
+    kind: Kind,
+    under: &Id,
+    links: &[(&str, &Id)],
+    fields: [(&str, Value); N],
+) -> String {
     let header = Header {
         kind,
         title: None,

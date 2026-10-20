@@ -2,8 +2,8 @@
 //! first, because a blocked issue must never read as ready. Pure: the caller hands in the node's records, its
 //! dependencies' states and the forge's view of its pull request.
 //!
-//! Predicates whose records do not exist yet (dispositions, drift runs, finish-line runs, concern answers,
-//! waivers) never hold; they arrive with the milestones that write those records.
+//! Predicates whose records do not exist yet (dispositions, drift runs, finish-line runs, concern answers) never
+//! hold; they arrive with the milestones that write those records. Re-asked is [`reasked`], over a project's waivers.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -381,6 +381,36 @@ pub fn milestone(status: &str, integrity: Option<String>) -> Verdict {
     }
 }
 
+/// A waiver record, reduced (13, Waiver). Its key is the milestone, the block, its `check`, and the sequence, read
+/// from the record key relative to `check`: `<check>` is 1, `<check>-<n>` is n.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Waiver {
+    /// The waiver record's id.
+    pub id: String,
+    /// The milestone whose finish line holds the block.
+    pub milestone: String,
+    /// The block's name.
+    pub block: String,
+    /// The sequence: a later waiver of one block takes the next.
+    pub seq: u64,
+    /// `valid_until`, Unix seconds; `None` when empty.
+    pub valid_until: Option<i64>,
+}
+
+/// Re-asked (21): each waiver that is the latest of its block, whose `valid_until` is empty or past, and that no
+/// passing run of its block follows, by commit order. `passed_after` answers that last test, which needs git, so it
+/// runs only for a latest waiver still in date. `stamp` calls the same function.
+pub fn reasked(waivers: &[Waiver], now: i64, mut passed_after: impl FnMut(&Waiver) -> bool) -> Vec<&Waiver> {
+    let mut latest: BTreeMap<(&str, &str), &Waiver> = BTreeMap::new();
+    for w in waivers {
+        let slot = latest.entry((w.milestone.as_str(), w.block.as_str())).or_insert(w);
+        if w.seq > slot.seq {
+            *slot = w;
+        }
+    }
+    latest.into_values().filter(|w| w.valid_until.is_none_or(|t| t <= now) && !passed_after(w)).collect()
+}
+
 /// A claim's release: the `key: value` lines of its appended `## Released` section (13). Empty while it is held.
 pub fn release(body: &str) -> BTreeMap<String, String> {
     let body = bp_vault::Body::parse(body);
@@ -705,6 +735,25 @@ mod tests {
         assert_eq!(issue(&i, NOW), Verdict::of(Intent::Blocked, "escalated"));
         let answered = Issue { answered: true, ..i };
         assert_eq!(issue(&answered, NOW).intent, Some(Intent::Ready));
+    }
+
+    #[test]
+    fn a_waiver_is_reasked_while_latest_in_date_and_not_passed() {
+        let w = |id: &str, block: &str, seq, valid_until| Waiver {
+            id: id.into(),
+            milestone: "m".into(),
+            block: block.into(),
+            seq,
+            valid_until,
+        };
+        let all =
+            [w("f", "f", 1, None), w("f-2", "f", 2, None), w("g", "g", 1, Some(NOW + 1)), w("h", "h", 1, Some(NOW))];
+        let ids = |passed: &[&str]| -> Vec<String> {
+            reasked(&all, NOW, |w| passed.contains(&w.id.as_str())).iter().map(|w| w.id.clone()).collect()
+        };
+        assert_eq!(ids(&[]), ["f-2", "h"], "the latest of f; g is in date; h's date is past");
+        assert_eq!(ids(&["f-2"]), ["h"], "a passing run after the latest closes it");
+        assert_eq!(ids(&["f"]), ["f-2", "h"], "a run after an earlier waiver says nothing about the latest");
     }
 
     #[test]

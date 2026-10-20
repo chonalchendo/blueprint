@@ -111,6 +111,15 @@ pub fn named(body: &bp_vault::Body) -> Vec<&Check> {
     body.checks.iter().filter(|c| c.attrs.get("name").is_some_and(|n| bp_vault::is_slug(n))).collect()
 }
 
+/// Why the block records `skipped` wherever it runs, if it does: a runner not built yet, or `when=post-land`. It never
+/// fails a verb, so a waiver of it never closes (27, design change 10). A skip reads no date, so none is given.
+pub fn skips(check: &Check) -> Option<String> {
+    match judge::plan(check, "") {
+        Plan::Skip(why) => Some(why),
+        _ => None,
+    }
+}
+
 /// Runs the named blocks of `owner`, or the one `only` names, from the git repository that holds `repo`, and commits
 /// one run record per block; none when the owner has no named block. `clock` gives the instant,
 /// `YYYY-MM-DDTHH:MM:SSZ`; its date decides `until`.
