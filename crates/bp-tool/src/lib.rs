@@ -6,6 +6,7 @@ mod claim;
 mod clock;
 mod create;
 mod done;
+mod install;
 mod intent;
 mod land;
 mod link;
@@ -89,6 +90,8 @@ pub enum Verb {
     /// Accept an approved milestone: its finish line, its deltas written into their designs, a blueprint version and
     /// the milestone at `done` in one commit, and a local tag.
     Stamp(stamp::Stamp),
+    /// The bundle into a harness, at the clone's top, with its manifest; local, so it calls no forge.
+    Install(install::Install),
 }
 
 /// `bp show <id> [--section <heading>] [--no-body] [--at <ref>]`.
@@ -184,6 +187,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Land(l) => wrote(land::land(cwd, l), cli.json, out),
         Verb::Check(c) => check::run(cwd, c, cli.json, out),
         Verb::Stamp(s) => stamp::run(cwd, s, cli.json, out),
+        Verb::Install(i) => wrote(install::install(cwd, i), cli.json, out),
     }
 }
 

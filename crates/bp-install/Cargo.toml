@@ -15,7 +15,14 @@ workspace = true
 bp-vault.workspace = true
 bp-operation.workspace = true
 bp-forge.workspace = true
+blake3.workspace = true
+serde_json.workspace = true
+yaml-rust2.workspace = true
 
-# The edge is declared ahead of its first use, so the crate rule holds it from the start.
+[dev-dependencies]
+tempfile.workspace = true
+
+# The edges are declared ahead of their first use (the role verbs, the forge preconditions), so the crate rule holds
+# them from the start.
 [package.metadata.cargo-machete]
 ignored = ["bp-operation", "bp-forge"]

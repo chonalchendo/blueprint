@@ -140,6 +140,7 @@ fn spec(kind: Kind) -> Option<Spec> {
                 ("started_at", Type::Instant, false),
                 ("ended_at", Type::Instant, false),
                 ("resumes", Type::Link(&[Kind::Handoff]), false),
+                ("seed", Type::Link(&bp_operation::NODES), false),
             ],
         ),
         _ => return None,
@@ -195,6 +196,13 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     }
     if let (Some(design), Some(milestone)) = (&parent, fields.get("milestone").filter(|_| kind == Kind::Delta)) {
         none_pending(index, design, milestone)?;
+    }
+    // A handoff's seed is the node of the session's latest vault commit, which the next session start walks (13).
+    if kind == Kind::Handoff
+        && !fields.contains_key("seed")
+        && let Some(seed) = seed(&vault, index, given["session"])?
+    {
+        fields.insert("seed".into(), seed.as_str().into());
     }
     if let Some(field) = spec.now {
         fields.insert(field.into(), crate::clock::instant(now).into());
@@ -276,6 +284,26 @@ fn key(key: &Key, given: &BTreeMap<&str, &str>, fields: &BTreeMap<String, Value>
             let session = fields["session"].as_str().expect("a session is a slug");
             format!("{}-{}", &date[..10], session.chars().take(8).collect::<String>())
         }
+    }
+}
+
+/// The node of `session`'s latest vault commit (`Bp-Session`, 12): the first id its subject names, a record followed
+/// up to the node it sits under. `None` when the session committed nothing, or the node is gone.
+fn seed(vault: &Vault, index: &Index, session: &str) -> Result<Option<Id>, Refusal> {
+    // A session is a slug, so it holds no character the pattern reads.
+    let pattern = format!("--grep=^Bp-Session: {session}$");
+    let subject = crate::claim::git(&vault.root, &["log", "-1", "--format=%s", &pattern])?;
+    let Some(mut id) = subject.split_whitespace().find_map(|w| Id::parse(w).ok()) else { return Ok(None) };
+    loop {
+        let Some((held, _)) = index.holder(&id)? else { return Ok(None) };
+        let Some(header) = index.header(held.as_str())? else { return Ok(None) };
+        if !header.get("kind").and_then(Value::as_str).and_then(|k| k.parse().ok()).is_some_and(Kind::is_record) {
+            return Ok(Some(held));
+        }
+        let Some(under) = header.get("under").and_then(Value::as_str).and_then(|u| Id::parse(u).ok()) else {
+            return Ok(None);
+        };
+        id = under;
     }
 }
 
