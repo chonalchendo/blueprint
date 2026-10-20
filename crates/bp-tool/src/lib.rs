@@ -252,7 +252,11 @@ fn where_(cwd: &Path) -> Result<Where, Refusal> {
 fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     let vault = Vault::discover(cwd)?;
     // A past commit is read as asked; today's index names today's ids only.
-    let id = if show.at.is_some() { node_id(&show.id)? } else { subject(&Index::open(&vault)?, &show.id)? };
+    let index = if show.at.is_some() { None } else { Some(Index::open(&vault)?) };
+    let id = match &index {
+        Some(index) => subject(index, &show.id)?,
+        None => node_id(&show.id)?,
+    };
     let file = match &show.at {
         Some(at) => vault.read_at(&id, at)?,
         None => vault.read(&id)?,
@@ -278,6 +282,10 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     m.insert("record".into(), header.kind.is_record().into());
     m.insert("hash".into(), file.hash.clone().into());
     m.extend(file.header_json().expect("the file has a header"));
+    // `stale` is today's state, so a past commit's learning has none (13, Learning).
+    if let Some(index) = index.as_ref().filter(|_| header.kind == Kind::Learning) {
+        m.insert("stale".into(), intent::Intents::new(&vault, index, None)?.stale(id.as_str(), &m)?.into());
+    }
     m.insert("lead".into(), file.body.lead.clone().into());
     if !file.body.findings.is_empty() {
         m.insert("findings".into(), serde_json::to_value(&file.body.findings).expect("a plain struct serialises"));
@@ -378,7 +386,7 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
         limit: if ready { crate::ALL } else { list.limit },
     };
     let (rows, total) = index.list(&filter)?;
-    if !matches!(kind_value, Kind::Issue | Kind::Milestone) {
+    if !matches!(kind_value, Kind::Issue | Kind::Milestone | Kind::Design | Kind::Learning) {
         return Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }));
     }
     // The projects in view: `--project`, else the rows' own; a snapshot outside them is not read (27, design change 9).
@@ -394,6 +402,9 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
             continue;
         }
         let mut v = serde_json::to_value(row).expect("a plain struct serialises");
+        if kind_value == Kind::Learning {
+            v["stale"] = intents.stale(&row.id, &index.header(&row.id)?.unwrap_or_default())?.into();
+        }
         if let Some(intent) = verdict.intent {
             v["intent"] = serde_json::to_value(intent).expect("an enum serialises");
             v["note"] = verdict.note.into();

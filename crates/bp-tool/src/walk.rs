@@ -88,7 +88,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         reached.iter().filter(|r| r.kind == Kind::Issue).filter_map(|r| intent::split(&r.id)).map(|(p, _)| p).collect();
     let read = intent::Intents::new(&vault, &index, (!projects.is_empty()).then_some(&projects))?;
     let mut intents = Vec::new();
-    for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone)) {
+    for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone | Kind::Design)) {
         let verdict = read.row(r.kind, &r.id, r.status.as_deref())?;
         if let Some(intent) = verdict.intent {
             intents.push(serde_json::json!({ "id": r.id, "intent": intent, "note": verdict.note }));
@@ -102,15 +102,24 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         }
     }
     let pull_request = pull_request(&vault, &index, &id, action)?;
-    let line =
-        |r: &bp_vault::Reached| serde_json::json!({ "id": r.id, "kind": r.kind, "title": r.title, "rank": r.rank });
+    if action == Action::TriageDrift {
+        drift(&index, &id, kind, &mut reached, &mut records)?;
+    }
+    let line = |r: &bp_vault::Reached| -> Result<Value, Refusal> {
+        let mut v = serde_json::json!({ "id": r.id, "kind": r.kind, "title": r.title, "rank": r.rank });
+        if r.kind == Kind::Learning {
+            v["stale"] = read.stale(&r.id, &index.header(&r.id)?.unwrap_or_default())?.into();
+        }
+        Ok(v)
+    };
     if walk.ids {
         // The map keeps the fill's order: conventions close the tail (21).
         let (conventions, rest): (Vec<_>, Vec<_>) = reached.iter().partition(|r| r.kind == Kind::Convention);
         let answered = records
             .iter()
             .map(|r| serde_json::json!({ "id": r["id"], "kind": r["kind"], "title": null, "rank": null }));
-        let ids: Vec<Value> = answered.chain(rest.into_iter().chain(conventions).map(line)).collect();
+        let lines = rest.into_iter().chain(conventions).map(line).collect::<Result<Vec<_>, _>>()?;
+        let ids: Vec<Value> = answered.chain(lines).collect();
         return Ok(with(
             serde_json::json!({ "seed": id, "for": action, "ids": ids, "intents": intents }),
             pull_request,
@@ -129,11 +138,11 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     let by_id = |want: &String| reached.iter().find(|r| &r.id == want).expect("the fill chose from the reached");
     let mut bodies = records;
     for b in &f.bodies {
-        let mut v = line(by_id(b));
+        let mut v = line(by_id(b))?;
         v["body"] = index.body(b)?.into();
         bodies.push(v);
     }
-    let ids: Vec<Value> = f.ids.iter().map(|i| line(by_id(i))).collect();
+    let ids = f.ids.iter().map(|i| line(by_id(i))).collect::<Result<Vec<_>, _>>()?;
     let slice = serde_json::json!({
         "seed": id, "for": action, "budget": budget, "used": f.used + named,
         "bodies": bodies, "ids": ids, "cut": f.cut, "intents": intents,
@@ -157,6 +166,33 @@ fn with(mut answer: Value, pull_request: Option<Value>) -> Value {
         answer["pull_request"] = p;
     }
     answer
+}
+
+/// Triage drift answers each failed drift run of the designs the seed covers, with what cites it; the designs they
+/// checked lead the fill (21, the context column).
+fn drift(
+    index: &Index,
+    id: &Id,
+    kind: Kind,
+    reached: &mut Vec<bp_vault::Reached>,
+    records: &mut Vec<Value>,
+) -> Result<(), Refusal> {
+    let mut checked = BTreeSet::new();
+    for d in intent::drift_designs(index, id, kind)? {
+        for (r, by) in intent::drift(index, &d)? {
+            checked.insert(d.clone());
+            let mut run = serde_json::json!({ "id": r.id, "kind": Kind::Run, "header": r.header, "body": r.body });
+            run["cited_by"] = serde_json::to_value(by).expect("ids serialise");
+            records.push(run);
+        }
+    }
+    for d in &checked {
+        if !reached.iter().any(|r| &r.id == d) {
+            reached.extend(index.reach(d, 0)?);
+        }
+    }
+    reached[1..].sort_by_key(|r| !checked.contains(&r.id));
+    Ok(())
 }
 
 /// The context the action cannot run without (21, rule 3), by the predicate the integrity check shares: a target

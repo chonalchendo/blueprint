@@ -69,14 +69,10 @@ pub(crate) fn done(
         },
         Action::Respond => responded(&vault.root, index, id, forge_age)?,
         Action::TriageDrift => {
-            // An integrity run checks the vault, not a design: 21's drifted reads drift runs only.
-            let failed = index.records(id.as_str(), Kind::Run)?.into_iter().filter(|r| {
-                matches!(field(r, "verdict").as_deref(), Some("fail" | "timed-out"))
-                    && field(r, "check_kind").as_deref() != Some("integrity")
-            });
-            for r in failed {
-                let run = Id::parse(&r.id).expect("the index holds ids");
-                if index.citing(&run, &[Kind::Delta, Kind::Thread])?.is_empty() {
+            // The drifted predicate over each design the seed covers: a project's drift runs sit under its designs.
+            let kind = text("kind").and_then(|k| k.parse().ok()).expect("the index stores closed kinds");
+            for d in crate::intent::drift_designs(index, id, kind)? {
+                if crate::intent::drift(index, &d)?.iter().any(|(_, by)| by.is_empty()) {
                     return Ok(false);
                 }
             }

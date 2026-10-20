@@ -297,9 +297,46 @@ fn triage_drift_needs_a_citation_for_each_failed_drift_run() {
     assert_eq!(done(d.path(), None, s, "triage-drift"), true, "an integrity run is no drift run");
     let drift = run("drift", "shell");
     assert_eq!(done(d.path(), None, s, "triage-drift"), false);
+    assert_eq!(done(d.path(), None, "projects/bp/project", "triage-drift"), false, "a project covers its designs");
+    // The slice answers the run ahead of the fill, the checked design follows the seed, and the design drifts.
+    let (_, v) = walk(d.path(), &["projects/bp/project", "--for", "triage-drift"]);
+    assert_eq!(ids(&v["bodies"])[..3], [drift.as_str(), "projects/bp/project", s], "{v}");
+    assert_eq!(v["bodies"][0]["cited_by"], serde_json::json!([]));
+    let (_, v) = walk(d.path(), &[s, "--for", "triage-drift"]);
+    let drifted = v["intents"].as_array().unwrap().iter().find(|i| i["id"] == s).expect("the design has an intent");
+    assert_eq!(drifted["intent"], "drifted", "{v}");
     let thread = format!("---\nkind: thread\ntitle: T\nstatus: open\n---\n\nWhy did [[{drift}]] fail?\n");
     write(d.path(), "projects/bp/threads/drift.md", &thread);
     assert_eq!(done(d.path(), None, s, "triage-drift"), true);
+    assert_eq!(done(d.path(), None, "projects/bp/project", "triage-drift"), true);
+    let (_, v) = walk(d.path(), &[s, "--for", "triage-drift"]);
+    assert_eq!(v["bodies"][0]["cited_by"], serde_json::json!(["projects/bp/threads/drift"]));
+    assert!(v["intents"].as_array().unwrap().iter().all(|i| i["id"] != s), "a cited run no longer drifts: {v}");
+}
+
+#[test]
+fn a_learning_is_stale_when_a_cited_design_changed_after_its_last_evidence() {
+    let d = vault();
+    let l = "shared/learnings/naps";
+    let text = "---\nkind: learning\ntitle: Naps\nstatus: verified\ncues: naps\ncites: [projects/bp/designs/system]\n---\n\nNap.\n";
+    write(d.path(), &format!("{l}.md"), &text.replace("cues", "cue"));
+    let evidence = |at: &str| {
+        let text = format!("---\nkind: evidence\nunder: {l}\nat: \"{at}\"\noutcome: helped\n---\n");
+        write(d.path(), &format!("{l}/evidence/{}.md", at.replace(':', "-")), &text);
+    };
+    let stale = || {
+        let _ = std::fs::remove_dir_all(d.path().join(".bp"));
+        let mut cmd = Command::cargo_bin("bp").unwrap();
+        let out = cmd.current_dir(d.path()).env_remove("BP_VAULT").args(["show", l, "--json"]).output().unwrap();
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()["stale"].clone()
+    };
+    evidence("2026-10-01T00:00:00Z");
+    assert_eq!(stale(), false, "no design changed");
+    let delta = "---\nkind: delta\nunder: projects/bp/designs/system\nstamp: \"2026-10-02T00:00:00Z\"\nmilestone: projects/bp/milestones/m\n---\n\nThe system.\n\n## Accepted\n\naccepted_at: 2026-10-10T00:00:00Z\nversion: [[projects/bp/versions/1]]\n";
+    write(d.path(), "projects/bp/designs/system/deltas/2026-10-02T00-00-00Z.md", delta);
+    assert_eq!(stale(), true, "the design changed after the last row");
+    evidence("2026-10-15T00:00:00Z");
+    assert_eq!(stale(), false, "a later row renews it");
 }
 
 #[test]

@@ -7,7 +7,8 @@ use std::path::Path;
 
 use bp_change::intents::{self, Base, Block, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
 use bp_forge::Snapshot;
-use bp_vault::{Id, Index, Kind, Record, Refusal, Vault};
+use bp_reasoning::LearningStatus;
+use bp_vault::{Body, DeltaState, DesignLevel, Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::{Map, Value};
 
 /// The clock and the forge one call reads. The forge is a snapshot and never a live call (22, constraint 8).
@@ -75,6 +76,8 @@ pub struct Intents<'a> {
     /// The clock and the forge, read only when an issue is in view.
     pub world: Option<World>,
     integrity: RefCell<BTreeMap<String, Option<IntegrityRun>>>,
+    /// Each design's latest acceptance, read once per call for `stale`.
+    accepted: RefCell<BTreeMap<String, Option<String>>>,
 }
 
 impl<'a> Intents<'a> {
@@ -82,10 +85,10 @@ impl<'a> Intents<'a> {
     /// needs neither the clock nor the forge.
     pub fn new(vault: &'a Vault, index: &'a Index, projects: Option<&BTreeSet<&str>>) -> Result<Self, Refusal> {
         let world = projects.map(|p| World::read(&vault.root, p)).transpose()?;
-        Ok(Self { vault, index, world, integrity: RefCell::default() })
+        Ok(Self { vault, index, world, integrity: RefCell::default(), accepted: RefCell::default() })
     }
 
-    /// The intent of one issue or milestone.
+    /// The intent of one issue, milestone or design; no other kind has one.
     pub fn row(&self, kind: Kind, id: &str, status: Option<&str>) -> Result<Verdict, Refusal> {
         let status = status.unwrap_or_default();
         match kind {
@@ -97,8 +100,32 @@ impl<'a> Intents<'a> {
                 status,
                 self.integrity(id)?,
             ),
-            _ => Ok(intents::milestone(status, self.integrity(id)?)),
+            Kind::Milestone => Ok(intents::milestone(status, self.integrity(id)?)),
+            Kind::Design => {
+                let uncited = drift(self.index, id)?.into_iter().filter(|(_, by)| by.is_empty()).map(|(r, _)| r.id);
+                Ok(intents::design(id, &uncited.collect::<Vec<_>>()))
+            }
+            _ => Ok(Verdict::NONE),
         }
+    }
+
+    /// A learning's derived `stale` (13, Learning), from its header. Evidence is read only when a cited design
+    /// changed at all.
+    pub fn stale(&self, id: &str, header: &Map<String, Value>) -> Result<bool, Refusal> {
+        let mut changed = Vec::new();
+        let mut cache = self.accepted.borrow_mut();
+        let cites = header.get("cites").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+        for d in cites.filter(|d| Id::parse(d).ok().and_then(|d| DesignLevel::of(&d)).is_some()) {
+            if !cache.contains_key(d) {
+                cache.insert(d.to_string(), accepted(self.index, d)?);
+            }
+            changed.extend(cache[d].clone());
+        }
+        if changed.is_empty() {
+            return Ok(false);
+        }
+        let last = self.index.records(id, Kind::Evidence)?.pop().and_then(|r| text(&r.header, "at"));
+        Ok(LearningStatus::stale(&text(header, "status").unwrap_or_default(), last.as_deref(), &changed))
     }
 
     /// The blocked note of the project's counting integrity run, when it failed and names `id` (21, blocked).
@@ -111,6 +138,40 @@ impl<'a> Intents<'a> {
         }
         Ok(cache[&project].as_ref().and_then(|r| r.blocks(id)))
     }
+}
+
+/// The failed drift runs under a design, each with the deltas and threads that cite it (21, drifted). An integrity
+/// run checks the vault, not a design.
+pub(crate) fn drift(index: &Index, design: &str) -> Result<Vec<(Record, Vec<Id>)>, Refusal> {
+    let mut out = Vec::new();
+    for r in index.records(design, Kind::Run)? {
+        let failed = matches!(text(&r.header, "verdict").as_deref(), Some("fail" | "timed-out"));
+        if failed && text(&r.header, "check_kind").as_deref() != Some("integrity") {
+            let by = index.citing(&Id::parse(&r.id).expect("the index holds ids"), &[Kind::Delta, Kind::Thread])?;
+            out.push((r, by));
+        }
+    }
+    Ok(out)
+}
+
+/// The designs a triage-drift seed covers: the design, or each design of the project (21, triage drift).
+pub(crate) fn drift_designs(index: &Index, id: &Id, kind: Kind) -> Result<Vec<String>, Refusal> {
+    match id.project() {
+        Some(project) if kind == Kind::Project => index.ids_of(Kind::Design, project),
+        _ => Ok(vec![id.to_string()]),
+    }
+}
+
+/// When a design last changed version: the latest `accepted_at` of its accepted deltas (13, Delta).
+fn accepted(index: &Index, design: &str) -> Result<Option<String>, Refusal> {
+    let at = |d: &Record| {
+        let body = Body::parse(&d.body);
+        let last = body.sections.last()?.text.lines().find_map(|l| l.strip_prefix("accepted_at: "))?;
+        Some(last.trim().trim_matches('"').to_string())
+    };
+    let deltas = index.records(design, Kind::Delta)?;
+    let accepted = deltas.iter().filter(|d| text(&d.header, "state").as_deref() == Some(DeltaState::Accepted.as_str()));
+    Ok(accepted.filter_map(at).max())
 }
 
 /// The intent of one issue.
