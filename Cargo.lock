@@ -116,8 +116,10 @@ dependencies = [
 name = "bp-check"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "bp-change",
  "bp-vault",
+ "serde_json",
 ]
 
 [[package]]
