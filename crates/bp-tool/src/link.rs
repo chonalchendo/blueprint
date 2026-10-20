@@ -35,11 +35,12 @@ pub(crate) fn link(cwd: &Path, link: &Link) -> Result<Wrote, Refusal> {
     let vault = Vault::discover(cwd)?;
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let mut writer = if link.dry_run { None } else { Some(vault.writer()?) };
-    let index = Index::open(&vault)?;
-    let from = subject(&index, &link.from)?;
+    let writer = if link.dry_run { None } else { Some(vault.writer()?) };
+    let mut opened = None;
+    let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
+    let from = subject(index, &link.from)?;
     // A human's uncommitted edit refuses first, dry run or not, before its text is read (12, Write path).
-    match &mut writer {
+    match &writer {
         Some(w) => w.clean([&from])?,
         None => vault.clean([&from])?,
     }
@@ -86,7 +87,7 @@ pub(crate) fn link(cwd: &Path, link: &Link) -> Result<Wrote, Refusal> {
         values.remove(at)
     } else {
         let schema = schema.expect("an added edge passed the schema");
-        let target = admit(&vault, &index, &from, ty, header.kind, &schema, &to.expect("an added edge names an id"))?;
+        let target = admit(&vault, index, &from, ty, header.kind, &schema, &to.expect("an added edge names an id"))?;
         if values.contains(&target.to_string()) {
             return Ok(Wrote::Already(serde_json::json!({ "id": from })));
         }

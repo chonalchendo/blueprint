@@ -1,6 +1,6 @@
 //! `cargo xtask scratch`: a writable copy of the vault for a block that writes (25, Finish line). It copies
 //! `projects`, `shared` and `.bp` of `$BP_VAULT` into a fresh directory under `$TMPDIR/bp-scratch`, makes it a git
-//! repository with one commit, and returns the directory. Nothing writes into `$BP_VAULT`.
+//! repository with one commit in one pack, and returns the directory. Nothing writes into `$BP_VAULT`.
 //!
 //! A block cannot delete its copy when `bash -e` stops it early, so the copies leaked: 120 of them, 15 GB, filled the
 //! disk mid-run. Each call now keeps only the newest copies and deletes the rest before it makes its own.
@@ -38,7 +38,12 @@ pub fn run() -> Result<PathBuf> {
     run_in(&dir, Command::new("git").args(["config", "user.name", "bp scratch"]))?;
     run_in(&dir, Command::new("git").args(["config", "user.email", "scratch@bp.invalid"]))?;
     run_in(&dir, Command::new("git").args(["add", "-A"]))?;
-    run_in(&dir, Command::new("git").args(["commit", "-q", "--no-verify", "-m", "scratch copy"]))?;
+    // `add -A` leaves every file as a loose object, about 10,000 on the converted vault, where the vault's own
+    // repository holds one pack. A commit then forked `git gc --auto`, which repacked in the background for seconds
+    // while a timed block ran, and charged whichever loop came first (25, issue 9). So the copy is packed here, and
+    // its own commit forks no gc to race the repack.
+    run_in(&dir, Command::new("git").args(["-c", "gc.auto=0", "commit", "-q", "--no-verify", "-m", "scratch copy"]))?;
+    run_in(&dir, Command::new("git").args(["repack", "-adq"]))?;
     Ok(dir)
 }
 

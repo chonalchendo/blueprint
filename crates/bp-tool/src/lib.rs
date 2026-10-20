@@ -284,6 +284,19 @@ pub(crate) fn node_id(text: &str) -> Result<Id, Refusal> {
     })
 }
 
+/// The index a write verb reads through: the writer's, opened under the lock, or for a dry run one opened without
+/// it into `opened`.
+pub(crate) fn index<'a>(
+    vault: &Vault,
+    writer: Option<&'a bp_vault::Writer<'_>>,
+    opened: &'a mut Option<Index>,
+) -> Result<&'a Index, Refusal> {
+    match writer {
+        Some(w) => Ok(w.index()),
+        None => Ok(opened.insert(Index::open(vault)?)),
+    }
+}
+
 /// A verb's subject: the id a node or record holds today, through the index. Case is ignored, and a renamed node's
 /// past id names the node (13, rule 1). An id nothing holds stays as asked, and the verb refuses it `no_node`.
 pub(crate) fn subject(index: &Index, text: &str) -> Result<Id, Refusal> {

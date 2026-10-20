@@ -7,7 +7,7 @@ use std::path::Path;
 use bp_change::{IssueStatus, MilestoneStatus};
 use bp_design::{DesignStatus, ProjectStatus};
 use bp_reasoning::{ConventionStatus, DecisionStatus, InboxStatus, LearningStatus, ThreadStatus};
-use bp_vault::{Code, Index, Kind, Refusal, Vault};
+use bp_vault::{Code, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
@@ -75,11 +75,12 @@ pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
     let vault = Vault::discover(cwd)?;
     let role = crate::set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let mut writer = if t.dry_run { None } else { Some(vault.writer()?) };
-    let index = Index::open(&vault)?;
-    let id = subject(&index, &t.id)?;
+    let writer = if t.dry_run { None } else { Some(vault.writer()?) };
+    let mut opened = None;
+    let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
+    let id = subject(index, &t.id)?;
     // A human's uncommitted edit refuses first, dry run or not, before its text is read (12, Write path).
-    match &mut writer {
+    match &writer {
         Some(w) => w.clean([&id])?,
         None => vault.clean([&id])?,
     }

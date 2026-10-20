@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::process::{Child, Command, Stdio};
 
 use bp_vault::{Code, File, Id, Index, Kind, Moves, Refusal, SLUG_MAX, Vault, is_slug, retarget};
 use clap::Args;
@@ -38,10 +39,11 @@ pub(crate) fn rename(cwd: &Path, rename: &Rename) -> Result<Wrote, Refusal> {
     let vault = Vault::discover(cwd)?;
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let mut writer = if rename.dry_run { None } else { Some(vault.writer()?) };
-    let index = Index::open(&vault)?;
+    let writer = if rename.dry_run { None } else { Some(vault.writer()?) };
+    let mut opened = None;
+    let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
     // The index, not the file system, names the node: a case-blind file system would take a wrong-case id as a file.
-    let old = subject(&index, &rename.id)?;
+    let old = subject(index, &rename.id)?;
     let (dir, was) = old.as_str().rsplit_once('/').expect("an id has three segments");
     let slug = inbox_slug(dir, was, &rename.slug)?;
     if !is_slug(&slug) {
@@ -51,6 +53,7 @@ pub(crate) fn rename(cwd: &Path, rename: &Rename) -> Result<Wrote, Refusal> {
     if new == old {
         return Ok(Wrote::Already(serde_json::json!({ "id": old })));
     }
+    let head = in_head(&vault.root, new.as_str())?;
     let mut moves = directory(&vault.root, &old, &new)?;
     moves.ids.insert(new.clone(), old.clone());
     let renamed: BTreeMap<&Id, &Id> = moves.ids.iter().map(|(to, from)| (from, to)).collect();
@@ -60,12 +63,13 @@ pub(crate) fn rename(cwd: &Path, rename: &Rename) -> Result<Wrote, Refusal> {
     let mut paths: Vec<String> = renamed.iter().flat_map(|(a, b)| [format!("{a}.md"), format!("{b}.md")]).collect();
     paths.extend(moves.files.iter().flat_map(|(a, b)| [a.clone(), b.clone()]));
     paths.extend(inbound.iter().map(|id| format!("{id}.md")));
-    match &mut writer {
-        Some(w) => w.clean_paths(paths)?,
-        None => vault.clean_paths(&paths)?,
+    let specs = moves.pathspecs(&paths, false);
+    match &writer {
+        Some(w) => w.clean_paths(specs)?,
+        None => vault.clean_paths(&specs)?,
     }
     let text = vault.text(&old)?;
-    admit(&vault, &index, &File::from_bytes(old.clone(), text.as_bytes())?, &new)?;
+    admit(&vault, index, &File::from_bytes(old.clone(), text.as_bytes())?, &new, head)?;
     let mut names = vec![old.clone()];
     names.extend(index.aliases_of(&old)?.into_iter().filter(|a| *a != old));
     let rewrite = |text: &str| names.iter().fold(text.to_string(), |t, n| retarget(&t, n.as_str(), new.as_str()));
@@ -155,8 +159,8 @@ fn directory(root: &Path, old: &Id, new: &Id) -> Result<Moves, Refusal> {
 }
 
 /// Refuses a rename the node's kind does not allow: an asset, a record, or a new id outside the kind's layout or
-/// already held.
-fn admit(vault: &Vault, index: &Index, file: &File, new: &Id) -> Result<(), Refusal> {
+/// already held. `head` is [`in_head`] for the new id.
+fn admit(vault: &Vault, index: &Index, file: &File, new: &Id, mut head: Child) -> Result<(), Refusal> {
     let old = &file.id;
     let schema = |subject: &str, rule: &'static str, fix: String| Refusal::new(Code::SchemaInvalid, subject, rule, fix);
     let Some(header) = &file.header else {
@@ -194,7 +198,8 @@ fn admit(vault: &Vault, index: &Index, file: &File, new: &Id) -> Result<(), Refu
         ));
     }
     // A directory left in place would merge with the moved one, and the move would overwrite its files (12, A rename).
-    if vault.root.join(new.as_str()).exists() || in_head(&vault.root, new.as_str())? {
+    let in_head = head.wait().map_err(|e| Refusal::failed("git cat-file", e.to_string()))?.success();
+    if vault.root.join(new.as_str()).exists() || in_head {
         return Err(Refusal::new(
             Code::IdTaken,
             new.as_str(),
@@ -205,15 +210,18 @@ fn admit(vault: &Vault, index: &Index, file: &File, new: &Id) -> Result<(), Refu
     Ok(())
 }
 
-/// Whether HEAD holds `path`, a file or a directory. git branches on the exit code alone: 0 names it, 128 does not.
-fn in_head(root: &Path, path: &str) -> Result<bool, Refusal> {
-    let out = std::process::Command::new("git")
+/// Asks git whether HEAD holds `path`, a file or a directory, and does not wait: the answer comes while the index
+/// and `git status` run, which spares a rename one git process (25, issue 9). git branches on the exit code alone:
+/// 0 names it, 128 does not.
+fn in_head(root: &Path, path: &str) -> Result<Child, Refusal> {
+    Command::new("git")
         .arg("-C")
         .arg(root)
         .args(["cat-file", "-e", &format!("HEAD:./{path}")])
-        .output()
-        .map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;
-    Ok(out.status.success())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| Refusal::failed("git", format!("{e}; install git")))
 }
 
 /// Every file under `dir`, sorted, dot files too; none when it is not there. A tracked one moves with the rest, so no

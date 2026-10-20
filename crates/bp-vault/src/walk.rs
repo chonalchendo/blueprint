@@ -2,8 +2,9 @@
 //! of the weight, ranked by personalized PageRank from the seed, then filled into a token budget first fit.
 //! Records and inbox entries are not walked: a record is evidence about its parent, and an inbox entry is a note.
 //!
-//! The index keeps the walk's graph as one adjacency blob, rebuilt by each refresh that changed a file. The reach
-//! and the rank then run in memory: spike 2 found the adjacency layout, not the language, sets the walk's cost.
+//! The index keeps the walk's graph as one adjacency blob, rebuilt by each refresh that changed a file and kept up
+//! to date by a write. The reach and the rank then run in memory: spike 2 found the adjacency layout, not the
+//! language, sets the walk's cost.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -252,8 +253,15 @@ fn reached(r: &rusqlite::Row) -> rusqlite::Result<Reached> {
     Ok(Reached { id: r.get(0)?, kind, title: r.get(2)?, status: r.get(3)?, rank: 0.0, tokens: count_at(r, 4)? })
 }
 
-/// Rebuilds the walk's graph from `links` and `nodes`. A refresh that changed any file runs it: row numbers move when
-/// a node is parsed again, so a partial update would point at stale rows.
+/// The walk's arcs as `src row, dst row, type`: one per link type between two nodes, a body wikilink read as a cite.
+/// [`rebuild_graph`] reads them all and [`around`] those of one id, so the two cannot drift apart.
+const ARCS: &str = "select a.rowid, b.rowid, case l.type when 'body' then 'cites' else l.type end
+    from links l join nodes a on a.id = l.src join nodes b on b.id = l.dst
+    where l.type in ('under', 'depends', 'answers', 'targets', 'cites', 'body') and a.rowid != b.rowid";
+
+/// Rebuilds the walk's graph from `links` and `nodes`. A refresh that changed any file runs it, because it may
+/// delete nodes and parse files no write named; a write updates the graph in place when no arc moves
+/// ([`update_graph`]).
 pub(crate) fn rebuild_graph(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     let n: i64 = conn.query_row("select coalesce(max(rowid), 0) + 1 from nodes", [], |r| r.get(0))?;
     let n = usize::try_from(n).expect("a rowid is positive");
@@ -261,13 +269,9 @@ pub(crate) fn rebuild_graph(conn: &rusqlite::Connection) -> rusqlite::Result<()>
     for row in conn.prepare("select rowid from nodes where kind != 'inbox'")?.query_map([], |r| r.get::<_, i64>(0))? {
         walkable[usize::try_from(row?).expect("a rowid is positive")] = true;
     }
-    // One arc per link type between two nodes, a body wikilink read as a cite; then summed per pair and direction.
+    // Each arc once, then summed per pair and direction.
     let mut typed = std::collections::BTreeSet::new();
-    let mut st = conn.prepare(
-        "select a.rowid, b.rowid, case l.type when 'body' then 'cites' else l.type end
-         from links l join nodes a on a.id = l.src join nodes b on b.id = l.dst
-         where l.type in ('under', 'depends', 'answers', 'targets', 'cites', 'body') and a.rowid != b.rowid",
-    )?;
+    let mut st = conn.prepare(ARCS)?;
     for row in st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)))? {
         typed.insert(row?);
     }
@@ -290,6 +294,83 @@ pub(crate) fn rebuild_graph(conn: &rusqlite::Connection) -> rusqlite::Result<()>
     conn.execute("delete from graph", [])?;
     conn.execute("insert into graph values (?1)", [blob])?;
     Ok(())
+}
+
+/// What the graph holds of one id: its row and whether the walk enters it, and every arc that starts or ends there,
+/// as `src dst type` over rows. Rows, not ids, because the graph stores rows: a renamed node keeps its row, so a
+/// rename that rewrites every link to it moves no arc.
+#[derive(PartialEq, Eq)]
+pub(crate) struct Around {
+    node: Option<(i64, bool)>,
+    arcs: std::collections::BTreeSet<(i64, i64, String)>,
+}
+
+/// [`Around`] for one id, read inside the write's transaction.
+pub(crate) fn around(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<Around> {
+    let node = conn
+        .prepare_cached("select rowid, kind != 'inbox' from nodes where id = ?1")?
+        .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let arcs = conn
+        .prepare_cached(&format!("{ARCS} and (l.src = ?1 or l.dst = ?1)"))?
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(Around { node, arcs })
+}
+
+/// Which way [`update_graph`] went.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Updated {
+    /// No row or arc moved: the stored graph stands.
+    Kept,
+    /// New rows with no arc were appended.
+    Grown,
+    /// An arc moved, or a row went: the graph was rebuilt.
+    Rebuilt,
+}
+
+/// Brings the graph up to date after a write took each id from `before` to `after`. A label, a body that moves no
+/// link, or a rename that rewrites every link to the node leaves it as it was, and a new node with no arc, such as
+/// an inbox entry, only adds its row; anything else rebuilds it. Rebuilding on every write cost a fifth of a
+/// one-file write (25, issue 9). A node keeps its row across an edit and a rename, so the stored rows still name the
+/// same nodes.
+pub(crate) fn update_graph(
+    conn: &rusqlite::Connection,
+    before: &[Around],
+    after: &[Around],
+) -> rusqlite::Result<Updated> {
+    let mut added = Vec::new();
+    for (b, a) in before.iter().zip(after) {
+        match (b.node, a.node) {
+            _ if b.arcs != a.arcs => return rebuild_graph(conn).map(|()| Updated::Rebuilt),
+            (x, y) if x == y => {}
+            (None, Some(row)) => added.push(row),
+            _ => return rebuild_graph(conn).map(|()| Updated::Rebuilt),
+        }
+    }
+    if added.is_empty() {
+        return Ok(Updated::Kept);
+    }
+    let old: Vec<u8> = conn.query_row("select csr from graph", [], |r| r.get(0))?;
+    let blob = Blob::new(&old);
+    let (n, m) = (blob.n, u32_at(&old, 4) as usize);
+    let rows = added.iter().map(|(row, _)| usize::try_from(*row).expect("a rowid is positive"));
+    let grown = rows.clone().map(|r| r + 1).chain([n]).max().expect("the chain holds n");
+    let mut out = Vec::with_capacity(old.len() + 5 * (grown - n));
+    out.extend(u32::try_from(grown).expect("a vault holds fewer than 2^32 nodes").to_le_bytes());
+    out.extend(&old[4..blob.arcs_at]);
+    // Each new row starts and ends its arcs where the last row ended them: at `m`, with none.
+    for _ in n..grown {
+        out.extend(&old[4..8]);
+    }
+    out.extend(&old[blob.arcs_at..]);
+    let walkable = blob.arcs_at + 4 * (grown - n) + 12 * m;
+    out.resize(walkable + grown, 0);
+    for (r, (_, walk)) in rows.zip(&added) {
+        out[walkable + r] = u8::from(*walk);
+    }
+    conn.execute("update graph set csr = ?1", [out])?;
+    Ok(Updated::Grown)
 }
 
 /// Personalized PageRank from the seed, `rows[0]`, over the reached nodes in `rows` order; `at` maps a row to its

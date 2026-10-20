@@ -123,23 +123,33 @@ impl Index {
         Ok(out)
     }
 
-    /// Takes the committed files, drops the ids the commit removed, and stores the fingerprint, in one transaction.
-    pub(crate) fn apply<'i>(
+    /// Takes the committed files, moves each id of `moved` (a new id to the id it had) to its new one, and stores the
+    /// fingerprint, in one transaction. A moved node keeps its row, so the graph's rows still name the same nodes.
+    pub(crate) fn apply(
         &mut self,
         root: &Path,
         files: &[File],
-        gone: impl IntoIterator<Item = &'i Id>,
-    ) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
-        for id in gone {
-            remove(&tx, id.as_str(), false)?;
+        moved: &BTreeMap<Id, Id>,
+    ) -> rusqlite::Result<crate::walk::Updated> {
+        // Immediate: a transaction that reads first and then writes gets SQLITE_BUSY at once, past the busy wait.
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let before = files
+            .iter()
+            .map(|f| crate::walk::around(&tx, moved.get(&f.id).unwrap_or(&f.id).as_str()))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (new, old) in moved {
+            remove(&tx, old.as_str(), true)?;
+            tx.execute("update nodes set id = ?2 where id = ?1", [old.as_str(), new.as_str()])?;
         }
         for f in files {
             replace(&tx, f)?;
         }
-        crate::walk::rebuild_graph(&tx)?;
+        let after =
+            files.iter().map(|f| crate::walk::around(&tx, f.id.as_str())).collect::<rusqlite::Result<Vec<_>>>()?;
+        let updated = crate::walk::update_graph(&tx, &before, &after)?;
         tx.execute("insert or replace into meta values ('fingerprint', ?1)", [fingerprint(root)])?;
-        tx.commit()
+        tx.commit()?;
+        Ok(updated)
     }
 }
 

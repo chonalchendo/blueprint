@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use bp_design::DesignStatus;
 use bp_operation::Role;
-use bp_vault::{Code, Header, Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Code, Header, Id, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
@@ -39,11 +39,12 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     let vault = Vault::discover(cwd)?;
     let role = role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let mut writer = if set.dry_run { None } else { Some(vault.writer()?) };
-    let index = Index::open(&vault)?;
-    let id = subject(&index, &set.id)?;
+    let writer = if set.dry_run { None } else { Some(vault.writer()?) };
+    let mut opened = None;
+    let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
+    let id = subject(index, &set.id)?;
     // A human's uncommitted edit refuses first, dry run or not, before its text is read (12, Write path).
-    match &mut writer {
+    match &writer {
         Some(w) => w.clean([&id])?,
         None => vault.clean([&id])?,
     }
