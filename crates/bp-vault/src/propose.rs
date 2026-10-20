@@ -7,7 +7,7 @@ use std::path::Path;
 use rusqlite::OptionalExtension;
 
 use crate::fingerprint::fingerprint;
-use crate::index::{failed, replace};
+use crate::index::{failed, remove, replace};
 use crate::write::Held;
 use crate::{Code, File, Id, Index, Refusal, Vault};
 
@@ -16,15 +16,29 @@ impl Index {
     /// holds no refusing finding that its current version does not. Returns the parsed files and every finding they
     /// hold. Links resolve against the proposed tree: a file the same write adds is there.
     pub fn propose(&self, vault: &Vault, changes: &BTreeMap<Id, String>) -> Result<(Vec<File>, Vec<Held>), Refusal> {
+        self.propose_moving(vault, changes, &BTreeMap::new())
+    }
+
+    /// [`Index::propose`] for a write that moves files: `moved` maps a new id to the id it had, and the file is held
+    /// to that old version, so a moved node's broken links stay findings it already held.
+    pub fn propose_moving(
+        &self,
+        vault: &Vault,
+        changes: &BTreeMap<Id, String>,
+        moved: &BTreeMap<Id, Id>,
+    ) -> Result<(Vec<File>, Vec<Held>), Refusal> {
         let mut files = Vec::with_capacity(changes.len());
         let mut all = Vec::new();
         for (id, text) in changes {
             let file = File::from_bytes(id.clone(), text.as_bytes())?;
-            let before = match vault.read(id) {
+            let mut before = match vault.read(moved.get(id).unwrap_or(id)) {
                 Ok(old) => self.held(&old, None)?,
                 Err(e) if e.code == Code::NoNode => Vec::new(),
                 Err(e) => return Err(e),
             };
+            for h in &mut before {
+                id.as_str().clone_into(&mut h.id);
+            }
             let now = self.held(&file, Some(changes))?;
             for new in now.iter().filter(|h| !before.contains(h)) {
                 if new.code == Code::UnresolvedLink.as_str() {
@@ -121,9 +135,17 @@ impl Index {
         Ok(holder.map(Id::from_trusted))
     }
 
-    /// Takes the committed files and the fingerprint after the commit, in one transaction.
-    pub(crate) fn apply(&mut self, root: &Path, files: &[File]) -> rusqlite::Result<()> {
+    /// Takes the committed files, drops the ids the commit removed, and stores the fingerprint, in one transaction.
+    pub(crate) fn apply<'i>(
+        &mut self,
+        root: &Path,
+        files: &[File],
+        gone: impl IntoIterator<Item = &'i Id>,
+    ) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
+        for id in gone {
+            remove(&tx, id.as_str(), false)?;
+        }
         for f in files {
             replace(&tx, f)?;
         }

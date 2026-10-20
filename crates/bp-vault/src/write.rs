@@ -58,6 +58,15 @@ pub struct Written {
     pub findings: Vec<Held>,
 }
 
+/// What a write moves besides the markdown it writes.
+#[derive(Debug, Default)]
+pub struct Moves {
+    /// Each new id and the id it had, which the write removes.
+    pub ids: BTreeMap<Id, Id>,
+    /// Each file that is not markdown, as its old and new paths under the root.
+    pub files: Vec<(String, String)>,
+}
+
 /// The journal's first line: the head the write started from, and each path with its pre-image's length, or none
 /// for a path the write creates.
 #[derive(Serialize, Deserialize)]
@@ -123,33 +132,68 @@ impl Writer<'_> {
         Ok(())
     }
 
+    /// [`Writer::clean`] over paths relative to the root: a node's directory holds files that are not markdown.
+    pub fn clean_paths(&mut self, paths: Vec<String>) -> Result<(), Refusal> {
+        let head = head_if_clean(&self.vault.root, &paths.iter().map(String::as_str).collect::<Vec<_>>())?;
+        self.clean = Some((head, paths));
+        Ok(())
+    }
+
     /// Validates `changes` as the proposed tree, writes them, and commits them alone with `Bp-Verb` and `Bp-Role`.
     /// Every change differs from the file on disk: a verb answers a repeat with exit 3 before it gets here. A
     /// refusal or a failure leaves the head and the working tree as they were.
     pub fn commit(
-        mut self,
+        self,
         verb: &str,
         role: &str,
         subject: &str,
         changes: &BTreeMap<Id, String>,
     ) -> Result<Written, Refusal> {
+        self.commit_moving(verb, role, subject, changes, &Moves::default())
+    }
+
+    /// [`Writer::commit`] for a write that also moves files (12, A rename): each old id of `moves` goes, and each
+    /// file that is not markdown is copied to its new path and removed from its old one, in the same commit.
+    pub fn commit_moving(
+        mut self,
+        verb: &str,
+        role: &str,
+        subject: &str,
+        changes: &BTreeMap<Id, String>,
+        moves: &Moves,
+    ) -> Result<Written, Refusal> {
         let root = &self.vault.root;
-        let paths: Vec<String> = changes.keys().map(|id| format!("{id}.md")).collect();
+        let gone: Vec<String> = moves.ids.values().map(|id| format!("{id}.md")).collect();
+        let mut paths: Vec<String> = changes.keys().map(|id| format!("{id}.md")).collect();
+        paths.extend(gone.iter().cloned());
+        paths.extend(moves.files.iter().flat_map(|(from, to)| [from.clone(), to.clone()]));
         let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
         let head = match self.clean.take() {
             Some((head, clean)) if paths.iter().all(|p| clean.iter().any(|c| c == p)) => head,
             _ => head_if_clean(root, &paths)?,
         };
-        let (files, findings) = self.index.propose(self.vault, changes)?;
+        let (files, findings) = self.index.propose_moving(self.vault, changes, &moves.ids)?;
         journal(root, head, &paths)?;
         let trailers = format!("Bp-Verb: {verb}\nBp-Role: {role}");
-        // `commit -- <paths>` stages a tracked path itself; only a path HEAD lacks needs `add`, so a label write
-        // spawns git twice, as a plain one-file commit does.
-        let new: Vec<&str> =
+        // `commit -- <paths>` stages a tracked path itself, a removed one too; only a path HEAD lacks needs `add`,
+        // so a label write spawns git twice, as a plain one-file commit does.
+        let mut new: Vec<&str> =
             paths.iter().zip(changes.keys()).filter(|(_, id)| !id.path(root).exists()).map(|(p, _)| *p).collect();
+        new.extend(moves.files.iter().map(|(_, to)| to.as_str()));
         let done = changes
             .iter()
             .try_for_each(|(id, text)| put(&id.path(root), text.as_bytes(), false))
+            .and_then(|()| {
+                moves.files.iter().try_for_each(|(from, to)| {
+                    let bytes = std::fs::read(root.join(from)).map_err(|e| failed(&root.join(from), &e))?;
+                    put(&root.join(to), &bytes, false)
+                })
+            })
+            .and_then(|()| {
+                gone.iter()
+                    .chain(moves.files.iter().map(|(from, _)| from))
+                    .try_for_each(|p| std::fs::remove_file(root.join(p)).map_err(|e| failed(&root.join(p), &e)))
+            })
             .and_then(
                 |()| if new.is_empty() { Ok(String::new()) } else { git(root, &[&["add", "--"], &new[..]].concat()) },
             )
@@ -166,8 +210,13 @@ impl Writer<'_> {
         let commit = crate::git::Repo::find(root).and_then(|r| r.head()).ok_or_else(|| {
             Refusal::failed(root.display().to_string(), "git committed but its head cannot be read; rerun bp where")
         })?;
+        // git keeps no directory, so the emptied ones go too, before the fingerprint reads their parents' times.
+        for p in gone.iter().chain(moves.files.iter().map(|(from, _)| from)) {
+            let mut dir = root.join(p);
+            while dir.pop() && dir != *root && std::fs::remove_dir(&dir).is_ok() {}
+        }
         // The head moved, so an update that fails here costs the next read one refresh and loses nothing.
-        let _ = self.index.apply(root, &files);
+        let _ = self.index.apply(root, &files, moves.ids.values());
         Ok(Written { commit, findings })
     }
 }

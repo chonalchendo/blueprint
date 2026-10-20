@@ -6,6 +6,7 @@ mod create;
 mod intent;
 mod link;
 mod record;
+mod rename;
 mod schema;
 mod set;
 mod transition;
@@ -65,6 +66,8 @@ pub enum Verb {
     Transition(transition::Transition),
     /// One append-only record under its parent: one new file, one commit.
     Record(record::Record),
+    /// A new slug for one node: the file and its directory move, every inbound link follows, one commit.
+    Rename(rename::Rename),
 }
 
 /// `bp show <id> [--section <heading>] [--no-body] [--at <ref>]`.
@@ -153,6 +156,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Link(l) => wrote(link::link(cwd, l), cli.json, out),
         Verb::Transition(t) => wrote(transition::transition(cwd, t), cli.json, out),
         Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
+        Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
     }
 }
 
@@ -200,9 +204,16 @@ fn where_(cwd: &Path) -> Result<Where, Refusal> {
 fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     let vault = Vault::discover(cwd)?;
     let id = node_id(&show.id)?;
-    let file = match &show.at {
-        Some(at) => vault.read_at(&id, at)?,
-        None => vault.read(&id)?,
+    let (id, file) = match &show.at {
+        Some(at) => (id.clone(), vault.read_at(&id, at)?),
+        // A renamed node's old id is an alias: it shows the node under its id today (13, rule 1).
+        None => match vault.read(&id) {
+            Err(e) if e.code == Code::NoNode => match Index::open(&vault)?.aliased(&id)? {
+                Some(real) => (real.clone(), vault.read(&real)?),
+                None => return Err(e),
+            },
+            read => (id, read?),
+        },
     };
     // A refusal's fix reads the same commit the verb read.
     let at = show.at.as_ref().map_or_else(String::new, |a| format!(" --at {a}"));

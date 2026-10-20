@@ -13,6 +13,7 @@ mod index;
 mod kind;
 mod propose;
 mod refusal;
+mod rename;
 mod walk;
 mod write;
 
@@ -30,8 +31,9 @@ pub use id::{Id, SLUG_MAX, is_slug, slug};
 pub use index::{Filter, Hit, Index, Reading, Record, Row};
 pub use kind::{DesignLevel, Kind};
 pub use refusal::{Code, Refusal};
+pub use rename::retarget;
 pub use walk::{Fill, Reached, fill};
-pub use write::{Held, Writer, Written};
+pub use write::{Held, Moves, Writer, Written};
 // The macro's expansion names serde through this crate, so a domain crate needs no serde dependency of its own.
 #[doc(hidden)]
 pub use serde;
