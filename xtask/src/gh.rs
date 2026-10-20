@@ -295,6 +295,10 @@ impl Fake {
         let mut cmd = Command::new("git");
         // `file` alone: the bare copy is a local path, and nothing the fake runs may reach the network.
         cmd.args(args).current_dir(self.t.join("origin.git")).env("GIT_ALLOW_PROTOCOL", "file");
+        // The squash is the forge's commit, as GitHub's is; a runner with no global git identity cannot make it.
+        for (k, v) in [("NAME", "GitHub"), ("EMAIL", "noreply@github.com")] {
+            cmd.env(format!("GIT_AUTHOR_{k}"), v).env(format!("GIT_COMMITTER_{k}"), v);
+        }
         cmd
     }
 
