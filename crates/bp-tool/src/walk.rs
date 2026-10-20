@@ -70,7 +70,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     if walk.done {
         // A stop reads a few rows, and `list` opens its own read transaction.
         drop(reading);
-        let done = crate::done::done(&index, &id, &header, action)?;
+        let done = crate::done::done(&vault.root, &index, &id, &header, action)?;
         return Ok(serde_json::json!({ "id": id, "for": action, "done": done }));
     }
     context(&vault, &index, &id, action)?;

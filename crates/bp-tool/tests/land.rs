@@ -17,10 +17,10 @@ const M: &str = "projects/bp/milestones/m";
 const S: &str = "projects/bp/designs/system";
 
 /// The vault, and a directory holding `origin.git`, its clone `code` and the fake `bin/gh`. The fake answers
-/// `api user` with `$FAKE_LOGIN`, `pr list` from `prs.json`, `pr create` with a url, and logs `pr edit` and
-/// `pr merge`. It keeps the body in `body` and prints it as JSON with CRLF line ends, as a forge may store it,
-/// escaping only those: a body holds no quote. The vault holds [`ISSUE`], with one block, under [`M`], with none, and
-/// [`BARE`], with none.
+/// `api user` with `$FAKE_LOGIN`, `pr list` from `prs.json`, `pr view` with its one row, `pr create` with a url, and
+/// logs `pr edit` and `pr merge`. It keeps the body in `body` and prints it as JSON with CRLF line ends, as a forge may
+/// store it, escaping only those: a body holds no quote. The vault holds [`ISSUE`], with one block, under [`M`], with
+/// none, and [`BARE`], with none.
 fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
     let t = tempfile::tempdir().unwrap();
     let origin = t.path().join("origin.git");
@@ -44,7 +44,7 @@ case "$1 $2" in
   "pr list") cat '{t}/prs.json' 2>/dev/null || echo '[]' ;;
   "pr create") echo "$*" > '{t}/created'; shift 9; printf '%s' "$1" > '{t}/body'; echo 'https://forge.invalid/o/r/pull/1' ;;
   "pr edit") if [ "$4" = --body ]; then printf '%s' "$5" > '{t}/body'; else echo "$*" > '{t}/edited'; fi ;;
-  "pr view") printf '{{"body":"'; awk 'BEGIN {{ ORS = "\\r\\n" }} {{ print }}' '{t}/body'; printf '"}}' ;;
+  "pr view") if [ "$5" = body ]; then printf '{{"body":"'; awk 'BEGIN {{ ORS = "\\r\\n" }} {{ print }}' '{t}/body'; printf '"}}'; else sed 's/^\[//; s/\]$//' '{t}/prs.json'; fi ;;
   "pr merge") echo "$*" > '{t}/merged' ;;
   *) exit 9 ;;
 esac
@@ -120,6 +120,11 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     assert!(git(v, &["log", "-1", "--format=%B"]).lines().any(|l| l == "Bp-Verb: pr"));
     forge(t, &h, &[("agent", &h)], &[]);
     assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "a head with a pull request and runs");
+    // The repeat refreshed the snapshot, and `list` reads it with no `gh` on its `PATH` (27, design change 9).
+    assert!(v.join(".bp/forge/bp/open-prs.json").is_file() && v.join(".bp/forge/bp/pr-1.json").is_file());
+    let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "issue"]);
+    assert!(list["forge"] == "snapshot" && list["forge_age"].is_i64(), "{list}");
+    assert_eq!(list["rows"].as_array().unwrap().iter().find(|r| r["id"] == ISSUE).unwrap()["intent"], "needs-review");
 
     let before = commits(v);
     let land = || bp(v, t, &[], &["land", ISSUE]).1["code"].clone();
@@ -174,6 +179,7 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     let (_, issue) = common::bp(v, &["show", ISSUE]);
     assert_eq!(issue["status"], "resolved");
     assert_eq!(bp(v, t, &[], &["land", ISSUE]).0, Some(3), "a resolved issue");
+    assert!(!v.join(".bp/forge/bp/pr-1.json").exists(), "no claim holds pull request 1 now");
     assert_eq!(git(v, &["status", "--porcelain"]), "");
 }
 

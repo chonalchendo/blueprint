@@ -2,17 +2,21 @@
 //! fails, exits non-zero or prints what does not parse is `could_not_run`. No call approves: an approval comes only
 //! from the reviewer identity, whose credential never enters an agent's environment (15, Controls 1).
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use bp_vault::Refusal;
 use serde::Deserialize;
 
-use crate::PullRequest;
+use crate::{PullRequest, Snapshot};
 
 /// The fields every pull request read asks for, so a list row and a view parse into the same type.
 const FIELDS: &str = "number,state,author,baseRefName,headRefName,headRefOid,reviews,statusCheckRollup";
+
+/// How many open pull requests the snapshot lists; `gh pr list` stops at 30 unless told.
+const OPEN_LIMIT: &str = "1000";
 
 /// `gh`, run in a clone of the project repository: `gh` finds the repository from the clone's `origin`.
 #[derive(Debug, Clone)]
@@ -56,6 +60,35 @@ impl Gh {
         self.json::<Body>(&["pr", "view", &number.to_string(), "--json", "body"]).map(|b| b.body)
     }
 
+    /// Rewrites the snapshot in `dir` (27, design change 9): `gh pr list --state open` into `open-prs.json`, and
+    /// `gh pr view <n>` into `pr-<n>.json` for each pull request whose slug `held` names. The held set is read from the
+    /// open list and from the last snapshot, so a pull request merged under a held claim stays in view. Every call
+    /// runs before any file is written, and each file goes in by a rename: a reader sees each file whole.
+    pub fn snapshot(&self, dir: &Path, held: impl Fn(&str) -> bool) -> Result<(), Refusal> {
+        let args = ["pr", "list", "--state", "open", "--limit", OPEN_LIMIT, "--json", FIELDS];
+        let (prs, listed): (Vec<PullRequest>, _) = self.read(&args)?;
+        let last = Snapshot::from_dir(dir).map(|s| s.prs).unwrap_or_default();
+        let numbers: BTreeSet<u64> = prs.iter().chain(&last).filter(|p| held(p.slug())).map(|p| p.number).collect();
+        let mut files = Vec::with_capacity(numbers.len() + 1);
+        for n in &numbers {
+            let (_, viewed): (PullRequest, _) = self.read(&["pr", "view", &n.to_string(), "--json", FIELDS])?;
+            files.push((format!("pr-{n}.json"), viewed));
+        }
+        files.push(("open-prs.json".into(), listed));
+        let failed = |e: std::io::Error| Refusal::failed(dir.display().to_string(), e.to_string());
+        std::fs::create_dir_all(dir).map_err(failed)?;
+        for (name, bytes) in &files {
+            put(&dir.join(name), bytes)?;
+        }
+        // A view of a claim no longer held would outlive its pull request's close.
+        for path in std::fs::read_dir(dir).map_err(failed)?.flatten().map(|e| e.path()) {
+            if crate::is_view(&path) && !files.iter().any(|(name, _)| path.ends_with(name)) {
+                std::fs::remove_file(path).map_err(failed)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Opens a pull request of `head` into `base` and returns its number, the last segment of the url `gh` prints.
     #[cfg(feature = "write")]
     pub fn create(&self, head: &str, base: &str, title: &str, body: &str) -> Result<u64, Refusal> {
@@ -86,9 +119,15 @@ impl Gh {
     }
 
     fn json<T: serde::de::DeserializeOwned>(&self, args: &[&str]) -> Result<T, Refusal> {
+        self.read(args).map(|(t, _)| t)
+    }
+
+    /// The parsed stdout and its bytes, as `gh` printed them.
+    fn read<T: serde::de::DeserializeOwned>(&self, args: &[&str]) -> Result<(T, Vec<u8>), Refusal> {
         let out = self.run(args)?;
-        serde_json::from_slice(&out)
-            .map_err(|e| Refusal::failed(Self::subject(args), format!("gh printed JSON this tool cannot read: {e}")))
+        let t = serde_json::from_slice(&out)
+            .map_err(|e| Refusal::failed(Self::subject(args), format!("gh printed JSON this tool cannot read: {e}")))?;
+        Ok((t, out))
     }
 
     /// Stdout of a call that exited 0.
@@ -121,6 +160,15 @@ impl Gh {
     }
 }
 
+/// Writes `bytes` to `path` through a temporary file in its directory and a rename.
+fn put(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.{}", std::process::id()));
+    std::fs::write(&tmp, bytes)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| Refusal::failed(path.display().to_string(), e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -148,7 +196,7 @@ mod tests {
             r#"case "$1 $2" in
   "api user") echo '{"login":"quokka-agent","id":1}' ;;
   "pr list") echo '[{"number":3,"headRefName":"bp/q","headRefOid":"h","baseRefName":"master","author":{"login":"quokka-agent"}}]' ;;
-  "pr view") [ "$5" = body ] && { echo '{"body":"b"}'; exit; }; echo '{"number":3,"headRefName":"bp/q","headRefOid":"h","reviews":[{"state":"APPROVED","author":{"login":"r"},"commit":{"oid":"h"}}]}' ;;
+  "pr view") [ "$5" = body ] && { echo '{"body":"b"}'; exit; }; echo '{"number":'$3',"headRefName":"bp/q","headRefOid":"h","state":"OPEN","reviews":[{"state":"APPROVED","author":{"login":"r"},"commit":{"oid":"h"}}]}' ;;
   "pr create") echo 'https://github.com/o/r/pull/3' ;;
   "pr edit") [ "$*" = "pr edit 3 --base master" ] || [ "$*" = "pr edit 3 --body b" ] || exit 9 ;;
   *) [ "$*" = "pr merge 3 --squash --match-head-commit h" ] || exit 9 ;;
@@ -163,6 +211,17 @@ esac"#,
         let pr = gh.pr(3).unwrap();
         assert_eq!(pr.reviews[0].author.as_ref().unwrap().login, "r");
         assert_eq!(gh.body(3).unwrap(), "b");
+
+        // The snapshot: the open list, a view per held pull request, and no view left of one no longer held.
+        let snap = ok.path().join("snap");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("pr-9.json"), r#"{"number":9,"headRefName":"bp/gone","headRefOid":"x"}"#).unwrap();
+        gh.snapshot(&snap, |slug| slug == "q").unwrap();
+        let s = Snapshot::from_dir(&snap).unwrap();
+        assert!(s.oldest.is_some() && s.open_for("q").is_some_and(|p| p.base_ref_name.as_deref() == Some("master")));
+        assert!(snap.join("pr-3.json").is_file() && !snap.join("pr-9.json").exists(), "a view per held claim only");
+        gh.snapshot(&snap, |_| false).unwrap();
+        assert!(!snap.join("pr-3.json").exists() && snap.join("open-prs.json").is_file());
         #[cfg(feature = "write")]
         {
             assert_eq!(gh.create("bp/q", "master", "t", "b").unwrap(), 3);

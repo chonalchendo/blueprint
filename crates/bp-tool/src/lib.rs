@@ -15,6 +15,7 @@ mod record;
 mod rename;
 mod schema;
 mod set;
+mod snapshot;
 mod stack;
 mod stamp;
 mod transition;
@@ -185,14 +186,21 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Transition(t) => wrote(transition::transition(cwd, t), cli.json, out),
         Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
         Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
-        Verb::Cut(c) => wrote(claim::cut(cwd, c), cli.json, out),
-        Verb::Release(r) => wrote(claim::release(cwd, r), cli.json, out),
-        Verb::Pr(p) => land::run_pr(cwd, p, cli.json, out),
-        Verb::Land(l) => wrote(land::land(cwd, l), cli.json, out),
+        // The repo verbs refresh the forge snapshot after their forge calls, refused or not (27, design change 9).
+        Verb::Cut(c) => repo(wrote(claim::cut(cwd, c), cli.json, out), cwd, &c.issue),
+        Verb::Release(r) => repo(wrote(claim::release(cwd, r), cli.json, out), cwd, &r.issue),
+        Verb::Pr(p) => repo(land::run_pr(cwd, p, cli.json, out), cwd, &p.issue),
+        Verb::Land(l) => repo(wrote(land::land(cwd, l), cli.json, out), cwd, &l.issue),
         Verb::Check(c) => check::run(cwd, c, cli.json, out),
         Verb::Stamp(s) => stamp::run(cwd, s, cli.json, out),
         Verb::Install(i) => wrote(install::install(cwd, i), cli.json, out),
     }
+}
+
+/// A repo verb's exit, once the forge snapshot of its issue's project is rewritten.
+fn repo(code: ExitCode, cwd: &Path, issue: &str) -> ExitCode {
+    snapshot::refresh(cwd, issue);
+    code
 }
 
 /// A write verb's exit: 0 for a write, 3 for a repeat, with the id, else the refusal's own.
@@ -386,7 +394,13 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     out.truncate(list.limit);
     let mut result = serde_json::json!({ "rows": out, "total": total, "truncated": total > out.len() });
     if let Some(w) = intents.world {
-        result["forge"] = if w.forge.is_some() { "snapshot" } else { "not read" }.into();
+        match w.forge_age(list.project.as_deref()) {
+            Some(age) => {
+                result["forge"] = "snapshot".into();
+                result["forge_age"] = age.into();
+            }
+            None => result["forge"] = "not read".into(),
+        }
     }
     Ok(result)
 }

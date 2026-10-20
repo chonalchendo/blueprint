@@ -246,6 +246,36 @@ fn review_and_respond_read_the_open_pull_request_head() {
 }
 
 #[test]
+fn a_stop_reads_the_vault_snapshot_and_never_calls_gh() {
+    let d = vault();
+    let claim = format!("---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n");
+    write(d.path(), &format!("{SEED}/claims/c.md"), &claim);
+    write(
+        d.path(),
+        &format!("{SEED}/reviews/aaaa.md"),
+        &format!("---\nkind: review\nunder: {SEED}\nhead: aaaa\n---\n"),
+    );
+    // A `gh` that leaves a mark and fails: no stop may call it.
+    let guard = tempfile::tempdir().unwrap();
+    let mark = guard.path().join("called");
+    write(guard.path(), "gh", &format!("#!/bin/sh\ntouch '{}'\nexit 1\n", mark.display()));
+    std::fs::set_permissions(guard.path().join("gh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", guard.path().display(), std::env::var("PATH").unwrap());
+    let stop = || {
+        let mut cmd = Command::cargo_bin("bp").unwrap();
+        cmd.current_dir(d.path()).env_remove("BP_VAULT").env_remove("BP_FORGE_SNAPSHOT").env("PATH", &path);
+        let out = cmd.args(["walk", SEED, "--for", "review", "--done", "--json"]).output().unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(out.status.success(), "{v}");
+        v["done"].clone()
+    };
+    assert_eq!(stop(), false, "with no snapshot no pull request is in view");
+    write(d.path(), ".bp/forge/bp/open-prs.json", r#"[{"number":1,"headRefName":"bp/0001.seed","headRefOid":"aaaa"}]"#);
+    assert_eq!(stop(), true, "the review is at the snapshot's head");
+    assert!(!mark.exists(), "no stop called gh");
+}
+
+#[test]
 fn triage_drift_needs_a_citation_for_each_failed_drift_run() {
     let d = vault();
     let s = "projects/bp/designs/system";
