@@ -73,7 +73,8 @@ impl Fake {
         let out = match args {
             ["api", "user"] => format!("{}\n", json!({ "login": self.login })),
             ["pr", "list", rest @ ..] => {
-                let f = flags(rest, &["--head", "--state", "--json"], &[])?;
+                // `--limit` caps rows the fake never has that many of.
+                let f = flags(rest, &["--head", "--state", "--limit", "--json"], &[])?;
                 let fields = fields(&f)?;
                 let state = f.get("--state").copied().unwrap_or("open").to_ascii_uppercase();
                 let rows: Vec<Value> = prs

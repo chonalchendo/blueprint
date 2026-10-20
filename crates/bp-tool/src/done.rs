@@ -2,17 +2,16 @@
 //! 11). A skill's `Stop:` line calls it, so it reads no slice; it reads only what its row's Stop column names.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bp_change::{MilestoneStatus, intents};
-use bp_forge::{Gh, PullRequest};
 use bp_operation::Action;
 use bp_reasoning::ThreadStatus;
 use bp_vault::git::Repo;
 use bp_vault::{Body, Filter, Id, Index, Kind, Refusal};
 use serde_json::{Map, Value};
 
-use crate::claim::{branch, field, held};
+use crate::claim::{field, held};
 
 /// The batch size for derive, until it is a project setting (21, open questions: the lean is three).
 const BATCH: usize = 3;
@@ -20,8 +19,16 @@ const BATCH: usize = 3;
 /// How deep `search` must find a learning by its cue: the search verb's default limit.
 const RETRIEVAL: usize = 10;
 
-/// Whether the action's Stop column holds for the seed `id`, whose header the walk read.
-pub(crate) fn done(index: &Index, id: &Id, header: &Map<String, Value>, action: Action) -> Result<bool, Refusal> {
+/// Whether the action's Stop column holds for the seed `id`, whose header the walk read. A stop that reads the forge
+/// sets `forge_age` to its snapshot's age; one that reads none leaves it `None`.
+pub(crate) fn done(
+    root: &Path,
+    index: &Index,
+    id: &Id,
+    header: &Map<String, Value>,
+    action: Action,
+    forge_age: &mut Option<i64>,
+) -> Result<bool, Refusal> {
     let text = |k: &str| header.get(k).and_then(Value::as_str);
     Ok(match action {
         // Call-shaped stops with no record predicate (21, rule 4): research ends when the dispatch returns, capture
@@ -40,19 +47,19 @@ pub(crate) fn done(index: &Index, id: &Id, header: &Map<String, Value>, action: 
             if intents::latest_claim(&claims).is_some_and(|c| c.escalated) {
                 return Ok(true);
             }
-            match open_head(index, id)? {
+            match open_head(root, index, id, forge_age)? {
                 Some((pr, Some(worktree))) => Repo::find(&worktree).and_then(|r| r.head()) == Some(pr),
                 _ => false,
             }
         }
-        Action::Review => match open_head(index, id)? {
+        Action::Review => match open_head(root, index, id, forge_age)? {
             Some((pr, _)) => index
                 .records(id.as_str(), Kind::Review)?
                 .iter()
                 .any(|r| field(r, "head").as_deref() == Some(pr.as_str())),
             None => false,
         },
-        Action::Respond => responded(index, id)?,
+        Action::Respond => responded(root, index, id, forge_age)?,
         Action::TriageDrift => {
             // An integrity run checks the vault, not a design: 21's drifted reads drift runs only.
             let failed = index.records(id.as_str(), Kind::Run)?.into_iter().filter(|r| {
@@ -116,8 +123,10 @@ fn names(body: &str, heading: &str) -> BTreeSet<String> {
 }
 
 /// Every finding of the latest review has a disposition, matched by its index, and the head moved if one is `fixed`.
-fn responded(index: &Index, id: &Id) -> Result<bool, Refusal> {
-    let (Some((pr, _)), Some(review)) = (open_head(index, id)?, index.records(id.as_str(), Kind::Review)?.pop()) else {
+fn responded(root: &Path, index: &Index, id: &Id, forge_age: &mut Option<i64>) -> Result<bool, Refusal> {
+    let (Some((pr, _)), Some(review)) =
+        (open_head(root, index, id, forge_age)?, index.records(id.as_str(), Kind::Review)?.pop())
+    else {
         return Ok(false);
     };
     // The findings are the rows of the body's table, after its header and separator lines, counted from 1 (21,
@@ -130,25 +139,17 @@ fn responded(index: &Index, id: &Id) -> Result<bool, Refusal> {
 }
 
 /// The head of the issue's open pull request while a claim is held, and the claim's worktree when this machine has
-/// it. The forge comes from the snapshot when one is set, as the intents read it. Else `gh` reads it in the worktree,
-/// and with no worktree nothing does: a temporary step that issue 5 of 27 removes.
-fn open_head(index: &Index, id: &Id) -> Result<Option<(String, Option<PathBuf>)>, Refusal> {
+/// it. The forge is the snapshot the intents read, never a call (22, constraint 8): with none, no pull request is in
+/// view, and the stop reads false until a repo verb writes one. Only the issue's own project is read.
+fn open_head(
+    root: &Path,
+    index: &Index,
+    id: &Id,
+    forge_age: &mut Option<i64>,
+) -> Result<Option<(String, Option<PathBuf>)>, Refusal> {
     let Some(claim) = held(index, id)? else { return Ok(None) };
     let worktree = field(&claim, "worktree").map(PathBuf::from).filter(|w| w.is_dir());
-    let open = if let Some(s) = crate::intent::World::read()?.forge {
-        s.open_for(id.as_str().rsplit('/').next().unwrap_or_default()).cloned()
-    } else if let Some(dir) = &worktree {
-        let prs = Gh::new(dir).prs_for_head(&branch(id)).map_err(|mut r| {
-            r.fix = format!(
-                "{}; until the forge snapshot lands (27, issue 5), `walk --done` reads the forge through gh, so \
-                 offline it cannot answer: rerun online, or set BP_FORGE_SNAPSHOT",
-                r.fix
-            );
-            r
-        })?;
-        prs.into_iter().find(PullRequest::is_open)
-    } else {
-        None
-    };
-    Ok(open.map(|p| (p.head_ref_oid, worktree)))
+    let world = crate::intent::World::read(root, &id.project().into_iter().collect())?;
+    *forge_age = world.forge_age();
+    Ok(world.pr(id.as_str()).map(|p| (p.head_ref_oid.clone(), worktree)))
 }

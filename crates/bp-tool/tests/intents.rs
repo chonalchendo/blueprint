@@ -141,6 +141,22 @@ fn the_forge_snapshot_moves_the_review_path_and_unblocks_dependents() {
     assert_eq!(intent(&v, "projects/bp/issues/0008.twochecks"), ("blocked", "run failed at head"));
     assert_eq!(intent(&v, "projects/bp/issues/0009.lands"), ("needs-landing", ""), "land's own predicate");
     assert_eq!(intent(&v, "projects/bp/issues/0010.twin"), ("needs-approval", ""), "only the reviewer's counts");
+    // The vault's own snapshot reads the same, with its age; a project with none reads `not read`.
+    let own = d.path().join(".bp/forge/bp");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::copy(d.path().join("forge/open-prs.json"), own.join("open-prs.json")).unwrap();
+    let v = list(d.path(), &["issue"], false);
+    assert!(v["forge"] == "snapshot" && v["forge_age"].is_i64(), "{v}");
+    assert_eq!(intent(&v, "projects/bp/issues/0003.held"), ("needs-review", ""));
+    let v = list(d.path(), &["issue", "--project", "other"], false);
+    assert!(v["forge"] == "not read" && v.get("forge_age").is_none(), "{v}");
+    // A bad file of a project out of view breaks no list: only the projects in view are read.
+    std::fs::create_dir_all(d.path().join(".bp/forge/zzz")).unwrap();
+    std::fs::write(d.path().join(".bp/forge/zzz/open-prs.json"), "garbage").unwrap();
+    let v = list(d.path(), &["issue", "--project", "bp"], false);
+    assert!(v["forge"] == "snapshot" && v["forge_age"].is_i64(), "{v}");
+    let v = list(d.path(), &["issue"], false);
+    assert!(v["forge"] == "snapshot" && v["forge_age"].is_i64(), "with no --project, the rows' projects: {v}");
 }
 
 #[test]

@@ -2,44 +2,69 @@
 //! and lives in `bp-change`; this is the IO around it (23, rule 2).
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use bp_change::intents::{self, Base, Block, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
 use bp_forge::Snapshot;
 use bp_vault::{Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::{Map, Value};
 
-/// The clock and the forge one call reads.
+/// The clock and the forge one call reads. The forge is a snapshot and never a live call (22, constraint 8).
 pub struct World {
     /// Unix seconds. `BP_NOW` fixes it for parity runs and replays, which must see the clock the reference saw.
     pub now: i64,
-    /// `None` when the forge was not read.
-    pub forge: Option<Snapshot>,
+    /// `BP_FORGE_SNAPSHOT`'s one snapshot, for every project.
+    over: Option<Snapshot>,
+    /// The snapshot of each project in view under the vault's `.bp/forge/`, as the repo verbs wrote it (27, design
+    /// change 9).
+    projects: Vec<(String, Snapshot)>,
 }
 
 impl World {
-    /// Reads `BP_NOW` and `BP_FORGE_SNAPSHOT`. The live forge read lands with the repo verbs.
-    pub fn read() -> Result<Self, Refusal> {
+    /// Reads `BP_NOW`, then `BP_FORGE_SNAPSHOT` or the snapshot of each of `projects` in the vault at `root`.
+    pub fn read(root: &Path, projects: &BTreeSet<&str>) -> Result<Self, Refusal> {
         let now = crate::clock::now()?;
-        let forge = match std::env::var_os("BP_FORGE_SNAPSHOT") {
-            Some(dir) => Some(Snapshot::from_dir(std::path::Path::new(&dir)).map_err(|(path, e)| {
+        if let Some(dir) = std::env::var_os("BP_FORGE_SNAPSHOT") {
+            let over = Snapshot::from_dir(Path::new(&dir)).map_err(|(path, e)| {
                 Refusal::failed(
                     path.display().to_string(),
                     format!("{e}; point BP_FORGE_SNAPSHOT at a directory of gh JSON, or unset it"),
                 )
-            })?),
-            None => None,
-        };
-        Ok(Self { now, forge })
+            })?;
+            return Ok(Self { now, over: Some(over), projects: Vec::new() });
+        }
+        Ok(Self { now, over: None, projects: crate::snapshot::read(root, projects)? })
     }
 
-    fn pr(&self, id: &str) -> Option<&bp_forge::PullRequest> {
-        self.forge.as_ref()?.open_for(id.rsplit('/').next()?)
+    /// The snapshot of the project, if one was read.
+    fn snapshot(&self, project: &str) -> Option<&Snapshot> {
+        self.over.as_ref().or_else(|| self.projects.iter().find(|(p, _)| p == project).map(|(_, s)| s))
+    }
+
+    /// The seconds since the oldest forge read in view; `None` when no snapshot was read. A `BP_NOW` before the
+    /// snapshot reads as 0.
+    pub fn forge_age(&self) -> Option<i64> {
+        let oldest = self.over.iter().chain(self.projects.iter().map(|(_, s)| s)).filter_map(|s| s.oldest).min()?;
+        let at = i64::try_from(oldest.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).ok()?;
+        Some((self.now - at).max(0))
+    }
+
+    pub(crate) fn pr(&self, id: &str) -> Option<&bp_forge::PullRequest> {
+        let (project, slug) = split(id)?;
+        self.snapshot(project)?.open_for(slug)
     }
 
     fn merged(&self, id: &str) -> Option<&bp_forge::PullRequest> {
-        self.forge.as_ref()?.merged_for(id.rsplit('/').next()?)
+        let (project, slug) = split(id)?;
+        self.snapshot(project)?.merged_for(slug)
     }
+}
+
+/// An issue id's project and slug: `projects/<project>/issues/<slug>`.
+pub(crate) fn split(id: &str) -> Option<(&str, &str)> {
+    let mut parts = id.split('/');
+    Some((parts.nth(1)?, parts.next_back()?))
 }
 
 /// What one call reads to compute intents: the index, the world when an issue is in view, and each project's
@@ -53,9 +78,10 @@ pub struct Intents<'a> {
 }
 
 impl<'a> Intents<'a> {
-    /// Reads the world only when `issues` are in view: a milestone's intent needs neither the clock nor the forge.
-    pub fn new(vault: &'a Vault, index: &'a Index, issues: bool) -> Result<Self, Refusal> {
-        let world = if issues { Some(World::read()?) } else { None };
+    /// Reads the world only when issues are in view, with the snapshots of their `projects`: a milestone's intent
+    /// needs neither the clock nor the forge.
+    pub fn new(vault: &'a Vault, index: &'a Index, projects: Option<&BTreeSet<&str>>) -> Result<Self, Refusal> {
+        let world = projects.map(|p| World::read(&vault.root, p)).transpose()?;
         Ok(Self { vault, index, world, integrity: RefCell::default() })
     }
 

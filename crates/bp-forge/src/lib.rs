@@ -1,12 +1,13 @@
 //! Forge adapter: pull request, reviews, check runs, branch base; the write calls sit behind the write feature.
 //!
 //! The snapshot is the forge state the `Intents` function reads, loaded from a directory of `gh` JSON
-//! (`open-prs.json` plus `pr-<n>.json`). [`Gh`] reads the live forge into the same types. A test swaps the `gh` on
-//! `PATH`, not a trait (26, design change 1).
+//! (`open-prs.json` plus `pr-<n>.json`). [`Gh`] reads the live forge into the same types, and a repo verb writes the
+//! snapshot through it (27, design change 9). A test swaps the `gh` on `PATH`, not a trait (26, design change 1).
 
 mod gh;
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::Deserialize;
 
@@ -78,6 +79,11 @@ pub struct CheckRun {
 }
 
 impl PullRequest {
+    /// The last segment of the head branch: the issue's slug (15).
+    pub fn slug(&self) -> &str {
+        self.head_ref_name.rsplit_once('/').map_or(&self.head_ref_name, |(_, s)| s)
+    }
+
     /// Open: `state` is `OPEN`, or absent as in `gh pr list`.
     pub fn is_open(&self) -> bool {
         self.state.as_deref().is_none_or(|s| s == "OPEN")
@@ -119,54 +125,57 @@ fn verdict(c: &CheckRun) -> Option<&str> {
     c.conclusion.as_deref().filter(|s| !s.is_empty()).or(c.state.as_deref())
 }
 
+/// A `pr-<n>.json` file: one `gh pr view`.
+fn is_view(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("pr-"))
+}
+
 /// The forge state at one moment.
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     /// Every pull request known, one per number.
     pub prs: Vec<PullRequest>,
+    /// The oldest file's modification time: when the earliest forge read in it was written.
+    pub oldest: Option<SystemTime>,
 }
 
 impl Snapshot {
     /// Reads `open-prs.json` and every `pr-<n>.json` in `dir`. The open list wins on a shared number. An error
     /// names the file it came from.
     pub fn from_dir(dir: &Path) -> Result<Self, (PathBuf, String)> {
-        fn parse<T: serde::de::DeserializeOwned>(path: PathBuf) -> Result<T, (PathBuf, String)> {
-            let bytes = match std::fs::read(&path) {
-                Ok(b) => b,
-                Err(e) => return Err((path, e.to_string())),
-            };
-            serde_json::from_slice(&bytes).map_err(|e| (path, e.to_string()))
+        fn parse<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, (PathBuf, String)> {
+            let bytes = std::fs::read(path).map_err(|e| (path.to_path_buf(), e.to_string()))?;
+            serde_json::from_slice(&bytes).map_err(|e| (path.to_path_buf(), e.to_string()))
         }
-        let mut prs: Vec<PullRequest> = parse(dir.join("open-prs.json"))?;
+        let open = dir.join("open-prs.json");
+        let mut prs: Vec<PullRequest> = parse(&open)?;
         let mut cached: Vec<_> = std::fs::read_dir(dir)
             .map_err(|e| (dir.to_path_buf(), e.to_string()))?
             .flatten()
             .map(|e| e.path())
-            .filter(|p| {
-                p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))
-                    && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("pr-"))
-            })
+            .filter(|p| is_view(p))
             .collect();
         cached.sort();
-        for path in cached {
+        for path in &cached {
             let pr: PullRequest = parse(path)?;
             if !prs.iter().any(|p| p.number == pr.number) {
                 prs.push(pr);
             }
         }
-        Ok(Self { prs })
+        let oldest =
+            cached.iter().chain([&open]).filter_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).min();
+        Ok(Self { prs, oldest })
     }
 
     /// The open pull request whose head branch's last segment is the issue's slug (15).
     pub fn open_for(&self, slug: &str) -> Option<&PullRequest> {
-        self.prs.iter().find(|p| p.is_open() && p.head_ref_name.rsplit('/').next() == Some(slug))
+        self.prs.iter().find(|p| p.is_open() && p.slug() == slug)
     }
 
     /// The latest merged pull request of the issue's slug: a `land` that stopped before its vault commit.
     pub fn merged_for(&self, slug: &str) -> Option<&PullRequest> {
-        let of =
-            |p: &&PullRequest| p.state.as_deref() == Some("MERGED") && p.head_ref_name.rsplit('/').next() == Some(slug);
-        self.prs.iter().filter(of).max_by_key(|p| p.number)
+        self.prs.iter().filter(|p| p.state.as_deref() == Some("MERGED") && p.slug() == slug).max_by_key(|p| p.number)
     }
 }
 

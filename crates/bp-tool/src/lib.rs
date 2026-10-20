@@ -15,12 +15,14 @@ mod record;
 mod rename;
 mod schema;
 mod set;
+mod snapshot;
 mod stack;
 mod stamp;
 mod transition;
 mod waiver;
 mod walk;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -185,14 +187,25 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Transition(t) => wrote(transition::transition(cwd, t), cli.json, out),
         Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
         Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
-        Verb::Cut(c) => wrote(claim::cut(cwd, c), cli.json, out),
-        Verb::Release(r) => wrote(claim::release(cwd, r), cli.json, out),
-        Verb::Pr(p) => land::run_pr(cwd, p, cli.json, out),
-        Verb::Land(l) => wrote(land::land(cwd, l), cli.json, out),
+        // The repo verbs refresh the forge snapshot after their forge calls or their write, refused or not (27, design
+        // change 9).
+        Verb::Cut(c) => repo(wrote(claim::cut(cwd, c), cli.json, out), cwd, &c.issue),
+        Verb::Release(r) => repo(wrote(claim::release(cwd, r), cli.json, out), cwd, &r.issue),
+        Verb::Pr(p) => repo(land::run_pr(cwd, p, cli.json, out), cwd, &p.issue),
+        Verb::Land(l) => repo(wrote(land::land(cwd, l), cli.json, out), cwd, &l.issue),
         Verb::Check(c) => check::run(cwd, c, cli.json, out),
         Verb::Stamp(s) => stamp::run(cwd, s, cli.json, out),
         Verb::Install(i) => wrote(install::install(cwd, i), cli.json, out),
     }
+}
+
+/// A repo verb's exit, once the forge snapshot of its issue's project is rewritten. A refusal before any forge call
+/// changed neither the forge nor the claims, so it rewrites nothing and calls no `gh`: offline, it returns at once.
+fn repo(code: ExitCode, cwd: &Path, issue: &str) -> ExitCode {
+    if code == ExitCode::SUCCESS || code == ExitCode::from(3) || bp_forge::Gh::called() {
+        snapshot::refresh(cwd, issue);
+    }
+    code
 }
 
 /// A write verb's exit: 0 for a write, 3 for a repeat, with the id, else the refusal's own.
@@ -368,7 +381,12 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     if !matches!(kind_value, Kind::Issue | Kind::Milestone) {
         return Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }));
     }
-    let intents = intent::Intents::new(&vault, &index, kind_value == Kind::Issue)?;
+    // The projects in view: `--project`, else the rows' own; a snapshot outside them is not read (27, design change 9).
+    let projects: BTreeSet<&str> = match list.project.as_deref() {
+        Some(p) => BTreeSet::from([p]),
+        None => rows.iter().filter_map(|r| intent::split(&r.id)).map(|(p, _)| p).collect(),
+    };
+    let intents = intent::Intents::new(&vault, &index, (kind_value == Kind::Issue).then_some(&projects))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in &rows {
         let verdict = intents.row(kind_value, &row.id, row.status.as_deref())?;
@@ -386,7 +404,13 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     out.truncate(list.limit);
     let mut result = serde_json::json!({ "rows": out, "total": total, "truncated": total > out.len() });
     if let Some(w) = intents.world {
-        result["forge"] = if w.forge.is_some() { "snapshot" } else { "not read" }.into();
+        match w.forge_age() {
+            Some(age) => {
+                result["forge"] = "snapshot".into();
+                result["forge_age"] = age.into();
+            }
+            None => result["forge"] = "not read".into(),
+        }
     }
     Ok(result)
 }

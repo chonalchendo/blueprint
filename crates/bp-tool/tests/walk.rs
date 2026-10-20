@@ -137,7 +137,9 @@ fn done_answers_the_stop_column_with_no_slice() {
     let d = vault();
     let (code, v) = walk(d.path(), &[SEED, "--for", "complete", "--done"]);
     assert_eq!(code, Some(0), "{v}");
-    assert_eq!(v, serde_json::json!({ "id": SEED, "for": "complete", "done": false, "contract_version": 1 }));
+    let want =
+        serde_json::json!({ "id": SEED, "for": "complete", "done": false, "forge_age": null, "contract_version": 1 });
+    assert_eq!(v, want, "no snapshot is in view, so its age is null");
     for (seed, action) in [("projects/bp/designs/system", "design"), ("projects/bp/designs/system", "shape")] {
         let (_, v) = walk(d.path(), &[seed, "--for", action, "--done"]);
         assert_eq!(v["done"], true, "{action}: {v}");
@@ -243,6 +245,39 @@ fn review_and_respond_read_the_open_pull_request_head() {
     answer(2, "fixed");
     assert_eq!(done(d.path(), Some(&one), SEED, "respond"), false, "a fix moves the head");
     assert_eq!(done(d.path(), Some(&two), SEED, "respond"), true);
+}
+
+#[test]
+fn a_stop_reads_the_vault_snapshot_and_never_calls_gh() {
+    let d = vault();
+    let claim = format!("---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n");
+    write(d.path(), &format!("{SEED}/claims/c.md"), &claim);
+    write(
+        d.path(),
+        &format!("{SEED}/reviews/aaaa.md"),
+        &format!("---\nkind: review\nunder: {SEED}\nhead: aaaa\n---\n"),
+    );
+    // A `gh` that leaves a mark and fails: no stop may call it.
+    let guard = tempfile::tempdir().unwrap();
+    let mark = guard.path().join("called");
+    write(guard.path(), "gh", &format!("#!/bin/sh\ntouch '{}'\nexit 1\n", mark.display()));
+    std::fs::set_permissions(guard.path().join("gh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", guard.path().display(), std::env::var("PATH").unwrap());
+    let stop = || {
+        let mut cmd = Command::cargo_bin("bp").unwrap();
+        cmd.current_dir(d.path()).env_remove("BP_VAULT").env_remove("BP_FORGE_SNAPSHOT").env("PATH", &path);
+        let out = cmd.args(["walk", SEED, "--for", "review", "--done", "--json"]).output().unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(out.status.success(), "{v}");
+        (v["done"].clone(), v["forge_age"].clone())
+    };
+    assert_eq!(stop(), (Value::Bool(false), Value::Null), "with no snapshot no pull request is in view");
+    write(d.path(), ".bp/forge/bp/open-prs.json", r#"[{"number":1,"headRefName":"bp/0001.seed","headRefOid":"aaaa"}]"#);
+    // Another project's bad file is out of view: the stop reads its own project's snapshot only.
+    write(d.path(), ".bp/forge/zzz/open-prs.json", "garbage");
+    let (done, age) = stop();
+    assert!(done == true && age.is_i64(), "the review is at the snapshot's head, read {age} seconds ago");
+    assert!(!mark.exists(), "no stop called gh");
 }
 
 #[test]
