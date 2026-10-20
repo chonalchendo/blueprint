@@ -100,7 +100,7 @@ impl Kind {
             Self::BlueprintVersion => &["milestone"],
             Self::ConcernAnswer => &["design"],
             Self::Evidence => &["issue"],
-            Self::Handoff => &["resumes"],
+            Self::Handoff => &["resumes", "seed"],
             Self::Claim => &["base_issue"],
             Self::Run => &["opens", "names"],
             _ => &[],

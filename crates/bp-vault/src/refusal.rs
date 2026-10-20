@@ -25,6 +25,7 @@ crate::closed_enum! {
         BaseUnmerged = "base_unmerged",
         BaseMismatch = "base_mismatch",
         BundleMismatch = "bundle_mismatch",
+        BundleInvalid = "bundle_invalid",
         ForgePrecondition = "forge_precondition",
         SchemaNewer = "schema_newer",
         NoVault = "no_vault",

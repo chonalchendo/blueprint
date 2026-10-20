@@ -34,7 +34,7 @@ bp_vault::closed_enum! {
 }
 
 /// Every node kind: a record is evidence about its parent, so no walk starts from one.
-const NODES: [Kind; 9] = [
+pub const NODES: [Kind; 9] = [
     Kind::Project,
     Kind::Design,
     Kind::Milestone,

@@ -39,6 +39,10 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         unknown("for", &walk.action, format!("use one of: {}", actions.join(", ")))
     })?;
     node_id(&walk.id)?;
+    // The bundle gates the walk: an installed bundle that drifted refuses before the vault is read (17, check 7).
+    if let Some(top) = bp_vault::git::Repo::find(cwd).and_then(|r| r.main_top()) {
+        bp_install::check(&top)?;
+    }
     let vault = Vault::discover(cwd)?;
     let index = Index::open(&vault)?;
     let reading = index.reading()?;

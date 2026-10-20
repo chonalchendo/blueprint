@@ -35,7 +35,7 @@ pub struct Writer<'v> {
     /// The head and the paths `clean` found clean, so `commit` asks git once. A cell, so a verb can clean while it
     /// reads through [`Writer::index`].
     clean: Cell<Option<(String, Vec<String>)>>,
-    /// Trailer lines after `Bp-Verb` and `Bp-Role`.
+    /// Trailer lines after `Bp-Verb`, `Bp-Role` and `Bp-Session`.
     trailers: Vec<String>,
     _lock: std::fs::File,
 }
@@ -221,6 +221,12 @@ impl Writer<'_> {
         let (files, findings) = self.index.propose_moving(self.vault, changes, &moves.ids)?;
         journal(root, head, &paths)?;
         let mut trailers = format!("Bp-Verb: {verb}\nBp-Role: {role}");
+        // The session-end hook finds the session's last node by this trailer (12). A value with a space or a line
+        // end could forge a second trailer, so it is not written.
+        if let Some(s) = std::env::var("BP_SESSION").ok().filter(|s| !s.is_empty() && !s.contains(char::is_whitespace))
+        {
+            trailers = format!("{trailers}\nBp-Session: {s}");
+        }
         for line in &self.trailers {
             trailers = format!("{trailers}\n{line}");
         }

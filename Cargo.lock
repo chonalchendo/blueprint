@@ -143,9 +143,13 @@ dependencies = [
 name = "bp-install"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "bp-forge",
  "bp-operation",
  "bp-vault",
+ "serde_json",
+ "tempfile",
+ "yaml-rust2",
 ]
 
 [[package]]
