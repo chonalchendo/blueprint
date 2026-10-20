@@ -57,6 +57,28 @@ pub struct Run {
     pub failed: bool,
 }
 
+/// An integrity run of the issue's project, reduced (25, issue 11).
+#[derive(Debug, Clone, Default)]
+pub struct IntegrityRun {
+    /// The run record's id.
+    pub id: String,
+    /// `at`, Unix seconds.
+    pub at: Option<i64>,
+    /// The attempt at its commit.
+    pub attempt: u64,
+    /// The verdict was `fail`.
+    pub failed: bool,
+    /// The nodes it failed.
+    pub names: Vec<String>,
+}
+
+/// The id of the project's latest integrity run when it failed and names `id` (21, blocked). Integrity is vault
+/// state, so the latest run is the latest across commits: the highest `at`, then the highest attempt.
+pub fn integrity_names<'r>(runs: &'r [IntegrityRun], id: &str) -> Option<&'r str> {
+    let latest = runs.iter().max_by_key(|r| (r.at, r.attempt))?;
+    (latest.failed && latest.names.iter().any(|n| n == id)).then_some(latest.id.as_str())
+}
+
 /// The forge's view of the issue's open pull request.
 #[derive(Debug, Clone, Default)]
 pub struct PullRequest {
@@ -96,6 +118,8 @@ pub struct Issue {
     pub pr: Option<PullRequest>,
     /// The issue file's last commit, Unix seconds (13: processing time). Read only after an escalated release.
     pub changed: Option<i64>,
+    /// The project's latest integrity run, when it failed and names the issue: its id ([`integrity_names`]).
+    pub integrity: Option<String>,
 }
 
 /// One node's intent and its note.
@@ -154,6 +178,9 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
             Some("abandoned") => return Verdict::of(Intent::Blocked, format!("depends on abandoned {}", d.id)),
             Some(_) => {}
         }
+    }
+    if let Some(run) = &i.integrity {
+        return Verdict::of(Intent::Blocked, format!("integrity: {run}"));
     }
     if i.status == "open" && held.is_none() && i.pr.is_none() {
         let waits: Vec<&str> = i
@@ -259,6 +286,27 @@ mod tests {
 
     fn released(at: i64) -> Claim {
         Claim { at: Some(at), released: Some(at + 60), escalated: false }
+    }
+
+    #[test]
+    fn a_failed_integrity_run_that_names_the_issue_blocks_it() {
+        let run = |id: &str, at: i64, attempt: u64, failed: bool, names: &[&str]| IntegrityRun {
+            id: id.into(),
+            at: Some(at),
+            attempt,
+            failed,
+            names: names.iter().map(|n| (*n).to_string()).collect(),
+        };
+        let a = "projects/bp/issues/a";
+        assert_eq!(integrity_names(&[run("r1", NOW, 1, true, &[a])], a), Some("r1"));
+        assert_eq!(integrity_names(&[run("r1", NOW, 1, true, &["projects/bp/issues/b"])], a), None);
+        assert_eq!(integrity_names(&[], a), None);
+        let later_pass = [run("r1", NOW, 1, true, &[a]), run("r2", NOW + 60, 1, false, &[])];
+        assert_eq!(integrity_names(&later_pass, a), None, "the latest run decides, across commits");
+        let rerun = [run("r2", NOW, 2, false, &[]), run("r1", NOW, 1, true, &[a])];
+        assert_eq!(integrity_names(&rerun, a), None, "one second: the highest attempt");
+        let i = Issue { integrity: integrity_names(&[run("r1", NOW, 1, true, &[a])], a).map(String::from), ..open() };
+        assert_eq!(issue(&i, NOW), Verdict::of(Intent::Blocked, "integrity: r1"));
     }
 
     #[test]

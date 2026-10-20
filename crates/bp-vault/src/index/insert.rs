@@ -84,6 +84,10 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     for text in &file.body.unresolved {
         st.execute(params![id, "body", text])?;
     }
+    let mut st = tx.prepare_cached("insert into markdown values (?1, ?2)")?;
+    for target in &file.body.markdown {
+        st.execute([id, target])?;
+    }
     let mut st = tx.prepare_cached("insert into checks values (?1)")?;
     for _ in &file.body.checks {
         st.execute([id])?;
@@ -113,7 +117,7 @@ pub(crate) fn remove(tx: &rusqlite::Transaction, id: &str, keep_node: bool) -> r
         tx.execute(&format!("delete from {table} where id = ?1"), [id])?;
     }
     tx.execute("delete from links where src = ?1", [id])?;
-    for table in ["unresolved", "checks", "findings"] {
+    for table in ["unresolved", "markdown", "checks", "findings"] {
         tx.execute(&format!("delete from {table} where src = ?1"), [id])?;
     }
     tx.execute("delete from aliases where id = ?1", [id])?;

@@ -30,7 +30,8 @@ impl Header {
                 }
             } else if let Some(ids) = self.links.get(key) {
                 let mut all: Vec<Value> = ids.iter().map(|i| Value::from(i.as_str())).chain(loose).collect();
-                let value = if self.kind.is_record() && all.len() == 1 { all.remove(0) } else { Value::Array(all) };
+                let one = self.kind.is_record() && !self.kind.record_list(key) && all.len() == 1;
+                let value = if one { all.remove(0) } else { Value::Array(all) };
                 out.push_str(&line(key, &value));
             }
         }

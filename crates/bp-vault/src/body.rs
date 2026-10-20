@@ -23,6 +23,10 @@ pub struct Body {
     pub links: Vec<Id>,
     /// Every wikilink target outside code that is not a path id.
     pub unresolved: Vec<String>,
+    /// Every root-relative markdown link or image under `projects/` or `shared/`, outside code: its path without the
+    /// leading `/`, the anchor or the query, first occurrence only, in order. Most name an asset the index does not
+    /// hold, so the integrity check resolves them against the files (25, issue 11).
+    pub markdown: Vec<String>,
     /// Every fenced `check` block, in order.
     pub checks: Vec<Check>,
     /// What the body does that CommonMark allows but the vault should not: kept, not refused.
@@ -110,6 +114,13 @@ impl Body {
                     subheadings.push((atx_text(&text[range.clone()]), range.start));
                 }
                 Event::Code(_) | Event::Html(_) | Event::InlineHtml(_) => code.push(range),
+                Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                    if let Some(target) = root_relative(&dest_url)
+                        && !body.markdown.contains(&target)
+                    {
+                        body.markdown.push(target);
+                    }
+                }
                 Event::Start(Tag::CodeBlock(kind)) => {
                     if let CodeBlockKind::Fenced(info) = &kind {
                         if is_check(info) {
@@ -201,6 +212,13 @@ fn empty_checks(
     parts.into_iter().filter(|(_, span)| !blocks.iter().any(|b| span.contains(b))).map(|(name, _)| name).collect()
 }
 
+/// A link destination that names a vault path from the root: `/projects/…` or `/shared/…`, without the slash, the
+/// anchor and the query.
+fn root_relative(url: &str) -> Option<String> {
+    let path = url.split(['#', '?']).next().unwrap_or_default().strip_prefix('/')?;
+    (path.starts_with("projects/") || path.starts_with("shared/")).then(|| path.to_string())
+}
+
 /// `check` alone or followed by whitespace: `checklist` and `checkout` are other languages.
 fn is_check(info: &str) -> bool {
     info == "check" || info.strip_prefix("check").is_some_and(|r| r.starts_with(char::is_whitespace))
@@ -267,6 +285,16 @@ fn wikilinks(text: &str) -> impl Iterator<Item = (&str, usize)> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_relative_markdown_links_outside_code_are_kept() {
+        let text = "See [a](/projects/bp/designs/system/diagrams/x.html#top), ![b](/shared/assets/y.png?v=1), \
+                    [c](projects/bp/rel.md), [d](https://example.com/projects/z), [e](/elsewhere/w) and \
+                    [again](/projects/bp/designs/system/diagrams/x.html).\n\n`[f](/projects/in/code)`\n\n\
+                    ```\n[g](/projects/in/fence)\n```\n";
+        let b = Body::parse(text);
+        assert_eq!(b.markdown, ["projects/bp/designs/system/diagrams/x.html", "shared/assets/y.png"]);
+    }
 
     const TEXT: &str = "Lead with [[shared/a/b|label]] and [[shared/a/c#part]] and [[old.style]].\n\n## One\n\nText one [[shared/a/b]] and `[[shared/in/code]]`.\n\n```check shell {name=x expect=0}\n## not a heading [[shared/not/link]]\nbp where\n```\n\n## Two ##\n\n### Sub\n\nText two.\n";
 

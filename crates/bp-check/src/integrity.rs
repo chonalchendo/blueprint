@@ -1,0 +1,107 @@
+//! The `integrity` kind (25, issue 11): the owner's project against the vault rules, in process over the index. Its
+//! run names the vault's head, not the code's, because integrity is vault state; and it names each failing node, so
+//! `blocked` reads the run instead of the rules (21).
+
+use std::collections::BTreeSet;
+
+use bp_vault::{Fault, Id, Index, Vault};
+
+use crate::Verdict;
+use crate::process::Tail;
+
+/// One integrity run, before its record has a key.
+pub(crate) struct Ran {
+    pub(crate) verdict: Verdict,
+    pub(crate) note: String,
+    /// The vault's head when the index was read.
+    pub(crate) commit: String,
+    /// One line per finding, within the run record's tail limits, and the lines before them.
+    pub(crate) tail: Vec<String>,
+    pub(crate) dropped: usize,
+    /// blake3 of every line, then the NUL byte that separates an empty stderr (13, Run).
+    pub(crate) evidence: String,
+    /// The failing nodes, sorted: only parsed files, since a run that names a broken one adds a broken link.
+    pub(crate) names: Vec<Id>,
+}
+
+/// Runs the rules over `owner`'s project. `Err` is why it could not run.
+pub(crate) fn run(vault: &Vault, owner: &Id) -> Result<Ran, String> {
+    let project = owner.project().expect("a check owner is a project's design, issue or milestone");
+    let commit = bp_vault::git::Repo::find(&vault.root)
+        .and_then(|r| r.head())
+        .ok_or_else(|| format!("the vault at {} has no commit for the run to name", vault.root.display()))?;
+    let faults =
+        Index::open(vault).and_then(|i| i.integrity(vault, project)).map_err(|r| format!("{}: {}", r.rule, r.fix))?;
+    Ok(judge(project, commit, &faults))
+}
+
+fn judge(project: &str, commit: String, faults: &[Fault]) -> Ran {
+    let names: BTreeSet<Id> = faults.iter().filter(|f| f.node).filter_map(|f| Id::parse(&f.id).ok()).collect();
+    let mut hasher = blake3::Hasher::new();
+    let mut tail = Tail::default();
+    for f in faults {
+        // A parse error may span lines; the output keeps one line per finding.
+        let detail: String = f.detail.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let line = format!("{}: {}: {detail}", f.rule, f.id);
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+        tail.push(line);
+    }
+    hasher.update(&[0]);
+    let (tail, dropped) = tail.drain();
+    let (verdict, note) = if faults.is_empty() {
+        (Verdict::Pass, format!("no file of projects/{project} breaks a vault rule"))
+    } else {
+        let nodes = faults.iter().map(|f| f.id.as_str()).collect::<BTreeSet<_>>().len();
+        (Verdict::Fail, format!("{} findings on {nodes} files of projects/{project}", faults.len()))
+    };
+    Ran {
+        verdict,
+        note,
+        commit,
+        tail,
+        dropped,
+        evidence: hasher.finalize().to_hex().to_string(),
+        names: names.into_iter().collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fault(rule: &'static str, id: &str, detail: &str, node: bool) -> Fault {
+        Fault { rule, id: id.into(), detail: detail.into(), node }
+    }
+
+    #[test]
+    fn any_finding_fails_and_names_each_parsed_node_once() {
+        let faults = [
+            fault("broken", "projects/bp/issues/x.md", "line 1\nline 2", false),
+            fault("issue", "projects/bp/issues/b", "cites no design that exists", true),
+            fault("issue", "projects/bp/issues/a", "no `under` milestone", true),
+            fault("issue", "projects/bp/issues/a", "cites no design that exists", true),
+        ];
+        let ran = judge("bp", "abc".into(), &faults);
+        assert_eq!(ran.verdict, Verdict::Fail);
+        assert_eq!(ran.note, "4 findings on 3 files of projects/bp");
+        let names: Vec<&str> = ran.names.iter().map(Id::as_str).collect();
+        assert_eq!(names, ["projects/bp/issues/a", "projects/bp/issues/b"], "sorted, once, no broken file");
+        assert_eq!(ran.tail[0], "broken: projects/bp/issues/x.md: line 1 line 2", "one line per finding");
+        assert_eq!((ran.tail.len(), ran.dropped), (4, 0));
+        let mut want = blake3::Hasher::new();
+        want.update(format!("{}\n\0", ran.tail.join("\n")).as_bytes());
+        assert_eq!(ran.evidence, want.finalize().to_hex().to_string());
+        let clean = judge("bp", "abc".into(), &[]);
+        assert_eq!((clean.verdict, clean.names.len(), clean.tail.len()), (Verdict::Pass, 0, 0));
+    }
+
+    #[test]
+    fn the_output_keeps_the_tail_and_the_names_keep_every_node() {
+        let faults: Vec<Fault> = (0..150)
+            .map(|i| fault("issue", &format!("projects/bp/issues/i{i:03}"), "no `under` milestone", true))
+            .collect();
+        let ran = judge("bp", "abc".into(), &faults);
+        assert_eq!((ran.tail.len(), ran.dropped, ran.names.len()), (crate::process::TAIL, 50, 150));
+    }
+}

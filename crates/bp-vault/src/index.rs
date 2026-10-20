@@ -13,13 +13,15 @@ use crate::fingerprint::{fingerprint, still};
 use crate::{Broken, BrokenFile, Code, Counts, File, FindingKind, Id, Kind, Refusal, Vault};
 
 mod insert;
+mod integrity;
 use insert::broken;
 pub(crate) use insert::{remove, replace};
+pub use integrity::Fault;
 
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
 /// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
 /// bump to the same number still differ.
-const SCHEMA: i64 = 7;
+const SCHEMA: i64 = 8;
 
 /// What is wrong with a markdown file whose path is not an id.
 const STRAY: &str = "the path is not an id: projects/<project>/<kind>/<slug> or shared/<kind>/<slug>";
@@ -40,6 +42,8 @@ create index records_under on records (under, kind);
 create table links (src text not null, type text not null, dst text not null);
 create table unresolved (src text not null, field text not null, text text not null);
 create index unresolved_src on unresolved (src);
+create table markdown (src text not null, target text not null);
+create index markdown_src on markdown (src);
 create table aliases (alias text not null, id text not null);
 create index aliases_alias on aliases (alias);
 create table checks (src text not null);
@@ -622,7 +626,7 @@ mod tests {
         let (_d, v) = vault();
         Index::open(&v).unwrap();
         write(&v.root, "projects/bp/issues/0003.d", &issue("New", "open"));
-        let body = "---\nkind: issue\ntitle: E\nstatus: open\naliases: [old.e]\ncites: ['[[x.y]]']\n---\n\n## A\n\n```check shell {name=one}\ntrue\n```\n\n## A\n";
+        let body = "---\nkind: issue\ntitle: E\nstatus: open\naliases: [old.e]\ncites: ['[[x.y]]']\n---\n\n[d](/projects/bp/d.html)\n\n## A\n\n```check shell {name=one}\ntrue\n```\n\n## A\n";
         write(&v.root, "projects/bp/issues/0004.e", body);
         std::fs::remove_file(crate::Id::parse("projects/bp/issues/0002.b").unwrap().path(&v.root)).unwrap();
         let refreshed = dump(&Index::open(&v).unwrap());
@@ -638,6 +642,7 @@ mod tests {
             ("links", "src, type, dst"),
             ("fts", "id, title, body"),
             ("unresolved", "src, field, text"),
+            ("markdown", "src, target"),
             ("aliases", "alias, id"),
             ("checks", "src"),
             ("findings", "src, kind, detail"),

@@ -157,10 +157,10 @@ impl Header {
             m.insert("aliases".into(), self.aliases.clone().into());
         }
         for (k, ids) in &self.links {
-            // A record's `→` field holds one id, so it reads as one, as it was written.
+            // A record's `→` field holds one id, so it reads as one, as it was written; a list field stays a list.
             let value = match ids.as_slice() {
                 [] if self.kind.is_record() => continue,
-                [one] if self.kind.is_record() => one.as_str().into(),
+                [one] if self.kind.is_record() && !self.kind.record_list(k) => one.as_str().into(),
                 _ => ids.iter().map(|i| Value::from(i.as_str())).collect(),
             };
             m.insert(k.clone(), value);

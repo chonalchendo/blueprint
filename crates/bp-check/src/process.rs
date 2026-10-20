@@ -56,15 +56,40 @@ pub(crate) struct Ran {
     pub(crate) evidence: Option<String>,
 }
 
+/// The last lines of output, within [`TAIL`] lines and [`TAIL_BYTES`] bytes, and the count of every line.
+#[derive(Default)]
+pub(crate) struct Tail {
+    kept: VecDeque<String>,
+    bytes: usize,
+    lines: usize,
+}
+
+impl Tail {
+    pub(crate) fn push(&mut self, line: String) {
+        self.lines += 1;
+        self.bytes += line.len() + 1;
+        self.kept.push_back(line);
+        while self.kept.len() > TAIL || self.bytes > TAIL_BYTES {
+            let gone = self.kept.pop_front().expect("a tail over its bound holds a line");
+            self.bytes -= gone.len() + 1;
+        }
+    }
+
+    /// The kept lines and the count of the lines before them.
+    pub(crate) fn drain(&mut self) -> (Vec<String>, usize) {
+        let kept: Vec<String> = std::mem::take(&mut self.kept).into();
+        let dropped = self.lines - kept.len();
+        (kept, dropped)
+    }
+}
+
 struct Output {
     stdout: blake3::Hasher,
     /// stderr's bytes, already unlinked, so a run that dies leaves no file behind.
     spool: File,
     spooled: u64,
     spool_failed: bool,
-    tail: VecDeque<String>,
-    tail_bytes: usize,
-    lines: usize,
+    tail: Tail,
     last: Option<String>,
     /// The run took what was read; a reader still blocked on an escapee's pipe adds nothing more.
     closed: bool,
@@ -90,13 +115,7 @@ impl Output {
         if stdout && !line.trim().is_empty() {
             self.last = Some(line.clone());
         }
-        self.lines += 1;
-        self.tail_bytes += line.len() + 1;
-        self.tail.push_back(line);
-        while self.tail.len() > TAIL || self.tail_bytes > TAIL_BYTES {
-            let gone = self.tail.pop_front().expect("a tail over its bound holds a line");
-            self.tail_bytes -= gone.len() + 1;
-        }
+        self.tail.push(line);
     }
 }
 
@@ -135,9 +154,7 @@ pub(crate) fn run(script: &str, dir: &Path, vault: &Path, timeout: Duration) -> 
         spool,
         spooled: 0,
         spool_failed: false,
-        tail: VecDeque::new(),
-        tail_bytes: 0,
-        lines: 0,
+        tail: Tail::default(),
         last: None,
         closed: false,
     }));
@@ -198,8 +215,8 @@ fn finish(mut end: End, out: &Mutex<Output>) -> Ran {
         && out.spool.seek(SeekFrom::Start(0)).is_ok()
         && std::io::copy(&mut (&out.spool).take(spooled), &mut hasher).is_ok_and(|n| n == spooled);
     let evidence = whole.then(|| hasher.finalize().to_hex().to_string());
-    let tail: Vec<String> = std::mem::take(&mut out.tail).into();
-    Ran { end, dropped: out.lines - tail.len(), tail, evidence }
+    let (tail, dropped) = out.tail.drain();
+    Ran { end, tail, dropped, evidence }
 }
 
 /// Reads one stream in chunks until every holder of its write end has gone, or the run has closed; then says so.

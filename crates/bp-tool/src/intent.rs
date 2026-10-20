@@ -1,7 +1,7 @@
 //! Composes the `Intents` function's inputs from the index and the forge snapshot. The function itself is pure
 //! and lives in `bp-change`; this is the IO around it (23, rule 2).
 
-use bp_change::intents::{self, Claim, Dependency, Issue, PullRequest, Verdict};
+use bp_change::intents::{self, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
 use bp_forge::Snapshot;
 use bp_vault::{Id, Index, Kind, Refusal, Vault};
 use serde_json::{Map, Value};
@@ -107,8 +107,32 @@ fn of(vault: &Vault, index: &Index, world: &World, id: &str, status: &str) -> Re
         Some(c) if c.escalated => Id::parse(id).ok().and_then(|id| vault.last_commit(&id)),
         _ => None,
     };
-    let issue = Issue { status: status.into(), claims, runs, review_heads, depends, pr, changed };
+    let integrity = integrity(index, id)?;
+    let issue = Issue { status: status.into(), claims, runs, review_heads, depends, pr, changed, integrity };
     Ok(intents::issue(&issue, world.now))
+}
+
+/// The project's latest integrity run, when it failed and names the issue (21, blocked; 25, issue 11).
+fn integrity(index: &Index, id: &str) -> Result<Option<String>, Refusal> {
+    let runs: Vec<IntegrityRun> = index
+        .integrity_runs(id)?
+        .into_iter()
+        .map(|h| IntegrityRun {
+            id: text(&h, "id").unwrap_or_default(),
+            at: text(&h, "at").and_then(|t| intents::timestamp(&t)),
+            attempt: h.get("attempt").and_then(Value::as_u64).unwrap_or_default(),
+            failed: text(&h, "verdict").as_deref() == Some("fail"),
+            names: h
+                .get("names")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+        })
+        .collect();
+    Ok(intents::integrity_names(&runs, id).map(str::to_string))
 }
 
 fn text(m: &Map<String, Value>, k: &str) -> Option<String> {
