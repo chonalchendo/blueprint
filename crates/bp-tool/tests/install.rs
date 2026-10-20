@@ -251,11 +251,21 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
     assert!(message.contains("Bp-Role: session\nBp-Session: s-one"), "{message}");
     let out = call("bp walk x --for complete --json | jq .", Some("bp-worker"));
     assert!(String::from_utf8_lossy(&out.stdout).contains("export BP_ROLE=worker BP_SESSION='a-one'; bp walk"));
+    // A read and a call with no verb pass for every role; an agent type with no role reads with no prefix.
+    for (command, agent, prefix) in [
+        ("bp list issue --json", Some("bp-reviewer"), "export BP_ROLE=reviewer"),
+        ("bp --help", Some("bp-worker"), "export BP_ROLE=worker"),
+        ("bp where && bp show x", Some("Explore"), ""),
+    ] {
+        let out = call(command, agent);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && stdout.contains(prefix) && prefix.is_empty() == stdout.is_empty(), "{command}");
+    }
     let no_jq = bin(&w.t.path().join("nojq"), &[("bash", which("bash"))], false);
     for (command, agent, cause) in [
         ("cd /tmp && FOO=1 timeout 30 bp --json land x", Some("bp-worker"), "bp land is outside the worker role"),
         ("echo $(bp record review x)", Some("bp-reviewer"), "bp record is outside the reviewer role"),
-        ("bp show x", Some("Explore"), "agent type 'Explore' is no bp role"),
+        ("bp show x; bp set x tags a", Some("Explore"), "agent type 'Explore' is no bp role, so its bp set"),
         ("bp stamp m", None, "bp stamp is outside the session role"),
     ] {
         let out = call(command, agent);

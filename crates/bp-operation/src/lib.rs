@@ -94,18 +94,19 @@ impl Action {
     }
 }
 
+/// The read verbs, open to every role and to any subagent: a read writes nothing, and the role is a label, not a gate
+/// (27, design change 3), so a denied read would cost a turn and protect nothing.
+pub const READ_VERBS: [&str; 5] = ["where", "show", "list", "search", "walk"];
+
 impl Role {
-    /// The verbs the role runs: the union of its rows' verbs in 21 (rule 6). The role hook denies any other, and a
-    /// dispatch template's forbidden list is the complement. `None` for the human, whom no list bounds: the forge is the
-    /// gate.
+    /// The write verbs the role runs: the union of its rows' verbs in 21 (rule 6), less the read verbs. The role hook
+    /// denies any verb outside these and `READ_VERBS`; a dispatch template's forbidden list is the complement of both.
+    /// `None` for the human, whom no list bounds: the forge is the gate.
     pub fn verbs(self) -> Option<&'static [&'static str]> {
         Some(match self {
-            Self::Session => {
-                &["show", "list", "search", "walk", "create", "set", "link", "record", "transition", "release"]
-            }
-            Self::Worker => &["show", "walk", "search", "cut", "check", "record", "pr", "release"],
-            Self::Reviewer => &["show", "walk", "search"],
-            Self::Researcher => &["show", "list", "search", "walk"],
+            Self::Session => &["create", "set", "link", "record", "transition", "release"],
+            Self::Worker => &["cut", "check", "record", "pr", "release"],
+            Self::Reviewer | Self::Researcher => &[],
             Self::Human => return None,
         })
     }
@@ -129,8 +130,9 @@ mod tests {
         for &r in Role::ALL {
             let verbs = r.verbs();
             assert_eq!(verbs.is_none(), r == Role::Human, "{r}");
-            assert!(verbs.unwrap_or_default().iter().all(|v| !["stamp", "land"].contains(v)), "{r}");
+            let verbs = verbs.unwrap_or_default();
+            assert!(verbs.iter().all(|v| !["stamp", "land"].contains(v) && !READ_VERBS.contains(v)), "{r}");
         }
-        assert!(!Role::Reviewer.verbs().unwrap().contains(&"record"), "the session records the review (21)");
+        assert!(Role::Reviewer.verbs().unwrap().is_empty(), "the session records the review (21)");
     }
 }

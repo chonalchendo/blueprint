@@ -32,31 +32,41 @@ while read -ra words; do
 done < <(tr ';&|(){}`' '\n' <<< "$command")
 [ ${#verbs[@]} -gt 0 ] || exit 0
 agent=$(jq -r '.agent_id // empty' <<< "$input")
+role=
 if [ -z "$agent" ]; then
     role=session
     session=$(jq -r '.session_id // empty' <<< "$input")
 else
     type=$(jq -r '.agent_type // empty' <<< "$input")
+    # Another agent type has no role: its reads pass with no prefix, as a read commits nothing.
     case $type in
     bp-worker) role=worker ;;
     bp-reviewer) role=reviewer ;;
     bp-researcher) role=researcher ;;
-    *) deny "agent type '$type' is no bp role, so its bp call is denied; dispatch bp-worker, bp-reviewer or bp-researcher" ;;
     esac
     session=$agent
 fi
 [ -n "$session" ] || deny "the hook input names no session, so the call is denied"
-# The role's verbs, which install writes from bp-operation (21, rule 6).
+# The read verbs, open to every role and any subagent, and the role's write verbs; install writes both from
+# bp-operation (21, rule 6).
+reads=
+# bp:read-verbs
 allowed=
 case $role in
 # bp:role-verbs
 esac
 for verb in "${verbs[@]}"; do
-    case " $allowed " in
+    # A call with no verb (`bp --help`, `bp --version`) runs nothing.
+    [ -n "$verb" ] || continue
+    case " $reads $allowed " in
     *" $verb "*) ;;
-    *) deny "bp ${verb:-with no verb} is outside the $role role's verbs ($allowed), so the call is denied" ;;
+    *)
+        [ -n "$role" ] || deny "agent type '$type' is no bp role, so its bp $verb is denied; dispatch bp-worker, bp-reviewer or bp-researcher"
+        deny "bp $verb is outside the $role role's verbs ($reads $allowed), so the call is denied"
+        ;;
     esac
 done
+[ -n "$role" ] || exit 0
 # The whole input goes back, as `updatedInput` replaces it; no permission is decided, so the user's rules still apply.
 jq -c --arg role "$role" --arg session "$session" '{hookSpecificOutput: {hookEventName: "PreToolUse",
     updatedInput: (.tool_input + {command: "export BP_ROLE=\($role) BP_SESSION=\($session | @sh); \(.tool_input.command)"})}}' <<< "$input"
