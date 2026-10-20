@@ -203,17 +203,11 @@ fn where_(cwd: &Path) -> Result<Where, Refusal> {
 
 fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     let vault = Vault::discover(cwd)?;
-    let id = node_id(&show.id)?;
-    let (id, file) = match &show.at {
-        Some(at) => (id.clone(), vault.read_at(&id, at)?),
-        // A renamed node's old id is an alias: it shows the node under its id today (13, rule 1).
-        None => match vault.read(&id) {
-            Err(e) if e.code == Code::NoNode => match Index::open(&vault)?.aliased(&id)? {
-                Some(real) => (real.clone(), vault.read(&real)?),
-                None => return Err(e),
-            },
-            read => (id, read?),
-        },
+    // A past commit is read as asked; today's index names today's ids only.
+    let id = if show.at.is_some() { node_id(&show.id)? } else { subject(&Index::open(&vault)?, &show.id)? };
+    let file = match &show.at {
+        Some(at) => vault.read_at(&id, at)?,
+        None => vault.read(&id)?,
     };
     // A refusal's fix reads the same commit the verb read.
     let at = show.at.as_ref().map_or_else(String::new, |a| format!(" --at {a}"));
@@ -284,6 +278,13 @@ pub(crate) fn node_id(text: &str) -> Result<Id, Refusal> {
             format!("{why}; bp search {}", text.rsplit('/').next().unwrap_or(text).replace(['-', '.', '_'], " ")),
         )
     })
+}
+
+/// A verb's subject: the id a node or record holds today, through the index. Case is ignored, and a renamed node's
+/// past id names the node (13, rule 1). An id nothing holds stays as asked, and the verb refuses it `no_node`.
+pub(crate) fn subject(index: &Index, text: &str) -> Result<Id, Refusal> {
+    let id = node_id(text)?;
+    Ok(index.holder(&id)?.map_or(id, |(held, _)| held))
 }
 
 fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {

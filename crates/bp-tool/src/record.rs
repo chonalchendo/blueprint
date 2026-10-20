@@ -12,7 +12,7 @@ use bp_vault::{Code, Header, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
-use crate::{Wrote, node_id};
+use crate::{Wrote, subject};
 
 /// `bp record <kind> <parent> [--field <name=value>]... [--body-file <f>] [--external <uri>] [--dry-run]`.
 #[derive(Args)]
@@ -179,7 +179,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     // The lock comes before the reads, so the key this write takes is still free when it commits.
     let mut writer = if r.dry_run { None } else { Some(vault.writer()?) };
     let index = Index::open(&vault)?;
-    let parent = if kind == Kind::Handoff && r.parent == "shared" { None } else { Some(node_id(&r.parent)?) };
+    let parent = if kind == Kind::Handoff && r.parent == "shared" { None } else { Some(subject(&index, &r.parent)?) };
     if let Some(p) = &parent {
         parent_fits(&index, kind, p)?;
     }

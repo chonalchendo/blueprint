@@ -123,6 +123,11 @@ impl Vault {
     pub fn clean<'i>(&self, ids: impl IntoIterator<Item = &'i Id>) -> Result<(), Refusal> {
         clean(&self.root, ids).map(drop)
     }
+
+    /// [`Vault::clean`] over paths relative to the root, for a rename's dry run.
+    pub fn clean_paths(&self, paths: &[String]) -> Result<(), Refusal> {
+        head_if_clean(&self.root, &paths.iter().map(String::as_str).collect::<Vec<_>>()).map(drop)
+    }
 }
 
 impl Writer<'_> {
@@ -212,8 +217,7 @@ impl Writer<'_> {
         })?;
         // git keeps no directory, so the emptied ones go too, before the fingerprint reads their parents' times.
         for p in gone.iter().chain(moves.files.iter().map(|(from, _)| from)) {
-            let mut dir = root.join(p);
-            while dir.pop() && dir != *root && std::fs::remove_dir(&dir).is_ok() {}
+            prune(root, p);
         }
         // The head moved, so an update that fails here costs the next read one refresh and loses nothing.
         let _ = self.index.apply(root, &files, moves.ids.values());
@@ -310,19 +314,26 @@ fn restore(root: &Path) -> Result<(), Refusal> {
                 _ => Ok(()),
             };
             gone(std::fs::remove_file(temp(&target)))?;
-            match len {
-                Some(n) => {
-                    let (image, rest) = images.split_at(*n);
-                    put(&target, image, false)?;
-                    images = rest;
-                }
-                None => gone(std::fs::remove_file(&target))?,
+            if let Some(n) = len {
+                let (image, rest) = images.split_at(*n);
+                put(&target, image, false)?;
+                images = rest;
+            } else {
+                gone(std::fs::remove_file(&target))?;
+                // A crashed rename made the new directories; they go with the files, as after a commit.
+                prune(root, p);
             }
         }
         let paths: Vec<&str> = journal.paths.iter().map(|(p, _)| p.as_str()).collect();
         git(root, &[&["reset", "-q", "--"], &paths[..]].concat())?;
     }
     std::fs::remove_file(&path).map_err(|e| failed(&path, &e))
+}
+
+/// Removes each directory above `path`, under the root, that is now empty: git keeps no directory.
+fn prune(root: &Path, path: &str) {
+    let mut dir = root.join(path);
+    while dir.pop() && dir != *root && std::fs::remove_dir(&dir).is_ok() {}
 }
 
 /// The temporary file beside `path`: a dot name, so no reader takes it for a node.

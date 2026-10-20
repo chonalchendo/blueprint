@@ -4,8 +4,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use rusqlite::OptionalExtension;
-
 use crate::fingerprint::fingerprint;
 use crate::index::{failed, remove, replace};
 use crate::write::Held;
@@ -122,17 +120,6 @@ impl Index {
             }
         }
         Ok(out)
-    }
-
-    /// The node whose live alias is `id`, when one is: a rename keeps the old id resolving, so no new node takes it
-    /// (13, rule 1).
-    pub fn aliased(&self, id: &Id) -> Result<Option<Id>, Refusal> {
-        let holder: Option<String> = self
-            .conn
-            .query_row("select id from aliases where alias = ?1 order by id limit 1", [id.as_str()], |r| r.get(0))
-            .optional()
-            .map_err(|e| failed(Path::new(".bp/index.db"), &e))?;
-        Ok(holder.map(Id::from_trusted))
     }
 
     /// Takes the committed files, drops the ids the commit removed, and stores the fingerprint, in one transaction.

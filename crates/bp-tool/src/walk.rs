@@ -7,7 +7,7 @@ use bp_vault::{Code, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
-use crate::{intent, node_id, unknown};
+use crate::{intent, node_id, subject, unknown};
 
 /// `bp walk <id> --for <action> [--budget <tokens>] [--depth <hops>] [--ids]`.
 #[derive(Args)]
@@ -33,10 +33,11 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         let actions: Vec<&str> = Action::ALL.iter().map(|a| a.as_str()).collect();
         unknown("for", &walk.action, format!("use one of: {}", actions.join(", ")))
     })?;
-    let id = node_id(&walk.id)?;
+    node_id(&walk.id)?;
     let vault = Vault::discover(cwd)?;
     let index = Index::open(&vault)?;
     let _reading = index.reading()?;
+    let id = subject(&index, &walk.id)?;
     let header = index.header(id.as_str())?.ok_or_else(|| {
         Refusal::new(
             Code::NoNode,

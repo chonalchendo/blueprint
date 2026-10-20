@@ -7,7 +7,7 @@ use bp_vault::{Code, Id, Index, Kind, LINKS, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
-use crate::{Wrote, node_id, schema, set};
+use crate::{Wrote, node_id, schema, set, subject};
 
 /// `bp link <from> <type> <to> [--remove] [--dry-run]`.
 #[derive(Args)]
@@ -28,7 +28,7 @@ pub struct Link {
 }
 
 pub(crate) fn link(cwd: &Path, link: &Link) -> Result<Wrote, Refusal> {
-    let from = node_id(&link.from)?;
+    node_id(&link.from)?;
     let ty = link.field.as_str();
     // A removal names the edge as written, so it also clears a link text that names nothing.
     let to = if link.remove { Id::parse(&link.to).ok() } else { Some(node_id(&link.to)?) };
@@ -36,12 +36,13 @@ pub(crate) fn link(cwd: &Path, link: &Link) -> Result<Wrote, Refusal> {
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
     let mut writer = if link.dry_run { None } else { Some(vault.writer()?) };
-    // A human's uncommitted edit refuses first, dry run or not, before its text is read or compared (12, Write path).
+    let index = Index::open(&vault)?;
+    let from = subject(&index, &link.from)?;
+    // A human's uncommitted edit refuses first, dry run or not, before its text is read (12, Write path).
     match &mut writer {
         Some(w) => w.clean([&from])?,
         None => vault.clean([&from])?,
     }
-    let index = Index::open(&vault)?;
     let text = vault.text(&from)?;
     let file = bp_vault::File::from_bytes(from.clone(), text.as_bytes())?;
     let Some(header) = &file.header else {
@@ -74,7 +75,7 @@ pub(crate) fn link(cwd: &Path, link: &Link) -> Result<Wrote, Refusal> {
     let target = if link.remove {
         // An alias names the node it points to, as it does when the edge is added.
         let real = match &to {
-            Some(id) => index.aliased(id)?,
+            Some(id) => index.holder(id)?.map(|(held, _)| held),
             None => None,
         };
         let names =
@@ -155,11 +156,10 @@ fn admit(index: &Index, from: &Id, ty: &str, holder: Kind, schema: &schema::Link
     Ok(target)
 }
 
-/// The node or record `id` names and its kind: the file itself, else the node a live alias of `id` names. `None`
-/// when neither exists.
+/// The node or record `id` names and its kind: the file itself up to case, else the node a live alias of `id`
+/// names. `None` when neither exists, or the file is an asset.
 pub(crate) fn resolve(index: &Index, id: &Id) -> Result<Option<(Id, Kind)>, Refusal> {
-    let target = if index.header(id.as_str())?.is_some() { Some(id.clone()) } else { index.aliased(id)? };
-    let Some(target) = target else { return Ok(None) };
+    let Some((target, _)) = index.holder(id)? else { return Ok(None) };
     let Some(header) = index.header(target.as_str())? else { return Ok(None) };
     let kind = header["kind"].as_str().and_then(|k| k.parse().ok()).expect("the index stores closed kinds");
     Ok(Some((target, kind)))

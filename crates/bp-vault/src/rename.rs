@@ -1,5 +1,5 @@
-//! What a rename reads and rewrites (12, A rename): the files that name a node, found in the index, and each one's
-//! text with the old id replaced and every other byte kept.
+//! What a rename reads and rewrites (12, A rename): the files that mention a node, found in the index, and each
+//! one's text with every whole mention of the old id replaced and every other byte kept.
 
 use std::path::Path;
 
@@ -18,17 +18,21 @@ impl Index {
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
-    /// The files that name `id`, sorted: a header or body link to it, to one of its aliases or to a file under its
-    /// directory, and a root-relative markdown link into its directory, which the index keeps only as body text.
+    /// The files that name `id`, sorted: a link to it, to one of its aliases or to a file under its directory, and
+    /// any other mention of one of those ids in a header or body, code and prose included (12, A rename). A stored
+    /// text that holds the id as part of a longer one is a candidate too; [`retarget`] leaves it as it was.
     pub fn inbound(&self, id: &Id) -> Result<Vec<Id>, Refusal> {
         let run = || -> rusqlite::Result<Vec<Id>> {
-            // `0` follows `/`, so the range holds exactly the ids under the directory, and the index serves it.
+            // `0` follows `/`, so the range holds exactly the ids under the directory, and the index serves it. A
+            // path under the directory holds the id, so the text scans need only the names.
             self.conn
                 .prepare_cached(
-                    "select src from links where dst = ?1 or dst in (select alias from aliases where id = ?1) \
-                     or (dst > ?1 || '/' and dst < ?1 || '0') \
-                     union select id from fts where instr(body, '](/' || ?1 || '/') > 0 \
-                     union select id from records where instr(body, '](/' || ?1 || '/') > 0 order by 1",
+                    "with names(n) as (select ?1 union select alias from aliases where id = ?1) \
+                     select src from links where dst in (select n from names) or (dst > ?1 || '/' and dst < ?1 || '0') \
+                     union select f.id from fts f, names where instr(f.body, n) > 0 \
+                     union select x.id from nodes x, names where instr(x.header, n) > 0 \
+                     union select r.id from records r, names where instr(r.body, n) > 0 or instr(r.header, n) > 0 \
+                     order by 1",
                 )?
                 .query_map([id.as_str()], |r| r.get(0).map(Id::from_trusted))?
                 .collect()

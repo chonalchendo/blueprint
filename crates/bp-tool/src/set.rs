@@ -11,7 +11,7 @@ use clap::Args;
 use serde_json::Value;
 
 use crate::create::{body_file, stored};
-use crate::{Wrote, node_id, schema};
+use crate::{Wrote, node_id, schema, subject};
 
 /// `bp set <id> <field> <value> [--dry-run]` or `bp set <id> --body-file <f> [--dry-run]`.
 #[derive(Args)]
@@ -35,11 +35,13 @@ pub struct Set {
 
 pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     let body = set.body_file.as_deref().map(body_file).transpose()?;
-    let id = node_id(&set.id)?;
+    node_id(&set.id)?;
     let vault = Vault::discover(cwd)?;
     let role = role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
     let mut writer = if set.dry_run { None } else { Some(vault.writer()?) };
+    let index = Index::open(&vault)?;
+    let id = subject(&index, &set.id)?;
     // A human's uncommitted edit refuses first, dry run or not, before its text is read (12, Write path).
     match &mut writer {
         Some(w) => w.clean([&id])?,
@@ -77,7 +79,7 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     };
     let changes = BTreeMap::from([(id.clone(), new)]);
     let Some(writer) = writer else {
-        let (_, findings) = Index::open(&vault)?.propose(&vault, &changes)?;
+        let (_, findings) = index.propose(&vault, &changes)?;
         result["findings"] = serde_json::to_value(findings).expect("a plain struct serialises");
         result["dry_run"] = true.into();
         // The change a dry run shows: a label's value and was, or the body as it would be stored.
