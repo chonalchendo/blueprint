@@ -66,7 +66,13 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
         None => Some(json!({})),
     };
     let settings = settings.and_then(|s| merged(s, spec)).ok_or_else(|| {
-        Refusal::failed(spec.settings, format!("{} is not a JSON object with an object `hooks`; fix it", spec.settings))
+        Refusal::failed(
+            spec.settings,
+            format!(
+                "{} is not a JSON object with an object `hooks` and a list `permissions.allow`; fix it",
+                spec.settings
+            ),
+        )
     })?;
     let manifest_rel = spec.manifest();
     let manifest_path = top.join(&manifest_rel);
@@ -314,7 +320,13 @@ fn is_ours(group: &Value, spec: &Spec) -> bool {
         .is_some_and(|h| h.iter().any(|h| h["command"].as_str().is_some_and(|c| c.contains(&mark))))
 }
 
-/// Blueprint's hook entries alone, by event: what the `#hooks` entry hashes, so the user's own entries may change.
+/// An allow rule is Blueprint's when it names `BP_ROLE`, which only the role hook's prefix sets.
+fn is_our_rule(rule: &Value) -> bool {
+    rule.as_str().is_some_and(|r| r.contains("BP_ROLE="))
+}
+
+/// Blueprint's hook entries alone, by event, and its allow rules: what the `#hooks` entry hashes, so the user's own
+/// entries and rules may change.
 fn ours(settings: &Value, spec: &Spec) -> Vec<u8> {
     let mut out = Map::new();
     for (event, groups) in settings["hooks"].as_object().into_iter().flatten() {
@@ -323,11 +335,13 @@ fn ours(settings: &Value, spec: &Spec) -> Vec<u8> {
             out.insert(event.clone(), json!(mine));
         }
     }
-    serde_json::to_vec(&out).expect("JSON serialises")
+    let rules: Vec<&Value> =
+        settings["permissions"]["allow"].as_array().into_iter().flatten().filter(|r| is_our_rule(r)).collect();
+    serde_json::to_vec(&json!({ "hooks": out, "allow": rules })).expect("JSON serialises")
 }
 
-/// The settings with Blueprint's entries replaced by the spec's, the user's kept; `None` when `hooks` is not an
-/// object.
+/// The settings with Blueprint's entries and rules replaced by the spec's, the user's kept; `None` when `hooks` is
+/// not an object or `permissions.allow` not a list.
 fn merged(mut settings: Value, spec: &Spec) -> Option<Value> {
     let hooks = settings.as_object_mut()?.entry("hooks").or_insert_with(|| json!({})).as_object_mut()?;
     for groups in hooks.values_mut() {
@@ -337,12 +351,23 @@ fn merged(mut settings: Value, spec: &Spec) -> Option<Value> {
     }
     hooks.retain(|_, g| g.as_array().is_none_or(|g| !g.is_empty()));
     for h in spec.events {
-        let mut group = json!({ "hooks": [{ "type": "command", "command": spec.command(h.script) }] });
+        let mut hook = json!({ "type": "command", "command": spec.command(h.script) });
+        if spec.block_on_failure {
+            hook["onFailure"] = "block".into();
+        }
+        let mut group = json!({ "hooks": [hook] });
         if let Some(m) = h.matcher {
             group["matcher"] = m.into();
         }
         let groups = hooks.entry(h.event).or_insert_with(|| json!([]));
         groups.as_array_mut()?.push(group);
+    }
+    // A target with no rule gets no `permissions` key.
+    if !spec.allow.is_empty() {
+        let permissions = settings.as_object_mut()?.entry("permissions").or_insert_with(|| json!({}));
+        let allow = permissions.as_object_mut()?.entry("allow").or_insert_with(|| json!([])).as_array_mut()?;
+        allow.retain(|r| !is_our_rule(r));
+        allow.extend(spec.allow.iter().map(|&r| json!(r)));
     }
     Some(settings)
 }

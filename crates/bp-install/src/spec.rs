@@ -26,6 +26,12 @@ pub(crate) struct Spec {
     pub(crate) always_on: &'static str,
     /// The file whose `hooks` key holds the hook entries, beside the user's own.
     pub(crate) settings: &'static str,
+    /// Claude Code's `"onFailure": "block"` on each hook entry: without it, a hook script that cannot start is a
+    /// non-blocking error, and a `bp` call runs with no role, as `human`.
+    pub(crate) block_on_failure: bool,
+    /// The rules the hooks need in the settings' `permissions.allow`, beside the user's own. The role hook's `export`
+    /// prefix would prompt under a `Bash(bp *)` rule, and a dispatch cannot answer a prompt.
+    pub(crate) allow: &'static [&'static str],
     /// How a hook command names the clone's top.
     pub(crate) top: &'static str,
     pub(crate) events: &'static [Hook],
@@ -46,6 +52,8 @@ pub(crate) const CLAUDE: Spec = Spec {
     hooks: ".claude/hooks",
     always_on: "CLAUDE.md",
     settings: ".claude/settings.local.json",
+    block_on_failure: true,
+    allow: &["Bash(export BP_ROLE=*)"],
     top: "\"$CLAUDE_PROJECT_DIR\"",
     events: &[
         START,
@@ -68,6 +76,8 @@ pub(crate) const CODEX: Spec = Spec {
     hooks: ".codex/hooks",
     always_on: "AGENTS.md",
     settings: ".codex/hooks.json",
+    block_on_failure: false,
+    allow: &[],
     // The main worktree's top, where `install` writes the hooks: a linked worktree holds none of them, as they are
     // excluded, not tracked.
     top: "\"$(git rev-parse --path-format=absolute --git-common-dir)/..\"",
@@ -90,7 +100,8 @@ impl Spec {
         format!("{}/bundle.json", self.skills)
     }
 
-    /// The manifest entries of the two edits inside shared files: `CLAUDE.md#bp`, `settings.local.json#hooks`.
+    /// The manifest entries of the two edits inside shared files: `CLAUDE.md#bp`, and `settings.local.json#hooks`,
+    /// which holds the hook entries and the allow rules.
     pub(crate) fn section_entry(&self) -> String {
         format!("{}#bp", file_name(self.always_on))
     }

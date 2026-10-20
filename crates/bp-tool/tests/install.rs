@@ -200,7 +200,10 @@ fn the_session_hooks_record_the_seed_and_walk_it() {
         &path,
         &[],
     );
-    let v: Value = serde_json::from_slice(&start.stdout).unwrap();
+    // One JSON object on stdout is the hook's output, so the walk goes as its context.
+    let out: Value = serde_json::from_slice(&start.stdout).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart", "{out}");
+    let v: Value = serde_json::from_str(out["hookSpecificOutput"]["additionalContext"].as_str().unwrap()).unwrap();
     assert_eq!((v["seed"].as_str(), v["for"].as_str()), (Some(MILESTONE), Some("derive")), "{v}");
 }
 
@@ -267,13 +270,45 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
         ("echo $(bp record review x)", Some("bp-reviewer"), "bp record is outside the reviewer role"),
         ("bp show x; bp set x tags a", Some("Explore"), "agent type 'Explore' is no bp role, so its bp set"),
         ("bp stamp m", None, "bp stamp is outside the session role"),
+        ("bp install --target claude", None, "ask the human to run it from a shell"),
+        ("bp set x tags a", Some("bp-reviewer"), "(where show list search walk), so"),
     ] {
         let out = call(command, agent);
         assert_eq!(out.status.code(), Some(2), "{command}");
         assert!(String::from_utf8_lossy(&out.stderr).contains(cause), "{}", String::from_utf8_lossy(&out.stderr));
     }
-    let out = call("ls -la", Some("bp-worker"));
+    let out = call("ls -la crates/bp-vault bp.rs", Some("bp-worker"));
     assert!(out.status.success() && out.stdout.is_empty(), "a command with no bp is not touched");
+    // A call the parse misses still gets the label, so it cannot commit as `human`; with no role it is denied.
+    for command in [
+        "for m in x; do bp release $m; done",
+        "if true; then bp release x; fi",
+        "bash -c 'bp release x'",
+        "eval 'bp release x'",
+        "sudo bp release x",
+        "env -u X bp release x",
+        "find . -maxdepth 0 -exec bp release x \\;",
+        "! bp release x",
+    ] {
+        for (agent, prefix) in [(None, "export BP_ROLE=session"), (Some("bp-worker"), "export BP_ROLE=worker")] {
+            let out = call(command, agent);
+            assert!(out.status.success() && String::from_utf8_lossy(&out.stdout).contains(prefix), "{command}");
+        }
+        let out = call(command, Some("Explore"));
+        assert_eq!(out.status.code(), Some(2), "{command}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("agent type 'Explore' is no bp role"), "{command}");
+    }
+    // Under the label, a human act in a nested shell refuses in the binary.
+    let out = call(&format!("cd {} && bash -c 'bp transition {MILESTONE} approved'", w.code().display()), None);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let command = v["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
+    let run = w.command("bash", &w.code()).env("PATH", &path).args(["-c", command]).output().unwrap();
+    assert_eq!(run.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("role_forbidden"),
+        "{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
     // Fails closed: no jq, malformed input and empty input each deny, whatever the command.
     let ls = serde_json::json!({ "session_id": "s", "tool_input": { "command": "ls" } }).to_string();
     for (input, path, cause) in
