@@ -28,7 +28,7 @@ pub use emit::set_field;
 pub use file::{Broken, DeltaState, File, header_end, normalise, opens_with_header, written};
 pub use header::{Header, LINKS, RESERVED, Unresolved};
 pub use id::{Id, SLUG_MAX, is_slug, slug};
-pub use index::{Fault, Filter, Hit, Index, Reading, Record, Row};
+pub use index::{Fault, Filter, Hit, Index, Reading, Record, Row, second};
 pub use kind::{DesignLevel, Kind};
 pub use refusal::{Code, Refusal};
 pub use rename::retarget;

@@ -176,3 +176,45 @@ fn a_finish_line_changed_while_the_blocks_ran_refuses() {
     assert_eq!(commits(vault).parse::<u32>().unwrap(), before + 1, "only the hand commit");
     assert_eq!(bp(vault, &["show", M]).1["status"], "approved");
 }
+
+#[test]
+fn a_later_stamp_asks_an_open_waiver_again() {
+    let (vault, code) = setup();
+    let (vault, code) = (vault.path(), code.path());
+    ready(vault, "~~~check shell {name=f expect=0}\nfalse\n~~~\n");
+    let (exit, v) = stamp(vault, code, &["--waive", "f", "--reason", "later"]);
+    assert_eq!((exit, &v["reasked"]), (Some(0), &serde_json::json!([])), "{v}");
+    let next = |n: &str, args: &[&str]| {
+        let id = format!("projects/bp/milestones/{n}");
+        let text = "---\nkind: milestone\ntitle: N\nstatus: planned\n---\n\n## Finish line\n\n\
+                    ~~~check shell {name=p expect=0}\ntrue\n~~~\n";
+        std::fs::write(vault.join(format!("{id}.md")), text).unwrap();
+        git(vault, &["add", "-A"]);
+        git(vault, &["commit", "-qm", "a milestone"]);
+        assert_eq!(bp(vault, &["transition", &id, "approved"]).0, Some(0));
+        bp_env(code, &[("BP_VAULT", vault.to_str().unwrap())], &[&["stamp", id.as_str()], args].concat())
+    };
+    let (exit, v) = next("n", &[]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("check_failed")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains(&format!("--waive {M}/f --reason")), "{v}");
+    let again = format!("{M}/f");
+    let n = "projects/bp/milestones/n";
+    let (exit, v) = bp_env(
+        code,
+        &[("BP_VAULT", vault.to_str().unwrap())],
+        &["stamp", n, "--waive", &format!("{M}/g"), "--reason", "x"],
+    );
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("unknown_value")), "{v}");
+    let (exit, v) =
+        bp_env(code, &[("BP_VAULT", vault.to_str().unwrap())], &["stamp", n, "--waive", &again, "--reason", "again"]);
+    assert_eq!((exit, v["waivers"].clone()), (Some(0), serde_json::json!([format!("{M}/waivers/f-2")])), "{v}");
+    // The block passes now, so the next stamp closes the waiver, and the one after asks nothing.
+    let text = std::fs::read_to_string(vault.join(format!("{M}.md"))).unwrap().replace("false", "true");
+    std::fs::write(vault.join(format!("{M}.md")), text).unwrap();
+    git(vault, &["commit", "-qam", "f passes"]);
+    let (exit, v) = next("o", &[]);
+    let asked = serde_json::json!([{ "waiver": format!("{M}/waivers/f-2"), "verdict": "pass" }]);
+    assert_eq!((exit, &v["reasked"]), (Some(0), &asked), "{v}");
+    let (exit, v) = next("q", &[]);
+    assert_eq!((exit, &v["reasked"]), (Some(0), &serde_json::json!([])), "{v}");
+}

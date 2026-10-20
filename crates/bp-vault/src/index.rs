@@ -441,9 +441,8 @@ impl Index {
     }
 }
 
-/// rusqlite reads no `usize`; a `count(*)` is never negative.
-/// A record id's key without its `-N`, and N: 1 for the first record with the key.
-fn second(id: &str) -> (&str, u64) {
+/// A record id's key without its `-N`, and N: 1 for the first record with the key (13, rule 1).
+pub fn second(id: &str) -> (&str, u64) {
     let key = id.rsplit('/').next().unwrap_or(id);
     match key.rsplit_once('-') {
         Some((stem, n)) if !n.starts_with('0') && n.len() < 6 => n.parse().map_or((key, 1), |n| (stem, n)),
@@ -451,6 +450,7 @@ fn second(id: &str) -> (&str, u64) {
     }
 }
 
+/// rusqlite reads no `usize`; a `count(*)` is never negative.
 pub(crate) fn count_at(r: &rusqlite::Row, i: usize) -> rusqlite::Result<usize> {
     Ok(usize::try_from(r.get::<_, i64>(i)?).expect("a count is never negative"))
 }
