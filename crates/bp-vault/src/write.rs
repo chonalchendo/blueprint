@@ -32,6 +32,8 @@ const PENDING: &str = "pending";
 pub struct Writer<'v> {
     vault: &'v Vault,
     index: Index,
+    /// The commit's time, Unix seconds, when the verb wrote it into a record too.
+    at: Option<i64>,
     /// The head and the paths `clean` found clean, so `commit` asks git once. A cell, so a verb can clean while it
     /// reads through [`Writer::index`].
     clean: Cell<Option<(String, Vec<String>)>>,
@@ -141,7 +143,14 @@ impl Vault {
             }
         }
         restore(&self.root)?;
-        Ok(Writer { index: Index::open(self)?, vault: self, clean: Cell::new(None), trailers: Vec::new(), _lock: lock })
+        Ok(Writer {
+            index: Index::open(self)?,
+            vault: self,
+            clean: Cell::new(None),
+            trailers: Vec::new(),
+            at: None,
+            _lock: lock,
+        })
     }
 
     /// Refuses `path_dirty` when a file of `ids` differs from HEAD in the working tree or git's index, or is on disk
@@ -180,6 +189,12 @@ impl Writer<'_> {
     /// (12, Write path). The caller keeps it to one line, so no text of it reads as a second trailer.
     pub fn trailer(&mut self, line: String) {
         self.trailers.push(line);
+    }
+
+    /// Dates the commit at `secs`, the instant the verb wrote into a record, so the record's time and the commit's
+    /// processing time (13) are one reading: a release's `to` and the commit that wrote it never straddle a second.
+    pub fn at(&mut self, secs: i64) {
+        self.at = Some(secs);
     }
 
     /// Validates `changes` as the proposed tree, writes them, and commits them alone with `Bp-Verb` and `Bp-Role`.
@@ -248,7 +263,14 @@ impl Writer<'_> {
             .and_then(
                 |()| if new.is_empty() { Ok(String::new()) } else { git(root, &[&["add", "--"], &new[..]].concat()) },
             )
-            .and_then(|_| git(root, &[&["commit", "-q", "-m", subject, "-m", &trailers, "--"], &specs[..]].concat()));
+            .and_then(|_| {
+                let date = self.at.map(|secs| format!("@{secs} +0000"));
+                let env: Vec<(&str, &str)> = date
+                    .iter()
+                    .flat_map(|d| [("GIT_AUTHOR_DATE", d.as_str()), ("GIT_COMMITTER_DATE", d.as_str())])
+                    .collect();
+                git_env(root, &env, &[&["commit", "-q", "-m", subject, "-m", &trailers, "--"], &specs[..]].concat())
+            });
         if let Err(e) = done {
             // The caller sees the failure, not a second refusal from the undo. An undo that fails keeps the journal,
             // and the next writer tries again.
@@ -407,12 +429,18 @@ fn put(path: &Path, bytes: &[u8], sync: bool) -> Result<(), Refusal> {
 /// `--no-optional-locks`, `status` rewrites git's index after a commit, which moves the fingerprint, so the next
 /// call after a refused or no-op write would rescan every file; `add` and `commit` still lock it.
 fn git(root: &Path, args: &[&str]) -> Result<String, Refusal> {
+    git_env(root, &[], args)
+}
+
+/// [`git`] with `env` set too.
+fn git_env(root: &Path, env: &[(&str, &str)], args: &[&str]) -> Result<String, Refusal> {
     let out = Command::new("git")
         .arg("-C")
         .arg(root)
         .arg("--no-optional-locks")
         .env("LC_ALL", "C")
         .env("GIT_LITERAL_PATHSPECS", "1")
+        .envs(env.iter().copied())
         .args(args)
         .output()
         .map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;

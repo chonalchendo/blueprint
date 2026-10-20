@@ -131,7 +131,8 @@ pub(crate) fn run(script: &str, dir: &Path, vault: &Path, timeout: Duration) -> 
         Err(e) => return not_started(format!("no spool file for stderr in {}: {e}", std::env::temp_dir().display())),
     };
     let start = Instant::now();
-    // A block is reproducible without an agent (15): it sees neither the frozen clock nor the caller's role.
+    // A block is reproducible without an agent (15): it sees neither the frozen clock nor the caller's role or
+    // session, so a `cut` inside it claims as a fresh session would.
     let spawned = Command::new("bash")
         .arg("-e")
         .arg("-c")
@@ -140,6 +141,7 @@ pub(crate) fn run(script: &str, dir: &Path, vault: &Path, timeout: Duration) -> 
         .env("BP_VAULT", vault)
         .env_remove("BP_NOW")
         .env_remove("BP_ROLE")
+        .env_remove("BP_SESSION")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -346,10 +348,10 @@ mod tests {
         assert!(ran.tail.is_empty());
         let ran = run_here("test -n \"$BP_VAULT\"", Duration::from_secs(10));
         assert!(matches!(ran.end, End::Exited { code: Some(0), .. }), "{:?}", ran.end);
-        let ran = run_here("test -z \"${BP_NOW-}${BP_ROLE-}\"", Duration::from_secs(10));
+        let ran = run_here("test -z \"${BP_NOW-}${BP_ROLE-}${BP_SESSION-}\"", Duration::from_secs(10));
         assert!(
             matches!(ran.end, End::Exited { code: Some(0), .. }),
-            "a block sees no BP_NOW or BP_ROLE: {:?}",
+            "a block sees no BP_NOW, BP_ROLE or BP_SESSION: {:?}",
             ran.end
         );
     }
