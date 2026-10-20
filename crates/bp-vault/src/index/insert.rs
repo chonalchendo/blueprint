@@ -5,8 +5,9 @@ use serde_json::Value;
 
 use crate::{Code, File};
 
-/// Puts a changed file's rows in place of its old ones. A node keeps its rowid, so the graph and a walk's float sums
-/// are those a rebuild from nothing gives.
+/// Puts a changed file's rows in place of its old ones. A node keeps its rowid across an edit. A node that is new, or
+/// back after a delete or a break, takes a rowid a rebuild would not give it: the rows equal a rebuild's, and a walk's
+/// ranks keep their order but may differ in the last float bits (12, check 5).
 pub(crate) fn replace(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
     remove(tx, file.id.as_str(), file.header.as_ref().is_some_and(|h| !h.kind.is_record()))?;
     insert(tx, file)

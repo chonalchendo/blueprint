@@ -25,7 +25,7 @@ use serde::Serialize;
 pub use body::{Body, Check, Finding, FindingKind, Section};
 pub use closed::OutsideSet;
 pub use emit::set_field;
-pub use file::{File, header_end, normalise, opens_with_header, written};
+pub use file::{Broken, File, header_end, normalise, opens_with_header, written};
 pub use header::{Header, LINKS, RESERVED, Unresolved};
 pub use id::{Id, SLUG_MAX, is_slug, slug};
 pub use index::{Filter, Hit, Index, Reading, Record, Row};
@@ -87,6 +87,13 @@ impl Vault {
         File::from_bytes(id.clone(), self.text(id)?.as_bytes())
     }
 
+    /// The `schema_invalid` refusal, with the by-hand fix, when the file at `id` is there but does not parse. A verb
+    /// that finds no node at `id` asks before it refuses, so an agent is not sent to search for a file that exists
+    /// (25, issue 8). It reads the file, so it runs only on a refusal path.
+    pub fn unparsed(&self, id: &Id) -> Option<Refusal> {
+        self.read(id).err().filter(|e| e.code == Code::SchemaInvalid)
+    }
+
     /// One file's text as it is on disk, for a writer that changes some lines and keeps the rest. Refuses `no_node`
     /// when no file has that id, and `schema_invalid` when the file is not UTF-8.
     pub fn text(&self, id: &Id) -> Result<String, Refusal> {
@@ -99,7 +106,7 @@ impl Vault {
             ),
             _ => Refusal::failed(id.as_str(), e.to_string()),
         })?;
-        String::from_utf8(bytes).map_err(|e| Refusal::schema(id.as_str(), format!("not UTF-8: {e}")))
+        String::from_utf8(bytes).map_err(|e| Refusal::schema(id.as_str(), &Broken::unread(format!("not UTF-8: {e}"))))
     }
 
     /// Reads one file as it was at a commit, branch or blueprint tag. Refuses `unknown_value` when git does not know
@@ -165,18 +172,18 @@ impl Vault {
         String::from_utf8_lossy(&out.stdout).trim().parse().ok()
     }
 
-    /// Every markdown file under `projects/` and `shared/`, sorted by id. Dot directories (`.bp`, `.git`) are skipped.
-    /// Refuses `schema_invalid` on a markdown file whose path is not an id: it would be neither read nor counted.
-    pub fn ids(&self) -> Result<Vec<Id>, Refusal> {
-        let mut ids = Vec::new();
+    /// Every markdown file under `projects/` and `shared/`: the ids, sorted, and the paths that are not ids, without
+    /// `.md` (a stray `notes.md`), which the index holds as broken files. Dot directories (`.bp`, `.git`) are skipped.
+    pub fn ids(&self) -> Result<(Vec<Id>, Vec<String>), Refusal> {
+        let (mut ids, mut strays) = (Vec::new(), Vec::new());
         for top in ["projects", "shared"] {
             let dir = self.root.join(top);
             if dir.is_dir() {
-                collect(&self.root, &dir, &mut ids)?;
+                collect(&self.root, &dir, &mut ids, &mut strays)?;
             }
         }
         ids.sort();
-        Ok(ids)
+        Ok((ids, strays))
     }
 
     /// The project for a working directory: the one whose directory holds it, else the one whose `repository` is
@@ -223,7 +230,7 @@ impl Vault {
     }
 }
 
-fn collect(root: &Path, dir: &Path, ids: &mut Vec<Id>) -> Result<(), Refusal> {
+fn collect(root: &Path, dir: &Path, ids: &mut Vec<Id>, strays: &mut Vec<String>) -> Result<(), Refusal> {
     let io = |e: std::io::Error| Refusal::failed(dir.display().to_string(), e.to_string());
     for entry in std::fs::read_dir(dir).map_err(io)? {
         let path = entry.map_err(io)?.path();
@@ -232,13 +239,14 @@ fn collect(root: &Path, dir: &Path, ids: &mut Vec<Id>) -> Result<(), Refusal> {
             continue;
         }
         if path.is_dir() {
-            collect(root, &path, ids)?;
+            collect(root, &path, ids, strays)?;
         } else if path.extension().is_some_and(|e| e == "md") {
-            let id = Id::of_path(root, &path).ok_or_else(|| {
-                let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
-                Refusal::schema(rel, "the path is not an id: projects/<project>/<kind>/<slug> or shared/<kind>/<slug>")
-            })?;
-            ids.push(id);
+            if let Some(id) = Id::of_path(root, &path) {
+                ids.push(id);
+            } else {
+                let rel = path.strip_prefix(root).unwrap_or(&path).with_extension("");
+                strays.push(rel.to_string_lossy().replace('\\', "/"));
+            }
         }
     }
     Ok(())
@@ -257,6 +265,17 @@ pub struct Counts {
     pub records: BTreeMap<String, usize>,
     /// Fenced `check` blocks across every body.
     pub check_blocks: usize,
+    /// Every file that does not parse, by path: what an agent hands a human to repair (25, issue 8).
+    pub broken: Vec<BrokenFile>,
+}
+
+/// One file that does not parse.
+#[derive(Debug, Serialize)]
+pub struct BrokenFile {
+    /// The path under the vault root, with `.md`.
+    pub path: String,
+    /// The parse error.
+    pub detail: String,
 }
 
 #[cfg(test)]

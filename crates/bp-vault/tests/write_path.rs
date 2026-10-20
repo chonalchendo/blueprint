@@ -287,7 +287,7 @@ fn every_label_of_the_vault_takes_the_line_writer() {
     let Some(root) = std::env::var_os("BP_VAULT") else { return };
     let v = Vault { root: root.into() };
     let mut writes = 0;
-    for id in v.ids().unwrap() {
+    for id in v.ids().unwrap().0 {
         let text = v.text(&id).unwrap();
         let Some(header) = File::from_bytes(id.clone(), text.as_bytes()).unwrap().header else { continue };
         if header.kind.is_record() {
@@ -306,7 +306,7 @@ fn every_label_of_the_vault_takes_the_line_writer() {
             for value in [own, new] {
                 let out = bp_vault::set_field(&text, key, &value);
                 let (yaml, after) = split(&out);
-                let got = bp_vault::Header::parse(yaml, id.as_str()).unwrap();
+                let got = bp_vault::Header::parse(yaml).unwrap();
                 let mut want = header.clone();
                 if key == "title" {
                     want.title = value.as_str().map(String::from);
@@ -333,7 +333,7 @@ fn every_header_of_the_vault_round_trips() {
     let Some(root) = std::env::var_os("BP_VAULT") else { return };
     let v = Vault { root: root.into() };
     let mut headers = 0;
-    for id in v.ids().unwrap() {
+    for id in v.ids().unwrap().0 {
         let text = v.text(&id).unwrap();
         let first = File::from_bytes(id.clone(), text.as_bytes()).unwrap();
         let Some(header) = &first.header else { continue };

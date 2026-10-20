@@ -129,7 +129,7 @@ mod tests {
     use super::*;
 
     fn parse(yaml: &str) -> Header {
-        Header::parse(yaml, "f").unwrap()
+        Header::parse(yaml).unwrap()
     }
 
     #[test]

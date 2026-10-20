@@ -39,9 +39,6 @@ crate::closed_enum! {
     }
 }
 
-/// The opening words of a `schema` refusal's fix, before what is wrong with the file.
-const FIX_THE_FILE: &str = "fix the file: ";
-
 /// One envelope: exit 2 for a refusal, 1 when the tool could not run, 4 for a usage error.
 #[derive(Debug, Clone, Serialize, thiserror::Error)]
 #[error("{code}: {rule}")]
@@ -86,18 +83,15 @@ impl Refusal {
         }
     }
 
-    /// A file breaks its kind's schema.
-    pub fn schema(subject: impl Into<String>, why: impl std::fmt::Display) -> Self {
+    /// A file does not parse. No verb rewrites a file it cannot parse, so the one fix, whatever the verb, is a human's
+    /// edit (25, issue 8).
+    pub fn schema(id: &str, broken: &crate::Broken) -> Self {
+        let what = if broken.rule { "breaks its kind's schema" } else { "does not parse" };
         Self::new(
             Code::SchemaInvalid,
-            subject,
+            id,
             "a file holds its kind's schema (12, the kind schemas)",
-            format!("{FIX_THE_FILE}{why}"),
+            format!("the file {what} ({}); edit {id}.md by hand, then git commit it", broken.why),
         )
-    }
-
-    /// What a `schema` refusal says is wrong with the file: its fix without the opening words.
-    pub fn why(&self) -> &str {
-        self.fix.strip_prefix(FIX_THE_FILE).unwrap_or(&self.fix)
     }
 }

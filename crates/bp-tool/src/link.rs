@@ -86,7 +86,7 @@ pub(crate) fn link(cwd: &Path, link: &Link) -> Result<Wrote, Refusal> {
         values.remove(at)
     } else {
         let schema = schema.expect("an added edge passed the schema");
-        let target = admit(&index, &from, ty, header.kind, &schema, &to.expect("an added edge names an id"))?;
+        let target = admit(&vault, &index, &from, ty, header.kind, &schema, &to.expect("an added edge names an id"))?;
         if values.contains(&target.to_string()) {
             return Ok(Wrote::Already(serde_json::json!({ "id": from })));
         }
@@ -122,13 +122,25 @@ pub(crate) fn link(cwd: &Path, link: &Link) -> Result<Wrote, Refusal> {
 
 /// The node an added edge names, once it passes 13: it resolves, through a live alias too; its kind is one the link
 /// type allows; and a dependency is another issue of the same project.
-fn admit(index: &Index, from: &Id, ty: &str, holder: Kind, schema: &schema::Link, to: &Id) -> Result<Id, Refusal> {
+fn admit(
+    vault: &Vault,
+    index: &Index,
+    from: &Id,
+    ty: &str,
+    holder: Kind,
+    schema: &schema::Link,
+    to: &Id,
+) -> Result<Id, Refusal> {
     let Some((target, kind)) = resolve(index, to)? else {
+        // A link to a file that does not parse still resolves to nothing, but its fix is the file's repair.
+        let fix = vault
+            .unparsed(to)
+            .map_or_else(|| format!("point it at an id that exists: bp search {}", search_terms(to)), |e| e.fix);
         return Err(Refusal::new(
             Code::UnresolvedLink,
             format!("{from} {ty} {to}"),
             "a write adds no link that resolves to nothing in the proposed tree (12, Write path)",
-            format!("point it at an id that exists: bp search {}", search_terms(to)),
+            fix,
         ));
     };
     if !schema.targets.contains(&kind) {

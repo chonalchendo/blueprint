@@ -32,7 +32,7 @@ fn a_file_that_does_not_parse_is_a_finding() {
     let (code, v) = bp(root, &["show", BROKEN]);
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{v}");
     let fix = v["fix"].as_str().unwrap();
-    assert!(fix.contains("duplicated key") && fix.contains("by hand"), "{fix}");
+    assert!(fix.contains("appears twice") && fix.contains("by hand"), "{fix}");
 
     let (code, v) = bp(root, &["set", OTHER, "severity", "high"]);
     assert_eq!(code, Some(0), "a write to another file proceeds: {v}");
@@ -67,4 +67,62 @@ fn a_file_that_does_not_parse_is_a_finding() {
     );
     std::fs::remove_file(root.join(".bp/index.db")).unwrap();
     assert_eq!(census(), repaired);
+}
+
+/// Each verb that meets a broken file names it with the one by-hand fix, rather than calling it missing; the census
+/// lists every broken file; and a stray markdown file whose path is not an id blocks nothing (review of PR 15).
+#[test]
+fn every_verb_names_a_broken_file() {
+    const DESIGN: &str = "projects/bp/designs/system";
+    const MILESTONE: &str = "projects/bp/milestones/m";
+    let issue = |title: &str| {
+        format!("---\nkind: issue\ntitle: {title}\nstatus: open\nunder: {MILESTONE}\ncites: [{DESIGN}]\n---\n\nText.\n")
+    };
+    let dir = common::vault(&[
+        ("projects/bp/project.md", "---\nkind: project\ntitle: P\n---\n"),
+        ("projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\nGoal.\n"),
+        ("projects/bp/designs/system.md", "---\nkind: design\ntitle: S\ntitle: T\nstatus: active\n---\n\nBody.\n"),
+        ("projects/bp/issues/0001.a.md", &issue("A")),
+        ("projects/bp/issues/0002.b.md", "---\nkind: issue\ntitle: B\nstatus: open\nseverity: low\n---\n"),
+        ("shared/notes.md", "# notes\n"),
+    ]);
+    let root = dir.path();
+    let fix = format!(
+        "the file does not parse (the key `title` appears twice at line 4 of the file); edit {DESIGN}.md by hand, \
+         then git commit it"
+    );
+
+    let (code, v) = bp(root, &["list", "--count-only"]);
+    assert_eq!(code, Some(0), "a stray file does not block the census: {v}");
+    let broken = serde_json::json!([
+        { "path": format!("{DESIGN}.md"), "detail": "the key `title` appears twice at line 4 of the file" },
+        { "path": "shared/notes.md", "detail": "the path is not an id: projects/<project>/<kind>/<slug> or shared/<kind>/<slug>" },
+    ]);
+    assert_eq!((&v["broken"], &v["findings"]["schema_invalid"]), (&broken, &serde_json::json!(2)), "{v}");
+    let (code, v) = bp(root, &["set", OTHER, "severity", "high"]);
+    assert_eq!(code, Some(0), "a stray file does not block a write: {v}");
+
+    for args in [
+        &["show", DESIGN][..],
+        &["show", DESIGN, "--at", "HEAD"],
+        &["set", DESIGN, "status", "draft"],
+        &["walk", DESIGN, "--for", "design"],
+        &["walk", "projects/bp/issues/0001.a", "--for", "complete"],
+        &["record", "concern-answer", DESIGN, "--field", "concern=x", "--field", "state=open"],
+    ] {
+        let (code, v) = bp(root, args);
+        assert_eq!((code, &v["code"], v["fix"].as_str()), (Some(2), &"schema_invalid".into(), Some(&*fix)), "{args:?}");
+    }
+    // A new edge to the file still resolves to nothing; its fix is the file's repair.
+    for args in [
+        &["link", OTHER, "cites", DESIGN][..],
+        &["create", "milestone", "--project", "bp", "--title", "N", "--under", DESIGN],
+    ] {
+        let (code, v) = bp(root, args);
+        assert_eq!(
+            (code, &v["code"], v["fix"].as_str()),
+            (Some(2), &"unresolved_link".into(), Some(&*fix)),
+            "{args:?}"
+        );
+    }
 }

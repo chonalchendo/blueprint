@@ -181,7 +181,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     let index = Index::open(&vault)?;
     let parent = if kind == Kind::Handoff && r.parent == "shared" { None } else { Some(subject(&index, &r.parent)?) };
     if let Some(p) = &parent {
-        parent_fits(&index, kind, p)?;
+        parent_fits(&vault, &index, kind, p)?;
     }
     let mut fields = BTreeMap::new();
     for (name, ty, _) in &spec.fields {
@@ -325,14 +325,19 @@ fn given<'a>(kind: Kind, spec: &Spec, flags: &'a [String]) -> Result<BTreeMap<&'
 }
 
 /// The parent exists and is a kind this record sits under.
-fn parent_fits(index: &Index, kind: Kind, parent: &Id) -> Result<(), Refusal> {
+fn parent_fits(vault: &Vault, index: &Index, kind: Kind, parent: &Id) -> Result<(), Refusal> {
     match index.header(parent.as_str())?.and_then(|h| h["kind"].as_str()?.parse::<Kind>().ok()) {
-        None => Err(Refusal::new(
-            Code::NoNode,
-            parent.as_str(),
-            "a record sits under a node or record that exists (13, rule 4)",
-            format!("bp search {}", parent.as_str().rsplit('/').next().unwrap_or_default().replace(['-', '.'], " ")),
-        )),
+        None => Err(vault.unparsed(parent).unwrap_or_else(|| {
+            Refusal::new(
+                Code::NoNode,
+                parent.as_str(),
+                "a record sits under a node or record that exists (13, rule 4)",
+                format!(
+                    "bp search {}",
+                    parent.as_str().rsplit('/').next().unwrap_or_default().replace(['-', '.'], " ")
+                ),
+            )
+        })),
         Some(k) if !kind.parents().contains(&k) => {
             let want: Vec<&str> = kind.parents().iter().map(|k| k.as_str()).collect();
             Err(schema(

@@ -211,18 +211,7 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     let id = if show.at.is_some() { node_id(&show.id)? } else { subject(&Index::open(&vault)?, &show.id)? };
     let file = match &show.at {
         Some(at) => vault.read_at(&id, at)?,
-        // No verb rewrites a file it cannot parse, so only a human's edit repairs it.
-        None => vault.read(&id).map_err(|e| match e.code {
-            Code::SchemaInvalid => Refusal {
-                fix: format!(
-                    "the file does not parse ({}); edit {} by hand, then git commit it",
-                    e.why(),
-                    id.path(&vault.root).display()
-                ),
-                ..e
-            },
-            _ => e,
-        })?,
+        None => vault.read(&id)?,
     };
     // A refusal's fix reads the same commit the verb read.
     let at = show.at.as_ref().map_or_else(String::new, |a| format!(" --at {a}"));
