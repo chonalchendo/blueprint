@@ -93,9 +93,14 @@ impl PullRequest {
             && self.status_check_rollup.iter().all(|c| matches!(verdict(c), Some("SUCCESS" | "NEUTRAL" | "SKIPPED")))
     }
 
-    /// Some review approved `head` (21: an approval is for one head; a push needs a new one).
-    pub fn is_approved(&self, head: &str) -> bool {
-        self.reviews.iter().any(|r| r.state == "APPROVED" && r.commit.as_ref().is_some_and(|c| c.oid == head))
+    /// `reviewer` approved `head` (21: an approval is for one head; a push needs a new one). No other login counts,
+    /// so an empty `reviewer` approves nothing (15, Controls 1).
+    pub fn is_approved(&self, head: &str, reviewer: &str) -> bool {
+        self.reviews.iter().any(|r| {
+            r.state == "APPROVED"
+                && r.author.as_ref().is_some_and(|a| !reviewer.is_empty() && a.login == reviewer)
+                && r.commit.as_ref().is_some_and(|c| c.oid == head)
+        })
     }
 }
 
@@ -152,7 +157,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("open-prs.json"),
-            r#"[{"number":2,"headRefName":"bp/0002.b","headRefOid":"h2","reviews":[{"state":"APPROVED","commit":{"oid":"h2"}},{"state":"APPROVED","commit":{"oid":"old"}}],"statusCheckRollup":[{"conclusion":"SUCCESS"},{"state":"SUCCESS"}]}]"#,
+            r#"[{"number":2,"headRefName":"bp/0002.b","headRefOid":"h2","reviews":[{"state":"APPROVED","author":{"login":"r"},"commit":{"oid":"h2"}},{"state":"APPROVED","author":{"login":"r"},"commit":{"oid":"old"}}],"statusCheckRollup":[{"conclusion":"SUCCESS"},{"state":"SUCCESS"}]}]"#,
         )
         .unwrap();
         std::fs::write(
@@ -170,8 +175,9 @@ mod tests {
         assert!(s.open_for("0001.a").is_none(), "a merged pull request is not open");
         let pr = s.open_for("0002.b").unwrap();
         assert_eq!(pr.head_ref_oid, "h2");
-        assert!(pr.is_green() && pr.is_approved("h2"));
-        assert!(!pr.is_approved("h3"), "an approval of another head does not count");
+        assert!(pr.is_green() && pr.is_approved("h2", "r"));
+        assert!(!pr.is_approved("h3", "r"), "an approval of another head does not count");
+        assert!(!pr.is_approved("h2", "a") && !pr.is_approved("h2", ""), "only the reviewer's approval counts");
         let (path, _) = Snapshot::from_dir(&dir.path().join("none")).unwrap_err();
         assert!(path.ends_with("none/open-prs.json"), "the error names the file");
     }
@@ -188,7 +194,7 @@ mod tests {
         assert_eq!(pr.author.as_ref().unwrap().login, "bdehamer");
         let authors: Vec<_> = pr.reviews.iter().map(|r| r.author.as_ref().unwrap().login.as_str()).collect();
         assert_eq!(authors, ["copilot-pull-request-reviewer", "babakks"]);
-        assert!(pr.reviews[1].state == "APPROVED" && pr.is_approved(head));
+        assert!(pr.reviews[1].state == "APPROVED" && pr.is_approved(head, "babakks"));
         assert!(pr.is_green(), "27 skipped and 12 successful checks are green, as on GitHub");
     }
 
@@ -217,6 +223,6 @@ mod tests {
         .unwrap();
         assert!(!pr.is_green());
         let pr: PullRequest = serde_json::from_str(r#"{"number":1,"headRefName":"x","headRefOid":"h"}"#).unwrap();
-        assert!(!pr.is_green() && !pr.is_approved("h") && pr.is_open());
+        assert!(!pr.is_green() && !pr.is_approved("h", "r") && pr.is_open());
     }
 }

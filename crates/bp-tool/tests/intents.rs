@@ -55,6 +55,20 @@ fn vault() -> tempfile::TempDir {
             ),
         );
     }
+    // Needs landing: the reviewer's approval, green, and a passing run of the one `error` block at the head. The
+    // twin's approval is the author's, which counts for nothing.
+    write(r, "projects/bp/project.md", "---\nkind: project\ntitle: Bp\nstatus: active\nreviewer: r\n---\n");
+    for slug in ["0009.lands", "0010.twin"] {
+        let id = format!("projects/bp/issues/{slug}");
+        let block = "## Check\n\n```check shell {name=hello expect=0}\ntrue\n```\n";
+        write(r, &format!("{id}.md"), &format!("{}\n{block}", issue("in-progress", "")));
+        write(r, &format!("{id}/reviews/cccc.md"), &format!("---\nkind: review\nunder: {id}\nhead: cccc\n---\n"));
+        write(
+            r,
+            &format!("{id}/runs/hello-cccc-1.md"),
+            &format!("---\nkind: run\nunder: {id}\ncheck: hello\ncommit: cccc\nattempt: 1\nverdict: pass\n---\n"),
+        );
+    }
     write(r, "projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n");
     let green = r#""statusCheckRollup":[{"conclusion":"SUCCESS"}]"#;
     let old_approval = r#""reviews":[{"state":"APPROVED","commit":{"oid":"old0"}}]"#;
@@ -64,7 +78,9 @@ fn vault() -> tempfile::TempDir {
         &format!(
             r#"[{{"number":9,"headRefName":"bp/0003.held","headRefOid":"h"}},
 {{"number":10,"headRefName":"bp/0007.reviewed","headRefOid":"aaaa",{green},{old_approval}}},
-{{"number":11,"headRefName":"bp/0008.twochecks","headRefOid":"bbbb",{green},"reviews":[{{"state":"APPROVED","commit":{{"oid":"bbbb"}}}}]}}]"#
+{{"number":11,"headRefName":"bp/0008.twochecks","headRefOid":"bbbb",{green},"reviews":[{{"state":"APPROVED","commit":{{"oid":"bbbb"}}}}]}},
+{{"number":12,"headRefName":"bp/0009.lands","headRefOid":"cccc",{green},"reviews":[{{"state":"APPROVED","author":{{"login":"r"}},"commit":{{"oid":"cccc"}}}}]}},
+{{"number":13,"headRefName":"bp/0010.twin","headRefOid":"cccc",{green},"reviews":[{{"state":"APPROVED","author":{{"login":"a"}},"commit":{{"oid":"cccc"}}}}]}}]"#
         ),
     );
     d
@@ -118,6 +134,8 @@ fn the_forge_snapshot_moves_the_review_path_and_unblocks_dependents() {
         "an old approval needs renewing"
     );
     assert_eq!(intent(&v, "projects/bp/issues/0008.twochecks"), ("blocked", "run failed at head"));
+    assert_eq!(intent(&v, "projects/bp/issues/0009.lands"), ("needs-landing", ""), "land's own predicate");
+    assert_eq!(intent(&v, "projects/bp/issues/0010.twin"), ("needs-approval", ""), "only the reviewer's counts");
 }
 
 #[test]

@@ -135,9 +135,7 @@ pub(crate) fn release(cwd: &Path, r: &Release) -> Result<Wrote, Refusal> {
     writer.clean([&id, &claim])?;
     let text = vault.text(&id)?;
     let to = crate::clock::instant(crate::clock::now()?);
-    let released =
-        format!("{}\n\n## Released\n\nto: {to}\nreason: {}\n", vault.text(&claim)?.trim_end_matches('\n'), r.reason);
-    let mut changes = BTreeMap::from([(claim.clone(), released)]);
+    let mut changes = BTreeMap::from([(claim.clone(), released(&vault.text(&claim)?, &to, &r.reason, ""))]);
     // A converted claim may sit on an issue whose status never moved (21, check 2); only `in-progress` returns.
     let was = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?.header.and_then(|h| h.status);
     if was.as_deref() == Some("in-progress") {
@@ -154,6 +152,11 @@ pub(crate) fn release(cwd: &Path, r: &Release) -> Result<Wrote, Refusal> {
         "commit": written.commit,
         "findings": written.findings,
     })))
+}
+
+/// The claim's text with its closing append (13, Claim): `to`, `reason`, then `more`, whole `key: value` lines.
+pub(crate) fn released(claim: &str, to: &str, reason: &str, more: &str) -> String {
+    format!("{}\n\n## Released\n\nto: {to}\nreason: {reason}\n{more}", claim.trim_end_matches('\n'))
 }
 
 /// The claim and status `cut` starts from: the active claim's repeat (exit 3, its fields) or `already_claimed`, then
@@ -204,7 +207,7 @@ fn gate(
 
 /// The top of the clone of `project`'s repository that holds `cwd`: a repo verb runs nowhere else (26, design change
 /// 2).
-fn clone_of(cwd: &Path, index: &Index, project: &str) -> Result<PathBuf, Refusal> {
+pub(crate) fn clone_of(cwd: &Path, index: &Index, project: &str) -> Result<PathBuf, Refusal> {
     let repository = index
         .header(&format!("projects/{project}/project"))?
         .and_then(|h| h.get("repository")?.as_str().map(str::to_string))
@@ -257,7 +260,7 @@ fn attach(top: &Path, worktree: &Path, branch: &str, start: &str) -> Result<Adde
 }
 
 /// The issue's active claim: the latest with no `to` (13, at most one).
-fn held(index: &Index, issue: &Id) -> Result<Option<Record>, Refusal> {
+pub(crate) fn held(index: &Index, issue: &Id) -> Result<Option<Record>, Refusal> {
     Ok(index
         .records(issue.as_str(), Kind::Claim)?
         .into_iter()
@@ -265,7 +268,7 @@ fn held(index: &Index, issue: &Id) -> Result<Option<Record>, Refusal> {
         .find(|c| intents::release(&c.body).get("to").is_none_or(String::is_empty)))
 }
 
-fn field(r: &Record, name: &str) -> Option<String> {
+pub(crate) fn field(r: &Record, name: &str) -> Option<String> {
     r.header.get(name).and_then(Value::as_str).map(str::to_string)
 }
 
@@ -286,7 +289,7 @@ fn checked_out(path: &Path) -> Option<String> {
 }
 
 /// Runs git in the code repository and returns its stdout, trimmed. A failure is `could_not_run` with git's own words.
-fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)

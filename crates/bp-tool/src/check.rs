@@ -23,13 +23,15 @@ pub struct Check {
     pub name: Option<String>,
 }
 
-/// `check_failed`: the five fields of every refusal, then what the commit holds.
+/// `check_failed`: the five fields of every refusal, then what the commit holds, and `pr`'s pull request.
 #[derive(Serialize)]
 struct Failed {
     #[serde(flatten)]
     refusal: Refusal,
     commit: String,
     runs: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pull_request: Option<u64>,
 }
 
 pub(crate) fn run(cwd: &Path, c: &Check, json: bool, out: &mut impl std::io::Write) -> ExitCode {
@@ -44,7 +46,7 @@ pub(crate) fn run(cwd: &Path, c: &Check, json: bool, out: &mut impl std::io::Wri
     let runs = rows(&checked.runs);
     if let Some(run) = checked.failed() {
         let then = format!("rerun bp check {owner} --name {}", run.name);
-        return failed(run, &then, &checked.commit, runs, json, out);
+        return failed(run, &then, &checked.commit, runs, None, json, out);
     }
     let result = json!({ "id": owner, "commit": checked.commit, "runs": runs, "findings": checked.findings });
     finish(Ok(result), json, out)
@@ -56,12 +58,14 @@ pub(crate) fn rows(runs: &[bp_check::Run]) -> Vec<Value> {
 }
 
 /// `check_failed` for the first failed run, after the commit that holds the runs: the one refusal that follows a
-/// commit, so its envelope adds the commit and every run. `then` is the command that tries again.
+/// commit, so its envelope adds the commit and every run, and `pr`'s pull request, which the push kept. `then` is the
+/// command that tries again.
 pub(crate) fn failed(
     run: &bp_check::Run,
     then: &str,
     commit: &str,
     runs: Vec<Value>,
+    pull_request: Option<u64>,
     json: bool,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
@@ -75,7 +79,7 @@ pub(crate) fn failed(
         ),
     );
     let exit = refusal.exit;
-    emit(out, &Failed { refusal, commit: commit.into(), runs }, json);
+    emit(out, &Failed { refusal, commit: commit.into(), runs, pull_request }, json);
     ExitCode::from(exit)
 }
 

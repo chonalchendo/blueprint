@@ -41,7 +41,7 @@ pub(crate) fn run(cwd: &Path, s: &Stamp, json: bool, out: &mut impl std::io::Wri
             let run = &runs[at];
             let m = &s.milestone;
             let then = format!("rerun bp stamp {m}, or waive it: bp stamp {m} --waive {} --reason <why>", run.name);
-            crate::check::failed(run, &then, &commit, crate::check::rows(&runs), json, out)
+            crate::check::failed(run, &then, &commit, crate::check::rows(&runs), None, json, out)
         }
         Err(refusal) => finish::<Value>(Err(refusal), json, out),
     }

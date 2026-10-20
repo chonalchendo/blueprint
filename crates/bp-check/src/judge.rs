@@ -52,7 +52,7 @@ pub(crate) enum Test {
 
 /// An `error` block fails the verb; a `warn` block prints and never fails (15). Any other severity is broken, so it
 /// counts as `error`.
-pub(crate) fn is_error(check: &Check) -> bool {
+pub fn is_error(check: &Check) -> bool {
     check.attrs.get("severity").is_none_or(|s| s != "warn")
 }
 

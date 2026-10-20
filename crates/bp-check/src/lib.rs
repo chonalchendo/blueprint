@@ -16,6 +16,7 @@ use bp_vault::{Check, Code, Header, Held, Id, Kind, Refusal, Vault};
 use serde_json::Value;
 
 use crate::judge::Plan;
+pub use crate::judge::is_error;
 
 bp_vault::closed_enum! {
     /// A run's verdict (13, Run). A failure to run differs from a violation (15, E6).
@@ -212,6 +213,11 @@ pub fn run(
 }
 
 impl Ran {
+    /// The code commit the blocks ran at.
+    pub fn commit(&self) -> &str {
+        &self.commit
+    }
+
     /// The writer, waited for up to [`LOCK_WAIT`]: the verdicts cost the whole run, so it waits longer than a plain
     /// write. If the lock never frees, the refusal's fix carries every verdict and `then`, the command to rerun, so
     /// the run is not lost with the commit.

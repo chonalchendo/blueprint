@@ -212,9 +212,12 @@ impl Fake {
         let head = pr["headRefOid"].as_str().unwrap_or_default().to_string();
         // An open pull request's base exists: the refresh closed any whose base is gone.
         let base = pr["baseRefName"].as_str().and_then(|b| heads.get(b)).context("the base branch is gone")?;
-        let mut ids = self.patch_ids()?;
-        ids.insert(head.clone(), self.patch_id(base, &head)?.into());
-        write(&self.t.join("forge/patch-ids.json"), &Value::Object(ids).to_string())?;
+        // GitHub approves an empty diff too, as when a later commit undoes the change; it has no patch id to carry.
+        if let Some(id) = self.patch_id(base, &head)? {
+            let mut ids = self.patch_ids()?;
+            ids.insert(head.clone(), id.into());
+            write(&self.t.join("forge/patch-ids.json"), &Value::Object(ids).to_string())?;
+        }
         let date = Command::new("date").args(["-u", "+%Y-%m-%dT%H:%M:%SZ"]).output().context("run date")?;
         let reviews = pr["reviews"].as_array_mut().context("reviews is a list")?;
         reviews.push(json!({
@@ -240,14 +243,18 @@ impl Fake {
         if at.contains(&head) {
             return Ok(true);
         }
-        let (ids, now) = (self.patch_ids()?, self.patch_id(base, head)?);
+        let Some(now) = self.patch_id(base, head)? else { return Ok(false) };
+        let ids = self.patch_ids()?;
         Ok(at.iter().any(|oid| ids.get(*oid).and_then(Value::as_str) == Some(now.as_str())))
     }
 
-    /// `git patch-id` of the diff from the merge base to `head`: equal for a rebase that keeps the change. A failed
-    /// run or an empty diff has no id, so two of them never match.
-    fn patch_id(&self, base: &str, head: &str) -> Result<String> {
+    /// `git patch-id` of the diff from the merge base to `head`: equal for a rebase that keeps the change. An empty
+    /// diff has no id, so two of them never match.
+    fn patch_id(&self, base: &str, head: &str) -> Result<Option<String>> {
         let diff = self.git(&["diff", &format!("{base}...{head}")])?;
+        if diff.is_empty() {
+            return Ok(None);
+        }
         let mut child = self
             .git_cmd(&["patch-id", "--stable"])
             .stdin(Stdio::piped())
@@ -258,9 +265,9 @@ impl Fake {
         let out = child.wait_with_output()?;
         let id = String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or_default().to_string();
         if !out.status.success() || id.is_empty() {
-            bail!("git patch-id gave no id for {base}...{head}: the diff is empty or git failed");
+            bail!("git patch-id gave no id for {base}...{head}");
         }
-        Ok(id)
+        Ok(Some(id))
     }
 
     fn patch_ids(&self) -> Result<Map<String, Value>> {

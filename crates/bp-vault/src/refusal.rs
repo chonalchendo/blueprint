@@ -39,6 +39,7 @@ crate::closed_enum! {
         CheckFailed = "check_failed",
         IssuesOpen = "issues_open",
         EvidenceStale = "evidence_stale",
+        ReviewerInvalid = "reviewer_invalid",
     }
 }
 

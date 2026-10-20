@@ -41,9 +41,11 @@ pub struct Claim {
 }
 
 /// A run record, reduced.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Run {
-    /// The check it ran: owner id plus name.
+    /// The run record's id, which `land`'s `check_failed` names.
+    pub id: String,
+    /// The block's name.
     pub check: String,
     /// `at`, Unix seconds.
     pub at: Option<i64>,
@@ -55,6 +57,9 @@ pub struct Run {
     pub error: bool,
     /// The verdict was `fail` or `timed-out`. `could-not-run` and `skipped` say nothing about the code.
     pub failed: bool,
+    /// The verdict was `pass`, or `skipped`: a `when=post-land` block holds only after the merge. Only these count as
+    /// evidence for a land; a run that could not run proves nothing.
+    pub passed: bool,
 }
 
 /// An integrity run of a project, reduced (25, issue 11).
@@ -103,7 +108,7 @@ pub struct PullRequest {
     pub head: String,
     /// Every check at the head succeeded, and there is at least one.
     pub green: bool,
-    /// An approving review at the head exists.
+    /// The reviewer identity's approving review at the head exists; no other login's counts (15, Controls 1).
     pub approved: bool,
 }
 
@@ -127,6 +132,8 @@ pub struct Issue {
     pub claims: Vec<Claim>,
     /// Run records.
     pub runs: Vec<Run>,
+    /// The names of the issue's `error` blocks; read only while a pull request is open.
+    pub blocks: Vec<String>,
     /// `head` of each review record.
     pub review_heads: Vec<String>,
     /// The `depends` targets.
@@ -172,18 +179,10 @@ pub fn latest_claim(claims: &[Claim]) -> Option<&Claim> {
 /// The intent of one live issue at `now` (Unix seconds).
 pub fn issue(i: &Issue, now: i64) -> Verdict {
     let held = i.claims.iter().find(|c| c.released.is_none());
-    if let Some(pr) = &i.pr {
-        // The latest run of each `error` check at the head; `at` is to the second, so attempts order the reruns.
-        let mut latest: BTreeMap<&str, &Run> = BTreeMap::new();
-        for r in i.runs.iter().filter(|r| r.error && r.commit == pr.head) {
-            let slot = latest.entry(r.check.as_str()).or_insert(r);
-            if r.attempt > slot.attempt {
-                *slot = r;
-            }
-        }
-        if latest.values().any(|r| r.failed) {
-            return Verdict::of(Intent::Blocked, "run failed at head");
-        }
+    if let Some(pr) = &i.pr
+        && latest_at(&i.runs, &pr.head).values().any(|r| r.failed)
+    {
+        return Verdict::of(Intent::Blocked, "run failed at head");
     }
     // Escalated holds until the issue changes after the release: the human's answer is a write to the issue.
     if latest_claim(&i.claims).is_some_and(|c| c.escalated) && !i.answered {
@@ -227,7 +226,56 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     if !pr.approved {
         return Verdict::of(Intent::NeedsApproval, "");
     }
-    Verdict::of(Intent::NeedsLanding, "")
+    match landing(pr, &i.runs, &i.blocks) {
+        Ok(()) => Verdict::of(Intent::NeedsLanding, ""),
+        Err(_) => Verdict::NONE,
+    }
+}
+
+/// The first part of needs landing that does not hold, in `land`'s refusal order (26, design change 4).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unmet<'a> {
+    /// No approving review from the reviewer identity at the head.
+    Review,
+    /// The forge check at the head is not green.
+    Checks,
+    /// The latest run of this `error` block at the head did not pass.
+    Failed(&'a Run),
+    /// This `error` block has no run at the head.
+    Evidence(&'a str),
+}
+
+/// Needs landing (21): the reviewer's approval at the head, the forge check green at the head, and a passing run of
+/// each `error` block at the head. `land` refuses on the first part that does not hold, and the `Intents` function
+/// reads the same answer, so the two never disagree (21, rule 1). Issue 5 of 26 adds the earlier head with the
+/// head's patch id.
+pub fn landing<'a>(pr: &PullRequest, runs: &'a [Run], blocks: &'a [String]) -> Result<(), Unmet<'a>> {
+    if !pr.approved {
+        return Err(Unmet::Review);
+    }
+    if !pr.green {
+        return Err(Unmet::Checks);
+    }
+    let latest = latest_at(runs, &pr.head);
+    if let Some(r) = latest.values().find(|r| !r.passed) {
+        return Err(Unmet::Failed(r));
+    }
+    match blocks.iter().find(|b| !latest.contains_key(b.as_str())) {
+        Some(b) => Err(Unmet::Evidence(b)),
+        None => Ok(()),
+    }
+}
+
+/// The latest run of each `error` check at `head`; `at` is to the second, so attempts order the reruns.
+fn latest_at<'a>(runs: &'a [Run], head: &str) -> BTreeMap<&'a str, &'a Run> {
+    let mut latest: BTreeMap<&str, &Run> = BTreeMap::new();
+    for r in runs.iter().filter(|r| r.error && r.commit == head) {
+        let slot = latest.entry(r.check.as_str()).or_insert(r);
+        if r.attempt > slot.attempt {
+            *slot = r;
+        }
+    }
+    latest
 }
 
 /// The intent of one milestone; `integrity` is the blocked note of a failed integrity run that names it
@@ -306,7 +354,17 @@ mod tests {
     }
 
     fn run(check: &str, at: i64, commit: &str, failed: bool) -> Run {
-        Run { check: check.into(), at: Some(at), commit: commit.into(), attempt: 1, error: true, failed }
+        let id = format!("{check}-{commit}");
+        Run {
+            id,
+            check: check.into(),
+            at: Some(at),
+            commit: commit.into(),
+            attempt: 1,
+            error: true,
+            failed,
+            passed: !failed,
+        }
     }
 
     fn released(at: i64) -> Claim {
@@ -443,6 +501,28 @@ mod tests {
         assert_eq!(issue(&warn, NOW).intent, Some(Intent::NeedsLanding), "a failing warn run does not block");
         let old = Issue { runs: vec![run("a", NOW, "old", true)], ..i };
         assert_eq!(issue(&old, NOW).intent, Some(Intent::NeedsLanding), "only runs at the head count");
+    }
+
+    #[test]
+    fn landing_refuses_in_order_and_needs_a_passing_run_of_each_error_block() {
+        let blocks = vec!["a".to_string(), "b".to_string()];
+        let runs = vec![run("a", NOW, "h", false), run("b", NOW, "h", false)];
+        assert_eq!(landing(&pr("h", false, false), &runs, &blocks), Err(Unmet::Review), "the review comes first");
+        assert_eq!(landing(&pr("h", false, true), &runs, &blocks), Err(Unmet::Checks));
+        assert_eq!(landing(&pr("h", true, true), &runs, &blocks), Ok(()));
+        assert_eq!(landing(&pr("h", true, true), &runs[..1], &blocks), Err(Unmet::Evidence("b")));
+        assert_eq!(landing(&pr("g", true, true), &runs, &blocks), Err(Unmet::Evidence("a")), "only runs at the head");
+        let failed = [run("a", NOW, "h", true), runs[1].clone()];
+        assert_eq!(landing(&pr("h", true, true), &failed, &blocks), Err(Unmet::Failed(&failed[0])));
+        let unrun = [Run { passed: false, ..runs[0].clone() }, runs[1].clone()];
+        assert_eq!(landing(&pr("h", true, true), &unrun, &blocks), Err(Unmet::Failed(&unrun[0])), "could not run");
+        assert_eq!(landing(&pr("h", true, true), &[], &[]), Ok(()), "an issue with no error block needs no run");
+
+        let held = Issue { status: "in-progress".into(), claims: vec![Claim::default()], ..Issue::default() };
+        let i = Issue { pr: Some(pr("h", true, true)), review_heads: vec!["h".into()], blocks, runs, ..held };
+        assert_eq!(issue(&i, NOW).intent, Some(Intent::NeedsLanding));
+        let stale = Issue { runs: Vec::new(), ..i };
+        assert_eq!(issue(&stale, NOW), Verdict::NONE, "no run at the head: land refuses, so it is not needed");
     }
 
     #[test]
