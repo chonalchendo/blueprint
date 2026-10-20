@@ -10,7 +10,7 @@ Intent: a source taught a lesson that other work can reuse. The source is a land
 3. Write one claim in one sentence to a file outside the vault. Put no evidence in it. Then run `bp create learning --title "<the claim>" --body-file <file> --json`. A learning is shared, so pass no `--project`.
 4. Set the cue: `bp set <learning> cue "<one line>" --json`. The cue holds the words that a later search for this lesson uses.
 5. Cite the source. For an issue or a design, run `bp link <learning> cites <source> --json`. A learning cannot cite a thread. So for a thread, add `[[<source>]]` as the last line of the body: `bp set <learning> --body-file <file> --json`.
-6. Record evidence. The slice can hold a learning that the source applied. Record one row for each: `bp record evidence <learning> --field outcome=<outcome> --field issue=<issue> --field note="<one line>" --json`. The outcome is `helped`, `hurt`, `no-effect` or `confounded`. Omit `issue` when the source is not an issue. A row also renews a learning whose cited design changed.
+6. Record evidence. The slice marks each learning with `stale`: true when a design it cites changed after its last row. Record one row for each learning that the source applied or tested. Use `bp record evidence <learning> --field outcome=<outcome> --field issue=<issue> --field note="<one line>" --json`. The outcome is `helped`, `hurt`, `no-effect` or `confounded`. Omit `issue` when the source is not an issue. A stale learning can no longer hold. Then record `hurt`, and run `bp transition <learning> retracted --json`.
 7. Leave a new learning in `draft`.
 
 Stop: `bp walk <source> --for distil --done --json` returns `done` true.
