@@ -19,7 +19,7 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
         tx.execute("insert into files values (?1, ?2, 'asset')", params![id, file.hash])?;
         return Ok(());
     };
-    let json = Value::Object(header.to_json(&file.id)).to_string();
+    let json = Value::Object(file.header_json().expect("a file with a header")).to_string();
     let under = header.under.as_ref().map(crate::Id::as_str);
     let kind = header.kind.as_str();
     if header.kind.is_record() {

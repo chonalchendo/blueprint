@@ -1,5 +1,6 @@
 //! One markdown file of the vault: its id, content hash, header and body. A file without a header is an asset.
 
+use serde_json::{Map, Value};
 use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::body::FindingKind;
@@ -86,6 +87,43 @@ impl File {
             body.findings.retain(|f| !matches!(f.kind, FindingKind::CheckUnnamed | FindingKind::CheckMalformed));
         }
         Ok(Self { id, hash, header: Some(header), body })
+    }
+}
+
+crate::closed_enum! {
+    /// A delta's state. The header stores none: it derives from the record's one closing append (13, Delta).
+    pub enum DeltaState {
+        Proposed = "proposed",
+        Accepted = "accepted",
+        Rejected = "rejected",
+    }
+}
+
+impl DeltaState {
+    /// The state a delta's body holds. The closing append is the last `## ` section, and it holds its instant
+    /// (`accepted_at:` or `rejected_at:`), so a proposed design body that ends with a heading of the same name
+    /// closes nothing.
+    pub fn of(body: &Body) -> Self {
+        let Some(last) = body.sections.last() else { return Self::Proposed };
+        let holds = |key: &str| last.text.lines().any(|l| l.starts_with(key));
+        match last.heading.as_str() {
+            "Accepted" if holds("accepted_at: ") => Self::Accepted,
+            "Rejected" if holds("rejected_at: ") => Self::Rejected,
+            _ => Self::Proposed,
+        }
+    }
+}
+
+impl File {
+    /// The header as `show` prints it and the index stores it: [`Header::to_json`], and a delta's derived state, so
+    /// the two cannot disagree. `None` for an asset.
+    pub fn header_json(&self) -> Option<Map<String, Value>> {
+        let header = self.header.as_ref()?;
+        let mut m = header.to_json(&self.id);
+        if header.kind == Kind::Delta {
+            m.insert("state".into(), DeltaState::of(&self.body).as_str().into());
+        }
+        Some(m)
     }
 }
 
@@ -269,5 +307,15 @@ mod tests {
         assert!(parse("projects/bp/issues/x", "---\nkind: issue\n---\n").is_err());
         let claim = "---\nkind: claim\nunder: projects/bp/issues/x\nstatus: open\n---\n";
         assert!(parse("projects/bp/issues/x/claims/c", claim).is_err());
+    }
+
+    #[test]
+    fn a_delta_is_closed_only_by_an_append_that_holds_its_instant() {
+        let state = |body: &str| DeltaState::of(&Body::parse(body));
+        assert_eq!(state("## One\n\nNew.\n"), DeltaState::Proposed);
+        assert_eq!(state("## One\n\nNew.\n\n## Accepted\n\nThe options we accepted.\n"), DeltaState::Proposed);
+        let close = "## Accepted\n\naccepted_at: 2026-10-20T00:00:00Z\nversion: [[projects/bp/versions/1]]\n";
+        assert_eq!(state(&format!("## One\n\nNew.\n\n{close}")), DeltaState::Accepted);
+        assert_eq!(state("## Rejected\n\nrejected_at: 2026-10-20T00:00:00Z\n"), DeltaState::Rejected);
     }
 }

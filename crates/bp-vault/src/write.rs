@@ -35,6 +35,8 @@ pub struct Writer<'v> {
     /// The head and the paths `clean` found clean, so `commit` asks git once. A cell, so a verb can clean while it
     /// reads through [`Writer::index`].
     clean: Cell<Option<(String, Vec<String>)>>,
+    /// Trailer lines after `Bp-Verb` and `Bp-Role`.
+    trailers: Vec<String>,
     _lock: std::fs::File,
 }
 
@@ -139,7 +141,7 @@ impl Vault {
             }
         }
         restore(&self.root)?;
-        Ok(Writer { index: Index::open(self)?, vault: self, clean: Cell::new(None), _lock: lock })
+        Ok(Writer { index: Index::open(self)?, vault: self, clean: Cell::new(None), trailers: Vec::new(), _lock: lock })
     }
 
     /// Refuses `path_dirty` when a file of `ids` differs from HEAD in the working tree or git's index, or is on disk
@@ -172,6 +174,12 @@ impl Writer<'_> {
         let head = head_if_clean(&self.vault.root, &paths.iter().map(String::as_str).collect::<Vec<_>>())?;
         self.clean.set(Some((head, paths)));
         Ok(())
+    }
+
+    /// Adds a trailer line to the commit, after `Bp-Verb` and `Bp-Role`: `stamp`'s `Bp-Version` and each `Bp-Delta`
+    /// (12, Write path). The caller keeps it to one line, so no text of it reads as a second trailer.
+    pub fn trailer(&mut self, line: String) {
+        self.trailers.push(line);
     }
 
     /// Validates `changes` as the proposed tree, writes them, and commits them alone with `Bp-Verb` and `Bp-Role`.
@@ -212,7 +220,10 @@ impl Writer<'_> {
         let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
         let (files, findings) = self.index.propose_moving(self.vault, changes, &moves.ids)?;
         journal(root, head, &paths)?;
-        let trailers = format!("Bp-Verb: {verb}\nBp-Role: {role}");
+        let mut trailers = format!("Bp-Verb: {verb}\nBp-Role: {role}");
+        for line in &self.trailers {
+            trailers = format!("{trailers}\n{line}");
+        }
         // `commit -- <paths>` stages a tracked path itself, a removed one too; only a path HEAD lacks needs `add`,
         // so a label write spawns git twice, as a plain one-file commit does.
         let mut new: Vec<&str> =

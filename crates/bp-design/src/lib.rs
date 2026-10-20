@@ -35,14 +35,9 @@ impl DesignStatus {
     ];
 }
 
-bp_vault::closed_enum! {
-    /// A delta's state. `record` writes `proposed`; acceptance and rejection come at milestone acceptance (13).
-    pub enum DeltaState {
-        Proposed = "proposed",
-        Accepted = "accepted",
-        Rejected = "rejected",
-    }
-}
+/// A delta's state, derived from its closing append. It lives in the substrate because the index stores it with the
+/// header, and the substrate depends on no domain crate (23).
+pub use bp_vault::DeltaState;
 
 bp_vault::closed_enum! {
     /// A concern answer's state (13, ConcernAnswer).
