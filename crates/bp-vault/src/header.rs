@@ -124,6 +124,10 @@ impl Header {
                         }
                     }));
                 }
+                "state" if header.kind == Kind::Delta => {
+                    // A stored copy could contradict the closing append the state derives from (13, Delta).
+                    return Err(Broken::rule("a delta's `state` derives from its closing append; delete the line"));
+                }
                 k => {
                     header.fields.insert(k.into(), json(value));
                 }
@@ -280,6 +284,7 @@ mod tests {
             ("kind: design\ntitle: T\nscope: system\n", "comes from the path"),
             ("kind: issue\ntitle: T\nscope: system\n", "`scope` is not a field of an issue; delete the line"),
             ("kind: milestone\ntitle: T\ndesign_kind: system\n", "`design_kind` is not a field of a milestone"),
+            ("kind: delta\nstate: accepted\n", "derives from its closing append"),
         ] {
             let e = Header::parse(yaml).unwrap_err();
             assert!(e.why.contains(why), "{yaml}: {}", e.why);

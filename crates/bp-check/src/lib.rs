@@ -114,7 +114,7 @@ pub fn check(
     clock: &dyn Fn() -> String,
 ) -> Result<Option<Checked>, Refusal> {
     let Some(ran) = run(vault, owner, repo, only, &[], clock)? else { return Ok(None) };
-    let writer = ran.writer(vault)?;
+    let writer = ran.writer(vault, &format!("bp check {owner}"))?;
     let (changes, runs) = ran.records(vault);
     let written = writer.commit("check", role, &format!("check {owner}"), &changes)?;
     Ok(Some(Checked { commit: written.commit, runs, findings: written.findings }))
@@ -213,8 +213,9 @@ pub fn run(
 
 impl Ran {
     /// The writer, waited for up to [`LOCK_WAIT`]: the verdicts cost the whole run, so it waits longer than a plain
-    /// write. If the lock never frees, the refusal's fix carries every verdict, so the run is not lost with the commit.
-    pub fn writer<'v>(&self, vault: &'v Vault) -> Result<bp_vault::Writer<'v>, Refusal> {
+    /// write. If the lock never frees, the refusal's fix carries every verdict and `then`, the command to rerun, so
+    /// the run is not lost with the commit.
+    pub fn writer<'v>(&self, vault: &'v Vault, then: &str) -> Result<bp_vault::Writer<'v>, Refusal> {
         let start = Instant::now();
         loop {
             match vault.writer() {
@@ -223,7 +224,7 @@ impl Ran {
                     let verdicts: Vec<String> =
                         self.done.iter().map(|d| format!("{} {}", d.check.attrs["name"], d.verdict)).collect();
                     r.fix = format!(
-                        "the lock stayed held for {} s, so no run was recorded; the verdicts were: {}; rerun once the other write has finished",
+                        "the lock stayed held for {} s, so no run was recorded; the verdicts were: {}; rerun {then} once the other write has finished",
                         LOCK_WAIT.as_secs(),
                         verdicts.join(", ")
                     );

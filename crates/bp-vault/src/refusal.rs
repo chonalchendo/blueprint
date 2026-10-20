@@ -37,6 +37,7 @@ crate::closed_enum! {
         CheckDuplicate = "check_duplicate",
         CheckFailed = "check_failed",
         IssuesOpen = "issues_open",
+        EvidenceStale = "evidence_stale",
     }
 }
 

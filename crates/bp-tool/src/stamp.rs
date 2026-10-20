@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use bp_change::{IssueStatus, MilestoneStatus};
-use bp_vault::{Body, Code, DeltaState, File, Filter, Header, Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Body, Check, Code, DeltaState, File, Filter, Header, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
@@ -62,41 +62,55 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
     let now = crate::clock::now()?;
     let index = Index::open(&vault)?;
     let id = subject(&index, &s.milestone)?;
-    // A human's uncommitted edit and every refusal come before the blocks run, which may take minutes.
+    let project = id.project().expect("a milestone sits under a project");
+    // Every refusal comes before the blocks run, which may take minutes: a human's uncommitted edit to a path the
+    // stamp writes, and a tag already taken. Each holds under the lock too.
     vault.clean([&id])?;
-    if let Some(done) = gate(&vault, &index, &id, &s.waive)? {
-        return Ok(Stamped::Wrote(Wrote::Already(done)));
-    }
+    let read = match gate(&vault, &index, &id, &s.waive)? {
+        Gated::Open(g) => g,
+        Gated::Done(done) => return retag(&vault, &index, &id, done),
+    };
+    // The milestone keeps the paths non-empty: a clean of no path reads the whole tree, ignored files too.
+    vault.clean(std::iter::once(&id).chain(read.deltas.iter().flat_map(|c| [&c.design, &c.delta])))?;
+    tag_free(&vault.root, &next(&index, project)?.1)?;
     // A block may rebuild the index; this connection is not needed again.
     drop(index);
     let skip: Vec<&str> = s.waive.iter().map(String::as_str).collect();
     let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
     let ran = bp_check::run(&vault, &id, cwd, None, &skip, &clock)?;
     let mut writer = match &ran {
-        Some(r) => r.writer(&vault)?,
+        Some(r) => r.writer(&vault, &format!("bp stamp {id}"))?,
         None => vault.writer()?,
     };
     // Another write may have landed while the blocks ran: the gate holds under the lock too.
-    if let Some(done) = gate(&vault, writer.index(), &id, &s.waive)? {
-        return Ok(Stamped::Wrote(Wrote::Already(done)));
-    }
+    let held = match gate(&vault, writer.index(), &id, &s.waive)? {
+        Gated::Open(g) => g,
+        Gated::Done(done) => return Ok(Stamped::Wrote(Wrote::Already(done))),
+    };
     let (mut changes, runs) = ran.map(|r| r.records(&vault)).unwrap_or_default();
     if let Some(at) = runs.iter().position(bp_check::Run::failed) {
         let written = writer.commit("stamp", role.as_str(), &format!("stamp {id}"), &changes)?;
         return Ok(Stamped::Failed { at, commit: written.commit, runs });
     }
-    let project = id.project().expect("a milestone sits under a project");
+    // The stamp accepts what its blocks ran against: the finish line, and the deltas it cleaned before them.
+    if held.finish != read.finish || held.deltas != read.deltas {
+        return Err(Refusal::new(
+            Code::EvidenceStale,
+            id.as_str(),
+            "stamp accepts the finish line its blocks ran and the deltas it read before them (26, design change 5)",
+            format!(
+                "the finish line or a carried delta changed while the blocks ran, so nothing was committed; rerun bp stamp {id}"
+            ),
+        ));
+    }
     let index = writer.index();
-    let versions = index.records(&format!("projects/{project}/project"), Kind::BlueprintVersion)?;
-    let n = versions.iter().filter_map(|r| r.header.get("n")?.as_u64()).max().map_or(1, |h| h + 1);
-    let tag = format!("blueprint/{project}/{n}");
+    let (n, tag) = next(index, project)?;
     tag_free(&vault.root, &tag)?;
     let version = Id::parse(&format!("projects/{project}/versions/{n}")).expect("a project and a number make an id");
     let accepted_at = crate::clock::instant(now);
-    let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: usize::MAX >> 1 };
-    let designs: Vec<Id> = index.list(&all)?.0.iter().filter_map(|r| Id::parse(&r.id).ok()).collect();
-    let close = format!("## Accepted\n\naccepted_at: {accepted_at}\nversion: {version}\n");
-    let deltas = accept(&vault, index, &id, &designs, &close, &mut changes)?;
+    // `version` is a wikilink, so the index holds the delta's edge to its version (13, Delta).
+    let close = format!("## Accepted\n\naccepted_at: {accepted_at}\nversion: [[{version}]]\n");
+    let deltas = accept(&vault, &held.deltas, &close, &mut changes)?;
     let mut waivers = Vec::new();
     for (name, reason) in s.waive.iter().zip(&s.reason) {
         // `valid_until` stays empty, so the next stamp of the project asks again (13, Waiver).
@@ -106,7 +120,7 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
         waivers.push(waiver);
     }
     let mut manifest = serde_json::Map::new();
-    for design in &designs {
+    for design in &held.designs {
         let hash = match changes.get(design) {
             Some(text) => File::from_bytes(design.clone(), text.as_bytes())?.hash,
             None => vault.read(design)?.hash,
@@ -128,17 +142,7 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
         writer.trailer(format!("Bp-Delta: {d}"));
     }
     let written = writer.commit("stamp", role.as_str(), &format!("stamp {id}"), &changes)?;
-    git(&vault.root, &["tag", &tag, &written.commit]).map_err(|why| {
-        Refusal::failed(
-            tag.as_str(),
-            format!(
-                "commit {} holds version {n}, but git tag failed: {why}; git -C {} tag {tag} {}",
-                written.commit,
-                vault.root.display(),
-                written.commit
-            ),
-        )
-    })?;
+    make_tag(&vault.root, &tag, &written.commit, n)?;
     Ok(Stamped::Wrote(Wrote::Changed(json!({
         "id": id,
         "status": done,
@@ -153,40 +157,88 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
     }))))
 }
 
-/// Puts each proposed delta the milestone carries into `changes`, with `close` appended, and its body into its
-/// design. The body is the proposed design body, so acceptance writes it in whole (13, Design). Returns the deltas.
+/// Puts each carried delta into `changes`, with `close` appended, and its body into its design. The body is the
+/// proposed design body, so acceptance writes it in whole (13, Design). Returns the deltas.
 fn accept(
     vault: &Vault,
-    index: &Index,
-    milestone: &Id,
-    designs: &[Id],
+    carried: &[Carried],
     close: &str,
     changes: &mut BTreeMap<Id, String>,
 ) -> Result<Vec<Id>, Refusal> {
     let mut deltas = Vec::new();
-    for design in designs {
-        for d in index.records(design.as_str(), Kind::Delta)? {
-            let carried = d.header.get("milestone").and_then(Value::as_str) == Some(milestone.as_str());
-            if !carried || DeltaState::of(&Body::parse(&d.body)) != DeltaState::Proposed {
-                continue;
-            }
-            if let Some(text) = crate::set::rebody(&vault.text(design)?, &d.body) {
-                changes.insert(design.clone(), text);
-            }
-            let delta = Id::parse(&d.id).expect("the index holds ids");
-            let held = vault.text(&delta)?;
-            let gap = if held.ends_with('\n') { "\n" } else { "\n\n" };
-            changes.insert(delta.clone(), format!("{held}{gap}{close}"));
-            deltas.push(delta);
+    for c in carried {
+        if let Some(text) = crate::set::rebody(&vault.text(&c.design)?, &c.body) {
+            changes.insert(c.design.clone(), text);
         }
+        let held = vault.text(&c.delta)?;
+        let gap = if held.ends_with('\n') { "\n" } else { "\n\n" };
+        changes.insert(c.delta.clone(), format!("{held}{gap}{close}"));
+        deltas.push(c.delta.clone());
     }
     Ok(deltas)
 }
 
+/// The project's next version number and its tag: the highest plus one, else 1 (0 is the conversion's).
+fn next(index: &Index, project: &str) -> Result<(u64, String), Refusal> {
+    let versions = index.records(&format!("projects/{project}/project"), Kind::BlueprintVersion)?;
+    let n = versions.iter().filter_map(|r| r.header.get("n")?.as_u64()).max().map_or(1, |h| h + 1);
+    Ok((n, format!("blueprint/{project}/{n}")))
+}
+
+/// A repeat on a `done` milestone exits 3, unless its version's tag is missing: the stamp stopped between its commit
+/// and its tag. Then it tags the commit that added the version record (15, An acceptance).
+fn retag(vault: &Vault, index: &Index, id: &Id, done: Value) -> Result<Stamped, Refusal> {
+    let project = id.project().expect("a milestone sits under a project");
+    let versions = index.records(&format!("projects/{project}/project"), Kind::BlueprintVersion)?;
+    let ours = versions.iter().find(|r| r.header.get("milestone").and_then(Value::as_str) == Some(id.as_str()));
+    let Some((v, Some(tag), Some(n))) =
+        ours.map(|v| (v, v.header.get("tag").and_then(Value::as_str), v.header.get("n").and_then(Value::as_u64)))
+    else {
+        return Ok(Stamped::Wrote(Wrote::Already(done)));
+    };
+    if tagged(&vault.root, tag) {
+        return Ok(Stamped::Wrote(Wrote::Already(done)));
+    }
+    let path = format!("{}.md", v.id);
+    let commit = git(&vault.root, &["log", "-1", "--format=%H", "--diff-filter=A", "--", &path])
+        .map_err(|why| Refusal::failed(tag, format!("git log could not find the commit that added {path}: {why}")))?;
+    let commit = commit.trim();
+    make_tag(&vault.root, tag, commit, n)?;
+    Ok(Stamped::Wrote(Wrote::Changed(json!({
+        "id": id,
+        "status": MilestoneStatus::Done.as_str(),
+        "version": n,
+        "tag": tag,
+        "commit": commit,
+    }))))
+}
+
+/// What the gate read: the finish line's named blocks, each design of the project, and each proposed delta the
+/// milestone carries. The blocks run against the first two reads, so the read under the lock must equal them.
+struct Gate {
+    finish: Vec<Check>,
+    designs: Vec<Id>,
+    deltas: Vec<Carried>,
+}
+
+/// A proposed delta the milestone carries: its design, its id and its body, the proposed design body.
+#[derive(PartialEq)]
+struct Carried {
+    design: Id,
+    delta: Id,
+    body: String,
+}
+
+/// The gate's answer: the stamp goes on, or the milestone is already `done`, a repeat.
+enum Gated {
+    Open(Gate),
+    Done(Value),
+}
+
 /// The refusals before a stamp runs anything, and again under the lock: the subject is a milestone, `approved`, each
-/// waived name is a named block of its finish line, and every issue under it is resolved or abandoned. `Some` when
-/// the milestone is already `done`: a repeat, exit 3.
-fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String]) -> Result<Option<Value>, Refusal> {
+/// waived name is a named block of its finish line, every file of its project parses, and every issue under it is
+/// resolved or abandoned (21, needs acceptance).
+fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String]) -> Result<Gated, Refusal> {
     let file = vault.read(id)?;
     let Some(header) = file.header.as_ref().filter(|h| h.kind == Kind::Milestone) else {
         return Err(Refusal::new(
@@ -198,7 +250,7 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String]) -> Result<Optio
     };
     let status = header.status.as_deref().unwrap_or_default();
     if status == MilestoneStatus::Done.as_str() {
-        return Ok(Some(json!({ "id": id, "status": status })));
+        return Ok(Gated::Done(json!({ "id": id, "status": status })));
     }
     if status != MilestoneStatus::Approved.as_str() {
         let fix = if status == MilestoneStatus::Planned.as_str() {
@@ -213,13 +265,24 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String]) -> Result<Optio
             fix,
         ));
     }
-    let names: Vec<&str> = bp_check::named(&file.body).iter().map(|c| c.attrs["name"].as_str()).collect();
+    let finish: Vec<Check> = bp_check::named(&file.body).into_iter().cloned().collect();
+    let names: Vec<&str> = finish.iter().map(|c| c.attrs["name"].as_str()).collect();
     if let Some(w) = waive.iter().find(|w| !names.contains(&w.as_str())) {
         return Err(Refusal::new(
             Code::UnknownValue,
             format!("waive {w}"),
             "a waiver names a block of the milestone's finish line (13, Waiver)",
             format!("waive one of the blocks of {id}: {}", names.join(", ")),
+        ));
+    }
+    let project = id.project().expect("a milestone sits under a project");
+    // A file that does not parse is in no list, so an open issue it holds would pass the next refusal unseen.
+    if let Some((path, why)) = index.broken(project)?.into_iter().next() {
+        return Err(Refusal::new(
+            Code::SchemaInvalid,
+            path.as_str(),
+            "a milestone is accepted when no file of its project fails to parse (21, needs acceptance)",
+            format!("the file does not parse ({why}); edit {path} by hand, git commit it, then bp stamp {id}"),
         ));
     }
     let under =
@@ -238,7 +301,19 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String]) -> Result<Optio
             ),
         ));
     }
-    Ok(None)
+    let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: usize::MAX >> 1 };
+    let designs: Vec<Id> = index.list(&all)?.0.iter().filter_map(|r| Id::parse(&r.id).ok()).collect();
+    let mut deltas = Vec::new();
+    for design in &designs {
+        for d in index.records(design.as_str(), Kind::Delta)? {
+            let carried = d.header.get("milestone").and_then(Value::as_str) == Some(id.as_str());
+            if carried && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed {
+                let delta = Id::parse(&d.id).expect("the index holds ids");
+                deltas.push(Carried { design: design.clone(), delta, body: d.body });
+            }
+        }
+    }
+    Ok(Gated::Open(Gate { finish, designs, deltas }))
 }
 
 /// A record's text: its header under `under`, with one id per `→` field, and no body.
@@ -256,9 +331,28 @@ fn record<const N: usize>(kind: Kind, under: &Id, links: &[(&str, &Id)], fields:
     format!("---\n{}---\n", header.emit())
 }
 
+/// The tag is already a ref.
+fn tagged(root: &Path, tag: &str) -> bool {
+    git(root, &["rev-parse", "-q", "--verify", &format!("refs/tags/{tag}")]).is_ok()
+}
+
+/// Tags `commit`, which holds version `n`. If git fails, the refusal names the commit and the command to run.
+fn make_tag(root: &Path, tag: &str, commit: &str, n: u64) -> Result<(), Refusal> {
+    git(root, &["tag", tag, commit]).map(drop).map_err(|why| {
+        Refusal::failed(
+            tag,
+            format!(
+                "commit {commit} holds version {n}, but git tag failed: {why}; git -C {} tag {tag} {commit}, \
+                 or rerun bp stamp",
+                root.display()
+            ),
+        )
+    })
+}
+
 /// Refuses `id_taken` when the tag is already a ref: a version's tag names one commit and never moves.
 fn tag_free(root: &Path, tag: &str) -> Result<(), Refusal> {
-    if git(root, &["rev-parse", "-q", "--verify", &format!("refs/tags/{tag}")]).is_err() {
+    if !tagged(root, tag) {
         return Ok(());
     }
     Err(Refusal::new(

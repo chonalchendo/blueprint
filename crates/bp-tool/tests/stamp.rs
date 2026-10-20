@@ -94,3 +94,85 @@ fn record_names_stamp_for_its_kinds() {
         assert!(v["fix"].as_str().unwrap().starts_with("bp stamp <milestone>"), "{kind}: {v}");
     }
 }
+
+/// Replaces the milestone's finish line with `blocks`, committed by hand, and makes the milestone stampable: its issue
+/// abandoned, the milestone approved.
+fn ready(vault: &Path, blocks: &str) {
+    let text = format!("---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\n## Finish line\n\n{blocks}");
+    std::fs::write(vault.join(format!("{M}.md")), text).unwrap();
+    git(vault, &["commit", "-qam", "finish line"]);
+    assert_eq!(bp(vault, &["transition", "projects/bp/issues/i", "abandoned"]).0, Some(0));
+    assert_eq!(bp(vault, &["transition", M, "approved"]).0, Some(0));
+}
+
+#[test]
+fn a_file_of_the_project_that_does_not_parse_refuses() {
+    let (vault, code) = setup();
+    let (vault, code) = (vault.path(), code.path());
+    ready(vault, "~~~check shell {name=p expect=0}\ntrue\n~~~\n");
+    let broken = "---\nkind: issue\ntitle: B\nstatus: open\nunder: projects/bp/milestones/m\nbad: [line\n---\n";
+    std::fs::write(vault.join("projects/bp/issues/broken.md"), broken).unwrap();
+    git(vault, &["add", "-A"]);
+    git(vault, &["commit", "-qm", "a broken issue"]);
+    let (exit, v) = stamp(vault, code, &[]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{v}");
+    assert_eq!(v["subject"], "projects/bp/issues/broken.md");
+    assert_eq!(bp(vault, &["show", M]).1["status"], "approved");
+}
+
+#[test]
+fn refusals_come_before_the_blocks_run_and_a_repeat_makes_a_missing_tag() {
+    let (vault, code) = setup();
+    let (vault, code) = (vault.path(), code.path());
+    ready(vault, "~~~check shell {name=p expect=0}\ntouch ran\n~~~\n");
+    let body = vault.join(".bp/body.md");
+    std::fs::write(&body, "## One\n\nNew.\n").unwrap();
+    let (ms, file) = (format!("milestone={M}"), body.to_str().unwrap());
+    let (_, v) = bp(vault, &["record", "delta", S, "--field", &ms, "--field", "change=one line", "--body-file", file]);
+    let delta = v["id"].as_str().unwrap().to_string();
+    let before: u32 = commits(vault).parse().unwrap();
+
+    std::fs::write(vault.join(format!("{S}.md")), "---\nkind: design\ntitle: S\nstatus: active\n---\n\nDirty.\n")
+        .unwrap();
+    assert_eq!(stamp(vault, code, &[]).1["code"], "path_dirty", "a design the delta rewrites");
+    git(vault, &["checkout", "--", &format!("{S}.md")]);
+    git(vault, &["tag", "blueprint/bp/1"]);
+    assert_eq!(stamp(vault, code, &[]).1["code"], "id_taken");
+    git(vault, &["tag", "-d", "blueprint/bp/1"]);
+    assert!(!code.join("ran").exists(), "no block ran");
+    assert_eq!(commits(vault).parse::<u32>().unwrap(), before);
+
+    // A file where the tag's directory goes makes `git tag` fail after the commit.
+    let refs = vault.join(".git/refs/tags/blueprint");
+    std::fs::create_dir_all(&refs).unwrap();
+    std::fs::write(refs.join("bp"), "").unwrap();
+    let (exit, v) = stamp(vault, code, &[]);
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
+    assert!(code.join("ran").exists());
+    assert_eq!(bp(vault, &["show", M]).1["status"], "done");
+    std::fs::remove_file(refs.join("bp")).unwrap();
+    let (exit, v) = stamp(vault, code, &[]);
+    assert_eq!((exit, v["tag"].as_str()), (Some(0), Some("blueprint/bp/1")), "the repeat makes the tag: {v}");
+    let head = git(vault, &["rev-parse", "HEAD"]);
+    assert_eq!(git(vault, &["rev-parse", "blueprint/bp/1^{commit}"]), head);
+    assert_eq!(v["commit"].as_str(), Some(head.trim()));
+    assert_eq!(stamp(vault, code, &[]).0, Some(3), "the tag exists");
+
+    let text = std::fs::read_to_string(vault.join(format!("{delta}.md"))).unwrap();
+    assert!(text.ends_with("version: [[projects/bp/versions/1]]\n"), "a wikilink, so the index holds the edge: {text}");
+}
+
+#[test]
+fn a_finish_line_changed_while_the_blocks_ran_refuses() {
+    let (vault, code) = setup();
+    let (vault, code) = (vault.path(), code.path());
+    // The block adds a failing block to its own milestone and commits it by hand, as a write during the run would.
+    let late = r"printf '\n\176\176\176check shell {name=late expect=0}\nfalse\n\176\176\176\n'";
+    let block = format!("cd \"$BP_VAULT\" && {late} >> {M}.md && git commit -qm late -- {M}.md");
+    ready(vault, &format!("~~~check shell {{name=p expect=0}}\n{block}\n~~~\n"));
+    let before: u32 = commits(vault).parse().unwrap();
+    let (exit, v) = stamp(vault, code, &[]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("evidence_stale")), "{v}");
+    assert_eq!(commits(vault).parse::<u32>().unwrap(), before + 1, "only the hand commit");
+    assert_eq!(bp(vault, &["show", M]).1["status"], "approved");
+}

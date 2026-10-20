@@ -31,7 +31,12 @@ impl Index {
         let prefix = format!("projects/{project}/");
         let tracked = tracked(&vault.root)?;
         let mut out = Vec::new();
-        self.broken_files(&prefix, &mut out)?;
+        out.extend(self.broken(project)?.into_iter().map(|(id, detail)| Fault {
+            rule: "broken",
+            id,
+            detail,
+            node: false,
+        }));
         self.links_to_nothing(&tracked, project, &mut out)?;
         self.issues_without_context(project, &mut out)?;
         self.designs_off_the_spine(project, &mut out)?;
@@ -60,13 +65,12 @@ impl Index {
         run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
     }
 
-    /// Rule 1: a file that does not parse (the census's `broken`).
-    fn broken_files(&self, prefix: &str, out: &mut Vec<Fault>) -> Result<(), Refusal> {
-        let sql = "select src, detail from findings where kind = ?1 and substr(src, 1, length(?2)) = ?2 order by src";
-        for (src, detail) in self.pairs(sql, params![Code::SchemaInvalid.as_str(), prefix])? {
-            out.push(Fault { rule: "broken", id: format!("{src}.md"), detail, node: false });
-        }
-        Ok(())
+    /// Rule 1: each file of `project` that does not parse (the census's `broken`), as its path and why, in path
+    /// order. `stamp` refuses on the first (21, needs acceptance).
+    pub fn broken(&self, project: &str) -> Result<Vec<(String, String)>, Refusal> {
+        let sql = "select src || '.md', detail from findings where kind = ?1 and substr(src, 1, length(?2)) = ?2 \
+                   order by src";
+        self.pairs(sql, params![Code::SchemaInvalid.as_str(), format!("projects/{project}/")])
     }
 
     /// Rule 2: a header link, body wikilink or root-relative markdown link from a node of the project that resolves

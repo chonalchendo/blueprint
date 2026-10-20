@@ -100,12 +100,15 @@ crate::closed_enum! {
 }
 
 impl DeltaState {
-    /// The state a delta's body holds. The closing append is the last `## ` section, so a heading of the same name
-    /// inside the proposed design body above it closes nothing.
+    /// The state a delta's body holds. The closing append is the last `## ` section, and it holds its instant
+    /// (`accepted_at:` or `rejected_at:`), so a proposed design body that ends with a heading of the same name
+    /// closes nothing.
     pub fn of(body: &Body) -> Self {
-        match body.sections.last().map(|s| s.heading.as_str()) {
-            Some("Accepted") => Self::Accepted,
-            Some("Rejected") => Self::Rejected,
+        let Some(last) = body.sections.last() else { return Self::Proposed };
+        let holds = |key: &str| last.text.lines().any(|l| l.starts_with(key));
+        match last.heading.as_str() {
+            "Accepted" if holds("accepted_at: ") => Self::Accepted,
+            "Rejected" if holds("rejected_at: ") => Self::Rejected,
             _ => Self::Proposed,
         }
     }
@@ -304,5 +307,15 @@ mod tests {
         assert!(parse("projects/bp/issues/x", "---\nkind: issue\n---\n").is_err());
         let claim = "---\nkind: claim\nunder: projects/bp/issues/x\nstatus: open\n---\n";
         assert!(parse("projects/bp/issues/x/claims/c", claim).is_err());
+    }
+
+    #[test]
+    fn a_delta_is_closed_only_by_an_append_that_holds_its_instant() {
+        let state = |body: &str| DeltaState::of(&Body::parse(body));
+        assert_eq!(state("## One\n\nNew.\n"), DeltaState::Proposed);
+        assert_eq!(state("## One\n\nNew.\n\n## Accepted\n\nThe options we accepted.\n"), DeltaState::Proposed);
+        let close = "## Accepted\n\naccepted_at: 2026-10-20T00:00:00Z\nversion: [[projects/bp/versions/1]]\n";
+        assert_eq!(state(&format!("## One\n\nNew.\n\n{close}")), DeltaState::Accepted);
+        assert_eq!(state("## Rejected\n\nrejected_at: 2026-10-20T00:00:00Z\n"), DeltaState::Rejected);
     }
 }
