@@ -1,7 +1,7 @@
 //! Check runner (15; 25, design changes 4 and 5): runs an owner's check blocks from the code repository, judges each
-//! against its attributes, and writes one run record per block in one commit through the vault's write path. No lock
-//! is held while a block runs, so a block may call `bp`; the lock comes after, for the commit alone, and is waited
-//! for longer than a plain write waits, because the verdicts cost the whole run.
+//! against its attributes, and gives one run record per block for the vault's write path. It splits in two (26,
+//! design change 6): [`run`] holds no lock while a block runs, so a block may call `bp`; [`Ran::records`] gives the
+//! record texts under the lock, which a verb commits with its own changes. `check` commits them alone.
 
 mod integrity;
 mod judge;
@@ -58,15 +58,22 @@ pub struct Run {
 }
 
 impl Checked {
-    /// The first `error` block that neither passed nor was skipped (25, design change 4).
+    /// The first failed run.
     pub fn failed(&self) -> Option<&Run> {
-        self.runs.iter().find(|r| r.error && !matches!(r.verdict, Verdict::Pass | Verdict::Skipped))
+        self.runs.iter().find(|r| r.failed())
+    }
+}
+
+impl Run {
+    /// An `error` block that neither passed nor was skipped: it fails the verb (25, design change 4).
+    pub fn failed(&self) -> bool {
+        self.error && !matches!(self.verdict, Verdict::Pass | Verdict::Skipped)
     }
 }
 
 /// A block that ran, before its record has a key.
-struct Done<'b> {
-    check: &'b Check,
+struct Done {
+    check: Check,
     at: String,
     ended: String,
     verdict: Verdict,
@@ -81,13 +88,23 @@ struct Done<'b> {
     names: Vec<Id>,
 }
 
+/// The blocks one call ran, with no lock held, before any record is written. A verb that runs blocks takes the lock
+/// after, and commits the records with its own changes (26, design change 6).
+pub struct Ran {
+    owner: Id,
+    /// The code commit the blocks ran at.
+    commit: String,
+    done: Vec<Done>,
+}
+
+/// The blocks of a body that have a run key: a slug `name`. The census counts the rest as `check_unnamed`.
+pub fn named(body: &bp_vault::Body) -> Vec<&Check> {
+    body.checks.iter().filter(|c| c.attrs.get("name").is_some_and(|n| bp_vault::is_slug(n))).collect()
+}
+
 /// Runs the named blocks of `owner`, or the one `only` names, from the git repository that holds `repo`, and commits
 /// one run record per block; none when the owner has no named block. `clock` gives the instant,
 /// `YYYY-MM-DDTHH:MM:SSZ`; its date decides `until`.
-///
-/// # Panics
-///
-/// Never: a named block's name is a slug, and an owner id, a slug and a sha make a run id.
 pub fn check(
     vault: &Vault,
     owner: &Id,
@@ -96,6 +113,27 @@ pub fn check(
     role: &str,
     clock: &dyn Fn() -> String,
 ) -> Result<Option<Checked>, Refusal> {
+    let Some(ran) = run(vault, owner, repo, only, &[], clock)? else { return Ok(None) };
+    let writer = ran.writer(vault)?;
+    let (changes, runs) = ran.records(vault);
+    let written = writer.commit("check", role, &format!("check {owner}"), &changes)?;
+    Ok(Some(Checked { commit: written.commit, runs, findings: written.findings }))
+}
+
+/// Runs the named blocks of `owner` but those `skip` names, or the one `only` names, from the git repository that
+/// holds `repo`, holding no lock, so a block may call `bp`. `None` when no block is left to run.
+///
+/// # Panics
+///
+/// Never: a named block's name is a slug.
+pub fn run(
+    vault: &Vault,
+    owner: &Id,
+    repo: &Path,
+    only: Option<&str>,
+    skip: &[&str],
+    clock: &dyn Fn() -> String,
+) -> Result<Option<Ran>, Refusal> {
     let file = vault.read(owner)?;
     if !file.header.as_ref().is_some_and(|h| Kind::CHECK_OWNERS.contains(&h.kind)) {
         return Err(Refusal::new(
@@ -105,12 +143,10 @@ pub fn check(
             format!("check the owner of the block: bp show {} --no-body", owner.as_str()),
         ));
     }
-    // A block without a slug name has no run key; the census already counts it as `check_unnamed`.
-    let named: Vec<&Check> =
-        file.body.checks.iter().filter(|c| c.attrs.get("name").is_some_and(|n| bp_vault::is_slug(n))).collect();
+    let named = named(&file.body);
     let blocks: Vec<&Check> = match only {
         Some(n) => named.iter().copied().filter(|c| c.attrs["name"] == n).collect(),
-        None => named.clone(),
+        None => named.iter().copied().filter(|c| !skip.contains(&c.attrs["name"].as_str())).collect(),
     };
     if let Some(n) = only
         && blocks.is_empty()
@@ -136,7 +172,7 @@ pub fn check(
         .map(|check| {
             let at = clock();
             let done = |verdict, note| Done {
-                check,
+                check: check.clone(),
                 at: at.clone(),
                 ended: String::new(),
                 verdict,
@@ -172,27 +208,59 @@ pub fn check(
             d
         })
         .collect();
-    let writer = writer(vault, owner, &done)?;
-    let mut changes = BTreeMap::new();
-    let mut runs = Vec::with_capacity(done.len());
-    for d in &done {
-        let name = d.check.attrs["name"].as_str();
-        let commit = d.commit.as_deref().unwrap_or(&commit);
-        // The first free attempt, read under the lock: a run is never overwritten (15, the run record).
-        let mut attempt = 1_u32;
-        let id = loop {
-            let id = Id::parse(&format!("{owner}/runs/{name}-{commit}-{attempt}")).expect("a slug key makes an id");
-            if !changes.contains_key(&id) && !id.path(&vault.root).exists() {
-                break id;
+    Ok(Some(Ran { owner: owner.clone(), commit, done }))
+}
+
+impl Ran {
+    /// The writer, waited for up to [`LOCK_WAIT`]: the verdicts cost the whole run, so it waits longer than a plain
+    /// write. If the lock never frees, the refusal's fix carries every verdict, so the run is not lost with the commit.
+    pub fn writer<'v>(&self, vault: &'v Vault) -> Result<bp_vault::Writer<'v>, Refusal> {
+        let start = Instant::now();
+        loop {
+            match vault.writer() {
+                Err(r) if r.code == Code::VaultLocked && start.elapsed() < LOCK_WAIT => {}
+                Err(mut r) if r.code == Code::VaultLocked => {
+                    let verdicts: Vec<String> =
+                        self.done.iter().map(|d| format!("{} {}", d.check.attrs["name"], d.verdict)).collect();
+                    r.fix = format!(
+                        "the lock stayed held for {} s, so no run was recorded; the verdicts were: {}; rerun once the other write has finished",
+                        LOCK_WAIT.as_secs(),
+                        verdicts.join(", ")
+                    );
+                    return Err(r);
+                }
+                other => return other,
             }
-            attempt += 1;
-        };
-        changes.insert(id.clone(), record(owner, commit, attempt, d));
-        let error = judge::is_error(d.check);
-        runs.push(Run { name: name.to_string(), verdict: d.verdict, id, note: d.note.clone(), error });
+        }
     }
-    let written = writer.commit("check", role, &format!("check {owner}"), &changes)?;
-    Ok(Some(Checked { commit: written.commit, runs, findings: written.findings }))
+
+    /// Each run record's id and text, and its row in body order. Each takes the first free attempt, so the caller
+    /// holds the writer: a run is never overwritten (15, the run record).
+    ///
+    /// # Panics
+    ///
+    /// Never: an owner id, a slug and a sha make a run id.
+    pub fn records(&self, vault: &Vault) -> (BTreeMap<Id, String>, Vec<Run>) {
+        let mut changes = BTreeMap::new();
+        let mut runs = Vec::with_capacity(self.done.len());
+        for d in &self.done {
+            let name = d.check.attrs["name"].as_str();
+            let commit = d.commit.as_deref().unwrap_or(&self.commit);
+            let owner = &self.owner;
+            let mut attempt = 1_u32;
+            let id = loop {
+                let id = Id::parse(&format!("{owner}/runs/{name}-{commit}-{attempt}")).expect("a slug key makes an id");
+                if !changes.contains_key(&id) && !id.path(&vault.root).exists() {
+                    break id;
+                }
+                attempt += 1;
+            };
+            changes.insert(id.clone(), record(owner, commit, attempt, d));
+            let error = judge::is_error(&d.check);
+            runs.push(Run { name: name.to_string(), verdict: d.verdict, id, note: d.note.clone(), error });
+        }
+        (changes, runs)
+    }
 }
 
 /// The code repository's HEAD and top. A run names the commit its blocks ran at, so the tree must be that commit:
@@ -228,28 +296,6 @@ fn code_tree(vault: &Vault, repo: &Path) -> Result<(String, std::path::PathBuf),
     }
 }
 
-/// The writer, waited for up to [`LOCK_WAIT`]. If the lock never frees, the refusal's fix carries every verdict, so
-/// the run is not lost with the commit.
-fn writer<'v>(vault: &'v Vault, owner: &Id, done: &[Done]) -> Result<bp_vault::Writer<'v>, Refusal> {
-    let start = Instant::now();
-    loop {
-        match vault.writer() {
-            Err(r) if r.code == Code::VaultLocked && start.elapsed() < LOCK_WAIT => {}
-            Err(mut r) if r.code == Code::VaultLocked => {
-                let verdicts: Vec<String> =
-                    done.iter().map(|d| format!("{} {}", d.check.attrs["name"], d.verdict)).collect();
-                r.fix = format!(
-                    "the lock stayed held for {} s, so no run was recorded; the verdicts were: {}; rerun bp check {owner} once the other write has finished",
-                    LOCK_WAIT.as_secs(),
-                    verdicts.join(", ")
-                );
-                return Err(r);
-            }
-            other => return other,
-        }
-    }
-}
-
 /// The run record's text (13, Run; 25, design change 5): the converted fields, then `ended`, the block's hash and
 /// the output's; the body is the verdict's reason and the output's last lines.
 fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
@@ -264,7 +310,7 @@ fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
         ("at".into(), d.at.as_str().into()),
         ("ended".into(), d.ended.as_str().into()),
         ("verdict".into(), d.verdict.as_str().into()),
-        ("severity".into(), if judge::is_error(d.check) { "error" } else { "warn" }.into()),
+        ("severity".into(), if judge::is_error(&d.check) { "error" } else { "warn" }.into()),
         ("check_hash".into(), blake3::hash(block.as_bytes()).to_hex().as_str().into()),
     ]);
     if let Some(evidence) = &d.evidence {

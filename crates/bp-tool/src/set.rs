@@ -116,14 +116,20 @@ fn with_body(id: &Id, header: &Header, text: &str, body: &str) -> Result<Option<
             format!("bp record delta {id} --field milestone=<milestone> --body-file <f>"),
         ));
     }
+    Ok(rebody(text, body))
+}
+
+/// `text`, a file with a header, with its body replaced: the header's bytes as they were, then the body as `create`
+/// stores it. `None` when the stored body is already that one. `stamp` writes an accepted delta's body this way.
+pub(crate) fn rebody(text: &str, body: &str) -> Option<String> {
     let (head, old) = text.split_at(bp_vault::header_end(text).expect("the file parsed with a header"));
     let body = stored(body);
     if stored(old) == body {
-        return Ok(None);
+        return None;
     }
     // A header closed at end of file gains the line end the body needs; every header byte stays.
     let eol = if head.ends_with('\n') { "" } else { "\n" };
-    Ok(Some(if body.is_empty() { format!("{head}{eol}") } else { format!("{head}{eol}\n{body}\n") }))
+    Some(if body.is_empty() { format!("{head}{eol}") } else { format!("{head}{eol}\n{body}\n") })
 }
 
 /// The `Bp-Role` of this process's commits: `BP_ROLE`, `human` when unset or empty (25, design change 7). A value

@@ -1,5 +1,6 @@
 //! One markdown file of the vault: its id, content hash, header and body. A file without a header is an asset.
 
+use serde_json::{Map, Value};
 use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::body::FindingKind;
@@ -86,6 +87,40 @@ impl File {
             body.findings.retain(|f| !matches!(f.kind, FindingKind::CheckUnnamed | FindingKind::CheckMalformed));
         }
         Ok(Self { id, hash, header: Some(header), body })
+    }
+}
+
+crate::closed_enum! {
+    /// A delta's state. The header stores none: it derives from the record's one closing append (13, Delta).
+    pub enum DeltaState {
+        Proposed = "proposed",
+        Accepted = "accepted",
+        Rejected = "rejected",
+    }
+}
+
+impl DeltaState {
+    /// The state a delta's body holds. The closing append is the last `## ` section, so a heading of the same name
+    /// inside the proposed design body above it closes nothing.
+    pub fn of(body: &Body) -> Self {
+        match body.sections.last().map(|s| s.heading.as_str()) {
+            Some("Accepted") => Self::Accepted,
+            Some("Rejected") => Self::Rejected,
+            _ => Self::Proposed,
+        }
+    }
+}
+
+impl File {
+    /// The header as `show` prints it and the index stores it: [`Header::to_json`], and a delta's derived state, so
+    /// the two cannot disagree. `None` for an asset.
+    pub fn header_json(&self) -> Option<Map<String, Value>> {
+        let header = self.header.as_ref()?;
+        let mut m = header.to_json(&self.id);
+        if header.kind == Kind::Delta {
+            m.insert("state".into(), DeltaState::of(&self.body).as_str().into());
+        }
+        Some(m)
     }
 }
 

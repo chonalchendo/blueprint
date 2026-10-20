@@ -21,7 +21,7 @@ pub use integrity::Fault;
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
 /// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
 /// bump to the same number still differ.
-const SCHEMA: i64 = 8;
+const SCHEMA: i64 = 9;
 
 /// What is wrong with a markdown file whose path is not an id.
 const STRAY: &str = "the path is not an id: projects/<project>/<kind>/<slug> or shared/<kind>/<slug>";
@@ -111,6 +111,8 @@ pub struct Hit {
 /// One record as `Index::records` reads it.
 #[derive(Debug)]
 pub struct Record {
+    /// The path id.
+    pub id: String,
     /// The header, as `show` prints it.
     pub header: Map<String, Value>,
     /// The body: what the record's appends wrote.
@@ -386,7 +388,7 @@ impl Index {
         let mut rows: Vec<_> = rows
             .into_iter()
             .map(|(id, h, body)| {
-                let r = Record { header: object(&h), body };
+                let r = Record { header: object(&h), body, id: id.clone() };
                 let (stem, n) = second(&id);
                 ((time(&r), stem.to_string(), n), r)
             })

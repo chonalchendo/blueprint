@@ -10,6 +10,7 @@ mod record;
 mod rename;
 mod schema;
 mod set;
+mod stamp;
 mod transition;
 mod walk;
 
@@ -71,6 +72,9 @@ pub enum Verb {
     Rename(rename::Rename),
     /// Run the owner's check blocks; one run record per block, one commit.
     Check(check::Check),
+    /// Accept an approved milestone: its finish line, its deltas written into their designs, a blueprint version and
+    /// the milestone at `done` in one commit, and a local tag.
+    Stamp(stamp::Stamp),
 }
 
 /// `bp show <id> [--section <heading>] [--no-body] [--at <ref>]`.
@@ -161,6 +165,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
         Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
         Verb::Check(c) => check::run(cwd, c, cli.json, out),
+        Verb::Stamp(s) => stamp::run(cwd, s, cli.json, out),
     }
 }
 
@@ -233,7 +238,7 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     m.insert("id".into(), id.as_str().into());
     m.insert("record".into(), header.kind.is_record().into());
     m.insert("hash".into(), file.hash.clone().into());
-    m.extend(header.to_json(&id));
+    m.extend(file.header_json().expect("the file has a header"));
     m.insert("lead".into(), file.body.lead.clone().into());
     if !file.body.findings.is_empty() {
         m.insert("findings".into(), serde_json::to_value(&file.body.findings).expect("a plain struct serialises"));

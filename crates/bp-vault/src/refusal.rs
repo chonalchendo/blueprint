@@ -36,6 +36,7 @@ crate::closed_enum! {
         IdTaken = "id_taken",
         CheckDuplicate = "check_duplicate",
         CheckFailed = "check_failed",
+        IssuesOpen = "issues_open",
     }
 }
 

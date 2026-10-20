@@ -25,7 +25,7 @@ pub struct Record {
     /// One field as `name=value`; repeat the flag for each field.
     #[arg(long = "field", value_name = "NAME=VALUE")]
     pub fields: Vec<String>,
-    /// The record's body, from a file: a delta's change, a review's findings, a handoff's text.
+    /// The record's body, from a file: a delta's proposed design body, a review's findings, a handoff's text.
     #[arg(long)]
     pub body_file: Option<PathBuf>,
     /// A forge URI the record names, such as its pull request.
@@ -86,6 +86,7 @@ fn spec(kind: Kind) -> Option<Spec> {
             Some("stamp"),
             vec![
                 ("milestone", Type::Link(&[Kind::Milestone]), true),
+                ("change", Type::Text, false),
                 ("cause", Type::Link(&[Kind::Thread, Kind::Issue, Kind::Run]), false),
                 ("pull_request", Type::Int, false),
                 ("authorized_by", Type::Link(&[Kind::Decision]), false),
@@ -171,7 +172,10 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
         None => String::new(),
     };
     if kind == Kind::Delta && body.trim().is_empty() {
-        return Err(schema(format!("{kind} body"), "a delta's body says what changes: pass --body-file <f>".into()));
+        return Err(schema(
+            format!("{kind} body"),
+            "a delta's body is the proposed design body: pass --body-file <f>".into(),
+        ));
     }
     let vault = Vault::discover(cwd)?;
     let role = crate::set::role()?;
@@ -194,9 +198,6 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     }
     if let Some(field) = spec.now {
         fields.insert(field.into(), crate::clock::instant(now).into());
-    }
-    if kind == Kind::Delta {
-        fields.insert("state".into(), DeltaState::Proposed.as_str().into());
     }
     if let Some(uri) = &r.external {
         fields.insert("external".into(), uri.as_str().into());
@@ -312,8 +313,7 @@ fn given<'a>(kind: Kind, spec: &Spec, flags: &'a [String]) -> Result<BTreeMap<&'
     }
     let names: Vec<&str> = spec.fields.iter().map(|(n, _, _)| *n).collect();
     let takes = || {
-        let tool: Vec<&str> = spec.now.into_iter().chain((kind == Kind::Delta).then_some("state")).collect();
-        let tool = if tool.is_empty() { String::new() } else { format!("; the tool writes {}", tool.join(", ")) };
+        let tool = spec.now.map_or_else(String::new, |f| format!("; the tool writes {f}"));
         format!("record {kind} takes --field {}{tool}", names.join(", --field "))
     };
     if let Some(name) = given.keys().find(|n| !names.contains(n)) {
@@ -353,8 +353,8 @@ fn parent_fits(vault: &Vault, index: &Index, kind: Kind, parent: &Id) -> Result<
 /// Refuses `delta_pending` when the design already carries a proposed delta under the milestone.
 fn none_pending(index: &Index, design: &Id, milestone: &Value) -> Result<(), Refusal> {
     let pending = index.records(design.as_str(), Kind::Delta)?.into_iter().any(|d| {
-        d.header.get("state").and_then(Value::as_str) == Some(DeltaState::Proposed.as_str())
-            && d.header.get("milestone") == Some(milestone)
+        d.header.get("milestone") == Some(milestone)
+            && DeltaState::of(&bp_vault::Body::parse(&d.body)) == DeltaState::Proposed
     });
     if !pending {
         return Ok(());
@@ -369,7 +369,7 @@ fn none_pending(index: &Index, design: &Id, milestone: &Value) -> Result<(), Ref
 
 /// The id `stem` names, or the first free `-2`, `-3`: a second record with one key under one parent (25, design
 /// change 6).
-fn free(root: &Path, stem: &str) -> Id {
+pub(crate) fn free(root: &Path, stem: &str) -> Id {
     let mut n = 1;
     loop {
         let text = if n == 1 { stem.to_string() } else { format!("{stem}-{n}") };

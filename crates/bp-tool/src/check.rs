@@ -41,27 +41,42 @@ pub(crate) fn run(cwd: &Path, c: &Check, json: bool, out: &mut impl std::io::Wri
         emit(out, &Envelope { result: json!({ "id": owner }), contract_version: CONTRACT }, json);
         return ExitCode::from(3);
     };
-    let runs: Vec<Value> = checked
-        .runs
-        .iter()
-        .map(|r| json!({ "name": r.name, "verdict": r.verdict, "id": r.id, "note": r.note }))
-        .collect();
+    let runs = rows(&checked.runs);
     if let Some(run) = checked.failed() {
-        let refusal = Refusal::new(
-            Code::CheckFailed,
-            run.id.as_str(),
-            "every error-severity check block passes (25, design change 4)",
-            format!(
-                "{} {}: {}; read its output with bp show {}, fix the cause, then rerun bp check {owner} --name {}",
-                run.name, run.verdict, run.note, run.id, run.name
-            ),
-        );
-        let exit = refusal.exit;
-        emit(out, &Failed { refusal, commit: checked.commit, runs }, json);
-        return ExitCode::from(exit);
+        let then = format!("rerun bp check {owner} --name {}", run.name);
+        return failed(run, &then, &checked.commit, runs, json, out);
     }
     let result = json!({ "id": owner, "commit": checked.commit, "runs": runs, "findings": checked.findings });
     finish(Ok(result), json, out)
+}
+
+/// Each run as a result lists it.
+pub(crate) fn rows(runs: &[bp_check::Run]) -> Vec<Value> {
+    runs.iter().map(|r| json!({ "name": r.name, "verdict": r.verdict, "id": r.id, "note": r.note })).collect()
+}
+
+/// `check_failed` for the first failed run, after the commit that holds the runs: the one refusal that follows a
+/// commit, so its envelope adds the commit and every run. `then` is the command that tries again.
+pub(crate) fn failed(
+    run: &bp_check::Run,
+    then: &str,
+    commit: &str,
+    runs: Vec<Value>,
+    json: bool,
+    out: &mut impl std::io::Write,
+) -> ExitCode {
+    let refusal = Refusal::new(
+        Code::CheckFailed,
+        run.id.as_str(),
+        "every error-severity check block passes (25, design change 4)",
+        format!(
+            "{} {}: {}; read its output with bp show {}, fix the cause, then {then}",
+            run.name, run.verdict, run.note, run.id
+        ),
+    );
+    let exit = refusal.exit;
+    emit(out, &Failed { refusal, commit: commit.into(), runs }, json);
+    ExitCode::from(exit)
 }
 
 fn check(cwd: &Path, c: &Check) -> Result<(bp_vault::Id, Option<bp_check::Checked>), Refusal> {
