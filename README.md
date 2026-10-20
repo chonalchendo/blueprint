@@ -15,3 +15,7 @@ just linux    # a static Linux binary from macOS, through zig
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`. `cargo deny` and `cargo machete` are installed with `cargo install cargo-deny cargo-machete`; `cargo zigbuild` with `cargo install cargo-zigbuild` and `pip install ziglang`.
+
+## Pull requests
+
+Every pull request body follows `.github/pull_request_template.md`. `gh pr create --body` does not load the template, so copy its sections into the body.
