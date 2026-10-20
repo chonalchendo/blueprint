@@ -254,7 +254,7 @@ fn reviewer(index: &Index, id: &Id, login: &str) -> Result<String, Refusal> {
     ))
 }
 
-/// `base_unmerged` unless the pull request's base is the claim's base branch, merged or not.
+/// `base_mismatch` unless the pull request's base is the claim's base branch, merged or not.
 fn on_base(pr: &PullRequest, base: &str, id: &Id) -> Result<(), Refusal> {
     let (n, into) = (pr.number, pr.base_ref_name.as_deref().unwrap_or_default());
     if into == base {
@@ -268,7 +268,7 @@ fn on_base(pr: &PullRequest, base: &str, id: &Id) -> Result<(), Refusal> {
         format!("pull request {n} targets {into}; bp pr {id} retargets it to {base}, then bp land {id}")
     };
     Err(Refusal::new(
-        Code::BaseUnmerged,
+        Code::BaseMismatch,
         id.as_str(),
         "land merges into the claim's base branch only (26, design change 4)",
         fix,

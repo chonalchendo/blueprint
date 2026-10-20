@@ -183,13 +183,13 @@ fn land_gates_a_merged_pull_request_and_keeps_a_branch_with_unmerged_commits() {
     let before = commits(v);
     forge_as(t, &h, &[("r", &h)], &["SUCCESS"], &json!({ "baseRefName": "side" }));
     let (code, out) = land();
-    assert_eq!((code, out["code"].as_str()), (Some(2), Some("base_unmerged")), "{out}");
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("base_mismatch")), "{out}");
     assert!(out["fix"].as_str().unwrap().contains(&format!("bp pr {ISSUE} retargets it to master")), "{out}");
     // Merged by another login's approval outside `land`: the gates hold on a merged head too, and nothing is recorded.
     forge_as(t, &h, &[("mallory", &h)], &["SUCCESS"], &json!({ "state": "MERGED" }));
     assert_eq!(land().1["code"], "review_missing");
     forge_as(t, &h, &[("r", &h)], &["SUCCESS"], &json!({ "state": "MERGED", "baseRefName": "side" }));
-    assert_eq!(land().1["code"], "base_unmerged", "merged into another branch");
+    assert_eq!(land().1["code"], "base_mismatch", "merged into another branch");
     assert_eq!(
         (commits(v), common::bp(v, &["show", ISSUE]).1["status"].clone()),
         (before.clone(), json!("in-progress"))
