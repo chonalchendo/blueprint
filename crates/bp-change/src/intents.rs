@@ -133,8 +133,9 @@ pub struct Issue {
     pub depends: Vec<Dependency>,
     /// The open pull request; `None` when there is none or the forge was not read.
     pub pr: Option<PullRequest>,
-    /// The issue file's last commit, Unix seconds (13: processing time). Read only after an escalated release.
-    pub changed: Option<i64>,
+    /// A commit after the latest claim's release commit touched the issue file: commit order, not time, so an answer
+    /// in the release's own second counts (21, blocked). Read only after an escalated release.
+    pub answered: bool,
     /// The note of the project's counting integrity run, when it failed and names the issue
     /// ([`IntegrityRun::blocks`]).
     pub integrity: Option<String>,
@@ -185,9 +186,7 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
         }
     }
     // Escalated holds until the issue changes after the release: the human's answer is a write to the issue.
-    if let Some(c) = latest_claim(&i.claims).filter(|c| c.escalated)
-        && !matches!((i.changed, c.released), (Some(changed), Some(to)) if changed > to)
-    {
+    if latest_claim(&i.claims).is_some_and(|c| c.escalated) && !i.answered {
         return Verdict::of(Intent::Blocked, "escalated");
     }
     for d in &i.depends {
@@ -449,11 +448,9 @@ mod tests {
     #[test]
     fn escalated_blocks_until_the_issue_changes() {
         let escalated = Claim { at: Some(NOW - 600), released: Some(NOW - 300), escalated: true };
-        let i = Issue { claims: vec![escalated], changed: Some(NOW - 600), ..open() };
+        let i = Issue { claims: vec![escalated], answered: false, ..open() };
         assert_eq!(issue(&i, NOW), Verdict::of(Intent::Blocked, "escalated"));
-        let unknown = Issue { changed: None, ..i.clone() };
-        assert_eq!(issue(&unknown, NOW).intent, Some(Intent::Blocked));
-        let answered = Issue { changed: Some(NOW - 60), ..i };
+        let answered = Issue { answered: true, ..i };
         assert_eq!(issue(&answered, NOW).intent, Some(Intent::Ready));
     }
 

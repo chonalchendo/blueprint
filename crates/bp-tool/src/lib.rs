@@ -2,6 +2,7 @@
 //! `--json`; diagnostics go to stderr.
 
 mod check;
+mod claim;
 mod clock;
 mod create;
 mod intent;
@@ -70,6 +71,11 @@ pub enum Verb {
     Record(record::Record),
     /// A new slug for one node: the file and its directory move, every inbound link follows, one commit.
     Rename(rename::Rename),
+    /// Claim an open issue: fetch, a worktree and branch at their fixed names, the claim and `in-progress` in one
+    /// commit.
+    Cut(claim::Cut),
+    /// Close the issue's active claim with a reason; the issue returns to `open` and the worktree stays.
+    Release(claim::Release),
     /// Run the owner's check blocks; one run record per block, one commit.
     Check(check::Check),
     /// Accept an approved milestone: its finish line, its deltas written into their designs, a blueprint version and
@@ -164,6 +170,8 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Transition(t) => wrote(transition::transition(cwd, t), cli.json, out),
         Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
         Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
+        Verb::Cut(c) => wrote(claim::cut(cwd, c), cli.json, out),
+        Verb::Release(r) => wrote(claim::release(cwd, r), cli.json, out),
         Verb::Check(c) => check::run(cwd, c, cli.json, out),
         Verb::Stamp(s) => stamp::run(cwd, s, cli.json, out),
     }

@@ -105,8 +105,8 @@ fn of(
             open_pr: world.pr(d).is_some(),
         });
     }
-    let claims: Vec<Claim> = index
-        .records(id, Kind::Claim)?
+    let records = index.records(id, Kind::Claim)?;
+    let claims: Vec<Claim> = records
         .iter()
         .map(|c| {
             let release = intents::release(&c.body);
@@ -139,11 +139,11 @@ fn of(
         approved: p.is_approved(&p.head_ref_oid),
     });
     // Git is asked only when an escalation needs the answer: one process per escalated issue, none otherwise.
-    let changed = match intents::latest_claim(&claims) {
-        Some(c) if c.escalated => Id::parse(id).ok().and_then(|id| vault.last_commit(&id)),
-        _ => None,
-    };
-    let issue = Issue { status: status.into(), claims, runs, review_heads, depends, pr, changed, integrity };
+    let answered = intents::latest_claim(&claims).filter(|c| c.escalated).is_some_and(|latest| {
+        let record = &records[claims.iter().position(|c| std::ptr::eq(c, latest)).expect("the latest is one of them")];
+        Id::parse(id).ok().zip(Id::parse(&record.id).ok()).is_some_and(|(id, claim)| vault.touched_after(&id, &claim))
+    });
+    let issue = Issue { status: status.into(), claims, runs, review_heads, depends, pr, answered, integrity };
     Ok(intents::issue(&issue, world.now))
 }
 

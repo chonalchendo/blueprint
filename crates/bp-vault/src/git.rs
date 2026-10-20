@@ -27,6 +27,11 @@ impl Repo {
         Some(Self { top, git, common })
     }
 
+    /// The main worktree's top, the parent of the common directory: the same for every linked worktree of a clone.
+    pub fn main_top(&self) -> Option<PathBuf> {
+        Some(self.common.canonicalize().ok()?.parent()?.to_path_buf())
+    }
+
     /// The commit `HEAD` names.
     pub fn head(&self) -> Option<String> {
         let head = std::fs::read_to_string(self.git.join("HEAD")).ok()?;
