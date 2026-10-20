@@ -13,13 +13,12 @@ use crate::fingerprint::{fingerprint, still};
 use crate::{Counts, File, FindingKind, Id, Kind, Refusal, Vault};
 
 mod insert;
-use insert::remove;
-pub(crate) use insert::replace;
+pub(crate) use insert::{remove, replace};
 
 /// Bump on any change to what the parser puts in the tables; a mismatch rebuilds from nothing. A change to the
 /// tables themselves rebuilds without a bump, because the schema key carries their hash: two branches that both
 /// bump to the same number still differ.
-const SCHEMA: i64 = 5;
+const SCHEMA: i64 = 6;
 
 pub(crate) fn schema() -> String {
     format!("{SCHEMA}-{}", &blake3::hash(TABLES.as_bytes()).to_hex()[..12])

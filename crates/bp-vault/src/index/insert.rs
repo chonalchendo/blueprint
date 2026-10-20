@@ -67,8 +67,14 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
         st.execute(params![id, "body", d.as_str()])?;
     }
     let mut st = tx.prepare_cached("insert into aliases values (?1, ?2)")?;
+    let dir = id.rsplit_once('/').expect("an id has three segments").0;
     for a in &header.aliases {
-        st.execute(params![a, id])?;
+        // An alias is a past path id (13, rule 1); `rename` keeps only the old slug, in the node's own directory.
+        if a.contains('/') {
+            st.execute(params![a, id])?;
+        } else {
+            st.execute(params![format!("{dir}/{a}"), id])?;
+        }
     }
     let mut st = tx.prepare_cached("insert into unresolved values (?1, ?2, ?3)")?;
     for u in &header.unresolved {
@@ -89,7 +95,7 @@ fn insert(tx: &rusqlite::Transaction, file: &File) -> rusqlite::Result<()> {
 }
 
 /// Deletes a file's rows; the node row stays when `keep_node`, for `replace` to update.
-pub(super) fn remove(tx: &rusqlite::Transaction, id: &str, keep_node: bool) -> rusqlite::Result<()> {
+pub(crate) fn remove(tx: &rusqlite::Transaction, id: &str, keep_node: bool) -> rusqlite::Result<()> {
     tx.execute("delete from fts where rowid = (select rowid from nodes where id = ?1)", [id])?;
     let tables: &[&str] = if keep_node { &["files", "records"] } else { &["files", "nodes", "records"] };
     for table in tables {

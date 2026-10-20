@@ -6,6 +6,7 @@ mod create;
 mod intent;
 mod link;
 mod record;
+mod rename;
 mod schema;
 mod set;
 mod transition;
@@ -65,6 +66,8 @@ pub enum Verb {
     Transition(transition::Transition),
     /// One append-only record under its parent: one new file, one commit.
     Record(record::Record),
+    /// A new slug for one node: the file and its directory move, every inbound link follows, one commit.
+    Rename(rename::Rename),
 }
 
 /// `bp show <id> [--section <heading>] [--no-body] [--at <ref>]`.
@@ -153,6 +156,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Link(l) => wrote(link::link(cwd, l), cli.json, out),
         Verb::Transition(t) => wrote(transition::transition(cwd, t), cli.json, out),
         Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
+        Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
     }
 }
 
@@ -199,7 +203,8 @@ fn where_(cwd: &Path) -> Result<Where, Refusal> {
 
 fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     let vault = Vault::discover(cwd)?;
-    let id = node_id(&show.id)?;
+    // A past commit is read as asked; today's index names today's ids only.
+    let id = if show.at.is_some() { node_id(&show.id)? } else { subject(&Index::open(&vault)?, &show.id)? };
     let file = match &show.at {
         Some(at) => vault.read_at(&id, at)?,
         None => vault.read(&id)?,
@@ -273,6 +278,13 @@ pub(crate) fn node_id(text: &str) -> Result<Id, Refusal> {
             format!("{why}; bp search {}", text.rsplit('/').next().unwrap_or(text).replace(['-', '.', '_'], " ")),
         )
     })
+}
+
+/// A verb's subject: the id a node or record holds today, through the index. Case is ignored, and a renamed node's
+/// past id names the node (13, rule 1). An id nothing holds stays as asked, and the verb refuses it `no_node`.
+pub(crate) fn subject(index: &Index, text: &str) -> Result<Id, Refusal> {
+    let id = node_id(text)?;
+    Ok(index.holder(&id)?.map_or(id, |(held, _)| held))
 }
 
 fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {

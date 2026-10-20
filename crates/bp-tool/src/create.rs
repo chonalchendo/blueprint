@@ -190,7 +190,7 @@ fn home(kind: Kind, create: &Create) -> Result<Id, Refusal> {
 }
 
 /// Whether a slug starts with a date and a dash, `YYYY-MM-DD-`, as an inbox slug does.
-fn dated(slug: &str) -> bool {
+pub(crate) fn dated(slug: &str) -> bool {
     let b = slug.as_bytes();
     b.len() > 11
         && b[..11]
