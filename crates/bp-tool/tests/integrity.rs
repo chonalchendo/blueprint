@@ -91,7 +91,8 @@ fn each_rule_fails_its_node_and_a_named_open_issue_is_blocked() {
     // twin is written too, so the tree is clean where the disk holds both.
     let blob = git(vault, &["hash-object", "-w", "projects/bp/issues/ok.md"]);
     git(vault, &["update-index", "--add", "--cacheinfo", &format!("100644,{},projects/bp/issues/OK.md", blob.trim())]);
-    if !vault.join("projects/bp/issues/OK.md").exists() {
+    let both_on_disk = !vault.join("projects/bp/issues/OK.md").exists();
+    if both_on_disk {
         std::fs::copy(vault.join("projects/bp/issues/ok.md"), vault.join("projects/bp/issues/OK.md")).unwrap();
     }
     git(vault, &["commit", "-qm", "faults"]);
@@ -104,16 +105,13 @@ fn each_rule_fails_its_node_and_a_named_open_issue_is_blocked() {
     let (_, run) = bp(vault, &["show", &id]);
     assert_eq!(run["commit"], at, "integrity is vault state: {run}");
     let names: Vec<&str> = run["names"].as_array().unwrap().iter().map(|n| n.as_str().unwrap()).collect();
-    assert_eq!(
-        names,
-        [
-            "projects/bp/designs/containers/c",
-            "projects/bp/issues/bare",
-            "projects/bp/issues/links",
-            "projects/bp/issues/ok"
-        ],
-        "sorted, once each; a broken file and a path no file holds are no edge"
-    );
+    // Where the disk holds both twins, both are nodes and both are named.
+    let mut want = vec!["projects/bp/designs/containers/c", "projects/bp/issues/bare", "projects/bp/issues/links"];
+    if both_on_disk {
+        want.insert(1, "projects/bp/issues/OK");
+    }
+    want.push("projects/bp/issues/ok");
+    assert_eq!(names, want, "sorted, once each; a broken file and a path no file holds are no edge");
     let text = std::fs::read_to_string(vault.join(format!("{id}.md"))).unwrap();
     for line in [
         "broken: projects/bp/issues/bad.md: ",
