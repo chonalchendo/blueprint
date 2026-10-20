@@ -1,6 +1,7 @@
 //! The surface spec of each target (17, Interfaces 1): where each part of the bundle goes, and the limits the
 //! validator holds it to. A change here is a delta on 17. The hook scripts read the harness's hook input with `jq`:
-//! `session_id`, and `tool_input.file_path` for a pre-tool hook.
+//! `session_id`, `tool_input.file_path` or `tool_input.command` for a pre-tool hook, and `agent_id` and `agent_type`
+//! inside a subagent.
 
 use crate::Target;
 
@@ -49,6 +50,7 @@ pub(crate) const CLAUDE: Spec = Spec {
     events: &[
         START,
         Hook { event: "PreToolUse", matcher: Some("Edit|Write"), script: "bp-guard.sh" },
+        Hook { event: "PreToolUse", matcher: Some("Bash"), script: "bp-role.sh" },
         Hook { event: "SessionEnd", matcher: None, script: "bp-end.sh" },
     ],
     description_max: 1024,

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::{Component, Path};
 
+use bp_operation::Role;
 use bp_vault::{Code, Kind, Refusal};
 use serde_json::{Map, Value, json};
 
@@ -237,7 +238,7 @@ fn plan(spec: &Spec) -> (BTreeMap<String, Vec<u8>>, Vec<String>) {
             }
             "roles" => Some((format!("{}/{rest}", spec.agents), bytes.to_vec())),
             "hooks" if spec.events.iter().any(|h| h.script == rest) => {
-                Some((format!("{}/{rest}", spec.hooks), bytes.to_vec()))
+                Some((format!("{}/{rest}", spec.hooks), with_role_verbs(bytes)))
             }
             _ => None,
         };
@@ -265,6 +266,14 @@ fn codex_role(stem: &str, text: &str) -> Vec<u8> {
         q(role)
     )
     .into_bytes()
+}
+
+/// A hook script with each agent role's verbs from `bp-operation` in place of its `# bp:role-verbs` line, so the role
+/// hook cannot drift from 21's rows. The human has no line: no hook runs in the human's shell.
+fn with_role_verbs(bytes: &[u8]) -> Vec<u8> {
+    let arms: Vec<String> =
+        Role::ALL.iter().filter_map(|r| Some(format!("{r}) allowed=\"{}\" ;;", r.verbs()?.join(" ")))).collect();
+    String::from_utf8_lossy(bytes).replace("# bp:role-verbs", &arms.join("\n")).into_bytes()
 }
 
 fn text_of(path: &str) -> String {

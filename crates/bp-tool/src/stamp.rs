@@ -51,9 +51,9 @@ pub(crate) fn run(cwd: &Path, s: &Stamp, json: bool, out: &mut impl std::io::Wri
 }
 
 fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
+    let role = crate::set::human(format!("stamp {}", s.milestone))?;
     waiver::usage(s)?;
     let vault = Vault::discover(cwd)?;
-    let role = crate::set::role()?;
     let now = crate::clock::now()?;
     let index = Index::open(&vault)?;
     let id = subject(&index, &s.milestone)?;

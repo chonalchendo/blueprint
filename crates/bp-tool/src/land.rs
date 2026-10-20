@@ -167,9 +167,9 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
 }
 
 pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
+    let role = crate::set::human(format!("land {}", l.issue))?;
     node_id(&l.issue)?;
     let vault = Vault::discover(cwd)?;
-    let role = crate::set::role()?;
     let index = Index::open(&vault)?;
     let id = subject(&index, &l.issue)?;
     let resolved = IssueStatus::Resolved.as_str();

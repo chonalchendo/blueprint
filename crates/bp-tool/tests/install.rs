@@ -222,3 +222,55 @@ fn a_handoff_seed_follows_a_record_to_its_node() {
     let (_, handoff) = w.bp(w.vault.path(), &[], &["show", v["id"].as_str().unwrap(), "--no-body"]);
     assert!(handoff.get("seed").is_none(), "a session with no commit has no seed: {handoff}");
 }
+
+#[test]
+fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
+    let w = World::new();
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    let path = bin(&w.t.path().join("bin"), &[("bp", assert_cmd::cargo::cargo_bin("bp"))], true);
+    let call = |command: &str, agent: Option<&str>| {
+        let mut input = serde_json::json!({
+            "hook_event_name": "PreToolUse", "session_id": "s-one", "tool_name": "Bash",
+            "tool_input": { "command": command, "timeout": 9 },
+        });
+        if let Some(a) = agent {
+            input["agent_id"] = "a-one".into();
+            input["agent_type"] = a.into();
+        }
+        w.hook("bp-role.sh", &input.to_string(), &path, &[])
+    };
+    // The session's call runs as the harness runs it: the returned input, with every other key kept.
+    let out = call(&format!("cd {} && bp set {MILESTONE} tags a", w.code().display()), None);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let input = &v["hookSpecificOutput"]["updatedInput"];
+    assert!(v["hookSpecificOutput"].get("permissionDecision").is_none(), "{v}");
+    assert_eq!(input["timeout"], 9, "{v}");
+    let run = w.command("bash", &w.code()).env("PATH", &path).args(["-c", input["command"].as_str().unwrap()]).output();
+    assert!(run.unwrap().status.success());
+    let message = git(w.vault.path(), &["log", "-1", "--format=%B"]);
+    assert!(message.contains("Bp-Role: session\nBp-Session: s-one"), "{message}");
+    let out = call("bp walk x --for complete --json | jq .", Some("bp-worker"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("export BP_ROLE=worker BP_SESSION='a-one'; bp walk"));
+    let no_jq = bin(&w.t.path().join("nojq"), &[("bash", which("bash"))], false);
+    for (command, agent, cause) in [
+        ("cd /tmp && FOO=1 timeout 30 bp --json land x", Some("bp-worker"), "bp land is outside the worker role"),
+        ("echo $(bp record review x)", Some("bp-reviewer"), "bp record is outside the reviewer role"),
+        ("bp show x", Some("Explore"), "agent type 'Explore' is no bp role"),
+        ("bp stamp m", None, "bp stamp is outside the session role"),
+    ] {
+        let out = call(command, agent);
+        assert_eq!(out.status.code(), Some(2), "{command}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains(cause), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let out = call("ls -la", Some("bp-worker"));
+    assert!(out.status.success() && out.stdout.is_empty(), "a command with no bp is not touched");
+    // Fails closed: no jq, malformed input and empty input each deny, whatever the command.
+    let ls = serde_json::json!({ "session_id": "s", "tool_input": { "command": "ls" } }).to_string();
+    for (input, path, cause) in
+        [(ls.as_str(), no_jq.as_str(), "jq"), ("{bad", path.as_str(), "JSON"), ("", &path, "empty")]
+    {
+        let out = w.hook("bp-role.sh", input, path, &[]);
+        assert_eq!(out.status.code(), Some(2), "{cause}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains(cause), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+}

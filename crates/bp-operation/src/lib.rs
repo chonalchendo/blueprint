@@ -94,6 +94,23 @@ impl Action {
     }
 }
 
+impl Role {
+    /// The verbs the role runs: the union of its rows' verbs in 21 (rule 6). The role hook denies any other, and a
+    /// dispatch template's forbidden list is the complement. `None` for the human, whom no list bounds: the forge is the
+    /// gate.
+    pub fn verbs(self) -> Option<&'static [&'static str]> {
+        Some(match self {
+            Self::Session => {
+                &["show", "list", "search", "walk", "create", "set", "link", "record", "transition", "release"]
+            }
+            Self::Worker => &["show", "walk", "search", "cut", "check", "record", "pr", "release"],
+            Self::Reviewer => &["show", "walk", "search"],
+            Self::Researcher => &["show", "list", "search", "walk"],
+            Self::Human => return None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +122,15 @@ mod tests {
         }
         assert_eq!("complete".parse::<Action>().unwrap().budget(), 15_000);
         assert!("land".parse::<Action>().is_err(), "a human act reads a page, not a walk");
+    }
+
+    #[test]
+    fn only_the_human_runs_the_human_acts() {
+        for &r in Role::ALL {
+            let verbs = r.verbs();
+            assert_eq!(verbs.is_none(), r == Role::Human, "{r}");
+            assert!(verbs.unwrap_or_default().iter().all(|v| !["stamp", "land"].contains(v)), "{r}");
+        }
+        assert!(!Role::Reviewer.verbs().unwrap().contains(&"record"), "the session records the review (21)");
     }
 }

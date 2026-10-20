@@ -65,6 +65,10 @@ pub(crate) fn machine(kind: Kind) -> Option<Machine> {
 }
 
 pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
+    let role = match t.status.as_str() {
+        "approved" | "active" => crate::set::human(format!("transition {} {}", t.id, t.status))?,
+        _ => crate::set::role()?,
+    };
     node_id(&t.id)?;
     if t.reason.as_deref().is_some_and(|r| r.contains(['\n', '\r'])) {
         return Err(Refusal::usage(
@@ -73,7 +77,6 @@ pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
         ));
     }
     let vault = Vault::discover(cwd)?;
-    let role = crate::set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
     let writer = if t.dry_run { None } else { Some(vault.writer()?) };
     let mut opened = None;
