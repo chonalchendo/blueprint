@@ -10,11 +10,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-use bp_change::{IssueStatus, MilestoneStatus, intents};
+use bp_change::{IssueStatus, MilestoneStatus};
 use bp_vault::{Body, Check, Code, DeltaState, File, Filter, Header, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
+use crate::waiver::{self, Reask};
 use crate::{Wrote, finish, subject};
 
 /// `bp stamp <milestone> [--waive <name> --reason <why>]...`.
@@ -50,7 +51,7 @@ pub(crate) fn run(cwd: &Path, s: &Stamp, json: bool, out: &mut impl std::io::Wri
 }
 
 fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
-    usage(s)?;
+    waiver::usage(s)?;
     let vault = Vault::discover(cwd)?;
     let role = crate::set::role()?;
     let now = crate::clock::now()?;
@@ -106,7 +107,8 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
         return Err(Refusal::new(
             Code::EvidenceStale,
             id.as_str(),
-            "stamp accepts the finish line its blocks ran and the deltas it read before them (26, design change 5)",
+            "stamp accepts the finish line its blocks ran, the deltas it read before them and the open waivers it ran \
+             (26, design change 5; 27, design change 10)",
             format!(
                 "the finish line, a carried delta or an open waiver changed while the blocks ran, so nothing was \
                  committed; rerun bp stamp {id}"
@@ -121,7 +123,7 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
     // `version` is a wikilink, so the index holds the delta's edge to its version (13, Delta).
     let close = format!("## Accepted\n\naccepted_at: {accepted_at}\nversion: [[{version}]]\n");
     let deltas = accept(&vault, &held.deltas, &close, &mut changes)?;
-    let waivers = waive(&vault, &id, s, &accepted_at, &mut changes);
+    let waivers = waiver::write(&vault, &id, s, &accepted_at, &mut changes);
     let mut manifest = serde_json::Map::new();
     for design in &held.designs {
         let hash = match changes.get(design) {
@@ -182,38 +184,6 @@ fn accept(
     Ok(deltas)
 }
 
-/// The flags' refusals, before the vault is read: one `--reason` per `--waive`, each one line, each block once.
-fn usage(s: &Stamp) -> Result<(), Refusal> {
-    if s.waive.len() != s.reason.len() {
-        return Err(Refusal::usage("--waive", "give each --waive <name> its own --reason <why>, in the same order"));
-    }
-    if s.reason.iter().any(|r| r.trim().is_empty() || r.contains(['\n', '\r'])) {
-        return Err(Refusal::usage("--reason", "give each reason as one line of text"));
-    }
-    if let Some(w) = s.waive.iter().enumerate().find_map(|(i, w)| s.waive[..i].contains(w).then_some(w)) {
-        return Err(Refusal::usage(format!("--waive {w}"), "waive each block once"));
-    }
-    Ok(())
-}
-
-/// Puts a waiver per `--waive` into `changes`, decided at `at`. Returns the waivers.
-fn waive(vault: &Vault, id: &Id, s: &Stamp, at: &str, changes: &mut BTreeMap<Id, String>) -> Vec<Id> {
-    let mut waivers = Vec::new();
-    for (name, reason) in s.waive.iter().zip(&s.reason) {
-        // A waiver waived again is the next of its block, under its own milestone (13, Waiver).
-        let (under, name) = match name.rsplit_once('/') {
-            Some((m, n)) => (Id::parse(m).expect("the gate matched an open waiver's milestone"), n),
-            None => (id.clone(), name.as_str()),
-        };
-        // `valid_until` stays empty, so the next stamp of the project asks again (13, Waiver).
-        let waiver = crate::record::free(&vault.root, &format!("{under}/waivers/{name}"));
-        let fields = [("reason", reason.as_str().into()), ("decided_at", at.into())];
-        changes.insert(waiver.clone(), record(Kind::Waiver, &under, &[], fields));
-        waivers.push(waiver);
-    }
-    waivers
-}
-
 /// The project's next version number and its tag: the highest plus one, else 1 (0 is the conversion's).
 fn next(index: &Index, project: &str) -> Result<(u64, String), Refusal> {
     let versions = index.records(&format!("projects/{project}/project"), Kind::BlueprintVersion)?;
@@ -259,23 +229,6 @@ struct Gate {
     reasked: Vec<Reask>,
 }
 
-/// An open waiver: its id, its milestone, its block's name and the block as the finish line holds it now; `None`
-/// when the block is gone, which its run refuses.
-#[derive(PartialEq)]
-struct Reask {
-    waiver: Id,
-    milestone: Id,
-    name: String,
-    check: Option<Check>,
-}
-
-impl Reask {
-    /// The `--waive` value that waives it again.
-    fn key(&self) -> String {
-        format!("{}/{}", self.milestone, self.name)
-    }
-}
-
 /// A proposed delta the milestone carries: its design, its id and its body, the proposed design body.
 #[derive(PartialEq)]
 struct Carried {
@@ -291,8 +244,8 @@ enum Gated {
 }
 
 /// The refusals before a stamp runs anything, and again under the lock: the subject is a milestone, `approved`, each
-/// waived name is a named block of its finish line or an open waiver of the project, every file of its project
-/// parses, and every issue under it is resolved or abandoned (21, needs acceptance).
+/// waived name is a named block of its finish line or an open waiver of the project (`waiver::refuse`), every file
+/// of its project parses, and every issue under it is resolved or abandoned (21, needs acceptance).
 fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Result<Gated, Refusal> {
     let file = vault.read(id)?;
     let Some(header) = file.header.as_ref().filter(|h| h.kind == Kind::Milestone) else {
@@ -321,27 +274,9 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Re
         ));
     }
     let finish: Vec<Check> = bp_check::named(&file.body).into_iter().cloned().collect();
-    let names: Vec<&str> = finish.iter().map(|c| c.attrs["name"].as_str()).collect();
     let project = id.project().expect("a milestone sits under a project");
-    let reasked = open_waivers(vault, index, project, now)?;
-    // A block name is a slug, so a `/` names an open waiver, split at the last one (27, design change 10).
-    let known = |w: &str| match w.rsplit_once('/') {
-        Some((m, n)) => reasked.iter().any(|r| r.milestone.as_str() == m && r.name == n),
-        None => names.contains(&w),
-    };
-    if let Some(w) = waive.iter().find(|w| !known(w)) {
-        let open: Vec<String> = reasked.iter().map(Reask::key).collect();
-        return Err(Refusal::new(
-            Code::UnknownValue,
-            format!("waive {w}"),
-            "a waiver names a block of the milestone's finish line, or an open waiver of the project (13, Waiver)",
-            format!(
-                "waive one of the blocks of {id}: {}; or an open waiver: {}",
-                names.join(", "),
-                if open.is_empty() { "none".to_string() } else { open.join(", ") }
-            ),
-        ));
-    }
+    let reasked = waiver::open(vault, index, project, now)?;
+    waiver::refuse(id, &finish, &reasked, waive)?;
     // A file that does not parse is in no list, so an open issue it holds would pass the next refusal unseen.
     if let Some((path, why)) = index.broken(project)?.into_iter().next() {
         return Err(Refusal::new(
@@ -382,54 +317,13 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Re
     Ok(Gated::Open(Gate { finish, designs, deltas, reasked }))
 }
 
-/// The project's open waivers, by 21's re-asked predicate: a passing run of the block follows the waiver when git
-/// last touched the run, not the waiver.
-fn open_waivers(vault: &Vault, index: &Index, project: &str, now: i64) -> Result<Vec<Reask>, Refusal> {
-    let all =
-        Filter { kind: Kind::Milestone, status: None, project: Some(project), under: None, limit: usize::MAX >> 1 };
-    let (mut waivers, mut runs) = (Vec::new(), BTreeMap::new());
-    for m in index.list(&all)?.0 {
-        let records = index.records(&m.id, Kind::Waiver)?;
-        if records.is_empty() {
-            continue;
-        }
-        for r in records {
-            let (block, seq) = bp_vault::second(&r.id);
-            // A `valid_until` that is not an instant reads as past, so the stamp asks again.
-            let until = r.header.get("valid_until").and_then(Value::as_str).filter(|t| !t.is_empty());
-            let valid_until = until.map(|t| intents::timestamp(t).unwrap_or(i64::MIN));
-            waivers.push(intents::Waiver {
-                id: r.id.clone(),
-                milestone: m.id.clone(),
-                block: block.into(),
-                seq,
-                valid_until,
-            });
-        }
-        runs.insert(m.id.clone(), index.records(&m.id, Kind::Run)?);
-    }
-    let passed_after = |w: &intents::Waiver| {
-        let waiver = Id::parse(&w.id).expect("the index holds ids");
-        let passed = runs[&w.milestone].iter().filter(|r| {
-            let field = |k: &str| r.header.get(k).and_then(Value::as_str);
-            field("check") == Some(w.block.as_str()) && field("verdict") == Some("pass")
-        });
-        // The latest first: it is the one that follows, if any does.
-        passed.rev().any(|r| vault.touched_after(&Id::parse(&r.id).expect("the index holds ids"), &waiver))
-    };
-    let mut open = Vec::new();
-    for w in intents::reasked(&waivers, now, passed_after) {
-        let milestone = Id::parse(&w.milestone).expect("the index holds ids");
-        let body = vault.read(&milestone)?.body;
-        let check = bp_check::named(&body).into_iter().find(|c| c.attrs["name"] == w.block).cloned();
-        let waiver = Id::parse(&w.id).expect("the index holds ids");
-        open.push(Reask { waiver, milestone, name: w.block.clone(), check });
-    }
-    Ok(open)
-}
-
 /// A record's text: its header under `under`, with one id per `→` field, and no body.
-fn record<const N: usize>(kind: Kind, under: &Id, links: &[(&str, &Id)], fields: [(&str, Value); N]) -> String {
+pub(crate) fn record<const N: usize>(
+    kind: Kind,
+    under: &Id,
+    links: &[(&str, &Id)],
+    fields: [(&str, Value); N],
+) -> String {
     let header = Header {
         kind,
         title: None,

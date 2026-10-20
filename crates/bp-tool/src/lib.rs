@@ -16,6 +16,7 @@ mod set;
 mod stack;
 mod stamp;
 mod transition;
+mod waiver;
 mod walk;
 
 use std::path::Path;

@@ -381,8 +381,8 @@ pub fn milestone(status: &str, integrity: Option<String>) -> Verdict {
     }
 }
 
-/// A waiver record, reduced (13, Waiver). Its key is the milestone, the block and the sequence: `<block>` is 1,
-/// `<block>-<n>` is n.
+/// A waiver record, reduced (13, Waiver). Its key is the milestone, the block, its `check`, and the sequence, read
+/// from the record key relative to `check`: `<check>` is 1, `<check>-<n>` is n.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Waiver {
     /// The waiver record's id.

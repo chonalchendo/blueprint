@@ -177,6 +177,18 @@ fn a_finish_line_changed_while_the_blocks_ran_refuses() {
     assert_eq!(bp(vault, &["show", M]).1["status"], "approved");
 }
 
+/// Stamps a new milestone `n` of the project, with one passing block, approved first.
+fn later(vault: &Path, code: &Path, n: &str, args: &[&str]) -> (Option<i32>, serde_json::Value) {
+    let id = format!("projects/bp/milestones/{n}");
+    let text = "---\nkind: milestone\ntitle: N\nstatus: planned\n---\n\n## Finish line\n\n\
+                ~~~check shell {name=p expect=0}\ntrue\n~~~\n";
+    std::fs::write(vault.join(format!("{id}.md")), text).unwrap();
+    git(vault, &["add", "-A"]);
+    git(vault, &["commit", "-qm", "a milestone"]);
+    assert_eq!(bp(vault, &["transition", &id, "approved"]).0, Some(0));
+    bp_env(code, &[("BP_VAULT", vault.to_str().unwrap())], &[&["stamp", id.as_str()], args].concat())
+}
+
 #[test]
 fn a_later_stamp_asks_an_open_waiver_again() {
     let (vault, code) = setup();
@@ -184,16 +196,7 @@ fn a_later_stamp_asks_an_open_waiver_again() {
     ready(vault, "~~~check shell {name=f expect=0}\nfalse\n~~~\n");
     let (exit, v) = stamp(vault, code, &["--waive", "f", "--reason", "later"]);
     assert_eq!((exit, &v["reasked"]), (Some(0), &serde_json::json!([])), "{v}");
-    let next = |n: &str, args: &[&str]| {
-        let id = format!("projects/bp/milestones/{n}");
-        let text = "---\nkind: milestone\ntitle: N\nstatus: planned\n---\n\n## Finish line\n\n\
-                    ~~~check shell {name=p expect=0}\ntrue\n~~~\n";
-        std::fs::write(vault.join(format!("{id}.md")), text).unwrap();
-        git(vault, &["add", "-A"]);
-        git(vault, &["commit", "-qm", "a milestone"]);
-        assert_eq!(bp(vault, &["transition", &id, "approved"]).0, Some(0));
-        bp_env(code, &[("BP_VAULT", vault.to_str().unwrap())], &[&["stamp", id.as_str()], args].concat())
-    };
+    let next = |n: &str, args: &[&str]| later(vault, code, n, args);
     let (exit, v) = next("n", &[]);
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("check_failed")), "{v}");
     assert!(v["fix"].as_str().unwrap().contains(&format!("--waive {M}/f --reason")), "{v}");
@@ -217,4 +220,50 @@ fn a_later_stamp_asks_an_open_waiver_again() {
     assert_eq!((exit, &v["reasked"]), (Some(0), &asked), "{v}");
     let (exit, v) = next("q", &[]);
     assert_eq!((exit, &v["reasked"]), (Some(0), &serde_json::json!([])), "{v}");
+}
+
+#[test]
+fn a_waiver_keys_its_block_by_check_and_a_gone_or_skipped_block_refuses() {
+    let (vault, code) = setup();
+    let (vault, code) = (vault.path(), code.path());
+    let finish = |walk: &str| {
+        format!(
+            "~~~check shell {{name={walk} expect=0}}\nfalse\n~~~\n\n~~~check shell {{name=pl when=post-land}}\ntrue\n~~~\n"
+        )
+    };
+    ready(vault, &finish("walk-8"));
+    let (exit, v) = stamp(vault, code, &["--waive", "walk-8", "--reason", "a", "--waive", "pl", "--reason", "b"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("unknown_value")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("drop --waive pl"), "a block that only skips needs no waiver: {v}");
+    let (exit, v) = stamp(vault, code, &["--waive", "walk-8", "--reason", "a"]);
+    assert_eq!(exit, Some(0), "{v}");
+    assert_eq!(bp(vault, &["show", &format!("{M}/waivers/walk-8")]).1["check"], "walk-8");
+    // `walk-8` is the block, not the eighth waiver of `walk`.
+    let (exit, v) = later(vault, code, "n", &[]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("check_failed")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains(&format!("--waive {M}/walk-8 --reason")), "{v}");
+    let (exit, v) = bp_env(
+        code,
+        &[("BP_VAULT", vault.to_str().unwrap())],
+        &["stamp", "projects/bp/milestones/n", "--waive", &format!("{M}/walk-8"), "--reason", "again"],
+    );
+    assert_eq!((exit, v["waivers"].clone()), (Some(0), serde_json::json!([format!("{M}/waivers/walk-8-2")])), "{v}");
+    // The block is renamed away: its open waiver refuses, and names how to restore it.
+    let done =
+        |walk: &str| format!("---\nkind: milestone\ntitle: M\nstatus: done\n---\n\n## Finish line\n\n{}", finish(walk));
+    std::fs::write(vault.join(format!("{M}.md")), done("walk")).unwrap();
+    git(vault, &["commit", "-qam", "rename walk-8"]);
+    let (exit, v) = later(vault, code, "o", &[]);
+    assert_eq!(
+        (exit, v["code"].as_str(), v["subject"].as_str()),
+        (Some(2), Some("unknown_value"), Some(&*format!("{M}/waivers/walk-8-2"))),
+        "{v}"
+    );
+    assert!(v["fix"].as_str().unwrap().contains("holds no block walk-8"), "{v}");
+    // Restored and passing, the latest waiver closes.
+    std::fs::write(vault.join(format!("{M}.md")), done("walk-8").replace("false", "true")).unwrap();
+    git(vault, &["commit", "-qam", "restore walk-8"]);
+    let (exit, v) = bp_env(code, &[("BP_VAULT", vault.to_str().unwrap())], &["stamp", "projects/bp/milestones/o"]);
+    let asked = serde_json::json!([{ "waiver": format!("{M}/waivers/walk-8-2"), "verdict": "pass" }]);
+    assert_eq!((exit, &v["reasked"]), (Some(0), &asked), "{v}");
 }
