@@ -183,6 +183,20 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     assert_eq!(git(v, &["status", "--porcelain"]), "");
 }
 
+/// `check` on an issue with a held claim runs at the claim's worktree head, as `pr` does, wherever the caller stands.
+#[test]
+fn check_runs_the_blocks_in_the_held_claims_worktree() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    let h = commit(&w, &["add", "hello.txt"], "hello");
+    let (code, out) = bp(v, t, &[], &["check", ISSUE]);
+    assert_eq!((code, &out["runs"][0]["verdict"]), (Some(0), &json!("pass")), "run from the clone root: {out}");
+    assert!(out["runs"][0]["id"].as_str().unwrap().starts_with(&format!("{ISSUE}/runs/hello-{h}")), "{out}");
+}
+
 /// Complete's stop: a pull request at the claim's head, and a passing run of each error block there. `pr` opens the
 /// pull request even when it refuses `check_failed`, so the open pull request alone is no stop (27, issue 8).
 #[test]

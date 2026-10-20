@@ -204,13 +204,14 @@ fn deliberate_needs_the_thread_closed_and_a_decision_citing_it() {
 }
 
 #[test]
-fn complete_is_done_when_the_latest_claim_is_released_escalated() {
+fn complete_and_respond_are_done_when_the_latest_claim_is_released_escalated() {
     let d = vault();
     let claim = format!(
         "---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n\n## Released\n\nto: 2026-10-16T01:00:00Z\nreason: escalated\n"
     );
     write(d.path(), &format!("{SEED}/claims/c.md"), &claim);
     assert_eq!(done(d.path(), None, SEED, "complete"), true);
+    assert_eq!(done(d.path(), None, SEED, "respond"), true, "no claim is held, so no head is in view to move");
 }
 
 #[test]

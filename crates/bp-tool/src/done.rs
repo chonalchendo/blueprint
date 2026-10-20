@@ -42,11 +42,9 @@ pub(crate) fn done(
             index.list(&f)?.1 > 0
         }
         Action::Derive => derived(index, id)?,
+        // A worker that cannot finish releases the claim `escalated`, and that ends its dispatch (21).
+        Action::Complete | Action::Respond if escalated(index, id)? => true,
         Action::Complete => {
-            let claims = crate::intent::claims(&index.records(id.as_str(), Kind::Claim)?);
-            if intents::latest_claim(&claims).is_some_and(|c| c.escalated) {
-                return Ok(true);
-            }
             // An open pull request is not done until each error block passes at its head: `pr` opens one even
             // when it refuses `check_failed` (27, issue 8).
             match open_head(&vault.root, index, id, forge_age)? {
@@ -130,6 +128,12 @@ fn names(body: &str, heading: &str) -> BTreeSet<String> {
         out.extend(bp_check::named(&Body::parse(&s.text)).into_iter().map(|c| c.attrs["name"].clone()));
     }
     out
+}
+
+/// The latest claim of the issue is released `escalated`.
+fn escalated(index: &Index, id: &Id) -> Result<bool, Refusal> {
+    let claims = crate::intent::claims(&index.records(id.as_str(), Kind::Claim)?);
+    Ok(intents::latest_claim(&claims).is_some_and(|c| c.escalated))
 }
 
 /// Every finding of the latest review has a disposition, matched by its index, and the head moved if one is `fixed`.

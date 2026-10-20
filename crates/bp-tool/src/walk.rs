@@ -106,7 +106,9 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     if walk.ids {
         // The map keeps the fill's order: conventions close the tail (21).
         let (conventions, rest): (Vec<_>, Vec<_>) = reached.iter().partition(|r| r.kind == Kind::Convention);
-        let answered = records.iter().map(|r| serde_json::json!({ "id": r["id"], "kind": r["kind"] }));
+        let answered = records
+            .iter()
+            .map(|r| serde_json::json!({ "id": r["id"], "kind": r["kind"], "title": null, "rank": null }));
         let ids: Vec<Value> = answered.chain(rest.into_iter().chain(conventions).map(line)).collect();
         return Ok(serde_json::json!({ "seed": id, "for": action, "ids": ids, "intents": intents }));
     }
