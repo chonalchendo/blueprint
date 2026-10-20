@@ -131,3 +131,46 @@ fn a_record_seed_and_a_deep_walk_are_refused() {
     let (code, v) = walk(d.path(), &[SEED, "--for", "complete", "--depth", "9"]);
     assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "{v}");
 }
+
+#[test]
+fn done_answers_the_stop_column_with_no_slice() {
+    let d = vault();
+    let (code, v) = walk(d.path(), &[SEED, "--for", "complete", "--done"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v, serde_json::json!({ "id": SEED, "for": "complete", "done": false, "contract_version": 1 }));
+    for (seed, action) in [("projects/bp/designs/system", "design"), ("projects/bp/designs/system", "shape")] {
+        let (_, v) = walk(d.path(), &[seed, "--for", action, "--done"]);
+        assert_eq!(v["done"], true, "{action}: {v}");
+    }
+    // No issue is under the new milestone, so the batch is short, and its finish line names a block none holds.
+    let n = "projects/bp/milestones/n";
+    let block = |name: &str| format!("```check shell {{name={name}}}\ntrue\n```\n");
+    let fin = format!("---\nkind: milestone\ntitle: N\nstatus: approved\n---\n\n## Finish line\n\n{}", block("fin"));
+    write(d.path(), &format!("{n}.md"), &fin);
+    let derived = |d: &Path| walk(d, &[n, "--for", "derive", "--done"]).1["done"].clone();
+    assert_eq!(derived(d.path()), false);
+    let issue = format!("---\nkind: issue\ntitle: C\nstatus: open\nunder: {n}\n---\n\n## Check\n\n{}", block("fin"));
+    write(d.path(), "projects/bp/issues/0003.covers.md", &issue);
+    assert_eq!(derived(d.path()), true, "an issue's block covers the finish line");
+    std::fs::remove_file(d.path().join("projects/bp/milestones/m.md")).unwrap();
+    let (_, v) = walk(d.path(), &["projects/bp/designs/system", "--for", "shape", "--done"]);
+    assert_eq!(v["done"], false, "no milestone is planned: {v}");
+}
+
+#[test]
+fn deliberate_is_done_when_the_thread_is_closed_and_a_decision_cites_it() {
+    let d = vault();
+    let thread = "projects/bp/threads/why";
+    let at = |status: &str| format!("---\nkind: thread\ntitle: Why\nstatus: {status}\n---\n\nThe question.\n");
+    write(d.path(), &format!("{thread}.md"), &at("open"));
+    let done = |d: &Path| walk(d, &[thread, "--for", "deliberate", "--done"]).1["done"].clone();
+    assert_eq!(done(d.path()), false);
+    write(d.path(), &format!("{thread}.md"), &at("closed"));
+    assert_eq!(done(d.path()), false, "no decision cites it yet");
+    let decision = format!("---\nkind: decision\ntitle: Because\nstatus: accepted\n---\n\nFrom [[{thread}]].\n");
+    write(d.path(), "projects/bp/decisions/because.md", &decision);
+    assert_eq!(done(d.path()), true);
+    let (code, v) = walk(d.path(), &[thread, "--for", "deliberate"]);
+    assert_eq!((code, v["budget"].as_u64()), (Some(0), Some(8000)), "{v}");
+    assert!(ids(&v["bodies"]).contains(&"projects/bp/decisions/because"), "a decision is a body: {v}");
+}
