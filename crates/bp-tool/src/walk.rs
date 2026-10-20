@@ -1,4 +1,5 @@
 //! `bp walk <id> --for <action>`: the ranked slice an action needs, under its budget, with the scope's intents (21).
+//! `--done` answers the action's stop instead (27, design change 11).
 
 use std::path::Path;
 
@@ -9,12 +10,13 @@ use serde_json::Value;
 
 use crate::{intent, node_id, subject, unknown};
 
-/// `bp walk <id> --for <action> [--budget <tokens>] [--depth <hops>] [--ids]`.
+/// `bp walk <id> --for <action> [--budget <tokens>] [--depth <hops>] [--ids] [--done]`.
 #[derive(Args)]
 pub struct Walk {
-    /// The seed: an issue for complete, review and respond; a milestone for derive.
+    /// The seed: an issue for complete, review and respond; a milestone for derive; a thread for deliberate.
     pub id: String,
-    /// The action: complete, review, respond, derive, design, shape, research, triage-drift, distil, capture.
+    /// The action: complete, review, respond, derive, design, shape, research, triage-drift, deliberate, distil,
+    /// capture.
     #[arg(long = "for")]
     pub action: String,
     /// The token budget; the action's own by default (21).
@@ -26,6 +28,9 @@ pub struct Walk {
     /// The map only: every reached id in rank order, no bodies.
     #[arg(long)]
     pub ids: bool,
+    /// The action's stop only: `{id, for, done}`, no slice (21, rule 4).
+    #[arg(long, conflicts_with = "ids")]
+    pub done: bool,
 }
 
 pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
@@ -36,7 +41,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     node_id(&walk.id)?;
     let vault = Vault::discover(cwd)?;
     let index = Index::open(&vault)?;
-    let _reading = index.reading()?;
+    let reading = index.reading()?;
     let id = subject(&index, &walk.id)?;
     let header = index.header(id.as_str())?.ok_or_else(|| {
         vault.unparsed(&id).unwrap_or_else(|| {
@@ -57,6 +62,12 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             "an action walks only from its seed kinds (21)",
             format!("{action} walks from: {}; bp list {} --json", kinds.join(", "), kinds[0]),
         ));
+    }
+    if walk.done {
+        // A stop reads a few rows, and `list` opens its own read transaction.
+        drop(reading);
+        let done = crate::done::done(&index, &id, &header, action)?;
+        return Ok(serde_json::json!({ "id": id, "for": action, "done": done }));
     }
     context(&vault, &index, &id, action)?;
     let mut reached = index.reach(id.as_str(), usize::from(walk.depth))?;

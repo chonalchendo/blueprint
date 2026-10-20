@@ -301,8 +301,14 @@ impl Index {
             };
             // Records carry no status, so a status filter on a record kind matches nothing.
             let status = if is_record { "?2 is null" } else { "(?2 is null or status = ?2)" };
-            let filter =
-                format!("where kind = ?1 and {status} and (?3 is null or project = ?3) and (?4 is null or under = ?4)");
+            // A node's children come from the `under` links, which are indexed by target; `nodes.under` is not. The
+            // plan is made before the bind, so a clause that holds for any `?4` would scan the kind, and `+kind`
+            // keeps the kind's index from winning over the ids.
+            let (kind, children) = match (f.under, is_record) {
+                (Some(_), false) => ("+kind", "id in (select src from links where dst = ?4 and type = 'under')"),
+                _ => ("kind", "(?4 is null or under = ?4)"),
+            };
+            let filter = format!("where {kind} = ?1 and {status} and (?3 is null or project = ?3) and {children}");
             let under = f.under;
             let limit = i64::try_from(f.limit).unwrap_or(i64::MAX);
             let total = tx.query_row(

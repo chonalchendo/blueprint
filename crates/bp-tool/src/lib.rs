@@ -5,6 +5,7 @@ mod check;
 mod claim;
 mod clock;
 mod create;
+mod done;
 mod intent;
 mod land;
 mod link;

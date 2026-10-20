@@ -15,6 +15,7 @@ bp_vault::closed_enum! {
         Review = "review",
         Respond = "respond",
         TriageDrift = "triage-drift",
+        Deliberate = "deliberate",
         Distil = "distil",
         Capture = "capture",
         Research = "research",
@@ -51,7 +52,7 @@ impl Action {
         match self {
             Self::Complete | Self::Respond => 15_000,
             Self::Design | Self::Shape | Self::Derive => 10_000,
-            Self::Review | Self::Research => 8_000,
+            Self::Review | Self::Research | Self::Deliberate => 8_000,
             Self::TriageDrift | Self::Distil | Self::Capture => 4_000,
         }
     }
@@ -61,6 +62,7 @@ impl Action {
         match self {
             Self::Complete | Self::Review | Self::Respond => &[Kind::Issue],
             Self::Derive => &[Kind::Milestone],
+            Self::Deliberate => &[Kind::Thread],
             Self::Design | Self::Shape | Self::TriageDrift | Self::Research => &[Kind::Design, Kind::Project],
             Self::Distil | Self::Capture => &NODES,
         }
@@ -75,6 +77,7 @@ impl Action {
             Self::Design | Self::Research => &[Kind::Design, Kind::Project],
             Self::Shape => &[Kind::Design, Kind::Learning],
             Self::Derive => &[Kind::Milestone, Kind::Design, Kind::Issue],
+            Self::Deliberate => &[Kind::Decision, Kind::Thread],
             Self::Distil => &[Kind::Learning],
             Self::Capture => &[],
         }
