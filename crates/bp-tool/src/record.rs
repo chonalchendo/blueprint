@@ -167,7 +167,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
         return Err(Refusal::usage("--external", "give the forge URI the record names, or leave the flag out"));
     }
     let body = match &r.body_file {
-        Some(p) => std::fs::read_to_string(p).map_err(|e| Refusal::failed(p.display().to_string(), e.to_string()))?,
+        Some(p) => crate::create::body_file(p)?,
         None => String::new(),
     };
     if kind == Kind::Delta && body.trim().is_empty() {
@@ -229,15 +229,16 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
         text = format!("{text}\n{body}");
     }
     // The parent and each link target are committed, so the record cites HEAD, not a human's work in progress
-    // (25, design change 1); the record's own path is clean too.
-    if let Some(w) = &mut writer {
-        let links = spec.fields.iter().filter(|(_, ty, _)| matches!(ty, Type::Link(_)));
-        let targets: Vec<Id> = links
-            .filter_map(|(name, _, _)| Id::parse(header.fields.get(*name)?.as_str()?).ok())
-            .chain(parent.clone())
-            .chain([id.clone()])
-            .collect();
-        w.clean(&targets)?;
+    // (25, design change 1); the record's own path is clean too. A dry run refuses what the write would.
+    let links = spec.fields.iter().filter(|(_, ty, _)| matches!(ty, Type::Link(_)));
+    let targets: Vec<Id> = links
+        .filter_map(|(name, _, _)| Id::parse(header.fields.get(*name)?.as_str()?).ok())
+        .chain(parent.clone())
+        .chain([id.clone()])
+        .collect();
+    match &mut writer {
+        Some(w) => w.clean(&targets)?,
+        None => vault.clean(&targets)?,
     }
     if identity && let Some(already) = taken(&vault.root, &id, &text)? {
         return Ok(already);

@@ -76,9 +76,10 @@ pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
     let role = crate::set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
     let mut writer = if t.dry_run { None } else { Some(vault.writer()?) };
-    // A human's uncommitted edit refuses first, before its text is read (12, Write path).
-    if let Some(w) = &mut writer {
-        w.clean([&id])?;
+    // A human's uncommitted edit refuses first, dry run or not, before its text is read (12, Write path).
+    match &mut writer {
+        Some(w) => w.clean([&id])?,
+        None => vault.clean([&id])?,
     }
     let text = vault.text(&id)?;
     let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;

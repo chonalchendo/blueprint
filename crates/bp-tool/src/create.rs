@@ -46,19 +46,17 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     };
     schema::title(&format!("create {kind} title"), &create.title)?;
     let under = create.under.as_deref().map(node_id).transpose()?;
-    let body = match &create.body_file {
-        Some(path) => std::fs::read_to_string(path)
-            .map_err(|e| Refusal::failed(path.display().to_string(), format!("{e}; pass a readable UTF-8 file")))?,
-        None => String::new(),
-    };
+    let body = create.body_file.as_deref().map(body_file).transpose()?.unwrap_or_default();
     let vault = Vault::discover(cwd)?;
     let id = home(kind, create)?;
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
     let mut writer = if create.dry_run { None } else { Some(vault.writer()?) };
-    // A file at the id that is not committed refuses first, before anything is read or compared (12, Write path).
-    if let Some(w) = &mut writer {
-        w.clean([&id])?;
+    // A file at the id that is not committed refuses first, dry run or not, before anything is read or compared
+    // (12, Write path).
+    match &mut writer {
+        Some(w) => w.clean([&id])?,
+        None => vault.clean([&id])?,
     }
     let index = Index::open(&vault)?;
     if let Some(p) = id.project().filter(|_| kind != Kind::Project)
@@ -201,10 +199,27 @@ fn dated(slug: &str) -> bool {
             .all(|(i, c)| if matches!(i, 4 | 7 | 10) { *c == b'-' } else { c.is_ascii_digit() })
 }
 
+/// The text of a `--body-file`, which `create` and `set` read. A file that opens with a header is a node's file, not
+/// a body: stored, it would nest a second header under the node's own, and each repeat one more.
+pub(crate) fn body_file(path: &Path) -> Result<String, Refusal> {
+    let text = std::fs::read_to_string(path)
+        // The caller named a file the tool cannot read: a usage error, not a failure of the tool.
+        .map_err(|e| Refusal::usage(path.display().to_string(), format!("{e}; pass a readable UTF-8 file")))?;
+    if bp_vault::opens_with_header(&stored(&text)) {
+        return Err(Refusal::new(
+            Code::SchemaInvalid,
+            path.display().to_string(),
+            "a body file holds the body only; the header is the node's, and its verbs write it (25, issue 7)",
+            "pass the body only, without the header: bp show <id> --json | jq -r .body > <f>",
+        ));
+    }
+    Ok(text)
+}
+
 /// The body as stored: no BOM, LF line endings, no leading blank lines and no trailing whitespace. The first line
 /// keeps its indentation, so a body that opens with an indented code block stays one.
-fn stored(body: &str) -> String {
-    let body = body.strip_prefix('\u{feff}').unwrap_or(body).replace("\r\n", "\n");
+pub(crate) fn stored(body: &str) -> String {
+    let body = bp_vault::normalise(body);
     let mut rest = body.as_str();
     while let Some((line, after)) = rest.split_once('\n')
         && line.trim().is_empty()

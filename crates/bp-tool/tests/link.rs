@@ -117,3 +117,15 @@ fn a_dirty_source_refuses_path_dirty_before_the_comparison() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
     assert_eq!(commits(root), "1");
 }
+
+#[test]
+fn a_dry_run_refuses_a_dirty_source() {
+    let dir = vault();
+    let root = dir.path();
+    let path = root.join(format!("{A}.md"));
+    let edited = std::fs::read_to_string(&path).unwrap() + "HUMAN WORK\n";
+    std::fs::write(&path, &edited).unwrap();
+    let (code, v) = bp(root, &["link", A, "cites", SYSTEM, "--dry-run"]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+}

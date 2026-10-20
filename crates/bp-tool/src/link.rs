@@ -36,9 +36,10 @@ pub(crate) fn link(cwd: &Path, link: &Link) -> Result<Wrote, Refusal> {
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
     let mut writer = if link.dry_run { None } else { Some(vault.writer()?) };
-    // A human's uncommitted edit refuses first, before its text is read or compared (12, Write path).
-    if let Some(w) = &mut writer {
-        w.clean([&from])?;
+    // A human's uncommitted edit refuses first, dry run or not, before its text is read or compared (12, Write path).
+    match &mut writer {
+        Some(w) => w.clean([&from])?,
+        None => vault.clean([&from])?,
     }
     let index = Index::open(&vault)?;
     let text = vault.text(&from)?;

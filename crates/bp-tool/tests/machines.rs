@@ -191,6 +191,8 @@ fn the_fix_names_the_owning_verb_and_the_reason_is_the_body() {
     let (exit, v) = bp(root, &["transition", "projects/bp/issues/h", "abandoned"]);
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
     assert!(std::fs::read_to_string(&h).unwrap().contains("status: abandoned"), "the edit stays on disk");
+    let (exit, v) = bp(root, &["transition", "projects/bp/issues/h", "abandoned", "--dry-run"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "a dry run refuses as the write: {v}");
     git(root, &["checkout", "--", "projects/bp/issues/h.md"]);
     let (exit, v) = bp(root, &["transition", "projects/bp/issues/i", "closed"]);
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("unknown_value")), "{v}");
