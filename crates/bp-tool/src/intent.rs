@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use bp_change::intents::{self, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
+use bp_change::intents::{self, Block, Claim, Dependency, IntegrityRun, Issue, PullRequest, Verdict};
 use bp_forge::Snapshot;
 use bp_vault::{Id, Index, Kind, Refusal, Vault};
 use serde_json::{Map, Value};
@@ -35,6 +35,10 @@ impl World {
 
     fn pr(&self, id: &str) -> Option<&bp_forge::PullRequest> {
         self.forge.as_ref()?.open_for(id.rsplit('/').next()?)
+    }
+
+    fn merged(&self, id: &str) -> Option<&bp_forge::PullRequest> {
+        self.forge.as_ref()?.merged_for(id.rsplit('/').next()?)
     }
 }
 
@@ -119,32 +123,69 @@ fn of(
             }
         })
         .collect();
-    let runs = index
-        .records(id, Kind::Run)?
-        .iter()
-        .map(|r| intents::Run {
-            check: text(&r.header, "check").unwrap_or_default(),
-            at: text(&r.header, "at").and_then(|t| intents::timestamp(&t)),
-            commit: text(&r.header, "commit").unwrap_or_default(),
-            attempt: r.header.get("attempt").and_then(Value::as_u64).unwrap_or_default(),
-            // A converted run has no severity; a block's default is `error` (15).
-            error: text(&r.header, "severity").is_none_or(|s| s != "warn"),
-            failed: matches!(text(&r.header, "verdict").as_deref(), Some("fail" | "timed-out")),
-        })
-        .collect();
+    let runs = runs(index, id)?;
     let review_heads = index.records(id, Kind::Review)?.iter().filter_map(|r| text(&r.header, "head")).collect();
-    let pr = world.pr(id).map(|p| PullRequest {
-        head: p.head_ref_oid.clone(),
-        green: p.is_green(),
-        approved: p.is_approved(&p.head_ref_oid),
-    });
+    // A merged pull request under a held claim is a land that stopped before its commit: `land` finishes it, through
+    // the same gates.
+    let held = claims.iter().any(|c| c.released.is_none());
+    let open = world.pr(id).or_else(|| world.merged(id).filter(|_| held));
+    // The body and the reviewer matter only to needs landing, which needs a pull request.
+    let (pr, blocks) = match open {
+        Some(p) => (Some(pull_request(p, &reviewer(index, id)?)), blocks(vault, id)?),
+        None => (None, Vec::new()),
+    };
     // Git is asked only when an escalation needs the answer: one process per escalated issue, none otherwise.
     let answered = intents::latest_claim(&claims).filter(|c| c.escalated).is_some_and(|latest| {
         let record = &records[claims.iter().position(|c| std::ptr::eq(c, latest)).expect("the latest is one of them")];
         Id::parse(id).ok().zip(Id::parse(&record.id).ok()).is_some_and(|(id, claim)| vault.touched_after(&id, &claim))
     });
-    let issue = Issue { status: status.into(), claims, runs, review_heads, depends, pr, answered, integrity };
+    let issue = Issue { status: status.into(), claims, runs, blocks, review_heads, depends, pr, answered, integrity };
     Ok(intents::issue(&issue, world.now))
+}
+
+/// The issue's run records, reduced.
+pub(crate) fn runs(index: &Index, id: &str) -> Result<Vec<intents::Run>, Refusal> {
+    Ok(index
+        .records(id, Kind::Run)?
+        .iter()
+        .map(|r| {
+            let verdict = text(&r.header, "verdict");
+            intents::Run {
+                id: r.id.clone(),
+                check: text(&r.header, "check").unwrap_or_default(),
+                check_hash: text(&r.header, "check_hash").unwrap_or_default(),
+                at: text(&r.header, "at").and_then(|t| intents::timestamp(&t)),
+                commit: text(&r.header, "commit").unwrap_or_default(),
+                attempt: r.header.get("attempt").and_then(Value::as_u64).unwrap_or_default(),
+                // A converted run has no severity; a block's default is `error` (15).
+                error: text(&r.header, "severity").is_none_or(|s| s != "warn"),
+                failed: matches!(verdict.as_deref(), Some("fail" | "timed-out")),
+                passed: matches!(verdict.as_deref(), Some("pass" | "skipped")),
+            }
+        })
+        .collect())
+}
+
+/// The issue's named `error` blocks: each needs a passing run of its current text at the head before a land.
+pub(crate) fn blocks(vault: &Vault, id: &str) -> Result<Vec<Block>, Refusal> {
+    let file = vault.read(&Id::parse(id).expect("the index holds ids"))?;
+    let named = bp_check::named(&file.body).into_iter().filter(|c| bp_check::is_error(c));
+    Ok(named.map(|c| Block { name: c.attrs["name"].clone(), hash: bp_check::hash(c) }).collect())
+}
+
+/// The project's reviewer identity, the forge login whose approval alone counts; empty when unset (13, Project).
+pub(crate) fn reviewer(index: &Index, id: &str) -> Result<String, Refusal> {
+    let project = Id::parse(id).ok().and_then(|i| i.project().map(str::to_string)).unwrap_or_default();
+    Ok(index.header(&format!("projects/{project}/project"))?.and_then(|h| text(&h, "reviewer")).unwrap_or_default())
+}
+
+/// The forge's pull request as the predicates read it: its head, green, and the reviewer's approval at the head.
+pub(crate) fn pull_request(p: &bp_forge::PullRequest, reviewer: &str) -> PullRequest {
+    PullRequest {
+        head: p.head_ref_oid.clone(),
+        green: p.is_green(),
+        approved: p.is_approved(&p.head_ref_oid, reviewer),
+    }
 }
 
 /// One integrity run's header, reduced. A run the check wrote always has these fields; one without them never counts.

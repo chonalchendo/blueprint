@@ -90,7 +90,12 @@ impl Gh {
             let err = String::from_utf8_lossy(&out.stderr);
             return Err(Refusal::failed(
                 Self::subject(args),
-                format!("gh exited {}: {}; run the call by hand in {}", out.status, err.trim(), self.dir.display()),
+                format!(
+                    "gh exited {}: {}; fix the cause in {}, then rerun",
+                    out.status,
+                    err.trim(),
+                    self.dir.display()
+                ),
             ));
         }
         Ok(out.stdout)

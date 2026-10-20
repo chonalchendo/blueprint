@@ -21,7 +21,8 @@ use crate::{Wrote, node_id, subject};
 pub struct Cut {
     /// The issue, for example `projects/bp/issues/cut-and-release`.
     pub issue: String,
-    /// The commit to cut from, any ref git resolves; origin's default branch when absent.
+    /// The commit to cut from, any ref git resolves; origin's default branch when absent. An origin branch it names is
+    /// the one the pull request targets.
     #[arg(long)]
     pub base: Option<String>,
 }
@@ -44,7 +45,7 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
     let index = Index::open(&vault)?;
     let id = subject(&index, &c.issue)?;
     let (project, slug) = (id.project().unwrap_or_default(), id.as_str().rsplit('/').next().unwrap_or_default());
-    let branch = format!("{project}/{slug}");
+    let branch = branch(&id);
     let top = clone_of(cwd, &index, project)?;
     let worktree = place(&top, slug)?;
     // The fetch has no time bound, so it runs with no lock held: every refusal comes before it and holds under the
@@ -67,6 +68,12 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
             ),
             None => Refusal::failed(e.subject, "origin has no default branch here: git remote set-head origin --auto"),
         })?;
+    // The pull request targets the origin branch `--base` names, else origin's default: never a branch it lacks.
+    let named = c.base.as_deref().and_then(|b| git(&top, &["rev-parse", "--symbolic-full-name", b]).ok());
+    let base_branch = match named.as_deref().and_then(|r| r.strip_prefix("refs/remotes/origin/")) {
+        Some(b) if b != "HEAD" => b.to_string(),
+        _ => default_branch(&top)?,
+    };
     let mut writer = vault.writer()?;
     let from = crate::clock::instant(crate::clock::now()?);
     let claim = crate::record::free(&vault.root, &format!("{id}/{}/{}", Kind::Claim.dir(), from.replace(':', "-")));
@@ -83,6 +90,7 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
         ("owner".into(), role.as_str().into()),
         ("worktree".into(), worktree.display().to_string().into()),
         ("base".into(), base.clone().into()),
+        ("base_branch".into(), base_branch.as_str().into()),
     ]);
     if let Some(s) = &session {
         fields.insert("session".into(), s.as_str().into());
@@ -119,6 +127,7 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
         "branch": branch,
         "worktree": worktree,
         "base": base,
+        "base_branch": base_branch,
         "commit": written.commit,
         "findings": written.findings,
     })))
@@ -135,9 +144,7 @@ pub(crate) fn release(cwd: &Path, r: &Release) -> Result<Wrote, Refusal> {
     writer.clean([&id, &claim])?;
     let text = vault.text(&id)?;
     let to = crate::clock::instant(crate::clock::now()?);
-    let released =
-        format!("{}\n\n## Released\n\nto: {to}\nreason: {}\n", vault.text(&claim)?.trim_end_matches('\n'), r.reason);
-    let mut changes = BTreeMap::from([(claim.clone(), released)]);
+    let mut changes = BTreeMap::from([(claim.clone(), released(&vault.text(&claim)?, &to, &r.reason, ""))]);
     // A converted claim may sit on an issue whose status never moved (21, check 2); only `in-progress` returns.
     let was = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?.header.and_then(|h| h.status);
     if was.as_deref() == Some("in-progress") {
@@ -156,6 +163,11 @@ pub(crate) fn release(cwd: &Path, r: &Release) -> Result<Wrote, Refusal> {
     })))
 }
 
+/// The claim's text with its closing append (13, Claim): `to`, `reason`, then `more`, whole `key: value` lines.
+pub(crate) fn released(claim: &str, to: &str, reason: &str, more: &str) -> String {
+    format!("{}\n\n## Released\n\nto: {to}\nreason: {reason}\n{more}", claim.trim_end_matches('\n'))
+}
+
 /// The claim and status `cut` starts from: the active claim's repeat (exit 3, its fields) or `already_claimed`, then
 /// `illegal_transition` unless the issue (`text`) is `open`.
 fn gate(
@@ -169,8 +181,10 @@ fn gate(
     if let Some(h) = held(index, id)? {
         let (owner, held_session) = (field(&h, "owner"), field(&h, "session"));
         if owner.as_deref() == Some(role) && held_session.as_deref() == session {
-            let (worktree, base) = (field(&h, "worktree"), field(&h, "base"));
-            return Ok(Some(json!({ "id": id, "claim": h.id, "branch": branch, "worktree": worktree, "base": base })));
+            let (worktree, base, base_branch) = (field(&h, "worktree"), field(&h, "base"), field(&h, "base_branch"));
+            return Ok(Some(
+                json!({ "id": id, "claim": h.id, "branch": branch, "worktree": worktree, "base": base, "base_branch": base_branch }),
+            ));
         }
         let by = owner.unwrap_or_default();
         let by = held_session.map_or(by.clone(), |s| format!("{by}, session {s}"));
@@ -184,27 +198,43 @@ fn gate(
     let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
     let status = file.header.as_ref().filter(|h| h.kind == Kind::Issue).and_then(|h| h.status.clone());
     if status.as_deref() != Some("open") {
-        let fix = match status.as_deref() {
-            Some("abandoned") => format!("bp transition {id} open, then bp cut {id}"),
-            Some("in-progress") => {
-                format!("{id} is in-progress with no active claim (21, check 2); no verb moves it yet")
-            }
-            Some(s) => format!("an issue at {s} is not claimed again; bp show {id}"),
-            None => format!("cut claims an issue; bp show {id}"),
-        };
         return Err(Refusal::new(
             Code::IllegalTransition,
             format!("{id} in-progress"),
             "cut moves an issue from open to in-progress (25, design change 3)",
-            fix,
+            unclaimed(id, status.as_deref()),
         ));
     }
     Ok(None)
 }
 
+/// The fix for an issue at `status` with no active claim: the verb that moves it to where its next verb starts.
+pub(crate) fn unclaimed(id: &Id, status: Option<&str>) -> String {
+    match status {
+        Some("open") => format!("bp cut {id}, then rerun"),
+        Some("abandoned") => format!("bp transition {id} open, then bp cut {id}"),
+        Some("in-progress") => format!("{id} is in-progress with no active claim (21, check 2); no verb moves it yet"),
+        Some(s) => format!("an issue at {s} is not claimed again; bp show {id}"),
+        None => format!("cut claims an issue; bp show {id}"),
+    }
+}
+
+/// The claim's branch: `<project>/<slug>` (26, design change 2).
+pub(crate) fn branch(id: &Id) -> String {
+    format!("{}/{}", id.project().unwrap_or_default(), id.as_str().rsplit('/').next().unwrap_or_default())
+}
+
+/// Origin's default branch, the base of a claim whose `--base` names no origin branch.
+pub(crate) fn default_branch(top: &Path) -> Result<String, Refusal> {
+    let head = git(top, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).map_err(|e| {
+        Refusal::failed(e.subject, "origin has no default branch here: git remote set-head origin --auto")
+    })?;
+    Ok(head.strip_prefix("origin/").unwrap_or(&head).to_string())
+}
+
 /// The top of the clone of `project`'s repository that holds `cwd`: a repo verb runs nowhere else (26, design change
 /// 2).
-fn clone_of(cwd: &Path, index: &Index, project: &str) -> Result<PathBuf, Refusal> {
+pub(crate) fn clone_of(cwd: &Path, index: &Index, project: &str) -> Result<PathBuf, Refusal> {
     let repository = index
         .header(&format!("projects/{project}/project"))?
         .and_then(|h| h.get("repository")?.as_str().map(str::to_string))
@@ -257,7 +287,7 @@ fn attach(top: &Path, worktree: &Path, branch: &str, start: &str) -> Result<Adde
 }
 
 /// The issue's active claim: the latest with no `to` (13, at most one).
-fn held(index: &Index, issue: &Id) -> Result<Option<Record>, Refusal> {
+pub(crate) fn held(index: &Index, issue: &Id) -> Result<Option<Record>, Refusal> {
     Ok(index
         .records(issue.as_str(), Kind::Claim)?
         .into_iter()
@@ -265,7 +295,7 @@ fn held(index: &Index, issue: &Id) -> Result<Option<Record>, Refusal> {
         .find(|c| intents::release(&c.body).get("to").is_none_or(String::is_empty)))
 }
 
-fn field(r: &Record, name: &str) -> Option<String> {
+pub(crate) fn field(r: &Record, name: &str) -> Option<String> {
     r.header.get(name).and_then(Value::as_str).map(str::to_string)
 }
 
@@ -286,7 +316,7 @@ fn checked_out(path: &Path) -> Option<String> {
 }
 
 /// Runs git in the code repository and returns its stdout, trimmed. A failure is `could_not_run` with git's own words.
-fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)

@@ -6,6 +6,7 @@ mod claim;
 mod clock;
 mod create;
 mod intent;
+mod land;
 mod link;
 mod record;
 mod rename;
@@ -76,6 +77,10 @@ pub enum Verb {
     Cut(claim::Cut),
     /// Close the issue's active claim with a reason; the issue returns to `open` and the worktree stays.
     Release(claim::Release),
+    /// Push the claim's branch, open or update its pull request, and run and commit the issue's blocks at the head.
+    Pr(land::Pr),
+    /// Merge the approved, green pull request at its head; release the claim `landed` and resolve the issue.
+    Land(land::Land),
     /// Run the owner's check blocks; one run record per block, one commit.
     Check(check::Check),
     /// Accept an approved milestone: its finish line, its deltas written into their designs, a blueprint version and
@@ -172,6 +177,8 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
         Verb::Cut(c) => wrote(claim::cut(cwd, c), cli.json, out),
         Verb::Release(r) => wrote(claim::release(cwd, r), cli.json, out),
+        Verb::Pr(p) => land::run_pr(cwd, p, cli.json, out),
+        Verb::Land(l) => wrote(land::land(cwd, l), cli.json, out),
         Verb::Check(c) => check::run(cwd, c, cli.json, out),
         Verb::Stamp(s) => stamp::run(cwd, s, cli.json, out),
     }

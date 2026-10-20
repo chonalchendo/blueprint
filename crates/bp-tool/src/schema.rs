@@ -79,8 +79,8 @@ pub fn parents(kind: Kind) -> &'static [Kind] {
 }
 
 /// Every label field of any kind, for the fix that lists one kind's.
-const LABELS: [&str; 9] =
-    ["title", "tags", "applies", "class", "repository", "forge", "cue", "severity", "walkthrough"];
+const LABELS: [&str; 10] =
+    ["title", "tags", "applies", "class", "repository", "forge", "reviewer", "cue", "severity", "walkthrough"];
 
 /// What a label holds.
 enum Vocab {
@@ -101,7 +101,7 @@ fn vocab(kind: Kind, field: &str) -> Option<Vocab> {
         Vocab::Closed(all.iter().map(|v| text(*v)).collect())
     }
     Some(match (kind, field) {
-        (_, "title") | (Kind::Project, "repository" | "forge") | (Kind::Learning, "cue") => Vocab::Text,
+        (_, "title") | (Kind::Project, "repository" | "forge" | "reviewer") | (Kind::Learning, "cue") => Vocab::Text,
         (_, "tags") | (Kind::Convention, "applies") => Vocab::Tags,
         (Kind::Project, "class") => closed(ProjectClass::ALL, ProjectClass::as_str),
         (Kind::Issue, "severity") => closed(Severity::ALL, Severity::as_str),

@@ -22,6 +22,7 @@ crate::closed_enum! {
         ChecksPending = "checks_pending",
         DiffChanged = "diff_changed",
         BaseUnmerged = "base_unmerged",
+        BaseMismatch = "base_mismatch",
         BundleMismatch = "bundle_mismatch",
         ForgePrecondition = "forge_precondition",
         SchemaNewer = "schema_newer",
@@ -39,6 +40,7 @@ crate::closed_enum! {
         CheckFailed = "check_failed",
         IssuesOpen = "issues_open",
         EvidenceStale = "evidence_stale",
+        ReviewerInvalid = "reviewer_invalid",
     }
 }
 
