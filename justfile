@@ -15,9 +15,10 @@ lint:
     cargo deny check
     cargo machete
 
-# The crate rule (23): every workspace edge is in crate-rule.txt.
+# The crate rule (23): every workspace edge is in crate-rule.txt. The file cap (22): no non-test file over 500 lines.
 deps:
     cargo xtask deps
+    cargo xtask lines
 
 # Everything CI runs, in CI's order.
 ci: lint deps test build
