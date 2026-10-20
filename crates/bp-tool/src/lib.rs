@@ -32,6 +32,9 @@ use serde_json::Value;
 /// The contract version every `--json` result carries (15). A breaking change to a result bumps it.
 pub const CONTRACT: u32 = 1;
 
+/// No limit on a `list` read: every row.
+pub(crate) const ALL: usize = usize::MAX >> 1;
+
 /// Every successful result: the verb's own fields and the contract version.
 #[derive(Serialize)]
 pub(crate) struct Envelope<T: Serialize> {
@@ -359,7 +362,7 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
         status: if ready { Some("open") } else { list.status.as_deref() },
         project: list.project.as_deref(),
         under: under.as_ref().map(Id::as_str),
-        limit: if ready { usize::MAX >> 1 } else { list.limit },
+        limit: if ready { crate::ALL } else { list.limit },
     };
     let (rows, total) = index.list(&filter)?;
     if !matches!(kind_value, Kind::Issue | Kind::Milestone) {

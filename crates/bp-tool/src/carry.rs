@@ -1,21 +1,29 @@
 //! What a pull request carries (27, design change 8; 13, Delta): each proposed delta the issue caused, and each named
 //! block of the issue, its milestone or such a delta whose `check_hash` changed since the claim. The body names a
 //! changed block and the `bp show` commands for its two texts, never the text, so a weakened block reaches the
-//! reviewer as a row to read, not as prose to trust (E3).
+//! reviewer as a row to read, not as prose to trust (E3). The check set binds those blocks to the approval: the head
+//! names the set by a `Bp-Checks` trailer, and a changed set needs a push, which dismisses each approval (15,
+//! Controls 1).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
-use bp_vault::{Body, DeltaState, Filter, Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Body, Code, DeltaState, Filter, Id, Index, Kind, Refusal, Vault};
 use serde_json::{Value, json};
 
 use crate::claim::git;
 
-/// The deltas and the block changes, in the order the body lists them.
+/// The deltas and the block changes, in the order the body lists them, and the check set now and at the claim.
 pub(crate) struct Carried {
     issue: Id,
     pub(crate) deltas: Vec<Id>,
     changes: Vec<Change>,
+    set: String,
+    claimed: String,
 }
+
+/// Each named block's hash, and whether it is an error block, by name.
+type Blocks = BTreeMap<String, (String, bool)>;
 
 /// One named block whose hash differs from its hash at the claim's commit.
 struct Change {
@@ -28,13 +36,23 @@ struct Change {
     now: String,
 }
 
-/// Reads what `issue` carries under `claim`. A delta's blocks are compared with its design's at the claim, as its
-/// body is the proposed design body.
-pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id, claim: &str) -> Result<Carried, Refusal> {
-    let at = git(&vault.root, &["log", "--diff-filter=A", "--format=%H", "-1", "--", &format!("./{claim}.md")])?;
+/// Reads what `issue` carries. "Since the claim" is the commit that added the issue's earliest claim, under any id
+/// the issue had, so neither `release` and `cut` again nor a `rename` moves the baseline past a change. Each owner is
+/// read at that commit under the id it had there. A delta's blocks are compared with its design's then, as its body
+/// is the proposed design body.
+pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id) -> Result<Carried, Refusal> {
+    let claims = index.records(issue.as_str(), Kind::Claim)?;
+    let first = &claims.first().expect("pr and land act under a claim").id;
+    // A claim's path is its issue's id and a suffix a rename keeps. `--follow` is no help: it takes a sibling claim
+    // for a copy and follows it.
+    let suffix = &first[issue.as_str().len()..];
+    let ids = std::iter::once(issue.clone()).chain(index.aliases_of(issue)?);
+    let paths: Vec<String> = ids.map(|id| format!("./{id}{suffix}.md")).collect();
+    let args = ["log", "--diff-filter=A", "--format=%H", "--"].into_iter().chain(paths.iter().map(String::as_str));
+    let at = git(&vault.root, &args.collect::<Vec<_>>())?.lines().last().unwrap_or_default().to_string();
     let file = vault.read(issue)?;
     let project = issue.project().expect("an issue sits under a project");
-    let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: usize::MAX >> 1 };
+    let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: crate::ALL };
     let mut deltas = Vec::new();
     for row in index.list(&all)?.0 {
         let design = Id::parse(&row.id).expect("the index holds ids");
@@ -53,14 +71,17 @@ pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id, claim: &str) -> Res
         owners.push((m.clone(), m, blocks));
     }
     owners.extend(deltas.iter().map(|(d, design, body)| (d.clone(), design.clone(), hashes(body))));
-    let mut changes = Vec::new();
+    let (mut changes, mut set, mut claimed) = (Vec::new(), Vec::new(), Vec::new());
     for (owner, source, now) in owners {
-        // A file the claim's commit lacks had no blocks then. One today's schema cannot parse counts as none too:
-        // its blocks read as added, which the reviewer sees, where a refusal would stop every later `pr`.
-        let then = vault.read_at(&source, &at).map(|f| hashes(&f.body)).unwrap_or_default();
+        let (source, then) = then(vault, index, source, &at)?;
+        let errors =
+            |blocks: &Blocks| blocks.values().filter(|(_, error)| *error).map(|(h, _)| h.clone()).collect::<Vec<_>>();
+        set.extend(errors(&now));
+        claimed.extend(errors(&then));
         let names: BTreeSet<&String> = then.keys().chain(now.keys()).collect();
         for name in names {
-            let (from, to) = (then.get(name).cloned(), now.get(name).cloned());
+            let hash = |blocks: &Blocks| blocks.get(name).map(|(h, _)| h.clone());
+            let (from, to) = (hash(&then), hash(&now));
             if from != to {
                 let then = format!("bp show {source} --at {at}");
                 let now = format!("bp show {owner}");
@@ -68,15 +89,56 @@ pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id, claim: &str) -> Res
             }
         }
     }
-    Ok(Carried { issue: issue.clone(), deltas: deltas.into_iter().map(|(d, ..)| d).collect(), changes })
+    Ok(Carried {
+        issue: issue.clone(),
+        deltas: deltas.into_iter().map(|(d, ..)| d).collect(),
+        changes,
+        set: bp_check::set_hash(set.iter().map(String::as_str)),
+        claimed: bp_check::set_hash(claimed.iter().map(String::as_str)),
+    })
 }
 
-/// Each named block's hash, by name.
-fn hashes(body: &Body) -> BTreeMap<String, String> {
-    bp_check::named(body).into_iter().map(|c| (c.attrs["name"].clone(), bp_check::hash(c))).collect()
+/// The blocks of `id` at commit `at`, under the id it had there: today's, or a past one its aliases keep. A file the
+/// commit lacks had no blocks then. One today's schema cannot parse counts as none too: its blocks read as added,
+/// which the reviewer sees, where a refusal would stop every later `pr`.
+fn then(vault: &Vault, index: &Index, id: Id, at: &str) -> Result<(Id, Blocks), Refusal> {
+    for past in std::iter::once(id.clone()).chain(index.aliases_of(&id)?) {
+        match vault.read_at(&past, at) {
+            Ok(f) => return Ok((past, hashes(&f.body))),
+            Err(r) if r.code == Code::SchemaInvalid => return Ok((past, BTreeMap::new())),
+            Err(r) if r.code == Code::NoNode => {}
+            Err(r) => return Err(r),
+        }
+    }
+    Ok((id, BTreeMap::new()))
+}
+
+/// The named blocks of `body`.
+fn hashes(body: &Body) -> Blocks {
+    bp_check::named(body)
+        .into_iter()
+        .map(|c| (c.attrs["name"].clone(), (bp_check::hash(c), bp_check::is_error(c))))
+        .collect()
 }
 
 impl Carried {
+    /// Whether `commit` in `repo` names the check set now: its `Bp-Checks` trailer, else the set at the claim, which
+    /// holds until a `pr` pushes a trailer.
+    pub(crate) fn named_by(&self, repo: &Path, commit: &str) -> Result<bool, Refusal> {
+        let named = git(repo, &["log", "-1", "--format=%(trailers:key=Bp-Checks,valueonly)", commit])?;
+        Ok(named.lines().last().map_or(self.claimed.as_str(), str::trim) == self.set)
+    }
+
+    /// Puts an empty commit that names the set now on `head`, the worktree's branch, and returns it. Its push
+    /// dismisses each approval, so the reviewer approves again after reading the new rows. The index and the files
+    /// stay as they are.
+    pub(crate) fn name_set(&self, worktree: &Path, head: &str) -> Result<String, Refusal> {
+        let message = format!("bp: the check set changed\n\nBp-Checks: {}", self.set);
+        let commit = git(worktree, &["commit-tree", &format!("{head}^{{tree}}"), "-p", head, "-m", &message])?;
+        git(worktree, &["update-ref", "HEAD", &commit, head])?;
+        Ok(commit)
+    }
+
     /// The result's `check_changes`.
     pub(crate) fn changes(&self) -> Value {
         self.changes
@@ -88,6 +150,13 @@ impl Carried {
                 })
             })
             .collect()
+    }
+
+    /// Whether the forge's body is this body. A forge may store CRLF line ends or trim trailing whitespace, so both
+    /// sides compare with LF ends and no trailing whitespace; else every `pr` rewrites the body and none exits 3.
+    pub(crate) fn describes(&self, forge: &str) -> bool {
+        let plain = |b: &str| b.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim_end().to_string();
+        plain(forge) == plain(&self.body())
     }
 
     /// The pull request's body.

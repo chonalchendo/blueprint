@@ -1,10 +1,11 @@
 //! `bp pr <issue>` and `bp land <issue>`: the pull request and its merge (15, the repo verbs; 26, design changes 3,
 //! 4 and 6). `pr` runs the issue's blocks at the worktree's head with no lock held, pushes that head, opens or
 //! retargets the pull request, keeps its body current with what it carries (27, design change 8) and commits the
-//! runs. `land` reads the forge with no lock held and refuses on the reviewer, the base, the approval at the head,
-//! the forge check and the run evidence, in that order, for a pull request already merged too. It merges at the head
-//! it read and moves each layer cut from it onto the base. Then it removes the worktree and a branch the merged head
-//! holds, and commits the claim's release and the issue at `resolved`; the result names each moved layer's next step.
+//! runs; a changed check set first gets a commit that names it. `land` reads the forge with no lock held and refuses
+//! on the reviewer, the base, the approval at the head, the forge check, the run evidence and the check set the head
+//! names, in that order, for a pull request already merged too. It merges at the head it read and moves each layer
+//! cut from it onto the base. Then it removes the worktree and a branch the merged head holds, and commits the claim's
+//! release and the issue at `resolved`; the result names each moved layer's next step.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -37,7 +38,7 @@ pub struct Land {
 /// What a `pr` did: opened or found its head done, or committed the runs of a failed block and kept its push.
 enum Opened {
     Wrote(Wrote),
-    Failed { at: usize, commit: String, runs: Vec<bp_check::Run>, number: u64 },
+    Failed { at: usize, commit: String, runs: Vec<bp_check::Run>, listed: Value },
 }
 
 /// The active claim a repo verb acts under, where its work lives and the branch it lands on.
@@ -57,9 +58,9 @@ struct Claimed {
 pub(crate) fn run_pr(cwd: &Path, p: &Pr, json: bool, out: &mut impl std::io::Write) -> ExitCode {
     match pr(cwd, p) {
         Ok(Opened::Wrote(w)) => crate::wrote(Ok(w), json, out),
-        Ok(Opened::Failed { at, commit, runs, number }) => {
+        Ok(Opened::Failed { at, commit, runs, listed }) => {
             let then = format!("commit it and bp pr {}", p.issue);
-            crate::check::failed(&runs[at], &then, &commit, crate::check::rows(&runs), Some(number), json, out)
+            crate::check::failed(&runs[at], &then, &commit, crate::check::rows(&runs), Some(listed), json, out)
         }
         Err(refusal) => finish::<Value>(Err(refusal), json, out),
     }
@@ -94,15 +95,17 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     let head = git(&c.worktree, &["rev-parse", "HEAD"])?;
     let open = gh.prs_for_head(&c.branch)?.into_iter().find(PullRequest::is_open);
     let runs = crate::intent::runs(&index, id.as_str())?;
-    let carried = crate::carry::read(&vault, &index, &id, c.claim.as_str())?;
+    let carried = crate::carry::read(&vault, &index, &id)?;
     let body = carried.body();
     // The forge's body, read once: a stale one is rewritten at any head.
-    let stale = open.as_ref().map(|o| gh.body(o.number).map(|b| b != body)).transpose()?.unwrap_or(true);
-    // A failed, unrun or stale block at the head runs again; only passing evidence of each block and a current body
-    // is a repeat.
+    let stale = open.as_ref().map(|o| gh.body(o.number).map(|b| !carried.describes(&b))).transpose()?.unwrap_or(true);
+    let named = carried.named_by(&c.worktree, &head)?;
+    // A failed, unrun or stale block at the head runs again; only passing evidence of each block, a current body and
+    // a head that names the check set is a repeat.
     if let Some(o) = open.as_ref().filter(|o| o.head_ref_oid == head && o.base_ref_name.as_ref() == Some(&c.target))
         && intents::evidence(&runs, &head, &blocks).is_ok()
         && !stale
+        && named
     {
         return Ok(Opened::Wrote(Wrote::Already(json!({
             "id": id,
@@ -117,6 +120,10 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     let title = title.unwrap_or_else(|| id.to_string());
     // The blocks may take minutes, so they run with no lock held; a dirty worktree refuses here, before the push.
     drop(index);
+    // A changed check set goes to the forge as a commit, before the runs, so they name the head that is pushed.
+    if !named {
+        carried.name_set(&c.worktree, &head)?;
+    }
     let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
     let ran = bp_check::run(&vault, &id, &c.worktree, None, &[], &clock)?.expect("an error block is a named block");
     // The head the runs name is the one pushed, even if a commit landed in the worktree while they ran.
@@ -141,8 +148,9 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     let writer = ran.writer(&vault, &format!("bp pr {id}"))?;
     let (changes, runs) = ran.records(&vault);
     let written = writer.commit("pr", role.as_str(), &format!("pr {id}"), &changes)?;
+    let listed = json!({ "pull_request": number, "deltas": carried.deltas, "check_changes": carried.changes() });
     if let Some(at) = runs.iter().position(bp_check::Run::failed) {
-        return Ok(Opened::Failed { at, commit: written.commit, runs, number });
+        return Ok(Opened::Failed { at, commit: written.commit, runs, listed });
     }
     Ok(Opened::Wrote(Wrote::Changed(json!({
         "id": id,
@@ -197,10 +205,13 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let runs = crate::intent::runs(&index, id.as_str())?;
     let blocks = crate::intent::blocks(&vault, id.as_str())?;
     let read = crate::intent::pull_request(&pr, &reviewer);
+    let carried = crate::carry::read(&vault, &index, &id)?;
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
     // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
-    if let Err(unmet) = intents::landing(&read, &c.base, &runs, &blocks) {
-        let mut r = refusal(&unmet, &c, &id, &pr, &reviewer);
+    let gate = intents::landing(&read, &c.base, &runs, &blocks)
+        .map_err(|unmet| refusal(&unmet, &c, &id, &pr, &reviewer))
+        .and_then(|()| checks(&carried, &c, &id, &pr));
+    if let Err(mut r) = gate {
         if merged(&pr) {
             // No approval or run can follow a merge: the human judges a change that skipped a gate.
             r.fix = format!(
@@ -346,6 +357,25 @@ fn unapproved(c: &Claimed, id: &Id, pr: &PullRequest, reviewer: &str) -> Refusal
             format!("{reviewer} approved {earlier}, which this clone cannot compare; {again}"),
         ),
     }
+}
+
+/// `checks_changed`: the head's `Bp-Checks` trailer, or the set at the claim when it has none, names another check
+/// set than the one the pull request carries now. The reviewer approved that head, so a block changed since then is
+/// one the reviewer has not seen (27, design change 8).
+fn checks(carried: &crate::carry::Carried, c: &Claimed, id: &Id, pr: &PullRequest) -> Result<(), Refusal> {
+    if carried.named_by(&c.top, &pr.head_ref_oid)? {
+        return Ok(());
+    }
+    Err(Refusal::new(
+        Code::ChecksChanged,
+        id.as_str(),
+        "land merges a head that names the error blocks the pull request carries now (27, design change 8)",
+        format!(
+            "an error block of {id}, its milestone or a carried delta changed after {} was pushed; bp pr {id} pushes \
+             a commit that names them, then the reviewer approves pull request {} at its new head, then bp land {id}",
+            pr.head_ref_oid, pr.number
+        ),
+    ))
 }
 
 /// The first unmet part of needs landing as its refusal (26, design change 4).

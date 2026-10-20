@@ -106,6 +106,14 @@ pub fn hash(check: &Check) -> String {
     blake3::hash(block.as_bytes()).to_hex().to_string()
 }
 
+/// The check-set hash (27, design change 8): blake3 of the sorted `check_hash` of each error block a pull request
+/// carries. A `Bp-Checks` trailer names it, so a changed set needs a push, and the push needs a new approval.
+pub fn set_hash<'a>(hashes: impl IntoIterator<Item = &'a str>) -> String {
+    let mut hashes: Vec<&str> = hashes.into_iter().collect();
+    hashes.sort_unstable();
+    blake3::hash(hashes.join("\n").as_bytes()).to_hex().to_string()
+}
+
 /// The blocks of a body that have a run key: a slug `name`. The census counts the rest as `check_unnamed`.
 pub fn named(body: &bp_vault::Body) -> Vec<&Check> {
     body.checks.iter().filter(|c| c.attrs.get("name").is_some_and(|n| bp_vault::is_slug(n))).collect()

@@ -286,8 +286,7 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Re
             format!("the file does not parse ({why}); edit {path} by hand, git commit it, then bp stamp {id}"),
         ));
     }
-    let under =
-        Filter { kind: Kind::Issue, status: None, project: None, under: Some(id.as_str()), limit: usize::MAX >> 1 };
+    let under = Filter { kind: Kind::Issue, status: None, project: None, under: Some(id.as_str()), limit: crate::ALL };
     let closed = [IssueStatus::Resolved.as_str(), IssueStatus::Abandoned.as_str()];
     let (issues, _) = index.list(&under)?;
     if let Some(open) = issues.iter().find(|i| !closed.contains(&i.status.as_deref().unwrap_or_default())) {
@@ -302,7 +301,7 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Re
             ),
         ));
     }
-    let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: usize::MAX >> 1 };
+    let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: crate::ALL };
     let designs: Vec<Id> = index.list(&all)?.0.iter().filter_map(|r| Id::parse(&r.id).ok()).collect();
     let mut deltas = Vec::new();
     for design in &designs {
