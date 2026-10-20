@@ -1,8 +1,9 @@
 //! `cargo xtask <check>`. `deps`, the crate rule: exit 0 when the rule holds, 2 with one line per violation.
 //! `bench`, the call budget: prints the largest ratio last. `scratch`, a writable copy of `$BP_VAULT`: prints its
-//! directory.
+//! directory. `lines`, the file cap: exit 2 with one line per non-test file over 500 lines.
 
 mod bench;
+mod lines;
 mod scratch;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +17,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("deps") => {}
+        Some("lines") => {
+            return report(lines::run(Path::new(".")));
+        }
         Some("bench") => {
             return match bench::run(&args[1..]) {
                 Ok(_) => ExitCode::SUCCESS,
@@ -39,12 +43,16 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask deps | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch"
+                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch"
             );
             return ExitCode::from(4);
         }
     }
-    let result = deps(Path::new("."));
+    report(deps(Path::new(".")))
+}
+
+/// Exit 0 with no violations, 2 with one line each on stderr, 1 when the check could not run.
+fn report(result: Result<Vec<String>>) -> ExitCode {
     match result {
         Ok(violations) if violations.is_empty() => ExitCode::SUCCESS,
         Ok(violations) => {

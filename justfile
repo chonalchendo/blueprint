@@ -19,8 +19,12 @@ lint:
 deps:
     cargo xtask deps
 
+# The file cap (22): no non-test source file over 500 lines.
+lines:
+    cargo xtask lines
+
 # Everything CI runs, in CI's order.
-ci: lint deps test build
+ci: lint deps lines test build
 
 # A static Linux binary from macOS, through zig.
 linux:
