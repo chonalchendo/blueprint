@@ -72,7 +72,7 @@ pub(crate) fn done(
             // The drifted predicate over each design the seed covers: a project's drift runs sit under its designs.
             let kind = text("kind").and_then(|k| k.parse().ok()).expect("the index stores closed kinds");
             for d in crate::intent::drift_designs(index, id, kind)? {
-                if crate::intent::drift(index, &d)?.iter().any(|(_, by)| by.is_empty()) {
+                if !crate::intent::drift(index, &d)?.is_empty() {
                     return Ok(false);
                 }
             }

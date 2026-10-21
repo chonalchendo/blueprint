@@ -102,8 +102,8 @@ impl<'a> Intents<'a> {
             ),
             Kind::Milestone => Ok(intents::milestone(status, self.integrity(id)?)),
             Kind::Design => {
-                let uncited = drift(self.index, id)?.into_iter().filter(|(_, by)| by.is_empty()).map(|(r, _)| r.id);
-                Ok(intents::design(id, &uncited.collect::<Vec<_>>()))
+                let uncited: Vec<String> = drift(self.index, id)?.into_iter().map(|r| r.id).collect();
+                Ok(intents::design(id, &uncited))
             }
             _ => Ok(Verdict::NONE),
         }
@@ -124,7 +124,11 @@ impl<'a> Intents<'a> {
         if changed.is_empty() {
             return Ok(false);
         }
-        let last = self.index.records(id, Kind::Evidence)?.pop().and_then(|r| text(&r.header, "at"));
+        // With no evidence row, the last verification is the learning's creation (13, Learning).
+        let last = match self.index.records(id, Kind::Evidence)?.pop() {
+            Some(r) => text(&r.header, "at"),
+            None => Id::parse(id).ok().and_then(|i| self.vault.created(&i)),
+        };
         Ok(LearningStatus::stale(&text(header, "status").unwrap_or_default(), last.as_deref(), &changed))
     }
 
@@ -140,15 +144,16 @@ impl<'a> Intents<'a> {
     }
 }
 
-/// The failed drift runs under a design, each with the deltas and threads that cite it (21, drifted). An integrity
-/// run checks the vault, not a design.
-pub(crate) fn drift(index: &Index, design: &str) -> Result<Vec<(Record, Vec<Id>)>, Refusal> {
+/// The drift runs under a design that no delta or thread cites: the runs of 21's drifted, which the intent, the
+/// triage-drift slice and its stop read. The predicate on a run is `bp-change`'s.
+pub(crate) fn drift(index: &Index, design: &str) -> Result<Vec<Record>, Refusal> {
     let mut out = Vec::new();
     for r in index.records(design, Kind::Run)? {
-        let failed = matches!(text(&r.header, "verdict").as_deref(), Some("fail" | "timed-out"));
-        if failed && text(&r.header, "check_kind").as_deref() != Some("integrity") {
-            let by = index.citing(&Id::parse(&r.id).expect("the index holds ids"), &[Kind::Delta, Kind::Thread])?;
-            out.push((r, by));
+        let field = |k: &str| text(&r.header, k).unwrap_or_default();
+        if intents::is_drift(&field("verdict"), &field("check_kind"))
+            && index.citing(&Id::parse(&r.id).expect("the index holds ids"), &[Kind::Delta, Kind::Thread])?.is_empty()
+        {
+            out.push(r);
         }
     }
     Ok(out)

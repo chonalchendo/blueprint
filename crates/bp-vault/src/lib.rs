@@ -178,6 +178,28 @@ impl Vault {
         })
     }
 
+    /// When the node's file entered the vault: the commit that added it, through any rename, as a UTC instant with
+    /// `Z`, the form every vault instant takes. `None` outside git or before the first commit.
+    pub fn created(&self, id: &Id) -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC")
+            .args([
+                "log",
+                "--follow",
+                "--diff-filter=A",
+                "--format=%cd",
+                "--date=format-local:%Y-%m-%dT%H:%M:%SZ",
+                "--",
+            ])
+            .arg(format!("./{id}.md"))
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).lines().last().map(str::to_string)
+    }
+
     /// Every markdown file under `projects/` and `shared/`: the ids, sorted, and the paths that are not ids, without
     /// `.md` (a stray `notes.md`), which the index holds as broken files. Dot directories (`.bp`, `.git`) are skipped.
     pub fn ids(&self) -> Result<(Vec<Id>, Vec<String>), Refusal> {

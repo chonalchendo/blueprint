@@ -78,10 +78,10 @@ impl LearningStatus {
     pub const MOVES: &'static [(Self, Self)] =
         &[(Self::Draft, Self::Verified), (Self::Draft, Self::Retracted), (Self::Verified, Self::Retracted)];
 
-    /// The derived `stale` (13, Learning): a design the learning cites changed version after its last evidence row.
-    /// `last` is that row's `at`, and `changed` holds each cited design's latest `accepted_at`; both are UTC with `Z`,
-    /// so text order is time order. A learning with no row has no verification to age, and a retracted one is out of
-    /// use.
+    /// The derived `stale` (13, Learning): a design the learning cites changed version after its last verification.
+    /// `last` is the `at` of its last evidence row, or with no row the time the learning was created; `changed` holds
+    /// each cited design's latest `accepted_at`. Both are UTC with `Z`, so text order is time order. A learning with
+    /// no known time has nothing to age, and a retracted one is out of use.
     pub fn stale(status: &str, last: Option<&str>, changed: &[String]) -> bool {
         status != Self::Retracted.as_str() && last.is_some_and(|l| changed.iter().any(|c| c.as_str() > l))
     }
@@ -93,12 +93,14 @@ impl InboxStatus {
 }
 
 bp_vault::closed_enum! {
-    /// What applying a learning did (13, EvidenceRow).
+    /// What applying a learning did (13, EvidenceRow). `rechecked` is a re-check of a stale learning against its
+    /// changed design, not an application: it clears `stale`, and the confidence rule does not count it.
     pub enum Outcome {
         Helped = "helped",
         Hurt = "hurt",
         NoEffect = "no-effect",
         Confounded = "confounded",
+        Rechecked = "rechecked",
     }
 }
 
@@ -128,7 +130,7 @@ mod tests {
             !LearningStatus::stale("verified", Some("2026-10-21T10:00:00Z"), &changed),
             "evidence after the change"
         );
-        assert!(!LearningStatus::stale("draft", None, &changed), "no row, no verification to age");
+        assert!(!LearningStatus::stale("draft", None, &changed), "no known time, nothing to age");
         assert!(!LearningStatus::stale("retracted", Some("2026-10-19T10:00:00Z"), &changed), "out of use");
         assert!(!LearningStatus::stale("verified", Some("2026-10-19T10:00:00Z"), &[]), "no design changed");
     }
