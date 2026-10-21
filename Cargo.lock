@@ -118,6 +118,7 @@ version = "0.0.1"
 dependencies = [
  "blake3",
  "bp-change",
+ "bp-diagram",
  "bp-vault",
  "serde_json",
 ]

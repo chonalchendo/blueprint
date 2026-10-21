@@ -167,6 +167,15 @@ pub fn render_with(
     Ok(Render { html: html::page(&head, &svg), findings })
 }
 
+/// A spec read without drawing it, for a caller that checks it against its vault (28, design change 6): its level,
+/// and a `nodes/resolve` finding for each node whose link `resolve` refuses. A spec that does not parse gives its
+/// parse findings.
+pub fn outline(spec: &str, resolve: &dyn Fn(Link<'_>) -> bool) -> Result<(Option<String>, Vec<Finding>), Vec<Finding>> {
+    let s = spec::parse(spec)?;
+    let findings = links(&s, Some(resolve));
+    Ok((s.level, findings))
+}
+
 /// Runs the geometric rules on another tool's geometry: the same rules `render` applies to its own.
 pub fn lint(g: &geom::Geometry) -> Vec<Finding> {
     rules::check(g)
@@ -187,25 +196,7 @@ fn spec_rules(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Findi
     if s.title.trim().is_empty() || s.lede.trim().is_empty() {
         out.push(Finding::error("a11y/title", "spec", "a diagram needs a `title` and a one-sentence `lede`".into()));
     }
-    for n in &s.nodes {
-        let Some(link) = n.link() else {
-            out.push(Finding::error(
-                "nodes/resolve",
-                &n.id,
-                "give exactly one of `term` (a glossary slug) and `noun` (a noun of the home design)".into(),
-            ));
-            continue;
-        };
-        if let Some(r) = resolve
-            && !r(link)
-        {
-            let what = match link {
-                Link::Term(t) => format!("term `{t}` is no glossary slug"),
-                Link::Noun(noun) => format!("noun `{noun}` is not named by the home design"),
-            };
-            out.push(Finding::error("nodes/resolve", &n.id, what));
-        }
-    }
+    out.extend(links(s, resolve));
     out.extend(legend::rule(s));
     let (count, max, what) = match s.ty {
         Type::Architecture => (s.nodes.len(), 9, "nodes"),
@@ -229,6 +220,31 @@ fn spec_rules(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Findi
             "spec",
             format!("{} edges against a budget of 12: consider a split", s.edges.len()),
         ));
+    }
+    out
+}
+
+/// A `nodes/resolve` finding for each node with no link, or whose link `resolve` refuses.
+fn links(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for n in &s.nodes {
+        let Some(link) = n.link() else {
+            out.push(Finding::error(
+                "nodes/resolve",
+                &n.id,
+                "give exactly one of `term` (a glossary slug) and `noun` (a noun of the home design)".into(),
+            ));
+            continue;
+        };
+        if let Some(r) = resolve
+            && !r(link)
+        {
+            let what = match link {
+                Link::Term(t) => format!("term `{t}` is no glossary slug"),
+                Link::Noun(noun) => format!("noun `{noun}` is not named by the home design"),
+            };
+            out.push(Finding::error("nodes/resolve", &n.id, what));
+        }
     }
     out
 }

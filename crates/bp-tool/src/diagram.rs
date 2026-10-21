@@ -1,33 +1,46 @@
-//! `bp diagram --spec-file <f> --out <path> [--base <spec>]`: the preview form (28, design changes 5 and 13). It
-//! checks and renders a spec, or the diff of two, to a file outside the vault and writes nothing to the vault. Its
-//! result lists the warnings; an error refuses with `diagram_invalid`, and the envelope adds every finding, each
-//! naming its rule and element. The vault-writing form is issue 2's.
+//! `bp diagram` (28, design changes 5 and 13). `bp diagram <design> <name> --spec-file <f>` checks, renders and
+//! writes the spec and its page into the design in one vault commit; `--remove` removes both. On a design past
+//! `draft` it refuses `design_not_delta`, as `set --body-file` does. `bp diagram --spec-file <f> --out <path>
+//! [--base <spec>]` is the preview: it renders a spec, or the diff of two, outside the vault and writes nothing in
+//! it. Either form refuses a broken hard rule with `diagram_invalid`, whose envelope adds every finding, each naming
+//! its rule and element; a warning does not refuse.
 
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use bp_check::nodes::{Names, specs, terms};
+use bp_design::DesignStatus;
 use bp_diagram::{Finding, Link, Severity};
-use bp_vault::{Code, Refusal, Vault};
+use bp_vault::{Code, Id, Kind, Moves, Refusal, SLUG_MAX, Vault, is_slug};
 use clap::Args;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{emit, finish};
+use crate::{Wrote, emit, finish, subject};
 
-/// `bp diagram --spec-file <f> --out <path> [--base <spec>]`.
+/// `bp diagram <design> <name> (--spec-file <f> | --remove)` or `bp diagram --spec-file <f> --out <path> [--base
+/// <spec>]`.
 #[derive(Args)]
 pub struct Diagram {
+    /// The design that holds the diagram, for example `projects/bp/designs/system`. Without it, the verb previews.
+    #[arg(requires = "name")]
+    pub design: Option<String>,
+    /// The diagram's name: the spec is `<design>/diagrams/<name>.yaml`, its page `<name>.html` beside it.
+    pub name: Option<String>,
     /// The diagram spec: YAML with `type`, `title`, `lede`, `nodes` and `edges` (13, Diagram).
-    #[arg(long)]
-    pub spec_file: PathBuf,
-    /// Where the HTML goes: a path outside the vault, so the agent and the human look first.
-    #[arg(long)]
-    pub out: PathBuf,
-    /// A base spec: the render shows the change from it, with `added`, `removed`, `changed` and `moved` marks.
-    #[arg(long)]
+    #[arg(long, required_unless_present = "remove")]
+    pub spec_file: Option<PathBuf>,
+    /// The preview's page: a path outside the vault, so the agent and the human look first.
+    #[arg(long, required_unless_present = "design", conflicts_with = "design")]
+    pub out: Option<PathBuf>,
+    /// A base spec: the preview shows the change from it, with `added`, `removed`, `changed` and `moved` marks.
+    #[arg(long, requires = "out")]
     pub base: Option<PathBuf>,
+    /// Remove the diagram's spec and page from the design.
+    #[arg(long, requires = "design", conflicts_with = "spec_file")]
+    pub remove: bool,
 }
 
 /// `diagram_invalid`: the five fields of every refusal, then every finding.
@@ -38,11 +51,32 @@ struct Invalid {
     findings: Vec<Value>,
 }
 
-fn rows(findings: &[bp_diagram::Finding]) -> Vec<Value> {
+/// A refusal, and for `diagram_invalid` every finding.
+struct Refused(Refusal, Option<Vec<Value>>);
+
+impl From<Refusal> for Refused {
+    fn from(r: Refusal) -> Self {
+        Self(r, None)
+    }
+}
+
+fn rows(findings: &[Finding]) -> Vec<Value> {
     findings
         .iter()
         .map(|f| json!({ "rule": f.rule, "id": f.id, "severity": f.severity.as_str(), "detail": f.detail }))
         .collect()
+}
+
+/// `diagram_invalid` for the first error of `findings`; `then` is the command that tries again.
+fn invalid(spec: &Path, findings: &[Finding], then: &str) -> Refused {
+    let first = findings.iter().find(|f| f.severity == Severity::Error).unwrap_or(&findings[0]);
+    let refusal = Refusal::new(
+        Code::DiagramInvalid,
+        format!("{}#{}", spec.display(), first.id),
+        "a diagram spec breaks no hard rule (28, design change 4)",
+        format!("edit {}: {} `{}`: {}; then {then}", spec.display(), first.rule, first.id, first.detail),
+    );
+    Refused(refusal, Some(rows(findings)))
 }
 
 fn read(cwd: &Path, path: &Path) -> Result<String, Refusal> {
@@ -50,14 +84,117 @@ fn read(cwd: &Path, path: &Path) -> Result<String, Refusal> {
         .map_err(|e| Refusal::failed(path.display().to_string(), format!("{e}; name a readable spec file")))
 }
 
-/// The slugs the vault's glossaries define: each `projects/<p>/designs/glossary.md` lists a term as `` - `slug` — ``
-/// (03's form). None when no project has a glossary, so there is nothing to check a term against.
+pub(crate) fn run(cwd: &Path, d: &Diagram, json: bool, out: &mut impl std::io::Write) -> ExitCode {
+    let done = match (&d.design, &d.name) {
+        (Some(design), Some(name)) => write(cwd, d, design, name),
+        _ => preview(cwd, d).map(Wrote::Changed),
+    };
+    match done {
+        Ok(wrote) => crate::wrote(Ok(wrote), json, out),
+        Err(Refused(refusal, None)) => finish::<Value>(Err(refusal), json, out),
+        Err(Refused(refusal, Some(findings))) => {
+            let exit = refusal.exit;
+            emit(out, &Invalid { refusal, findings }, json);
+            ExitCode::from(exit)
+        }
+    }
+}
+
+/// The vault-writing form: the spec and its page into `<design>/diagrams/`, or both out with `--remove`, in one
+/// commit with `Bp-Verb: diagram`. A repeat that changes no file exits 3.
+fn write(cwd: &Path, d: &Diagram, design: &str, name: &str) -> Result<Wrote, Refused> {
+    let spec = d.spec_file.as_deref().map(|f| read(cwd, f).map(|text| (f, text))).transpose()?;
+    // No dot, so `<name>.yaml` never reads as a converted `<name>.nodes.yaml`.
+    if !is_slug(name) || name.contains('.') {
+        return Err(
+            Refusal::usage(name, "name the diagram in lowercase letters, digits and `-`, such as containers").into()
+        );
+    }
+    let vault = Vault::discover(cwd)?;
+    let role = crate::set::role()?;
+    let writer = vault.writer()?;
+    let id = subject(writer.index(), design)?;
+    let header = writer.index().header(id.as_str())?;
+    let field = |k: &str| header.as_ref().and_then(|h| h.get(k)?.as_str().map(str::to_string));
+    if field("kind").and_then(|k| k.parse::<Kind>().ok()) != Some(Kind::Design) {
+        return Err(Refusal::new(
+            Code::NoNode,
+            id.as_str(),
+            "a diagram belongs to a design (13, Diagram)",
+            format!("name a design: bp list design --project {}", id.project().unwrap_or("<project>")),
+        )
+        .into());
+    }
+    let preview = format!("bp diagram --spec-file <f> --out /tmp/{name}.html");
+    if field("status").as_deref() != Some(DesignStatus::Draft.as_str()) {
+        return Err(Refusal::new(
+            Code::DesignNotDelta,
+            id.as_str(),
+            "a design past draft changes only through a delta record; its diagrams change with it (13, Design history)",
+            format!("bp record delta {id} --field milestone=<milestone> --body-file <f>; {preview} renders it first"),
+        )
+        .into());
+    }
+    let paths = [format!("{id}/diagrams/{name}.yaml"), format!("{id}/diagrams/{name}.html")];
+    writer.clean_paths(paths.to_vec())?;
+    let on_disk = |p: &str| std::fs::read_to_string(vault.root.join(p)).ok();
+    let (files, findings) = match spec {
+        None => (paths.iter().filter(|p| on_disk(p).is_some()).map(|p| (p.clone(), None)).collect::<Vec<_>>(), vec![]),
+        Some((file, spec)) => {
+            let names = Names::of(&vault, &id, &vault.read(&id)?.body.text);
+            let level = bp_diagram::outline(&spec, &|_| true).ok().and_then(|(level, _)| level);
+            let project = id.project().expect("a design sits in a project");
+            let children = |link: Link<'_>| children(&vault, project, level.as_deref(), link);
+            let then = format!("bp diagram {id} {name} --spec-file {} --json", file.display());
+            let render = bp_diagram::render_with(&spec, None, Some(&|l| names.resolves(l)), &children)
+                .map_err(|f| invalid(file, &f, &then))?;
+            let texts = [spec, render.html];
+            let files = paths
+                .iter()
+                .zip(texts)
+                .filter(|(p, t)| on_disk(p).as_ref() != Some(t))
+                .map(|(p, t)| (p.clone(), Some(t)))
+                .collect();
+            (files, render.findings)
+        }
+    };
+    let mut result = json!({ "id": id, "name": name });
+    if files.is_empty() {
+        return Ok(Wrote::Already(result));
+    }
+    let key = if d.remove { "removed" } else { "written" };
+    let changed: Vec<String> = files.iter().map(|(p, _)| p.clone()).collect();
+    let moves = Moves { writes: files, ..Moves::default() };
+    let written =
+        writer.commit_moving("diagram", role.as_str(), &format!("diagram {id} {name}"), &BTreeMap::new(), &moves)?;
+    result[key] = changed.into();
+    result["commit"] = written.commit.into();
+    result["findings"] = rows(&findings).into();
+    Ok(Wrote::Changed(result))
+}
+
+/// The drill badge's count (28, design change 12): a node of a container-level diagram drills to the component-level
+/// diagrams of the container design its link names (`m5-interactive-architecture.md` §3.3). The page keeps the count
+/// it was rendered with.
+fn children(vault: &Vault, project: &str, level: Option<&str>, link: Link<'_>) -> usize {
+    let (Link::Term(text) | Link::Noun(text)) = link;
+    let container = Id::parse(&format!("projects/{project}/designs/containers/{}", bp_vault::slug(text, SLUG_MAX)));
+    match (level, container) {
+        (Some("container"), Ok(c)) => specs(vault, &c)
+            .iter()
+            .filter(|(_, t)| bp_diagram::outline(t, &|_| true).is_ok_and(|(l, _)| l.as_deref() == Some("component")))
+            .count(),
+        _ => 0,
+    }
+}
+
+/// The slugs the vault's glossaries define, over every project: the preview names no design. None when no project
+/// has a glossary, so there is nothing to check a term against.
 fn glossary(vault: &Vault) -> Option<BTreeSet<String>> {
     let projects = std::fs::read_dir(vault.root.join("projects")).ok()?;
     let texts: Vec<String> =
         projects.filter_map(|p| std::fs::read_to_string(p.ok()?.path().join("designs/glossary.md")).ok()).collect();
-    let slug = |line: &str| Some(line.trim_start().strip_prefix("- `")?.split_once('`')?.0.to_string());
-    (!texts.is_empty()).then(|| texts.iter().flat_map(|t| t.lines().filter_map(slug)).collect())
+    (!texts.is_empty()).then(|| texts.iter().flat_map(|t| terms(t).map(str::to_string)).collect())
 }
 
 fn warn(detail: &str) -> Finding {
@@ -72,26 +209,27 @@ fn inside(vault: &Vault, cwd: &Path, path: &Path) -> bool {
     dir.is_some_and(|d| d.starts_with(&vault.root))
 }
 
-pub(crate) fn run(cwd: &Path, d: &Diagram, json: bool, out: &mut impl std::io::Write) -> ExitCode {
+/// The preview form: the page at `--out`, outside the vault.
+fn preview(cwd: &Path, d: &Diagram) -> Result<Value, Refused> {
+    let (Some(file), Some(out)) = (&d.spec_file, &d.out) else {
+        unreachable!("clap requires --spec-file and --out without a design")
+    };
     let vault = Vault::discover(cwd).ok();
-    if let Some(v) = vault.as_ref().filter(|v| inside(v, cwd, &d.out)) {
-        let name = d.out.file_name().map_or_else(|| "diagram.html".into(), |n| n.to_string_lossy().into_owned());
-        let refusal = Refusal::new(
+    if let Some(v) = vault.as_ref().filter(|v| inside(v, cwd, out)) {
+        let name = out.file_name().map_or_else(|| "diagram.html".into(), |n| n.to_string_lossy().into_owned());
+        return Err(Refusal::new(
             Code::Usage,
-            d.out.display().to_string(),
+            out.display().to_string(),
             "the preview renders outside the vault and writes nothing in it (28, design change 5)",
             format!(
                 "pass --out a path outside {}, such as /tmp/{name}; bp diagram <design> <name> writes into a design",
                 v.root.display()
             ),
-        );
-        return finish::<Value>(Err(refusal), json, out);
+        )
+        .into());
     }
-    let texts = read(cwd, &d.spec_file).and_then(|s| Ok((s, d.base.as_ref().map(|b| read(cwd, b)).transpose()?)));
-    let (spec, base) = match texts {
-        Ok(t) => t,
-        Err(refusal) => return finish::<Value>(Err(refusal), json, out),
-    };
+    let spec = read(cwd, file)?;
+    let base = d.base.as_ref().map(|b| read(cwd, b)).transpose()?;
     // A term resolves against the vault's glossaries. A noun resolves against its home design, which only the
     // vault-writing form has, so the preview names it once as unchecked.
     let terms = vault.as_ref().and_then(glossary);
@@ -109,43 +247,14 @@ pub(crate) fn run(cwd: &Path, d: &Diagram, json: bool, out: &mut impl std::io::W
         (Some(_), None) => unchecked.push(warn("the vault holds no glossary design, so terms were not checked")),
         _ => {}
     }
-    let render = match bp_diagram::render(&spec, base.as_deref(), Some(&resolve)) {
-        Ok(mut r) => {
-            if vault.is_some() && noun_seen.get() {
-                unchecked.push(warn("nouns resolve against their home design, which bp diagram <design> <name> names"));
-            }
-            r.findings.extend(unchecked);
-            r
-        }
-        Err(findings) => {
-            let first = findings.iter().find(|f| f.severity == bp_diagram::Severity::Error).unwrap_or(&findings[0]);
-            let refusal = Refusal::new(
-                Code::DiagramInvalid,
-                format!("{}#{}", d.spec_file.display(), first.id),
-                "a diagram spec breaks no hard rule (28, design change 4)",
-                format!(
-                    "edit {}: {} `{}`: {}; then bp diagram --spec-file {} --out {} --json",
-                    d.spec_file.display(),
-                    first.rule,
-                    first.id,
-                    first.detail,
-                    d.spec_file.display(),
-                    d.out.display()
-                ),
-            );
-            let exit = refusal.exit;
-            emit(out, &Invalid { refusal, findings: rows(&findings) }, json);
-            return ExitCode::from(exit);
-        }
-    };
-    if let Err(e) = std::fs::write(cwd.join(&d.out), &render.html) {
-        return finish::<Value>(
-            Err(Refusal::failed(d.out.display().to_string(), format!("{e}; name a writable path"))),
-            json,
-            out,
-        );
+    let then = format!("bp diagram --spec-file {} --out {} --json", file.display(), out.display());
+    let mut render =
+        bp_diagram::render(&spec, base.as_deref(), Some(&resolve)).map_err(|f| invalid(file, &f, &then))?;
+    if vault.is_some() && noun_seen.get() {
+        unchecked.push(warn("nouns resolve against their home design, which bp diagram <design> <name> names"));
     }
-    let result =
-        json!({ "out": d.out.display().to_string(), "bytes": render.html.len(), "findings": rows(&render.findings) });
-    finish(Ok(result), json, out)
+    render.findings.extend(unchecked);
+    std::fs::write(cwd.join(out), &render.html)
+        .map_err(|e| Refusal::failed(out.display().to_string(), format!("{e}; name a writable path")))?;
+    Ok(json!({ "out": out.display().to_string(), "bytes": render.html.len(), "findings": rows(&render.findings) }))
 }

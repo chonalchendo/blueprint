@@ -5,6 +5,7 @@
 
 mod integrity;
 mod judge;
+pub mod nodes;
 mod process;
 
 use std::collections::BTreeMap;
@@ -48,6 +49,8 @@ pub struct Checked {
 pub struct Run {
     /// The block's name.
     pub name: String,
+    /// The block's kind: its runner, such as `shell` or `nodes`.
+    pub kind: String,
     /// The verdict.
     pub verdict: Verdict,
     /// The run record's id.
@@ -189,7 +192,7 @@ pub fn run(
         return Ok(None);
     }
     let (commit, top) = code_tree(vault, repo)?;
-    if blocks.iter().any(|c| c.runner == "integrity") {
+    if blocks.iter().any(|c| matches!(c.runner.as_str(), "integrity" | "nodes")) {
         integrity::clean(vault, owner)?;
     }
     let today = clock()[..10].to_string();
@@ -218,17 +221,20 @@ pub fn run(
                     let (verdict, note) = judge::judge(&spec.test, &ran.end);
                     Done { tail: ran.tail, dropped: ran.dropped, evidence: ran.evidence, ..done(verdict, note) }
                 }
-                Plan::Integrity => match integrity::run(vault, owner) {
-                    Ok(ran) => Done {
-                        tail: ran.tail,
-                        dropped: ran.dropped,
-                        evidence: Some(ran.evidence),
-                        commit: Some(ran.commit),
-                        names: ran.names,
-                        ..done(ran.verdict, ran.note)
-                    },
-                    Err(why) => done(Verdict::CouldNotRun, why),
-                },
+                plan @ (Plan::Integrity | Plan::Nodes) => {
+                    let ran = if plan == Plan::Nodes { nodes::run(vault, owner) } else { integrity::run(vault, owner) };
+                    match ran {
+                        Ok(ran) => Done {
+                            tail: ran.tail,
+                            dropped: ran.dropped,
+                            evidence: Some(ran.evidence),
+                            commit: Some(ran.commit),
+                            names: ran.names,
+                            ..done(ran.verdict, ran.note)
+                        },
+                        Err(why) => done(Verdict::CouldNotRun, why),
+                    }
+                }
             };
             d.ended = clock();
             d
@@ -289,7 +295,8 @@ impl Ran {
             };
             changes.insert(id.clone(), record(owner, commit, attempt, d));
             let error = judge::is_error(&d.check);
-            runs.push(Run { name: name.to_string(), verdict: d.verdict, id, note: d.note.clone(), error });
+            let kind = d.check.runner.clone();
+            runs.push(Run { name: name.to_string(), kind, verdict: d.verdict, id, note: d.note.clone(), error });
         }
         (changes, runs)
     }
