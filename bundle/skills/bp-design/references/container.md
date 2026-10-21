@@ -31,7 +31,7 @@ Show the human one step's output at a time. Go on only after the human confirms 
    Output: `## Interfaces`. Put the `contract` check in `## Open`, with the interface it will guard. Add the block once a version exists.
 
 6. **Name the permitted connections**. List each container and component that this container may call, with the direction. The context map's upstream and downstream edges set this list.
-   Output: the list as a table in `## Interfaces`. When the code exists, add a `deps` block with one `<from> -> <to>` line per permitted edge. Name code units in it, such as packages, crates or modules, not containers. Before the code exists, put the `deps` check in `## Open`.
+   Output: the list as a table in `## Interfaces`. When the code exists, add a `deps` block with one line per code unit: `<unit> -> <unit> <unit>`. The right side lists each unit it may import, and stays empty for a leaf. Name packages, crates or modules, not containers. The runner records this block `skipped` today, so it states intent and proves nothing yet. Before the code exists, put the `deps` check in `## Open`.
 
 7. **Walk the runtime scenarios**. Pick two to four flows: the main path, one failure and one concurrent case. Write each flow as numbered steps, with one actor per step.
    Output: `## Runtime scenarios`.
