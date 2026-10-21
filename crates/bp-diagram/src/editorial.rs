@@ -3,9 +3,9 @@
 use crate::spec::{self, Spec};
 
 /// Whether `new` differs from `old` only in wording and layout, else the first other change. Wording is the spec's
-/// free text: `title`, `lede`, a node's `label` and `note`, an edge's `label`, a step's `say` and `back`, and the
-/// labels of groups, lanes and the legend. Layout is a node's `at` and `span` and an edge's `exit` and `enter`.
-/// Everything else must be equal, list order included. A spec that does not parse is a change.
+/// free text: `title`, `lede`, a node's `label` and `note`, an edge's `label`, a step's `say`, `back` text and
+/// `note`, and the labels of groups, lanes and the legend. Layout is a node's `at` and `span` and an edge's `exit`
+/// and `enter`. Everything else must be equal, list order included. A spec that does not parse is a change.
 pub fn editorial_change(old: &str, new: &str) -> Option<String> {
     let (a, b) = match (spec::parse(old), spec::parse(new)) {
         (Ok(a), Ok(b)) => (masked(a), masked(b)),
@@ -73,8 +73,8 @@ pub fn editorial_change(old: &str, new: &str) -> Option<String> {
                         ("id", x.id == y.id),
                         ("from", x.from == y.from),
                         ("to", x.to == y.to),
-                        ("note", x.note == y.note),
                         ("ret", x.ret == y.ret),
+                        ("return", x.back.is_some() == y.back.is_some()),
                     ]
                 },
             )
@@ -85,6 +85,8 @@ pub fn editorial_change(old: &str, new: &str) -> Option<String> {
             let same = a.legend.is_some() == b.legend.is_some() && x.iter().map(|l| &l.0).eq(y.iter().map(|l| &l.0));
             field("legend entries", same)
         })
+        // The named fields give the message; this catches a field added to the spec later, so it stays an allow-list.
+        .or_else(|| field("structure", a == b))
 }
 
 /// The first item that differs by a field `fields` names, else the first one dropped or added, as the change's text.
@@ -127,7 +129,9 @@ fn masked(mut s: Spec) -> Spec {
     }
     for t in &mut s.steps {
         t.say.clear();
-        t.back = None;
+        // A return's text is wording; whether the step has a return is not.
+        t.back = t.back.as_ref().map(|_| String::new());
+        t.note = None;
     }
     s.lanes.iter_mut().for_each(|l| l.1.clear());
     s.legend.iter_mut().flatten().for_each(|l| l.1.clear());
@@ -161,5 +165,20 @@ mod tests {
             Some("changes the spec's legend entries")
         );
         assert!(editorial_change(OLD, "type: nope").unwrap().starts_with("does not parse"));
+    }
+
+    const SEQ: &str = "type: sequence\ntitle: One\nlede: A call.\nparties:\n  - {id: s, noun: Store}\n  - {id: i, noun: Index}\n\
+                       steps:\n  - {id: read, from: s, to: i, say: read, back: rows, note: first}\n";
+
+    #[test]
+    fn a_step_note_and_return_text_pass_and_a_dropped_return_is_named() {
+        assert_eq!(
+            editorial_change(SEQ, &SEQ.replace("back: rows, note: first", "back: all rows, note: second")),
+            None
+        );
+        assert_eq!(
+            editorial_change(SEQ, &SEQ.replace(", back: rows", "")).as_deref(),
+            Some("changes the return of step `read`")
+        );
     }
 }
