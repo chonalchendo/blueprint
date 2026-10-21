@@ -33,17 +33,17 @@ fn vault() -> tempfile::TempDir {
 }
 
 fn walk(root: &Path, args: &[&str]) -> (Option<i32>, Value) {
-    let out = Command::cargo_bin("bp")
-        .unwrap()
-        .current_dir(root)
-        .env_remove("BP_VAULT")
-        .env("BP_NOW", "2026-10-18T00:00:00Z")
-        .env_remove("BP_FORGE_SNAPSHOT")
-        .arg("walk")
-        .args(args)
-        .arg("--json")
-        .output()
-        .unwrap();
+    walk_at(root, None, args)
+}
+
+/// `walk`, with the forge snapshot at `forge` when one is given.
+fn walk_at(root: &Path, forge: Option<&Path>, args: &[&str]) -> (Option<i32>, Value) {
+    let mut cmd = Command::cargo_bin("bp").unwrap();
+    cmd.current_dir(root).env_remove("BP_VAULT").env("BP_NOW", "2026-10-18T00:00:00Z").env_remove("BP_FORGE_SNAPSHOT");
+    if let Some(f) = forge {
+        cmd.env("BP_FORGE_SNAPSHOT", f);
+    }
+    let out = cmd.arg("walk").args(args).arg("--json").output().unwrap();
     (out.status.code(), serde_json::from_slice(&out.stdout).unwrap())
 }
 
@@ -341,4 +341,28 @@ fn respond_holds_the_latest_review_by_its_time_not_its_id() {
     assert_eq!(v["ids"][0]["id"], format!("{SEED}/reviews/aaaa"), "{v}");
     let (_, v) = walk(d.path(), &[SEED, "--for", "complete"]);
     assert!(!ids(&v["bodies"]).iter().any(|i| i.contains("/reviews/")), "complete answers no review: {v}");
+}
+
+#[test]
+fn the_review_slice_carries_the_pull_request_head_that_its_stop_compares() {
+    let d = vault();
+    let claim = format!("---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n");
+    write(d.path(), &format!("{SEED}/claims/c.md"), &claim);
+    let (code, v) = walk_at(d.path(), None, &[SEED, "--for", "review"]);
+    assert_eq!(code, Some(0), "{v}");
+    assert!(v.get("pull_request").is_some_and(Value::is_null), "no snapshot, so no pull request in view: {v}");
+    let forge = tempfile::tempdir().unwrap();
+    write(forge.path(), "open-prs.json", r#"[{"number":7,"headRefName":"bp/0001.seed","headRefOid":"cafe"}]"#);
+    let want = serde_json::json!({ "number": 7, "head": "cafe" });
+    let (_, v) = walk_at(d.path(), Some(forge.path()), &[SEED, "--for", "review"]);
+    assert_eq!(v["pull_request"], want, "the pushed head: {v}");
+    let (_, v) = walk_at(d.path(), Some(forge.path()), &[SEED, "--for", "review", "--ids"]);
+    assert_eq!(v["pull_request"], want, "the map carries it too: {v}");
+    let (_, v) = walk_at(d.path(), Some(forge.path()), &[SEED, "--for", "complete"]);
+    assert!(v.get("pull_request").is_none(), "only review carries it: {v}");
+    let review = format!(
+        "---\nkind: review\nunder: {SEED}\nhead: cafe\n---\n\n| severity | location | finding |\n|---|---|---|\n"
+    );
+    write(d.path(), &format!("{SEED}/reviews/r.md"), &review);
+    assert_eq!(done(d.path(), Some(forge.path()), SEED, "review"), true, "a review at the slice's head ends the stop");
 }
