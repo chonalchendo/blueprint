@@ -1,0 +1,71 @@
+# The logical data model, Design domain (view 1 of 3). Source: 13-data-model-logical-vault.md, Design domain.
+type: er
+level: logical
+title: "Design: the design, what it carries, how it changes"
+lede: The design is the aggregate root. Deltas change it; versions stamp it.
+focus: [design]
+nodes:
+  - id: project
+    term: project
+    role: node
+    at: [0, 0]
+    label: Project
+    fields: ["# id", class, repository, forge, reviewer, status]
+    time: processing
+  - id: design
+    term: design
+    role: node
+    at: [1, 0]
+    label: Design
+    fields: ["# id", "design_kind, scope", "→ under: Design | Project", "→ cites: Design, Decision, Convention, Term", aliases, status]
+    time: processing · as-of by version
+  - id: diagram
+    term: diagram
+    role: record
+    at: [2, 0]
+    label: Diagram
+    fields: ["#→ design", "# name", type, "nodes: Term | noun"]
+    time: processing
+  - id: glossary-term
+    noun: GlossaryTerm
+    role: row
+    at: [3, 0]
+    label: GlossaryTerm
+    fields: ["#→ project", "# slug", definition, status]
+    time: processing
+  - id: concern-answer
+    term: answer
+    role: record
+    at: [0, 1]
+    label: ConcernAnswer
+    fields: ["#→ project", "# concern", state, "→ design", "reason, valid_until"]
+    time: valid · decision
+  - id: delta
+    term: delta
+    role: record
+    at: [1, 1]
+    label: Delta
+    fields: ["#→ design", "# stamp", change, "→ cause: Thread | Issue | Run", "→ milestone", "→ version, accepted_at"]
+    time: processing · decision
+  - id: version
+    term: blueprint-version
+    role: record
+    at: [2, 1]
+    label: BlueprintVersion
+    fields: ["#→ project", "# n", "tag, manifest", "→ milestone", accepted_at]
+    time: valid · decision
+  - id: milestone
+    term: milestone
+    role: elsewhere
+    owner: Change domain
+    at: [3, 1]
+    label: Milestone
+edges:
+  - {from: design, to: project, label: under, card: ["1..N", "1"]}
+  - {from: design, to: diagram, label: carries, card: ["1", "0..N"]}
+  - {from: diagram, to: glossary-term, label: names, card: ["N", "N"]}
+  - {from: concern-answer, to: design, label: answered by, card: ["0..N", "0..1"]}
+  - {from: delta, to: design, label: targets, card: ["N", "1"]}
+  - {from: delta, to: version, label: accepted in, card: ["N", "0..1"]}
+  - {from: version, to: milestone, label: stamped by, card: ["1", "1"]}
+  - {from: delta, to: milestone, label: carried by, card: ["N", "1"]}

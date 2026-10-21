@@ -1,0 +1,16 @@
+[package]
+name = "bp-diagram"
+description = "The diagram renderer: a pure function from a typed spec to an annotated SVG inside self-contained HTML."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json.workspace = true
+yaml-rust2.workspace = true

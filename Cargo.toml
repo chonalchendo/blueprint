@@ -19,6 +19,7 @@ bp-operation = { path = "crates/bp-operation" }
 bp-check = { path = "crates/bp-check" }
 bp-forge = { path = "crates/bp-forge" }
 bp-install = { path = "crates/bp-install" }
+bp-diagram = { path = "crates/bp-diagram" }
 
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

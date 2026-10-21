@@ -130,6 +130,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bp-diagram"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "yaml-rust2",
+]
+
+[[package]]
 name = "bp-forge"
 version = "0.0.1"
 dependencies = [
@@ -174,6 +182,7 @@ dependencies = [
  "bp-change",
  "bp-check",
  "bp-design",
+ "bp-diagram",
  "bp-forge",
  "bp-install",
  "bp-operation",

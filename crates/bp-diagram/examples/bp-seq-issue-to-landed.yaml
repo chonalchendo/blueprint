@@ -1,0 +1,30 @@
+# An issue to landed. Source: 20-workflow-model-conceptual.md, Scenario walks; parties from its Roles table.
+type: sequence
+title: An issue to landed
+lede: The worker stops at pull request opened; the human approves from the reviewer identity and lands.
+focus: [approve, land]
+parties:
+  - {id: human, noun: Human, sub: engineer}
+  - {id: session, term: session, label: Session, sub: main agent}
+  - {id: worker, noun: Worker, sub: dispatched role}
+  - {id: reviewer, noun: Reviewer, sub: read-only role}
+  - {id: tool, noun: Tool, sub: Blueprint}
+  - {id: forge, term: forge, label: Forge, sub: github}
+steps:
+  - {id: walk, from: session, to: tool, say: walk, back: ready, note: "issue: open"}
+  - {id: dispatch, from: session, to: worker, say: dispatch · five-slot prompt}
+  - {id: cut, from: worker, to: tool, say: cut, note: "claim written · issue: in-progress"}
+  - {id: build, from: worker, to: worker, say: build}
+  - {id: record, from: worker, to: tool, say: record delta · pr}
+  - {id: push, from: tool, to: forge, say: push · open pr · run checks}
+  - {id: opened, from: worker, to: session, say: pull request opened, kind: return}
+  - {id: review, from: session, to: reviewer, say: dispatch reviewer, back: findings}
+  - {id: record-review, from: session, to: tool, say: record review}
+  - {id: respond, from: session, to: worker, say: dispatch · respond}
+  - {id: dispositions, from: worker, to: tool, say: record dispositions · pr}
+  - {id: new-head, from: tool, to: forge, say: push new head}
+  - {id: again, from: session, to: reviewer, say: review again · new head, back: findings}
+  - {id: approve, from: human, to: forge, say: approve · reviewer identity}
+  - {id: land, from: human, to: tool, say: land}
+  - {id: verify, from: tool, to: forge, say: verify review · ci · patch id, back: merged}
+  - {id: landed, from: tool, to: human, say: landed, kind: return, note: "landed · issue: resolved"}

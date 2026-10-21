@@ -349,7 +349,8 @@ fn each_planted_fault_names_itself() {
     let add = |f: &mut Files, p: &str, line: &str| f.get_mut(p).unwrap().push_str(line);
     let researcher = |f: &mut Files, stop: &str| {
         let role = "---\nname: bp-researcher\ndescription: Use to research.\n---\n\nStop: return the report.\n";
-        let forbidden = "check, create, cut, install, land, link, pr, record, release, rename, set, stamp, transition";
+        let forbidden =
+            "check, create, cut, diagram, install, land, link, pr, record, release, rename, set, stamp, transition";
         let tmpl = format!("Node: <id>\nSkill:\nBudget: 8000\nForbidden: {forbidden}.\nStop: {stop}\n");
         f.insert("roles/bp-researcher.md".into(), role.into());
         f.insert("roles/bp-researcher/research.md".into(), tmpl);
