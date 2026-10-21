@@ -53,7 +53,7 @@ The grammar comes from DDD Crew, "EventStorming Glossary & Cheat Sheet".
 
 The event timeline is not among the five diagram types. Keep it as a numbered list, grouped by phase.
 
-A domain story is a working note, so its diagram is a preview outside the vault. Draw it as a `workflow` diagram when the human asks to see it. Each actor is a lane. Each numbered sentence is one step, in order. The label of a step is its activity. The `term` of a step is the glossary slug of its work object. Until the glossary holds that slug, the preview warns on the step. Preview it with `bp diagram --spec-file <f> --out <path> --json`. To keep the flow in the vault, draw it in the workflow model through `references/workflow-model.md`. The spec and the rules are in `references/diagrams.md`.
+A domain story is a working note, so its diagram is a preview outside the vault. Draw it as a `workflow` diagram when the human asks to see it. Each actor is a lane. Each numbered sentence is one step, in order. The label of a step is its activity. Link each step to its work object. Before the glossary holds the slug, give the step `noun` with the `## Vocabulary` noun. After the glossary step of `references/system.md`, give it `term` with the slug. Preview it with `bp diagram --spec-file <f> --out <path> --json`. To keep the flow in the vault, draw it in the workflow model through `references/workflow-model.md`. The spec and the rules are in `references/diagrams.md`.
 
 ## Gate questions
 
