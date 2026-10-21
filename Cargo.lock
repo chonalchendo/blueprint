@@ -180,6 +180,7 @@ name = "bp-tool"
 version = "0.0.1"
 dependencies = [
  "assert_cmd",
+ "blake3",
  "bp-change",
  "bp-check",
  "bp-design",

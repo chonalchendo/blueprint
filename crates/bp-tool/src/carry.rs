@@ -1,4 +1,5 @@
-//! What a pull request carries (27, design change 8; 13, Delta): each proposed delta the issue caused, and each named
+//! What a pull request carries (27, design change 8; 13, Delta): each proposed delta the issue caused, each diagram
+//! such a delta adds, replaces or removes (28, design change 7), and each named
 //! block of the issue, its milestone or such a delta whose `check_hash` changed since the claim. The body names a
 //! changed block and the `bp show` commands for its two texts, never the text, so a weakened block reaches the
 //! reviewer as a row to read, not as prose to trust (E3). The check set binds those blocks to the approval: the head
@@ -17,6 +18,9 @@ use crate::claim::git;
 pub(crate) struct Carried {
     issue: Id,
     pub(crate) deltas: Vec<Id>,
+    /// Each diagram a delta changes: the delta, the name, `added`, `replaced` or `removed`, and a replaced one's diff
+    /// page (28, design change 13).
+    diagrams: Vec<(Id, String, &'static str, Option<String>)>,
     changes: Vec<Change>,
     set: String,
     claimed: String,
@@ -53,14 +57,25 @@ pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id) -> Result<Carried, 
     let file = vault.read(issue)?;
     let project = issue.project().expect("an issue sits under a project");
     let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: crate::ALL };
-    let mut deltas = Vec::new();
+    let (mut deltas, mut diagrams) = (Vec::new(), Vec::new());
     for row in index.list(&all)?.0 {
         let design = Id::parse(&row.id).expect("the index holds ids");
         for d in index.records(design.as_str(), Kind::Delta)? {
             let caused = d.header.get("cause").and_then(Value::as_str) == Some(issue.as_str());
             let body = Body::parse(&d.body);
             if caused && DeltaState::of(&body) == DeltaState::Proposed {
-                deltas.push((Id::parse(&d.id).expect("the index holds ids"), design.clone(), body));
+                let delta = Id::parse(&d.id).expect("the index holds ids");
+                for (name, spec) in crate::delta::carried(vault, &delta, &d.header)? {
+                    let page = format!("{delta}/{name}.diff.html");
+                    let diff = vault.root.join(&page).exists().then_some(page);
+                    let change = match spec {
+                        None => "removed",
+                        Some(_) if vault.root.join(format!("{design}/diagrams/{name}.yaml")).exists() => "replaced",
+                        Some(_) => "added",
+                    };
+                    diagrams.push((delta.clone(), name, change, diff));
+                }
+                deltas.push((delta, design.clone(), body));
             }
         }
     }
@@ -92,6 +107,7 @@ pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id) -> Result<Carried, 
     Ok(Carried {
         issue: issue.clone(),
         deltas: deltas.into_iter().map(|(d, ..)| d).collect(),
+        diagrams,
         changes,
         set: bp_check::set_hash(set.iter().map(String::as_str)),
         claimed: bp_check::set_hash(claimed.iter().map(String::as_str)),
@@ -139,6 +155,18 @@ impl Carried {
         Ok(commit)
     }
 
+    /// The result's `diagrams`.
+    pub(crate) fn diagrams(&self) -> Value {
+        let row = |(d, name, change, diff): &(Id, String, &str, Option<String>)| {
+            let mut row = json!({ "delta": d, "name": name, "change": change });
+            if let Some(diff) = diff {
+                row["diff"] = diff.as_str().into();
+            }
+            row
+        };
+        self.diagrams.iter().map(row).collect()
+    }
+
     /// The result's `check_changes`.
     pub(crate) fn changes(&self) -> Value {
         self.changes
@@ -161,7 +189,15 @@ impl Carried {
 
     /// The pull request's body.
     pub(crate) fn body(&self) -> String {
-        let deltas: Vec<String> = self.deltas.iter().map(|d| format!("- {d}\n")).collect();
+        let mut deltas = Vec::new();
+        for d in &self.deltas {
+            deltas.push(format!("- {d}\n"));
+            let drawn = self.diagrams.iter().filter(|(of, ..)| of == d);
+            deltas.extend(drawn.map(|(_, name, change, diff)| match diff {
+                Some(diff) => format!("  - diagram `{name}`: {change}; diff page `{diff}`\n"),
+                None => format!("  - diagram `{name}`: {change}\n"),
+            }));
+        }
         let deltas = if deltas.is_empty() { "None.\n".into() } else { deltas.concat() };
         let hash = |h: &Option<String>| h.as_deref().map_or("-".into(), |h| format!("`{h}`"));
         let rows: Vec<String> = self

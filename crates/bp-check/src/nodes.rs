@@ -29,10 +29,20 @@ impl Names {
     pub fn of(vault: &Vault, design: &Id, body: &str) -> Self {
         let project = design.project().expect("a design sits in a project");
         let glossary = std::fs::read_to_string(vault.root.join(format!("projects/{project}/designs/glossary.md")));
+        Self::with(glossary.ok().as_deref(), design, body)
+    }
+
+    /// [`Names::of`] with the glossary's text given: a delta's diagrams resolve against the glossary its milestone
+    /// proposes (28, design change 7).
+    ///
+    /// # Panics
+    ///
+    /// Never: a design's id names its project.
+    pub fn with(glossary: Option<&str>, design: &Id, body: &str) -> Self {
         Self {
-            terms: glossary.ok().map(|g| terms(&g).map(str::to_string).collect()),
+            terms: glossary.map(|g| terms(g).map(str::to_string).collect()),
             nouns: nouns(body),
-            project: project.to_string(),
+            project: design.project().expect("a design sits in a project").to_string(),
         }
     }
 

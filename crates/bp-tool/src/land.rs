@@ -112,6 +112,7 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
             "pull_request": o.number,
             "head": head,
             "deltas": carried.deltas,
+            "diagrams": carried.diagrams(),
             "check_changes": carried.changes(),
         }))));
     }
@@ -148,7 +149,8 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     let writer = ran.writer(&vault, &format!("bp pr {id}"))?;
     let (changes, runs) = ran.records(&vault);
     let written = writer.commit("pr", role.as_str(), &format!("pr {id}"), &changes)?;
-    let listed = json!({ "pull_request": number, "deltas": carried.deltas, "check_changes": carried.changes() });
+    let listed = json!({ "pull_request": number, "deltas": carried.deltas,
+            "diagrams": carried.diagrams(), "check_changes": carried.changes() });
     if let Some(at) = runs.iter().position(bp_check::Run::failed) {
         return Ok(Opened::Failed { at, commit: written.commit, runs, listed });
     }
@@ -160,6 +162,7 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
         "base": base,
         "runs": crate::check::rows(&runs),
         "deltas": carried.deltas,
+            "diagrams": carried.diagrams(),
         "check_changes": carried.changes(),
         "commit": written.commit,
         "findings": written.findings,

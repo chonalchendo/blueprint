@@ -6,6 +6,7 @@ mod check;
 mod claim;
 mod clock;
 mod create;
+mod delta;
 mod diagram;
 mod done;
 mod install;
@@ -13,6 +14,7 @@ mod intent;
 mod land;
 mod link;
 mod record;
+mod redraw;
 mod rename;
 mod schema;
 mod set;
@@ -189,7 +191,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Create(c) => wrote(create::create(cwd, c), cli.json, out),
         Verb::Link(l) => wrote(link::link(cwd, l), cli.json, out),
         Verb::Transition(t) => wrote(transition::transition(cwd, t), cli.json, out),
-        Verb::Record(r) => wrote(record::record(cwd, r), cli.json, out),
+        Verb::Record(r) => diagram::answer(record::record(cwd, r), cli.json, out),
         Verb::Rename(r) => wrote(rename::rename(cwd, r), cli.json, out),
         // The repo verbs refresh the forge snapshot after their forge calls or their write, refused or not (27, design
         // change 9).
