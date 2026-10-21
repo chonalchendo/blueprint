@@ -31,7 +31,7 @@ The levels follow Brown, *The C4 model*. Each line gives the design that is the 
 - System, workflow model section: `state` for each lifecycle, `sequence` for each scenario walk, `workflow` for hand-offs. These diagrams sit under the system design.
 - Container: `architecture` at `component`, which is required. The system's container view drills into it.
 - Container, optional: `architecture` at `container` for its neighbours, and `sequence` for each runtime scenario.
-- Component: `state` for each lifecycle and `sequence` for each of its own scenarios. Add `architecture` at `component` only for internals that the container view does not show.
+- Component: `state` for each lifecycle. A scenario `sequence` belongs to the workflow model, under the system design. Add `architecture` at `component` only for internals that the container view does not show.
 - Data model: `er` at `conceptual`, `logical` or `physical`. The project has one data model. Its views split by domain or by container, and all sit under the data-model design.
 
 These are the five types. A deployment level of `architecture` waits for a project that needs it. A method chart outside the five stays a table in the design. Story maps, timelines and quadrants are examples. A new type needs a design that no listed type can draw.

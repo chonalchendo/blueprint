@@ -56,7 +56,7 @@ Tell the human the route in one line: each answer and each reference. Recommend 
 13. Write each confirmed diagram: `bp diagram <design> <name> --spec-file <spec> --json`. Preview it first, as `references/diagrams.md` says.
 14. Link each decision and convention that the design obeys: `bp link <design> cites <node> --json`.
 15. Record each concern that the design answers: `bp record concern-answer <project> --field concern=<concern> --field state=designed --field design=<design> --json`.
-16. Run each gate of `references/gates.md`. It holds the cold-read dispatch. Fix each gap in the draft with `bp set <design> --body-file <file> --json`.
+16. Run each gate of `references/gates.md` on the draft after the create call, before the human confirms the draft. It holds the cold-read dispatch. Fix each gap in the draft with `bp set <design> --body-file <file> --json`.
 17. Tell the human that the draft exists. Give one line per gate. Activation is the human's later act.
 
 For a convention, get the template with `bp create convention --template --json`. Validate it with `bp create convention --title "<title>" --body-file <file> --dry-run --json`. Skip steps 1 to 6, 13 and 15. Run gates G1, G2, G4, G9 and G12 only.

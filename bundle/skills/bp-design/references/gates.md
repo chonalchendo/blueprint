@@ -1,10 +1,10 @@
 # Gates
 
-Load this reference last, every time. For a new design, run it on the draft before the human confirms it. For a revision, run it on the proposed body file before the `record delta` call. It produces one verdict per gate and an `## Open` entry for each gap that stays.
+Load this reference last, every time. For a new design, run it on the draft after the create call, before the human confirms the draft. For a revision, run it on the proposed body file before the `record delta` call. It produces one verdict per gate and an `## Open` entry for each gap that stays.
 
 A new design passes all twelve gates. A delta passes the gates that `references/revision.md` names for its class.
 
-Write each gap that stays into `## Open`. On a draft, write the body with `bp set <design> --body-file <file> --json`. On a revision, write it into the proposed body file.
+Write each gap that stays into `## Open`. On a draft, write the body with `bp set <design> --body-file <file> --json`. On a revision, write it into the proposed body file. On the editorial path, tell the human each gap, and add no section or heading.
 
 ## Solo moves
 
@@ -60,7 +60,7 @@ Verify: the `findings` of the dry run. A draft adds `--dry-run` to its create or
 
 ## The cold-read dispatch
 
-Run it on the draft before the human confirms it. For a revision, run it on the proposed body file before `record delta`.
+Run it on the draft after the create call, before the human confirms the draft. For a revision, run it on the proposed body file before `record delta`.
 
 1. Fill the research template of the `bp-researcher` role. Put the design id on the `Node:` line.
 2. After the five lines, write this question. For a revision, replace the second line with the path of the body file.

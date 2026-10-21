@@ -19,7 +19,7 @@ Load this reference when the design is past `draft`. Load it before the referenc
    Tell the human the class and the impact list. The human confirms the class.
 5. **Choose the path**. A clarifying change can take the editorial path. Any other class needs a milestone. Find it with `bp list milestone --project <p> --status planned --json`. Use `--status approved` when none is planned. With no milestone, tell the human and stop. Recommend a thread or an editorial split.
 6. **Re-check by class**. Run the gates of `references/gates.md` on the proposed design. Each class runs these gates:
-   - Clarifying: G1, G7 and G9. On the editorial path, tell the human each gap that stays, and add no section for it.
+   - Clarifying: G1, G7 and G9. On the editorial path, tell the human each gap that stays, and add no section or heading.
    - Additive: the clarifying gates, then G2. Add G3 for a new characteristic. Each new noun gets a glossary term.
    - Breaking: all twelve gates. Also read each sentence of each citing design that uses the changed term. Supersede each decision whose context names the changed fact: write a new decision, and never edit the old one. Run `bp check <id> --json` on the design and on each child. A renamed concept gets a new term, and the old term retires.
    - Each class: does the change contradict the parent design? If it does, the parent needs its own delta, or the change is wrong.
