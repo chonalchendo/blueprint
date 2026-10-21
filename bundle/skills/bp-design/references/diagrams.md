@@ -48,10 +48,10 @@ Top keys: `type`, `level`, `title`, `lede`, `focus`, `nodes`, `groups`, `edges`,
   - `architecture`: `application`, `library`, `store`, `deployable`, `component`, `system`, `person`, `external`.
   - `er`: `entity`, `node`, `record`, `row`, `elsewhere`. An `elsewhere` node is an entity of another domain, with its `owner`.
   - `state`: `state`, `start`, `end`, `choice`. `workflow`: `step`, `start`, `end`, `decision`.
-- Optional node keys: `at`, `span`, `note`, `sub`, `fields`, `time`, `owner`, `lane`. An `er` node and a `start`, `end`, `choice` or `decision` node draw no `note`, so `bp` refuses one there.
+- Optional node keys: `at`, `span`, `note`, `sub`, `fields`, `time`, `owner`, `lane`. A `state` or `step` draws its `note` as a muted line under its name. Put detail there, not in the label.
 - A group has `id`, `label` and `members`. It draws a boundary.
 - A `lanes` item has `id` and `label`. Each workflow node names its lane in `lane`.
-- A `legend` item has `role` or `style`, and `label`. `bp` refuses an item that has no key or no `label`. Without `legend`, `bp` draws the legend from the marks in use.
+- A `legend` item has `role` or `style`, and `label`. Without `legend`, `bp` draws the legend from the marks in use.
 - An edge has `from`, `to` and `label`. `style` is `solid` or `dashed`. `both` draws two heads. `exit` and `enter` take `top`, `right`, `bottom` or `left`. An `er` edge takes `card`: the cardinality at `from`, then at `to`. Give an edge an `id` only when two edges share their ends.
 - A sequence step has `from`, `to` and `say`. `back` draws the return on the next row. `kind` is `call` or `return`.
 
