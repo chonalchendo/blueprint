@@ -82,7 +82,7 @@ pub struct Row {
     /// The title; records have none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// The status; records have none.
+    /// The status; a record's is its `state`, where its kind has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// The parent.
@@ -295,14 +295,18 @@ impl Index {
     /// the total and the rows come from the same refresh.
     pub fn list(&self, f: &Filter) -> Result<(Vec<Row>, usize), Refusal> {
         let run = || -> rusqlite::Result<(Vec<Row>, usize)> {
-            let tx = self.conn.unchecked_transaction()?;
+            // The count and the rows read one state. Inside a walk's read, that read is the one; a nested
+            // transaction would refuse.
+            let _tx = if self.conn.is_autocommit() { Some(self.conn.unchecked_transaction()?) } else { None };
             let is_record = f.kind.is_record();
             let (from, cols) = if is_record {
-                ("records", "id, kind, null, null, under, null, null")
+                // A record's status is its `state`, where its kind has one: a delta, a concern answer (13). A skill
+                // reads it from the row, not one `show` per row (27, issue 12).
+                ("records", "id, kind, null, json_extract(header, '$.state'), under, null, null")
             } else {
                 ("nodes", "id, kind, title, status, under, design_kind, scope")
             };
-            // Records carry no status, so a status filter on a record kind matches nothing.
+            // A record has no header status, so a status filter on a record kind matches nothing.
             let status = if is_record { "?2 is null" } else { "(?2 is null or status = ?2)" };
             // A node's children come from the `under` links, which are indexed by target; `nodes.under` is not. The
             // plan is made before the bind, so a clause that holds for any `?4` would scan the kind, and `+kind`
@@ -314,12 +318,12 @@ impl Index {
             let filter = format!("where {kind} = ?1 and {status} and (?3 is null or project = ?3) and {children}");
             let under = f.under;
             let limit = i64::try_from(f.limit).unwrap_or(i64::MAX);
-            let total = tx.query_row(
+            let total = self.conn.query_row(
                 &format!("select count(*) from {from} {filter}"),
                 params![f.kind.as_str(), f.status, f.project, under],
                 count,
             )?;
-            let mut st = tx.prepare(&format!("select {cols} from {from} {filter} order by id limit ?5"))?;
+            let mut st = self.conn.prepare(&format!("select {cols} from {from} {filter} order by id limit ?5"))?;
             let rows = st
                 .query_map(params![f.kind.as_str(), f.status, f.project, under, limit], |r| {
                     Ok(Row {
@@ -382,8 +386,8 @@ impl Index {
         Ok(text.map(|t| object(&t)))
     }
 
-    /// The ids of a project's nodes of one kind, in id order. It runs inside the caller's read, which `list`, with
-    /// its own transaction, cannot: a walk holds one read across its statements.
+    /// The ids of a project's nodes of one kind, in id order, with no count: a walk holds one read across its
+    /// statements, and reads them inside it.
     pub fn ids_of(&self, kind: Kind, project: &str) -> Result<Vec<String>, Refusal> {
         let run = || -> rusqlite::Result<Vec<String>> {
             let mut st =

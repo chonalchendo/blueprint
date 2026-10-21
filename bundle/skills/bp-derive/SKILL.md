@@ -1,6 +1,6 @@
 ---
 name: bp-derive
-description: Use when an approved milestone has a finish-line block that no issue covers. Write the next few issues under it.
+description: Use when a milestone is `needs-derivation`. Write the next few issues under it.
 ---
 
 Intent: `needs-derivation`. An approved milestone has fewer live issues than its batch of three. A block of its finish line has no issue that covers it. You write the next few issues, not every issue of the milestone.

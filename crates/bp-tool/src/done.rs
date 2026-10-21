@@ -1,20 +1,16 @@
 //! `bp walk <id> --for <action> --done`: the action's stop, a predicate on records (21, rule 4; 27, design change
 //! 11). A skill's `Stop:` line calls it, so it reads no slice; it reads only what its row's Stop column names.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use bp_change::{MilestoneStatus, intents};
 use bp_operation::Action;
 use bp_reasoning::ThreadStatus;
 use bp_vault::git::Repo;
-use bp_vault::{Body, Filter, Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Filter, Id, Index, Kind, Refusal, Vault};
 use serde_json::{Map, Value};
 
 use crate::claim::{field, held};
-
-/// The batch size for derive, until it is a project setting (21, open questions: the lean is three).
-const BATCH: usize = 3;
 
 /// How deep `search` must find a learning by its cue: the search verb's default limit.
 const RETRIEVAL: usize = 10;
@@ -41,7 +37,7 @@ pub(crate) fn done(
             let f = Filter { kind: Kind::Milestone, status: planned, project: Some(project), under: None, limit: 1 };
             index.list(&f)?.1 > 0
         }
-        Action::Derive => derived(index, id)?,
+        Action::Derive => intents::uncovered(&crate::intent::derivation(index, id.as_str())?).is_empty(),
         // A worker that cannot finish releases the claim `escalated`, and that ends its dispatch (21).
         Action::Complete | Action::Respond if escalated(index, id)? => true,
         Action::Complete => {
@@ -102,30 +98,6 @@ pub(crate) fn done(
     })
 }
 
-/// The batch is full or the finish line is covered: each named block in the milestone's `## Finish line` has a
-/// namesake in the `## Check` of an issue under it (21, needs derivation).
-fn derived(index: &Index, id: &Id) -> Result<bool, Refusal> {
-    let f = Filter { kind: Kind::Issue, status: None, project: None, under: Some(id.as_str()), limit: crate::ALL };
-    let (issues, _) = index.list(&f)?;
-    if issues.iter().filter(|i| intents::is_live_issue(i.status.as_deref().unwrap_or_default())).count() >= BATCH {
-        return Ok(true);
-    }
-    let mut covered = BTreeSet::new();
-    for i in &issues {
-        covered.extend(names(&index.body(&i.id)?, "Check"));
-    }
-    Ok(names(&index.body(id.as_str())?, "Finish line").is_subset(&covered))
-}
-
-/// The names of the named blocks in the body's sections under `heading`.
-fn names(body: &str, heading: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for s in Body::parse(body).sections_named(heading) {
-        out.extend(bp_check::named(&Body::parse(&s.text)).into_iter().map(|c| c.attrs["name"].clone()));
-    }
-    out
-}
-
 /// The latest claim of the issue is released `escalated`.
 fn escalated(index: &Index, id: &Id) -> Result<bool, Refusal> {
     let claims = crate::intent::claims(&index.records(id.as_str(), Kind::Claim)?);
@@ -139,13 +111,8 @@ fn responded(root: &Path, index: &Index, id: &Id, forge_age: &mut Option<i64>) -
     else {
         return Ok(false);
     };
-    // The findings are the rows of the body's table, after its header and separator lines, counted from 1 (21,
-    // respond). A disposition for an index past the last row answers nothing.
-    let rows = review.body.lines().filter(|l| l.trim_start().starts_with('|')).count().saturating_sub(2);
-    let dispositions = index.records(&review.id, Kind::Disposition)?;
-    let answered: BTreeSet<u64> = dispositions.iter().filter_map(|d| d.header.get("finding")?.as_u64()).collect();
-    let fixed = dispositions.iter().any(|d| field(d, "as").as_deref() == Some("fixed"));
-    Ok((1..=rows as u64).all(|n| answered.contains(&n)) && !(fixed && field(&review, "head") == Some(pr)))
+    let (open, fixed) = crate::intent::findings(index, &review)?;
+    Ok(open.is_empty() && !(fixed && field(&review, "head") == Some(pr)))
 }
 
 /// The head of the issue's open pull request while a claim is held, and the claim's worktree when this machine has

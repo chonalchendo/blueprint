@@ -199,3 +199,25 @@ fn a_bad_clock_is_usage_and_a_bad_snapshot_names_its_file() {
     let (code, _) = bp(d.path(), &[("BP_FORGE_SNAPSHOT", &none)], &["list", "milestone"]);
     assert_eq!(code, Some(0), "a milestone list never reads the forge");
 }
+
+#[test]
+fn a_walk_reads_needs_derivation_inside_its_one_read() {
+    // Needs derivation lists the milestone's issues inside the walk's read, so the list opens no second transaction.
+    let d = vault();
+    let r = d.path();
+    let block = "## Finish line\n\n```check shell {name=open expect=0}\ntrue\n```\n";
+    write(
+        r,
+        "projects/bp/milestones/a.md",
+        &format!("---\nkind: milestone\ntitle: A\nstatus: approved\n---\n\n{block}"),
+    );
+    write(r, "projects/bp/designs/system.md", "---\nkind: design\ntitle: S\nstatus: active\n---\n\nBody.\n");
+    let under = "---\nkind: issue\ntitle: U\nstatus: open\nunder: projects/bp/milestones/a\ncites: [projects/bp/designs/system]\n---\n\nBody.\n";
+    write(r, "projects/bp/issues/0011.under.md", under);
+    let forge = r.join("forge");
+    let (code, v) =
+        bp(r, &[("BP_FORGE_SNAPSHOT", &forge)], &["walk", "projects/bp/issues/0011.under", "--for", "complete"]);
+    assert_eq!(code, Some(0), "{v}");
+    let a = v["intents"].as_array().unwrap().iter().find(|i| i["id"] == "projects/bp/milestones/a").unwrap();
+    assert_eq!(a["intent"], "needs-derivation", "{v}");
+}

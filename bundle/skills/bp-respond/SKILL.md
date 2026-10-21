@@ -1,6 +1,6 @@
 ---
 name: bp-respond
-description: Use when a worker dispatch names an issue whose latest review has an unanswered finding. Answer each finding, and push the fixes.
+description: Use when a worker dispatch names an issue that is `needs-response`. Answer each finding, and push the fixes.
 ---
 
 Task: answer each finding of the latest review on the issue on the `Node:` line of the dispatch. This text calls the issue `<id>`.

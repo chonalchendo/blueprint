@@ -1,6 +1,6 @@
 ---
 name: bp-shape
-description: Use when an active design has an open concern and no milestone is planned or approved. Propose the next milestone, and write it when the human agrees.
+description: Use when a design is `needs-shaping`. Propose the next milestone, and write it when the human agrees.
 ---
 
 Intent: `needs-shaping`. An active design has an open concern, and the project has no milestone `planned` or `approved`. You propose one milestone. The human decides its scope.

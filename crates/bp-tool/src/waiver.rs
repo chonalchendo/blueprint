@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use bp_change::intents;
-use bp_vault::{Check, Code, Filter, Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Check, Code, Filter, Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::Value;
 
 use crate::stamp::Stamp;
@@ -52,24 +52,7 @@ pub(crate) fn open(vault: &Vault, index: &Index, project: &str, now: i64) -> Res
         if records.is_empty() {
             continue;
         }
-        for r in records {
-            let key = r.id.rsplit('/').next().unwrap_or(&r.id);
-            let field = |k: &str| r.header.get(k).and_then(Value::as_str).filter(|t| !t.is_empty());
-            // A block name may end in `-<n>`, so only `check` splits the key `<check>-<n>`; 13's rule 1 on the bare
-            // key would misread `walk-8` as the eighth waiver of `walk`. A waiver written by hand without it keys
-            // its own block.
-            let block = field("check").unwrap_or(key);
-            let seq = key.strip_prefix(block).and_then(|n| n.strip_prefix('-')).and_then(|n| n.parse().ok());
-            // A `valid_until` that is not an instant reads as past, so the stamp asks again.
-            let valid_until = field("valid_until").map(|t| intents::timestamp(t).unwrap_or(i64::MIN));
-            waivers.push(intents::Waiver {
-                id: r.id.clone(),
-                milestone: m.id.clone(),
-                block: block.into(),
-                seq: seq.unwrap_or(1),
-                valid_until,
-            });
-        }
+        waivers.extend(records.iter().map(|r| reduce(&m.id, r)));
         runs.insert(m.id.clone(), index.records(&m.id, Kind::Run)?);
     }
     let passed_after = |w: &intents::Waiver| {
@@ -90,6 +73,25 @@ pub(crate) fn open(vault: &Vault, index: &Index, project: &str, now: i64) -> Res
         open.push(Reask { waiver, milestone, name: w.block.clone(), check });
     }
     Ok(open)
+}
+
+/// A waiver record of `milestone`, reduced.
+pub(crate) fn reduce(milestone: &str, r: &Record) -> intents::Waiver {
+    let key = r.id.rsplit('/').next().unwrap_or(&r.id);
+    let field = |k: &str| r.header.get(k).and_then(Value::as_str).filter(|t| !t.is_empty());
+    // A block name may end in `-<n>`, so only `check` splits the key `<check>-<n>`; 13's rule 1 on the bare key
+    // would misread `walk-8` as the eighth waiver of `walk`. A waiver written by hand without it keys its own block.
+    let block = field("check").unwrap_or(key);
+    let seq = key.strip_prefix(block).and_then(|n| n.strip_prefix('-')).and_then(|n| n.parse().ok());
+    // A `valid_until` that is not an instant reads as past, so the stamp asks again.
+    let valid_until = field("valid_until").map(|t| intents::timestamp(t).unwrap_or(i64::MIN));
+    intents::Waiver {
+        id: r.id.clone(),
+        milestone: milestone.into(),
+        block: block.into(),
+        seq: seq.unwrap_or(1),
+        valid_until,
+    }
 }
 
 /// The refusals of a stamp of `id` over its waivers. Each `--waive` names a block of `finish`, the milestone's finish

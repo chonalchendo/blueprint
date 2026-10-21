@@ -2,19 +2,22 @@
 //! first, because a blocked issue must never read as ready. Pure: the caller hands in the node's records, its
 //! dependencies' states and the forge's view of its pull request.
 //!
-//! Predicates whose records do not exist yet (dispositions, finish-line runs, concern answers) never hold; they
-//! arrive with the milestones that write those records. Re-asked is [`reasked`], over a project's waivers.
+//! The issue predicates live here; the design and milestone predicates, which follow them in the order, live in
+//! [`planning`].
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::{IssueStatus, MilestoneStatus};
+use crate::IssueStatus;
+
+mod planning;
+pub use planning::*;
 
 /// Twelve hours: a claim older than this with no run since reads `working (stale)`.
 pub const STALE_AFTER: i64 = 12 * 3600;
 
-/// The intents, in predicate order (21). A variant arrives with the milestone that writes the records it reads.
+/// The intents, in predicate order (21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 #[allow(missing_docs)]
@@ -24,10 +27,15 @@ pub enum Intent {
     Waiting,
     Working,
     NeedsReview,
+    NeedsResponse,
     NeedsApproval,
     NeedsLanding,
     Drifted,
+    NeedsDerivation,
+    NeedsShaping,
     NeedsMilestoneApproval,
+    NeedsAcceptance,
+    ReAsked,
 }
 
 /// A claim record, reduced to what the predicates read.
@@ -201,6 +209,9 @@ pub struct Issue {
     pub blocks: Vec<Block>,
     /// `head` of each review record.
     pub review_heads: Vec<String>,
+    /// The findings of the review at the head that no disposition answers, counted from 1; read only while a
+    /// pull request is in view.
+    pub unanswered: Vec<u64>,
     /// The `depends` targets.
     pub depends: Vec<Dependency>,
     /// The open pull request, or the merged one of a held claim; `None` when there is none or the forge was not read.
@@ -302,6 +313,10 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     if !pr.green {
         return Verdict::of(Intent::Working, "checks not green");
     }
+    if !i.unanswered.is_empty() {
+        let rows: Vec<String> = i.unanswered.iter().map(u64::to_string).collect();
+        return Verdict::of(Intent::NeedsResponse, format!("no disposition: findings {}", rows.join(", ")));
+    }
     Verdict::of(Intent::NeedsApproval, "")
 }
 
@@ -364,67 +379,6 @@ fn latest_at<'a>(runs: &'a [Run], head: &str) -> BTreeMap<&'a str, &'a Run> {
         }
     }
     latest
-}
-
-/// The intent of one milestone; `integrity` is the blocked note of a failed integrity run that names it
-/// ([`IntegrityRun::blocks`]). Blocked comes first, for a milestone not yet done or abandoned. Derivation and
-/// acceptance need finish-line run records, which arrive later.
-pub fn milestone(status: &str, integrity: Option<String>) -> Verdict {
-    let status = status.parse();
-    if matches!(status, Ok(MilestoneStatus::Planned | MilestoneStatus::Approved))
-        && let Some(note) = integrity
-    {
-        return Verdict::of(Intent::Blocked, note);
-    }
-    match status {
-        Ok(MilestoneStatus::Planned) => Verdict::of(Intent::NeedsMilestoneApproval, ""),
-        _ => Verdict::NONE,
-    }
-}
-
-/// A drift run (21, drifted; 13, Run): a run of a design's check that failed or timed out. An integrity run checks the
-/// vault, not a design, and a run that could not run or was skipped says nothing about the code.
-pub fn is_drift(verdict: &str, check_kind: &str) -> bool {
-    matches!(verdict, "fail" | "timed-out") && check_kind != "integrity"
-}
-
-/// The intent of one design (21, drifted): `uncited` holds its failed drift runs that no delta or thread cites. The
-/// note names them and the action that answers them.
-pub fn design(id: &str, uncited: &[String]) -> Verdict {
-    if uncited.is_empty() {
-        return Verdict::NONE;
-    }
-    Verdict::of(Intent::Drifted, format!("{}; bp walk {id} --for triage-drift", uncited.join(", ")))
-}
-
-/// A waiver record, reduced (13, Waiver). Its key is the milestone, the block, its `check`, and the sequence, read
-/// from the record key relative to `check`: `<check>` is 1, `<check>-<n>` is n.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Waiver {
-    /// The waiver record's id.
-    pub id: String,
-    /// The milestone whose finish line holds the block.
-    pub milestone: String,
-    /// The block's name.
-    pub block: String,
-    /// The sequence: a later waiver of one block takes the next.
-    pub seq: u64,
-    /// `valid_until`, Unix seconds; `None` when empty.
-    pub valid_until: Option<i64>,
-}
-
-/// Re-asked (21): each waiver that is the latest of its block, whose `valid_until` is empty or past, and that no
-/// passing run of its block follows, by commit order. `passed_after` answers that last test, which needs git, so it
-/// runs only for a latest waiver still in date. `stamp` calls the same function.
-pub fn reasked(waivers: &[Waiver], now: i64, mut passed_after: impl FnMut(&Waiver) -> bool) -> Vec<&Waiver> {
-    let mut latest: BTreeMap<(&str, &str), &Waiver> = BTreeMap::new();
-    for w in waivers {
-        let slot = latest.entry((w.milestone.as_str(), w.block.as_str())).or_insert(w);
-        if w.seq > slot.seq {
-            *slot = w;
-        }
-    }
-    latest.into_values().filter(|w| w.valid_until.is_none_or(|t| t <= now) && !passed_after(w)).collect()
 }
 
 /// A claim's release: the `key: value` lines of its appended `## Released` section (13). Empty while it is held.
@@ -514,8 +468,8 @@ mod tests {
 
     #[test]
     fn a_design_drifts_while_a_failed_drift_run_is_uncited() {
-        assert_eq!(design("d", &[]), Verdict::NONE);
-        let v = design("d", &["d/runs/x-1".to_string()]);
+        assert_eq!(design("d", &[], &[], false), Verdict::NONE);
+        let v = design("d", &["d/runs/x-1".to_string()], &["c".to_string()], false);
         assert_eq!(v, Verdict::of(Intent::Drifted, "d/runs/x-1; bp walk d --for triage-drift"));
     }
 
@@ -558,9 +512,10 @@ mod tests {
         assert_eq!(latest(&tie).as_deref(), Some("b-run"), "then the id, whatever the read order");
         let i = Issue { integrity: failed.blocks(a), ..open() };
         assert_eq!(issue(&i, NOW), Verdict::of(Intent::Blocked, note));
-        assert_eq!(milestone("planned", failed.blocks(a)), Verdict::of(Intent::Blocked, note));
-        assert_eq!(milestone("approved", failed.blocks(a)).intent, Some(Intent::Blocked));
-        assert_eq!(milestone("done", failed.blocks(a)), Verdict::NONE, "a done milestone has nothing left to do");
+        let m = |status: &str| Milestone { status: status.into(), integrity: failed.blocks(a), ..Milestone::default() };
+        assert_eq!(milestone("m", &m("planned")), Verdict::of(Intent::Blocked, note));
+        assert_eq!(milestone("m", &m("approved")).intent, Some(Intent::Blocked));
+        assert_eq!(milestone("m", &m("done")), Verdict::NONE, "a done milestone has nothing left to do");
     }
 
     #[test]
@@ -788,9 +743,65 @@ mod tests {
 
     #[test]
     fn milestones() {
-        assert_eq!(milestone("planned", None).intent, Some(Intent::NeedsMilestoneApproval));
-        assert_eq!(milestone("approved", None).intent, None);
-        assert_eq!(milestone("in-progress", None).intent, None);
+        let of = |m: &Milestone| milestone("m", m).intent;
+        let status = |s: &str| Milestone { status: s.into(), ..Milestone::default() };
+        assert_eq!(of(&status("planned")), Some(Intent::NeedsMilestoneApproval));
+        assert_eq!(of(&status("in-progress")), None);
+        assert_eq!(of(&status("done")), None);
         assert!(is_live_issue("in-progress") && !is_live_issue("abandoned"));
+
+        let approved = Milestone { finish: vec![block("a"), block("b")], ..status("approved") };
+        let v = milestone("m", &approved);
+        assert_eq!(v, Verdict::of(Intent::NeedsDerivation, "a, b uncovered; bp walk m --for derive"));
+        let full = Milestone { issues: vec!["open".into(), "in-progress".into(), "open".into()], ..approved.clone() };
+        assert_eq!(of(&full), None, "a full batch waits for its issues");
+        let covered = Milestone { covered: ["a".into(), "b".into()].into(), ..approved.clone() };
+        assert_eq!(milestone("m", &covered), Verdict::of(Intent::NeedsAcceptance, "bp stamp m"), "no run yet");
+        let one = Milestone { issues: vec!["resolved".into(), "open".into()], ..covered.clone() };
+        assert_eq!(of(&one), None, "a live issue under it");
+        assert_eq!(of(&Milestone { broken: true, ..covered.clone() }), None, "a broken file in the project");
+        let failed = Milestone { runs: vec![run("a", NOW, "c1", true)], ..covered.clone() };
+        assert_eq!(of(&failed), None, "the latest run of a failed");
+        assert_eq!(of(&Milestone { waived: ["a".into()].into(), ..failed.clone() }), Some(Intent::NeedsAcceptance));
+        let mut rerun = failed.clone();
+        rerun.runs.push(run("a", NOW + 60, "c2", false));
+        assert_eq!(of(&rerun), Some(Intent::NeedsAcceptance), "a later pass");
+        rerun.runs[1].check_hash = "#old".into();
+        assert_eq!(of(&rerun), None, "a pass of another text says nothing");
+
+        let done = Milestone { reasked: vec!["f".into()], ..status("done") };
+        assert_eq!(milestone("m", &done), Verdict::of(Intent::ReAsked, "f; bp stamp <next> --waive m/f"));
+    }
+
+    #[test]
+    fn a_design_needs_shaping_while_a_concern_is_open_and_no_milestone_is_due() {
+        let answer = |concern: &str, stamp: &str, state: &str| ConcernAnswer {
+            concern: concern.into(),
+            stamp: stamp.into(),
+            state: state.into(),
+        };
+        let answers = [answer("a", "2", "designed"), answer("a", "1", "open"), answer("b", "1", "open")];
+        let open = open_concerns(&answers);
+        assert_eq!(open, ["b"], "the latest answer of a is designed");
+        assert_eq!(design("d", &[], &open, false), Verdict::of(Intent::NeedsShaping, "b open; bp walk d --for shape"));
+        assert_eq!(design("d", &[], &open, true), Verdict::NONE, "a planned or approved milestone");
+    }
+
+    #[test]
+    fn needs_response_follows_a_review_with_an_unanswered_finding() {
+        let reviewed = Issue {
+            status: "in-progress".into(),
+            claims: vec![Claim::default()],
+            review_heads: vec!["h".into()],
+            pr: Some(pr("h", true, false)),
+            unanswered: vec![2, 3],
+            ..Issue::default()
+        };
+        let v = issue(&reviewed, NOW);
+        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 2, 3"));
+        let red = Issue { pr: Some(pr("h", false, false)), ..reviewed.clone() };
+        assert_eq!(issue(&red, NOW).intent, Some(Intent::Working), "working comes first in the order");
+        let answered = Issue { unanswered: Vec::new(), ..reviewed };
+        assert_eq!(issue(&answered, NOW).intent, Some(Intent::NeedsApproval));
     }
 }
