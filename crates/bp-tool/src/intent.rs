@@ -113,6 +113,8 @@ impl<'a> Intents<'a> {
     pub fn row(&self, kind: Kind, id: &str, status: Option<&str>) -> Result<Verdict, Refusal> {
         let status = status.unwrap_or_default();
         match kind {
+            // A settled issue has no intent, so it reads nothing: most issues a walk reaches are settled.
+            Kind::Issue if !intents::is_live_issue(status) => Ok(Verdict::NONE),
             Kind::Issue => of(
                 self.vault,
                 self.index,
@@ -168,11 +170,13 @@ impl<'a> Intents<'a> {
     /// The blocked note of the project's counting integrity run, when it failed and names `id` (21, blocked).
     fn integrity(&self, id: &str) -> Result<Option<String>, Refusal> {
         let Some(project) = project(id) else { return Ok(None) };
-        let counting = once(&self.integrity, &project, || {
+        // The run is answered in place, not cloned through `once`: it names every node it failed, and a walk asks
+        // once per live node.
+        if !self.integrity.borrow().contains_key(&project) {
             let runs: Vec<IntegrityRun> = self.index.integrity_runs(&project)?.iter().map(integrity_run).collect();
-            Ok(IntegrityRun::counting(&runs).cloned())
-        })?;
-        Ok(counting.and_then(|r| r.blocks(id)))
+            self.integrity.borrow_mut().insert(project.clone(), IntegrityRun::counting(&runs).cloned());
+        }
+        Ok(self.integrity.borrow()[&project].as_ref().and_then(|r| r.blocks(id)))
     }
 
     /// The intent of one milestone. Each read waits for the status, and the earlier reads, that let it matter.
@@ -180,8 +184,11 @@ impl<'a> Intents<'a> {
         let project = project(id).expect("a milestone sits under a project");
         let mut m = Milestone::default();
         match status.parse() {
+            // Blocked holds only before `done` (21).
+            Ok(MilestoneStatus::Planned) => m.integrity = self.integrity(id)?,
             Ok(MilestoneStatus::Approved) => {
                 m = derivation(self.index, id)?;
+                m.integrity = self.integrity(id)?;
                 if !m.issues.iter().any(|s| intents::is_live_issue(s)) {
                     m.runs = runs(self.index, id)?;
                     m.broken = once(&self.broken, &project, || Ok(!self.index.broken(&project)?.is_empty()))?;
@@ -198,7 +205,6 @@ impl<'a> Intents<'a> {
             _ => {}
         }
         m.status = status.into();
-        m.integrity = self.integrity(id)?;
         Ok(intents::milestone(id, &m))
     }
 }
@@ -340,7 +346,7 @@ fn accepted(index: &Index, design: &str) -> Result<Option<String>, Refusal> {
     Ok(accepted.filter_map(at).max())
 }
 
-/// The intent of one issue.
+/// The intent of one live issue.
 fn of(
     vault: &Vault,
     index: &Index,
@@ -349,9 +355,6 @@ fn of(
     status: &str,
     integrity: Option<String>,
 ) -> Result<Verdict, Refusal> {
-    if !intents::is_live_issue(status) {
-        return Ok(Verdict::NONE);
-    }
     let header = index.header(id)?.expect("a listed row is in the index");
     let mut depends = Vec::new();
     for d in header.get("depends").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
