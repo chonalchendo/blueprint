@@ -139,7 +139,7 @@ pub fn render_with(
             }
         },
     };
-    legend::lay_out(&mut scene, &drawn);
+    legend::lay_out(&mut scene, &drawn, base.is_some());
     findings.extend(rules::check(&scene.geometry()));
     if findings.iter().any(|f| f.severity == Severity::Error) {
         return Err(findings);

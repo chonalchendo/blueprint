@@ -10,6 +10,10 @@ use crate::scene::{Key, Scene};
 use crate::spec::{Spec, Type};
 use crate::svg::esc;
 
+/// The diff's states and their words.
+const DIFF: &[(&str, &str)] =
+    &[("added", "Added"), ("removed", "Removed"), ("changed", "Changed"), ("moved", "Moved: ghost at the old cell")];
+
 /// The keys in use, in order of first use.
 fn in_use(spec: &Spec) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
@@ -53,8 +57,9 @@ pub(crate) fn rule(spec: &Spec) -> Vec<Finding> {
     out
 }
 
-/// Places the legend under the drawing and grows the scene to hold it.
-pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec) {
+/// Places the legend under the drawing and grows the scene to hold it. A diff adds its four states, which the author
+/// never names.
+pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec, diff: bool) {
     let named = |k: &str| spec.legend.as_ref().and_then(|l| l.iter().find(|(n, _)| n == k)).map(|(_, l)| l.clone());
     let mut keys: Vec<(String, String)> = in_use(spec)
         .into_iter()
@@ -65,6 +70,11 @@ pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec) {
         .collect();
     if spec.ty == Type::Er && spec.level.as_deref() != Some("conceptual") {
         keys.push(("marks".into(), "# key · → reference · #→ key part that is a reference".into()));
+    }
+    if diff {
+        for (k, words) in DIFF {
+            keys.push(((*k).into(), (*words).into()));
+        }
     }
     // A tagged role's swatch is the tag itself, as its nodes draw it: the reader matches words, not fills.
     let tag = |k: &str| match k {
@@ -128,6 +138,17 @@ pub(crate) fn draw(scene: &Scene) -> String {
                 "<g class=\"swatch note\"><rect class=\"notebox\" x=\"{x}\" y=\"{y}\" width=\"20\" height=\"12\" rx=\"3\"/></g>"
             ),
             "marks" => String::new(),
+            "added" | "removed" | "changed" | "moved" => {
+                let dot = if k.kind == "changed" {
+                    format!("<circle class=\"dot\" cx=\"{}\" cy=\"{}\" r=\"2\"/>", x + 15, y + 4)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "<g class=\"swatch key-{0}\"><rect class=\"box\" x=\"{x}\" y=\"{y}\" width=\"20\" height=\"12\" rx=\"3\"/>{dot}</g>",
+                    k.kind
+                )
+            }
             role => match &k.tag {
                 Some(t) => format!(
                     "<g class=\"swatch role-{role}\"><rect class=\"tagbox\" x=\"{x}\" y=\"{}\" width=\"{}\" height=\"18\" rx=\"9\"/><text class=\"t-body tag\" x=\"{}\" y=\"{}\" font-size=\"11\">{}</text></g>",

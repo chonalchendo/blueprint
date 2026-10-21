@@ -64,6 +64,9 @@ fn the_diff_marks_added_and_removed_and_keeps_the_ghost() {
     );
     assert!(page.contains("class=\"edge removed\" data-id=\"tool--repository\""));
     assert!(page.contains("class=\"bp bp-architecture diff mode-diff\""));
+    for state in ["added", "removed", "changed", "moved"] {
+        assert!(page.contains(&format!("swatch key-{state}")), "the diff legend lists {state}");
+    }
 }
 
 /// The drill badge is the caller's input, never the spec's (28, design change 12): the preview draws none, and a
@@ -133,5 +136,5 @@ fn the_bytes_are_the_same_on_every_platform() {
         .map(|page| format!("{:016x}", fnv(&page)))
         .collect();
     // A deliberate change to the renderer, the style or the viewer changes these; update them in the same commit.
-    assert_eq!(got, ["95cc3e90e8d5c1d8", "8be473fae3472fa3", "b78b0ee0a230382e", "cc056fef711866f2"]);
+    assert_eq!(got, ["88438aad52eeac7d", "9d2a092b27c41e4c", "d4a8b9e072b8f10f", "fba83aceb6b18bc0"]);
 }
