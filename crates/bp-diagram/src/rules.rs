@@ -95,7 +95,7 @@ fn pairs(g: &Geometry, out: &mut Vec<Finding>) {
     }
 }
 
-fn parallel_overlap((p, q): (Point, Point), (s, t): (Point, Point)) -> bool {
+pub(crate) fn parallel_overlap((p, q): (Point, Point), (s, t): (Point, Point)) -> bool {
     let overlap = |a1: i32, a2: i32, b1: i32, b2: i32| a1.max(a2).min(b1.max(b2)) - a1.min(a2).max(b1.min(b2)) > 0;
     if p.1 == q.1 && s.1 == t.1 && p.0 != q.0 && s.0 != t.0 {
         (p.1 - s.1).abs() < TRACK && overlap(p.0, q.0, s.0, t.0)
@@ -108,7 +108,7 @@ fn parallel_overlap((p, q): (Point, Point), (s, t): (Point, Point)) -> bool {
 
 /// A point two segments share that is not a crossing inside both: an end on the other, a shared corner, or two
 /// collinear runs that meet. Drawn, either reads as one line that goes to the wrong box.
-fn meet(one: (Point, Point), two: (Point, Point)) -> Option<Point> {
+pub(crate) fn meet(one: (Point, Point), two: (Point, Point)) -> Option<Point> {
     let within = |v: i32, a: i32, b: i32| v >= a.min(b) && v <= a.max(b);
     let flat = |s: (Point, Point)| s.0.1 == s.1.1;
     match (flat(one), flat(two)) {
