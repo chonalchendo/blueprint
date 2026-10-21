@@ -306,8 +306,11 @@ impl Index {
             } else {
                 ("nodes", "id, kind, title, status, under, design_kind, scope")
             };
-            // A record has no header status, so a status filter on a record kind matches nothing.
-            let status = if is_record { "?2 is null" } else { "(?2 is null or status = ?2)" };
+            let status = if is_record {
+                "(?2 is null or json_extract(header, '$.state') = ?2)"
+            } else {
+                "(?2 is null or status = ?2)"
+            };
             // A node's children come from the `under` links, which are indexed by target; `nodes.under` is not. The
             // plan is made before the bind, so a clause that holds for any `?4` would scan the kind, and `+kind`
             // keeps the kind's index from winning over the ids.

@@ -1,12 +1,13 @@
 //! The per-kind schema rules that live in the domain crates, composed for the census and for `set` (23, rule 2).
 
 use bp_change::{IssueStatus, MilestoneStatus, Severity};
-use bp_design::{DesignStatus, ProjectClass, ProjectStatus};
+use bp_design::{ConcernState, DeltaState, DesignStatus, ProjectClass, ProjectStatus};
 use bp_reasoning::{ConventionStatus, DecisionStatus, InboxStatus, LearningStatus, ThreadStatus};
 use bp_vault::{Code, Id, Kind, LINKS, Refusal};
 use serde_json::Value;
 
-/// A node's status is in its kind's closed set. Every node carries one; a record carries none.
+/// A node's status is in its kind's closed set. Every node carries one. A record's status is its `state`, where its
+/// kind has one (13); `list --status` filters on it.
 pub fn status_in_set(kind: &str, status: Option<&str>) -> bool {
     let (Ok(kind), Some(s)) = (kind.parse::<Kind>(), status) else { return false };
     match kind {
@@ -19,6 +20,8 @@ pub fn status_in_set(kind: &str, status: Option<&str>) -> bool {
         Kind::Convention => s.parse::<ConventionStatus>().is_ok(),
         Kind::Learning => s.parse::<LearningStatus>().is_ok(),
         Kind::Inbox => s.parse::<InboxStatus>().is_ok(),
+        Kind::Delta => s.parse::<DeltaState>().is_ok(),
+        Kind::ConcernAnswer => s.parse::<ConcernState>().is_ok(),
         _ => false,
     }
 }
@@ -227,6 +230,7 @@ mod tests {
         assert!(!status_in_set("learning", Some("stale")));
         assert!(!status_in_set("issue", None));
         assert!(!status_in_set("claim", Some("open")));
+        assert!(status_in_set("concern-answer", Some("open")) && status_in_set("delta", Some("proposed")));
     }
 
     #[test]

@@ -22,8 +22,9 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - The human parks a thought: run the skill `bp-capture`.
 - `blocked`: do what its note names.
 - `working` with the note `stale`: run `bp release <issue> --reason lost --json`. Then dispatch again.
-- `waiting`, or `working` without `stale`: do nothing until the cause in its note clears.
-- `needs-approval`, `needs-landing`, `needs-milestone-approval`, `needs-acceptance` or `re-asked`: the human acts. Give the human the command below.
+- `working` without `stale`: do nothing; the worker or the cause in its note moves it.
+- `waiting`: do nothing until the cause in its note clears.
+- `needs-approval`, `needs-landing`, `needs-milestone-approval`, `needs-acceptance` or `re-asked`: the human acts. Give the human the line below that names the intent.
 
 ### Dispatch
 
@@ -35,7 +36,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 
 ### The human's acts
 
-The human approves each change on the forge. The human also approves a milestone, activates a design, lands a change and stamps a milestone. Give the human these commands:
+Give the human these commands:
 
 - `needs-approval`: approve the pull request on the forge.
 - `needs-milestone-approval`: `bp transition <milestone> approved --json`.

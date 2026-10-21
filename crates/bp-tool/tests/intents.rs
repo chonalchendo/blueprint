@@ -221,3 +221,28 @@ fn a_walk_reads_needs_derivation_inside_its_one_read() {
     let a = v["intents"].as_array().unwrap().iter().find(|i| i["id"] == "projects/bp/milestones/a").unwrap();
     assert_eq!(a["intent"], "needs-derivation", "{v}");
 }
+
+#[test]
+fn needs_shaping_is_one_row_per_project_on_its_root_design() {
+    let d = vault();
+    let r = d.path();
+    let design = |status: &str| format!("---\nkind: design\ntitle: D\nstatus: {status}\n---\n\nBody.\n");
+    write(r, "projects/q/project.md", "---\nkind: project\ntitle: Q\nstatus: active\n---\n");
+    write(r, "projects/q/designs/product.md", &design("active"));
+    write(r, "projects/q/designs/components/x.md", &design("active"));
+    let answer = "---\nkind: concern-answer\nunder: projects/q/project\nconcern: c\nstate: open\ndecided_at: 2026-10-19T10:00:00Z\n---\n";
+    write(r, "projects/q/concerns/c/2026-10-19T10-00-00Z.md", answer);
+    let v = list(r, &["design", "--project", "q"], false);
+    assert_eq!(
+        intent(&v, "projects/q/designs/product"),
+        ("needs-shaping", "c open; bp walk projects/q/designs/product --for shape")
+    );
+    assert_eq!(intent(&v, "projects/q/designs/components/x"), ("-", "-"), "one node per project");
+    // A system design is the root once it exists, and an inactive root reads nothing.
+    write(r, "projects/q/designs/system.md", &design("draft"));
+    let v = list(r, &["design", "--project", "q"], false);
+    assert_eq!(intent(&v, "projects/q/designs/product"), ("-", "-"));
+    assert_eq!(intent(&v, "projects/q/designs/system"), ("-", "-"));
+    let v = list(r, &["concern-answer", "--status", "open"], false);
+    assert_eq!(v["rows"][0]["status"], "open", "{v}");
+}

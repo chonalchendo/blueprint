@@ -12,8 +12,8 @@ pub const BATCH: usize = 3;
 
 /// What the milestone predicates read. A field past `integrity` matters only for the status that reads it, so the
 /// caller reads it only then: the issues, and while fewer than [`BATCH`] are live the finish line and the coverage,
-/// for `approved`; the runs, the waivers and `broken` once no issue is live; `reasked` for `done`. A field left
-/// empty reads as no record.
+/// for `approved`; the runs and `broken` once no issue is live; `reasked` for `done`. A field left empty reads as no
+/// record.
 #[derive(Debug, Clone, Default)]
 pub struct Milestone {
     /// The header status.
@@ -28,8 +28,6 @@ pub struct Milestone {
     pub covered: BTreeSet<String>,
     /// Its run records, the finish line's.
     pub runs: Vec<Run>,
-    /// The blocks its waivers name.
-    pub waived: BTreeSet<String>,
     /// A file of its project does not parse. A broken issue's milestone is unknown, so any file of the project counts.
     pub broken: bool,
     /// The blocks of its open waivers ([`reasked`]).
@@ -47,7 +45,15 @@ pub fn milestone(id: &str, m: &Milestone) -> Verdict {
     match status {
         Ok(MilestoneStatus::Planned) => Verdict::of(Intent::NeedsMilestoneApproval, ""),
         Ok(MilestoneStatus::Approved) => match uncovered(m).as_slice() {
-            [] if accepting(m) => Verdict::of(Intent::NeedsAcceptance, format!("bp stamp {id}")),
+            [] if accepting(m) => match failed(m).as_slice() {
+                [] => Verdict::of(Intent::NeedsAcceptance, format!("bp stamp {id}")),
+                // A waiver exists only after `stamp --waive`, so the note names the waive (21, needs acceptance).
+                failed => {
+                    let waive: Vec<String> = failed.iter().map(|b| format!("--waive {b} --reason <why>")).collect();
+                    let note = format!("{} failed; bp stamp {id} {}", failed.join(", "), waive.join(" "));
+                    Verdict::of(Intent::NeedsAcceptance, note)
+                }
+            },
             [] => Verdict::NONE,
             open => Verdict::of(
                 Intent::NeedsDerivation,
@@ -72,16 +78,20 @@ pub fn uncovered(m: &Milestone) -> Vec<&str> {
     m.finish.iter().map(|b| b.name.as_str()).filter(|n| !m.covered.contains(*n)).collect()
 }
 
-/// Needs acceptance past the status (21): every issue resolved or abandoned, every file of the project parses, and no
-/// finish-line block whose latest `error` run of its text now failed, unless a waiver names it. A block with no such
-/// run holds: `stamp` runs the line itself, so it asks for no run before.
+/// Needs acceptance past the status (21): every issue resolved or abandoned, and every file of the project parses.
+/// A failed run does not clear it: `stamp` refuses on it, and its note names the waive.
 fn accepting(m: &Milestone) -> bool {
     let settled = m.issues.iter().all(|s| matches!(s.parse(), Ok(IssueStatus::Resolved | IssueStatus::Abandoned)));
-    let ran = |b: &Block| {
+    settled && !m.broken
+}
+
+/// The finish-line blocks whose latest `error` run of their text now failed. A run of an older text says nothing.
+fn failed(m: &Milestone) -> Vec<&str> {
+    let latest = |b: &Block| {
         let runs = m.runs.iter().filter(|r| r.error && r.check == b.name && r.check_hash == b.hash);
-        runs.max_by_key(|r| (r.at, r.attempt)).is_none_or(|r| r.passed)
+        runs.max_by_key(|r| (r.at, r.attempt)).is_some_and(|r| r.failed)
     };
-    settled && !m.broken && m.finish.iter().all(|b| m.waived.contains(&b.name) || ran(b))
+    m.finish.iter().filter(|b| latest(b)).map(|b| b.name.as_str()).collect()
 }
 
 /// A concern answer, reduced (13, `ConcernAnswer`). The latest stamp of a concern is its state now.
@@ -114,8 +124,9 @@ pub fn is_drift(verdict: &str, check_kind: &str) -> bool {
 }
 
 /// The intent of the design `id`: drifted, then needs shaping (21). `uncited` holds its failed drift runs that no
-/// delta or thread cites. `open` holds the project's [`open_concerns`] for an `active` design of a project, else
-/// none; `due` says that a milestone of the project is `planned` or `approved`.
+/// delta or thread cites. `open` holds the project's [`open_concerns`] when `id` is the project's root design and is
+/// `active`, else none, so needs shaping is one node per project; `due` says that a milestone of the project is
+/// `planned` or `approved`.
 pub fn design(id: &str, uncited: &[String], open: &[String], due: bool) -> Verdict {
     if !uncited.is_empty() {
         return Verdict::of(Intent::Drifted, format!("{}; bp walk {id} --for triage-drift", uncited.join(", ")));

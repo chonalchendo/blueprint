@@ -124,9 +124,13 @@ impl<'a> Intents<'a> {
             Kind::Milestone => self.milestone(id, status),
             Kind::Design => {
                 let uncited: Vec<String> = drift(self.index, id)?.into_iter().map(|r| r.id).collect();
-                // Shaping reads the project's concern answers only for an active design that has not drifted.
+                // Shaping reads the project's concern answers only for its active root design, if it has not drifted.
                 let (open, due) = match project(id) {
-                    Some(p) if uncited.is_empty() && status == DesignStatus::Active.as_str() => {
+                    Some(p)
+                        if uncited.is_empty()
+                            && status == DesignStatus::Active.as_str()
+                            && root(self.index, &p, id)? =>
+                    {
                         once(&self.shaping, &p, || shaping(self.index, &p))?
                     }
                     _ => (Vec::new(), false),
@@ -180,22 +184,12 @@ impl<'a> Intents<'a> {
                 m = derivation(self.index, id)?;
                 if !m.issues.iter().any(|s| intents::is_live_issue(s)) {
                     m.runs = runs(self.index, id)?;
-                    m.waived = self
-                        .index
-                        .records(id, Kind::Waiver)?
-                        .iter()
-                        .map(|r| crate::waiver::reduce(id, r).block)
-                        .collect();
                     m.broken = once(&self.broken, &project, || Ok(!self.index.broken(&project)?.is_empty()))?;
                 }
             }
             Ok(MilestoneStatus::Done) => {
-                // One count per project: the waiver module's read, which needs git, runs only when a waiver exists.
+                // The decision `stamp` makes, read once per project (27, design change 10).
                 let open = once(&self.reasked, &project, || {
-                    let f = Filter { kind: Kind::Waiver, status: None, project: Some(&project), under: None, limit: 1 };
-                    if self.index.list(&f)?.1 == 0 {
-                        return Ok(Vec::new());
-                    }
                     let open = crate::waiver::open(self.vault, self.index, &project, crate::clock::now()?)?;
                     Ok(open.into_iter().map(|r| (r.milestone.to_string(), r.name)).collect())
                 })?;
@@ -226,6 +220,12 @@ fn once<T: Clone>(
 /// The node's project, when it has one.
 fn project(id: &str) -> Option<String> {
     Id::parse(id).ok().and_then(|i| i.project().map(str::to_string))
+}
+
+/// `id` is the project's root design, its system design, else its product design: needs shaping's one node (21).
+fn root(index: &Index, project: &str, id: &str) -> Result<bool, Refusal> {
+    let system = format!("projects/{project}/designs/system");
+    Ok(id == system || (id == format!("projects/{project}/designs/product") && index.header(&system)?.is_none()))
 }
 
 /// The project's open concerns, and whether a milestone of it is `planned` or `approved` (21, needs shaping). The
@@ -272,8 +272,10 @@ pub(crate) fn derivation(index: &Index, id: &str) -> Result<Milestone, Refusal> 
     }
     m.finish = named(&index.body(id)?, "Finish line");
     // With no block to cover, the issues' checks say nothing.
-    for r in rows.iter().filter(|_| !m.finish.is_empty()) {
-        m.covered.extend(named(&index.body(&r.id)?, "Check").into_iter().map(|b| b.name));
+    if !m.finish.is_empty() {
+        for r in &rows {
+            m.covered.extend(named(&index.body(&r.id)?, "Check").into_iter().map(|b| b.name));
+        }
     }
     Ok(m)
 }

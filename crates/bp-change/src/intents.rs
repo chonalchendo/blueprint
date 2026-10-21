@@ -760,14 +760,15 @@ mod tests {
         let one = Milestone { issues: vec!["resolved".into(), "open".into()], ..covered.clone() };
         assert_eq!(of(&one), None, "a live issue under it");
         assert_eq!(of(&Milestone { broken: true, ..covered.clone() }), None, "a broken file in the project");
+        // A failed run keeps the intent, and the note names the waive (21, needs acceptance).
         let failed = Milestone { runs: vec![run("a", NOW, "c1", true)], ..covered.clone() };
-        assert_eq!(of(&failed), None, "the latest run of a failed");
-        assert_eq!(of(&Milestone { waived: ["a".into()].into(), ..failed.clone() }), Some(Intent::NeedsAcceptance));
+        let waive = "a failed; bp stamp m --waive a --reason <why>";
+        assert_eq!(milestone("m", &failed), Verdict::of(Intent::NeedsAcceptance, waive));
         let mut rerun = failed.clone();
         rerun.runs.push(run("a", NOW + 60, "c2", false));
-        assert_eq!(of(&rerun), Some(Intent::NeedsAcceptance), "a later pass");
+        assert_eq!(milestone("m", &rerun), Verdict::of(Intent::NeedsAcceptance, "bp stamp m"), "a later pass");
         rerun.runs[1].check_hash = "#old".into();
-        assert_eq!(of(&rerun), None, "a pass of another text says nothing");
+        assert_eq!(milestone("m", &rerun).note, waive, "a pass of another text says nothing");
 
         let done = Milestone { reasked: vec!["f".into()], ..status("done") };
         assert_eq!(milestone("m", &done), Verdict::of(Intent::ReAsked, "f; bp stamp <next> --waive m/f"));
