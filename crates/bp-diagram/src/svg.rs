@@ -107,11 +107,17 @@ fn arrow(tip: Point, u: Point) -> String {
     format!("M{},{}L{},{}L{},{}L{},{}Z", tip.0, tip.1, bx + px, by + py, nx, ny, bx - px, by - py)
 }
 
+/// The drill badge's box: at the top right, on the name's row.
+fn drill_box(n: &SNode) -> Rect {
+    let w = crate::nodes::drill_w(n.children);
+    Rect::new(n.rect.right() - 12 - w, n.rect.y + 14, w, 18)
+}
+
 fn node(out: &mut String, n: &SNode, diff: &[&str]) {
     let mut class = vec!["node".to_string(), format!("role-{}", n.role)];
     class.extend(n.class.iter().chain(diff).map(|c| (*c).to_string()));
-    if n.dashed {
-        class.push("dashed".into());
+    if n.children > 0 {
+        class.push("drill".into());
     }
     let link = match (&n.term, &n.noun) {
         (Some(t), _) => format!(" data-term=\"{}\"", esc(t)),
@@ -128,7 +134,7 @@ fn node(out: &mut String, n: &SNode, diff: &[&str]) {
     let r = n.rect;
     let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
     match n.shape {
-        Shape::Box | Shape::Store | Shape::Deployable => rect(out, "box", &r, 6),
+        Shape::Box => rect(out, "box", &r, 8),
         Shape::Pill => rect(out, "box", &r, r.h / 2),
         Shape::Dot => {
             let _ = write!(out, "<circle class=\"box solid\" cx=\"{cx}\" cy=\"{cy}\" r=\"{}\"/>", r.w / 2 - 2);
@@ -151,25 +157,39 @@ fn node(out: &mut String, n: &SNode, diff: &[&str]) {
             );
         }
     }
-    match n.shape {
-        Shape::Store => {
-            let _ = write!(out, "<path class=\"cap\" d=\"M{},{}H{}\"/>", r.x, r.y + 6, r.right());
-        }
-        Shape::Deployable => {
-            let _ = write!(out, "<path class=\"cap\" d=\"M{},{}V{}H{}\"/>", r.right() - 12, r.y, r.y + 12, r.right());
-        }
-        _ => {}
-    }
     for y in &n.rules {
         let _ = write!(out, "<path class=\"rule\" d=\"M{},{y}H{}\"/>", r.x, r.right());
     }
     for t in &n.runs {
+        // The tag's pill reaches 6 px past its text; `nodes::title` counts that reach in the box width.
+        if t.class == "tag" {
+            rect(out, "tagbox", &Rect::new(t.x - 6, t.y - 13, t.w + 12, 18), 9);
+        }
         run(out, t);
     }
-    if diff.contains(&"changed") {
-        let _ = write!(out, "<circle class=\"dot\" cx=\"{}\" cy=\"{}\" r=\"4\"/>", r.right() - 12, r.y + 12);
+    if n.children > 0 {
+        let Rect { x: left, y: top, w: width, .. } = drill_box(n);
+        let _ = write!(
+            out,
+            "<g class=\"badge\"><rect x=\"{left}\" y=\"{top}\" width=\"{width}\" height=\"18\" rx=\"9\"/><circle cx=\"{}\" cy=\"{}\" r=\"3\"/><path d=\"M{},{}L{},{}\"/><text class=\"t-mono\" x=\"{}\" y=\"{}\" font-size=\"10\">{}</text></g>",
+            left + 10,
+            top + 8,
+            left + 12,
+            top + 10,
+            left + 15,
+            top + 13,
+            left + 18,
+            top + 13,
+            n.children
+        );
     }
-    out.push_str("<g class=\"badge\"></g></g>");
+    if diff.contains(&"changed") {
+        // On the name row in the room `nodes::title` kept; a box without that room takes it in its top right corner,
+        // with a smaller dot 6 px clear of a centred name.
+        let (cx, cy, radius) = n.dot.map_or((r.right() - 9, r.y + 8, 3), |dx| (r.x + dx, r.y + 23, 4));
+        let _ = write!(out, "<circle class=\"dot\" cx=\"{cx}\" cy=\"{cy}\" r=\"{radius}\"/>");
+    }
+    out.push_str("</g>");
 }
 
 fn label(out: &mut String, l: &SLabel, of: &str, class: &[&str]) {
@@ -180,9 +200,13 @@ fn label(out: &mut String, l: &SLabel, of: &str, class: &[&str]) {
     });
     let _ = write!(out, "<g class=\"label{extra}\" data-id=\"{}\" data-of=\"{}\">", esc(&l.id), esc(of));
     if l.pill {
-        rect(out, "pill", &l.rect, 4);
+        rect(out, "pill", &l.rect, 12);
     } else {
         rect(out, "mask", &l.rect, 2);
+    }
+    // A step number sits in a grey chip, the height of its label.
+    for r in l.runs.iter().filter(|r| r.class == "chip") {
+        rect(out, "chipbox", &Rect::new(r.x - 4, l.rect.y, r.w + 8, l.rect.h), 4);
     }
     for r in &l.runs {
         run(out, r);
@@ -274,7 +298,7 @@ pub(crate) fn svg(scene: &Scene, head: &crate::Head, classes: &dyn Fn(&str) -> V
     }
     for n in &scene.notes {
         let _ = write!(out, "<g class=\"note\" data-id=\"{}\" data-of=\"{}\">", esc(&n.id), esc(&n.of));
-        rect(&mut out, "notebox", &n.rect, 4);
+        rect(&mut out, "notebox", &n.rect, 6);
         for r in &n.runs {
             run(&mut out, r);
         }
@@ -308,6 +332,10 @@ fn index(scene: &Scene, head: &crate::Head) -> Value {
             })
             .collect();
         let mut v = json!({"kind": "node", "box": bx(&n.rect), "role": n.role, "label": n.label, "ports": ports});
+        if n.children > 0 {
+            v["children"] = n.children.into();
+            v["badge"] = bx(&drill_box(n));
+        }
         if let Some(t) = &n.term {
             v["term"] = t.clone().into();
         }

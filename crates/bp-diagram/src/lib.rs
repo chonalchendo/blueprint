@@ -90,22 +90,38 @@ pub(crate) struct Head {
     pub(crate) level: Option<String>,
     pub(crate) title: String,
     pub(crate) lede: String,
-    pub(crate) eyebrow: String,
+    pub(crate) tag: String,
     pub(crate) prefix: String,
     pub(crate) focus: Vec<String>,
     pub(crate) diff: bool,
 }
 
 /// Renders `spec`, or, with `base`, the diff of the two. `resolve` answers whether a node's link resolves; without
-/// it, each node still needs exactly one of `term` and `noun`. Returns every finding when any is an error.
+/// it, each node still needs exactly one of `term` and `noun`. Returns every finding when any is an error. No node
+/// shows a drill badge: the preview knows no lower diagram.
 pub fn render(
     spec: &str,
     base: Option<&str>,
     resolve: Option<&dyn Fn(Link<'_>) -> bool>,
 ) -> Result<Render, Vec<Finding>> {
-    let head = spec::parse(spec)?;
+    render_with(spec, base, resolve, &|_| 0)
+}
+
+/// [`render`], with `children` giving each node's count of lower diagrams for its drill badge. The crate reads no
+/// vault, so the caller that has one answers: the count is an input, never a field of the spec the agent writes.
+/// Only architecture boxes and entities draw the badge; other types drop the count.
+pub fn render_with(
+    spec: &str,
+    base: Option<&str>,
+    resolve: Option<&dyn Fn(Link<'_>) -> bool>,
+    children: &dyn Fn(Link<'_>) -> usize,
+) -> Result<Render, Vec<Finding>> {
+    let mut head = spec::parse(spec)?;
+    for n in &mut head.nodes {
+        n.children = n.link().map_or(0, children);
+    }
     let mut findings = spec_rules(&head, resolve);
-    let (drawn, classes, ghosts) = match base {
+    let (mut drawn, classes, ghosts) = match base {
         Some(b) => {
             let base = spec::parse(b)
                 .map_err(|f| f.into_iter().map(|mut x| (x.id = format!("base:{}", x.id), x).1).collect::<Vec<_>>())?;
@@ -114,6 +130,14 @@ pub fn render(
         }
         None => (head.clone(), std::collections::BTreeMap::new(), BTreeSet::new()),
     };
+    for n in &mut drawn.nodes {
+        n.changed = classes.get(&n.id).is_some_and(|c| c.contains(&"changed"));
+    }
+    // The legend lists a diff state only when the drawing uses it (`legend/truthful`).
+    let states: Vec<&str> = ["added", "removed", "changed", "moved"]
+        .into_iter()
+        .filter(|s| classes.values().any(|c| c.contains(s)))
+        .collect();
     let mut scene = match drawn.ty {
         Type::Sequence => seq::lay_out(&drawn),
         _ => match layout::lay_out(&drawn, &ghosts) {
@@ -124,7 +148,7 @@ pub fn render(
             }
         },
     };
-    legend::lay_out(&mut scene, &drawn);
+    legend::lay_out(&mut scene, &drawn, &states);
     findings.extend(rules::check(&scene.geometry()));
     if findings.iter().any(|f| f.severity == Severity::Error) {
         return Err(findings);
@@ -132,7 +156,7 @@ pub fn render(
     let head = Head {
         ty: head.ty.as_str(),
         level: head.level.clone(),
-        eyebrow: eyebrow(&head),
+        tag: tag(&head),
         prefix: format!("bp-{}", slug(&head.title)),
         focus: head.focus.clone(),
         diff: base.is_some(),
@@ -164,17 +188,13 @@ fn spec_rules(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Findi
         out.push(Finding::error("a11y/title", "spec", "a diagram needs a `title` and a one-sentence `lede`".into()));
     }
     for n in &s.nodes {
-        let link = match (&n.term, &n.noun) {
-            (Some(t), None) => Link::Term(t),
-            (None, Some(noun)) => Link::Noun(noun),
-            _ => {
-                out.push(Finding::error(
-                    "nodes/resolve",
-                    &n.id,
-                    "give exactly one of `term` (a glossary slug) and `noun` (a noun of the home design)".into(),
-                ));
-                continue;
-            }
+        let Some(link) = n.link() else {
+            out.push(Finding::error(
+                "nodes/resolve",
+                &n.id,
+                "give exactly one of `term` (a glossary slug) and `noun` (a noun of the home design)".into(),
+            ));
+            continue;
         };
         if let Some(r) = resolve
             && !r(link)
@@ -213,7 +233,8 @@ fn spec_rules(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Findi
     out
 }
 
-fn eyebrow(s: &Spec) -> String {
+/// The page header's type tag: the diagram's type and level.
+fn tag(s: &Spec) -> String {
     match (s.ty, s.level.as_deref()) {
         (Type::Architecture, Some("context")) => "System context · C4 level 1".into(),
         (Type::Architecture, Some("component")) => "Component view · C4 level 3".into(),

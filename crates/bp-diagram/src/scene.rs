@@ -44,8 +44,6 @@ impl Run {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Shape {
     Box,
-    Store,
-    Deployable,
     Pill,
     Dot,
     Ring,
@@ -61,7 +59,6 @@ pub(crate) struct SNode {
     pub(crate) label: String,
     pub(crate) rect: Rect,
     pub(crate) shape: Shape,
-    pub(crate) dashed: bool,
     pub(crate) runs: Vec<Run>,
     /// Horizontal rules inside the box, as `y`.
     pub(crate) rules: Vec<i32>,
@@ -69,6 +66,12 @@ pub(crate) struct SNode {
     pub(crate) lifeline: Option<(i32, i32, i32)>,
     pub(crate) bars: Vec<Rect>,
     pub(crate) class: Vec<&'static str>,
+    /// The drill badge's count: the lower diagrams the caller named. Only architecture boxes and entities keep room
+    /// for it at the top right.
+    pub(crate) children: usize,
+    /// The changed dot's centre `x`, from the box's left edge, in the room the name row keeps for it. None puts the
+    /// dot in the top right corner.
+    pub(crate) dot: Option<i32>,
 }
 
 /// A label: its mask and its runs. A pill draws its mask; a bare label masks with the canvas only.
@@ -127,10 +130,11 @@ pub(crate) struct SNote {
     pub(crate) step: usize,
 }
 
-/// One legend entry: the swatch's kind and its words.
+/// One legend entry: the swatch's kind, the tag its swatch shows when the role tags its nodes, and its words.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Key {
     pub(crate) kind: String,
+    pub(crate) tag: Option<String>,
     pub(crate) label: String,
     pub(crate) x: i32,
     pub(crate) y: i32,

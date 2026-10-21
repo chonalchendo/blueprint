@@ -10,6 +10,10 @@ use crate::scene::{Key, Scene};
 use crate::spec::{Spec, Type};
 use crate::svg::esc;
 
+/// The diff's states and their words.
+const DIFF: &[(&str, &str)] =
+    &[("added", "Added"), ("removed", "Removed"), ("changed", "Changed"), ("moved", "Moved: ghost at the old cell")];
+
 /// The keys in use, in order of first use.
 fn in_use(spec: &Spec) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
@@ -53,8 +57,9 @@ pub(crate) fn rule(spec: &Spec) -> Vec<Finding> {
     out
 }
 
-/// Places the legend under the drawing and grows the scene to hold it.
-pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec) {
+/// Places the legend under the drawing and grows the scene to hold it. A diff adds the states its drawing uses, which
+/// the author never names.
+pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec, states: &[&str]) {
     let named = |k: &str| spec.legend.as_ref().and_then(|l| l.iter().find(|(n, _)| n == k)).map(|(_, l)| l.clone());
     let mut keys: Vec<(String, String)> = in_use(spec)
         .into_iter()
@@ -66,13 +71,25 @@ pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec) {
     if spec.ty == Type::Er && spec.level.as_deref() != Some("conceptual") {
         keys.push(("marks".into(), "# key · → reference · #→ key part that is a reference".into()));
     }
+    for (k, words) in DIFF.iter().filter(|(k, _)| states.contains(k)) {
+        keys.push(((*k).into(), (*words).into()));
+    }
+    // A tagged role's swatch is the tag itself, as its nodes draw it: the reader matches words, not fills.
+    let tag = |k: &str| match k {
+        "elsewhere" => spec.nodes.iter().find(|n| n.role == k).and_then(|n| n.owner.clone()),
+        _ => role_words(k).0.map(str::to_string),
+    };
     let (mut x, mut y) = (88, scene.legend_y + 20);
     for (key, label) in keys {
-        let w = up4(28 + Font::Body.width(&label, 11, 0) + 28);
+        let tag = tag(&key);
+        // A badge that already says the words needs no words after it.
+        let label = if tag.as_ref().is_some_and(|t| t.eq_ignore_ascii_case(&label)) { String::new() } else { label };
+        let swatch = tag.as_ref().map_or(20, |t| Font::Body.width(t, 11, 0) + 12);
+        let w = up4(swatch + 8 + Font::Body.width(&label, 11, 0) + 28);
         if x + w > scene.w - 24 && x > 88 {
             (x, y) = (88, y + 24);
         }
-        scene.legend.push(Key { kind: key, label, x, y });
+        scene.legend.push(Key { kind: key, tag, label, x, y });
         x += w;
     }
     scene.h = y + 36;
@@ -99,11 +116,11 @@ fn default_words(spec: &Spec, key: &str) -> String {
     }
 }
 
-/// The strip as SVG: a hairline, `KEY`, then one swatch and its words per entry.
+/// The strip as SVG: a hairline, `Legend`, then one swatch and its words per entry.
 pub(crate) fn draw(scene: &Scene) -> String {
     let Some(first) = scene.legend.first() else { return String::new() };
     let mut out = format!(
-        "<g class=\"legend\"><path class=\"hair\" d=\"M24,{}H{}\"/><text class=\"t-mono kind\" x=\"24\" y=\"{}\" font-size=\"10\" letter-spacing=\"1\">KEY</text>",
+        "<g class=\"legend\"><path class=\"hair\" d=\"M24,{}H{}\"/><text class=\"t-strong glabel\" x=\"24\" y=\"{}\" font-size=\"12\">Legend</text>",
         first.y - 8,
         scene.w - 24,
         first.y + 10
@@ -119,22 +136,54 @@ pub(crate) fn draw(scene: &Scene) -> String {
                 "<g class=\"swatch note\"><rect class=\"notebox\" x=\"{x}\" y=\"{y}\" width=\"20\" height=\"12\" rx=\"3\"/></g>"
             ),
             "marks" => String::new(),
-            role => {
-                let dashed =
-                    if matches!(role, "external" | "person" | "system" | "elsewhere") { " dashed" } else { "" };
-                let class = if role == "focus" { "focus".to_string() } else { format!("role-{role}{dashed}") };
+            "added" | "removed" | "changed" | "moved" => {
+                let dot = if k.kind == "changed" {
+                    format!("<circle class=\"dot\" cx=\"{}\" cy=\"{}\" r=\"2\"/>", x + 15, y + 4)
+                } else {
+                    String::new()
+                };
                 format!(
-                    "<g class=\"swatch {class}\"><rect class=\"box\" x=\"{x}\" y=\"{y}\" width=\"20\" height=\"12\" rx=\"3\"/></g>"
+                    "<g class=\"swatch key-{0}\"><rect class=\"box\" x=\"{x}\" y=\"{y}\" width=\"20\" height=\"12\" rx=\"3\"/>{dot}</g>",
+                    k.kind
                 )
             }
+            role => match &k.tag {
+                Some(t) => format!(
+                    "<g class=\"swatch role-{role}\"><rect class=\"tagbox\" x=\"{x}\" y=\"{}\" width=\"{}\" height=\"18\" rx=\"9\"/><text class=\"t-body tag\" x=\"{}\" y=\"{}\" font-size=\"11\">{}</text></g>",
+                    y - 3,
+                    Font::Body.width(t, 11, 0) + 12,
+                    x + 6,
+                    y + 10,
+                    esc(t)
+                ),
+                // A sequence's focus is a message, so its swatch is a line.
+                None if role == "focus" && !scene.steps.is_empty() => format!(
+                    "<g class=\"swatch edge focus\"><path class=\"stroke\" d=\"M{x},{}H{}\"/></g>",
+                    y + 4,
+                    x + 20
+                ),
+                None => {
+                    let class = if role == "focus" { "focus".to_string() } else { format!("role-{role}") };
+                    format!(
+                        "<g class=\"swatch {class}\"><rect class=\"box\" x=\"{x}\" y=\"{y}\" width=\"20\" height=\"12\" rx=\"3\"/></g>"
+                    )
+                }
+            },
         };
-        let tx = if k.kind == "marks" { x } else { x + 28 };
-        let _ = write!(
-            out,
-            "{swatch}<text class=\"t-body key\" x=\"{tx}\" y=\"{}\" font-size=\"11\">{}</text>",
-            y + 10,
-            esc(&k.label)
-        );
+        let tx = match (&k.tag, k.kind.as_str()) {
+            (_, "marks") => x,
+            (Some(t), _) => x + Font::Body.width(t, 11, 0) + 20,
+            _ => x + 28,
+        };
+        out.push_str(&swatch);
+        if !k.label.is_empty() {
+            let _ = write!(
+                out,
+                "<text class=\"t-body key\" x=\"{tx}\" y=\"{}\" font-size=\"11\">{}</text>",
+                y + 10,
+                esc(&k.label)
+            );
+        }
     }
     out.push_str("</g>");
     out

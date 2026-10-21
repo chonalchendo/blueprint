@@ -17,6 +17,9 @@ const ROW: i32 = 40;
 const LOOP_ROW: i32 = 52;
 const SIDE: i32 = 48;
 
+/// A message label's step chip: the number with 4 px each side in a grey pill, then 6 px before the words.
+const CHIP: i32 = 14;
+
 /// One drawn message: a call, or the return a step's `back` adds.
 struct Msg<'a> {
     id: String,
@@ -58,7 +61,7 @@ pub(crate) fn lay_out(spec: &Spec) -> Scene {
     for (k, m) in msgs.iter().enumerate() {
         let y = ys[k];
         let (chip, text) = labels[k].clone();
-        let lw = up4(chip.w + 6 + text.w + 8);
+        let lw = up4(chip.w + CHIP + text.w + 4);
         let pts: Vec<Point>;
         let rect;
         if m.from == m.to {
@@ -71,7 +74,7 @@ pub(crate) fn lay_out(spec: &Spec) -> Scene {
             pts = vec![(a, y), (b, y)];
             rect = Rect::new((a.midpoint(b) - lw / 2).div_euclid(4) * 4, y - 8 - 16, lw, 16);
         }
-        let runs = vec![chip.at(rect.x + 4, rect.y + 12), text.at(rect.x + 4 + labels[k].0.w + 6, rect.y + 12)];
+        let runs = vec![chip.at(rect.x + 4, rect.y + 12), text.at(rect.x + labels[k].0.w + CHIP, rect.y + 12)];
         let focus = spec.focus.iter().any(|f| f == m.step);
         let mut class = vec![if m.ret { "return" } else { "call" }];
         if focus {
@@ -162,7 +165,7 @@ fn messages(spec: &Spec) -> Vec<Msg<'_>> {
 /// A party's header box at the top, its name over its role, at x 0 until the columns are known.
 fn header(n: &crate::spec::Node, focus: bool) -> SNode {
     let name = Run::new(Font::Strong, 13, 0, "name", &n.label);
-    let sub = n.note.as_deref().map(|s| Run::new(Font::Mono, 10, 0, "kind", s));
+    let sub = n.note.as_deref().map(|s| Run::new(Font::Body, 11, 0, "note", s));
     let w = ((name.w.max(sub.as_ref().map_or(0, |s| s.w)) + 32 + 7) / 8 * 8).max(120);
     let mut runs = vec![name.centred(w / 2, if sub.is_some() { 24 } else { 31 })];
     runs.extend(sub.map(|s| s.centred(w / 2, 40)));
@@ -174,12 +177,13 @@ fn header(n: &crate::spec::Node, focus: bool) -> SNode {
         label: n.label.clone(),
         rect: Rect::new(0, TOP, w, HEAD_H),
         shape: Shape::Box,
-        dashed: false,
         runs,
         rules: Vec::new(),
         lifeline: None,
         bars: Vec::new(),
         class: if focus { vec!["focus"] } else { Vec::new() },
+        children: 0,
+        dot: None,
     }
 }
 
@@ -192,7 +196,7 @@ fn columns(heads: &[SNode], msgs: &[Msg<'_>], labels: &[(Run, Run)]) -> Vec<i32>
         .iter()
         .zip(labels)
         .map(|(m, (chip, text))| {
-            let w = chip.w + 6 + text.w + 8;
+            let w = chip.w + CHIP + text.w + 4;
             if m.from == m.to {
                 (m.from, (m.from + 1).min(n - 1), w + 56)
             } else {
