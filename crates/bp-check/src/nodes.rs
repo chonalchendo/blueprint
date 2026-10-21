@@ -1,5 +1,6 @@
 //! The `nodes` kind (12, check 3; 28, design change 6): each node of each diagram spec under the owner design names a
-//! slug of its project's glossary, or a noun the design names in a heading or a table's first column. Like
+//! slug of its project's glossary, or a noun the design names in a heading or a table's first column. A `start`,
+//! `end`, `choice` or `decision` node may name neither (28, design change 1). Like
 //! `integrity`, it reads vault state in process, so its run names the vault's head. `bp diagram` resolves a node
 //! with the same [`Names`] before it writes a spec.
 

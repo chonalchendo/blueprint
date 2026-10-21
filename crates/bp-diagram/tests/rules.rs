@@ -223,6 +223,81 @@ fn refuses_unresolved_term() {
     assert!(names(&refused(&neither), "nodes/resolve", "a"));
 }
 
+/// A state machine whose entry, exit and branch name nothing: each state is a noun of its design.
+const MACHINE: &str = "type: state\ntitle: An issue\nlede: An issue moves from open to resolved.\nnodes:\n  - {id: in, \
+                       role: start}\n  - {id: open, noun: open}\n  - {id: which, role: choice, label: landed?}\n  - \
+                       {id: resolved, noun: resolved}\n  - {id: out, role: end}\nedges:\n  - {from: in, to: open}\n  \
+                       - {from: open, to: which, label: land}\n  - {from: which, to: resolved, label: yes}\n  - {from: \
+                       which, to: open, label: no}\n  - {from: resolved, to: out}\n";
+
+#[test]
+fn a_start_end_or_branch_needs_no_link() {
+    let known = |l: Link<'_>| matches!(l, Link::Noun("open" | "resolved"));
+    let r = render(MACHINE, None, Some(&known)).expect("start, end and choice name nothing");
+    assert!(r.findings.iter().all(|f| f.severity != Severity::Error), "{:?}", r.findings);
+    let flow = "type: workflow\ntitle: Review\nlede: A change is reviewed.\nlanes:\n  - {id: h, label: Human}\nnodes:\n  \
+                - {id: in, role: start, lane: h}\n  - {id: ok, role: decision, lane: h, label: approve?}\n  - {id: \
+                out, role: end, lane: h}\nedges:\n  - {from: in, to: ok}\n  - {from: ok, to: out, label: yes}\n";
+    render(flow, None, None).expect("start, end and decision name nothing");
+    // A link given anyway is still resolved.
+    let linked = MACHINE.replace("role: choice,", "role: choice, noun: verdict,");
+    assert!(names(&render(&linked, None, Some(&known)).expect_err("no verdict noun"), "nodes/resolve", "which"));
+}
+
+#[test]
+fn refuses_an_unlinked_state() {
+    let f = refused(&MACHINE.replace("{id: open, noun: open}", "{id: open}"));
+    assert!(names(&f, "nodes/resolve", "open") && f.len() == 1, "{f:?}");
+    let both = MACHINE.replace("role: start}", "role: start, term: issue, noun: start}");
+    assert!(names(&refused(&both), "nodes/resolve", "in"), "a start that gives two links");
+}
+
+#[test]
+fn a_state_or_step_draws_its_note() {
+    let noted = MACHINE.replace("{id: open, noun: open}", "{id: open, noun: open, note: Waits for a worker.}");
+    let known = |_: Link<'_>| true;
+    let html = render(&noted, None, Some(&known)).expect("a state takes a note").html;
+    assert!(html.contains(">Waits for a worker.</text>"), "the note is drawn, not dropped");
+    let flow = "type: workflow\ntitle: Review\nlede: A change is reviewed.\nlanes:\n  - {id: h, label: Human}\nnodes:\n  - {id: r, noun: \
+                review, lane: h, note: By the owner.}\n";
+    assert!(render(flow, None, None).expect("a step takes a note").html.contains(">By the owner.</text>"));
+}
+
+#[test]
+fn refuses_a_note_on_a_start_end_or_branch() {
+    let f = refused(&MACHINE.replace("role: choice,", "role: choice, note: Did it land?,"));
+    assert!(
+        f.iter().any(|f| f.rule == "spec/schema" && f.id == "which" && f.detail.contains("draws no `note`")),
+        "{f:?}"
+    );
+    // A dot draws no text, so the fix names no `label`; the finding names the key the author wrote.
+    let f = refused(&MACHINE.replace("role: start}", "role: start, sub: Filed.}"));
+    let detail = &f.iter().find(|f| f.id == "in").expect("the start refuses").detail;
+    assert_eq!(detail, "a `start` node draws no `sub`; say it in the design");
+}
+
+#[test]
+fn refuses_a_note_on_an_entity() {
+    let spec = "type: er\nlevel: logical\ntitle: T\nlede: One entity.\nnodes:\n  - {id: a, noun: A, at: [0, 0], note: Dropped.}\n";
+    let f = refused(spec);
+    assert!(f.iter().any(|f| f.rule == "spec/schema" && f.id == "a" && f.detail.contains("draws no `note`")), "{f:?}");
+    let f = refused(&spec.replace("note:", "sub:"));
+    assert!(f.iter().any(|f| f.detail == "an `er` node draws no `sub`; use its `label`"), "{f:?}");
+}
+
+#[test]
+fn refuses_a_legend_item_without_a_label() {
+    let spec = format!("{ONE}legend:\n  - {{role: application}}\nnodes:\n  - {{id: a, noun: A, at: [0, 0]}}\n");
+    let f = refused(&spec);
+    assert!(
+        f.iter().any(|f| f.rule == "spec/schema" && f.id == "legend" && f.detail.contains("needs a `label`")),
+        "{f:?}"
+    );
+    let empty = format!("{ONE}legend:\n  - {{}}\nnodes:\n  - {{id: a, noun: A, at: [0, 0]}}\n");
+    let f = refused(&empty);
+    assert!(f.iter().any(|f| f.detail.starts_with("legend item 1 needs a `role` or a `style`")), "{f:?}");
+}
+
 #[test]
 fn refuses_unknown_role() {
     let spec = format!("{ONE}nodes:\n  - {{id: a, noun: A, role: database, at: [0, 0]}}\n");

@@ -15,6 +15,12 @@ pub(crate) const fn up4(v: i32) -> i32 {
     (v + 3) / 4 * 4
 }
 
+/// Whether `role` marks a place in a flow, drawn as a dot, ring or diamond, rather than a thing with a name: it needs
+/// no link and draws no note.
+pub(crate) fn pseudo(role: &str) -> bool {
+    matches!(role, "start" | "end" | "choice" | "decision")
+}
+
 /// A role's tag, drawn beside the name only where the kind tells the reader something, and its legend words when the
 /// author names none. The default kinds (an application, a component, an entity, a step) carry no tag.
 pub(crate) fn role_words(role: &str) -> (Option<&'static str>, &'static str) {
@@ -128,7 +134,8 @@ pub(crate) fn entity(n: &Node, level: Option<&str>) -> SNode {
     node
 }
 
-/// A state or a workflow step: one centred name in a pill or box, or a start dot, end ring or choice diamond.
+/// A state or a workflow step: a centred name in a pill or box with its note in muted lines below, or a start dot,
+/// end ring or choice diamond, which takes no note.
 pub(crate) fn ordered(n: &Node, ty: Type) -> SNode {
     match n.role.as_str() {
         "start" => base(n, Shape::Dot, 24, 24, Vec::new()),
@@ -140,16 +147,32 @@ pub(crate) fn ordered(n: &Node, ty: Type) -> SNode {
         }
         _ => {
             let lines = Font::Body.wrap(&n.label, 13, 152);
-            let h = 20 + 17 * i32::try_from(lines.len()).unwrap_or(1) + 4;
-            let w = lines.iter().map(|l| Font::Body.width(l, 13, 0)).max().unwrap_or(0) + 40;
-            let w = up4(w.max(if ty == Type::State { 104 } else { 128 }));
-            let first = up4(h) / 2 - (17 * (i32::try_from(lines.len()).unwrap_or(1) - 1)) / 2 + Font::Body.cap(13) / 2;
-            let runs = lines
+            let notes = n.note.as_deref().map(|t| Font::Body.wrap(t, 12, 152)).unwrap_or_default();
+            let k = i32::try_from(notes.len()).unwrap_or(0);
+            let h = 20 + 17 * i32::try_from(lines.len()).unwrap_or(1) + 16 * k + 4;
+            let w = lines
+                .iter()
+                .map(|l| Font::Body.width(l, 13, 0))
+                .chain(notes.iter().map(|l| Font::Body.width(l, 12, 0)));
+            let w = up4((w.max().unwrap_or(0) + 40).max(if ty == Type::State { 104 } else { 128 }));
+            // The name and the note centre as one block; with no note the name sits where it always did.
+            let last = 17 * (i32::try_from(lines.len()).unwrap_or(1) - 1);
+            let first = up4(h) / 2 - i32::midpoint(last, 16 * k) + Font::Body.cap(13) / 2;
+            let names = lines
                 .into_iter()
                 .zip(0..)
-                .map(|(l, i)| Run::new(Font::Body, 13, 0, "name", l).centred(w / 2, first + 17 * i))
-                .collect();
-            base(n, if ty == Type::State { Shape::Pill } else { Shape::Box }, w, h, runs)
+                .map(|(l, i)| Run::new(Font::Body, 13, 0, "name", l).centred(w / 2, first + 17 * i));
+            let notes = notes
+                .into_iter()
+                .zip(1..)
+                .map(|(l, i)| Run::new(Font::Body, 12, 0, "note", l).centred(w / 2, first + last + 16 * i));
+            // A noted state is too tall for a pill: its rounded ends would cut into the note's lines.
+            let shape = match (ty, k) {
+                (Type::State, 0) => Shape::Pill,
+                (Type::State, _) => Shape::Rounded,
+                _ => Shape::Box,
+            };
+            base(n, shape, w, h, names.chain(notes).collect())
         }
     }
 }

@@ -14,12 +14,22 @@ const VAULT: &str = "projects/bp/designs/containers/vault";
 const SPEC: &str = "type: architecture\nlevel: container\ntitle: Front\nlede: Two boxes.\nnodes:\n  - {id: h, term: \
                     harness, at: [0, 0]}\n  - {id: v, noun: Vault, at: [1, 0]}\n";
 
+/// A states table: the first column names each state as a noun of the design (28, design change 1).
+const STATES: &str = "| State | Means |\n|---|---|\n| open | waits |\n| resolved | landed |\n";
+
+/// A lifecycle whose start, branch and end name nothing.
+const MACHINE: &str = "type: state\ntitle: Work\nlede: Work moves from open to resolved.\nnodes:\n  - {id: in, role: \
+                       start}\n  - {id: open, noun: open}\n  - {id: which, role: choice, label: landed?}\n  - {id: \
+                       resolved, noun: resolved}\n  - {id: out, role: end}\nedges:\n  - {from: in, to: open}\n  - \
+                       {from: open, to: which}\n  - {from: which, to: resolved, label: yes}\n  - {from: resolved, to: \
+                       out}\n";
+
 fn design(title: &str, status: &str, body: &str) -> String {
     format!("---\nkind: design\ntitle: {title}\nstatus: {status}\nunder: projects/bp/designs/system\n---\n\n{body}")
 }
 
-/// A project with a glossary, a draft container design whose body names `Vault`, an active one, and a code
-/// repository for `check`.
+/// A project with a glossary, a draft container design whose body names `Vault` and two states, an active one, and a
+/// code repository for `check`.
 fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
     let nodes = "## Check\n\n~~~check nodes {name=diagram}\n~~~\n";
     let vault = common::vault(&[
@@ -31,7 +41,7 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
         ("projects/bp/designs/glossary.md", &design("G", "active", "- `harness` — runs the agents.\n")),
         (
             &format!("{FRONT}.md"),
-            &design("Front", "draft", &format!("The front.\n\n## Vault\n\nThe files.\n\n{nodes}")),
+            &design("Front", "draft", &format!("The front.\n\n## Vault\n\nThe files.\n\n{STATES}\n{nodes}")),
         ),
         (&format!("{VAULT}.md"), &design("Vault", "active", "The vault.\n")),
         ("shared/.keep", ""),
@@ -228,5 +238,24 @@ fn with_no_glossary_a_term_says_how_to_make_one() {
     assert!(
         v["fix"].as_str().unwrap().contains("bp create design --project bp --title Glossary --slug glossary"),
         "{v}"
+    );
+}
+
+#[test]
+fn a_start_end_or_choice_needs_no_link_in_the_verb_and_the_check() {
+    let (vault, code) = setup();
+    let (root, code) = (vault.path(), code.path());
+    let tmp = tempfile::tempdir().unwrap();
+    let s = spec(tmp.path(), "s.yaml", MACHINE);
+    let (exit, v) = bp(root, &["diagram", FRONT, "work", "--spec-file", &s]);
+    assert_eq!(exit, Some(0), "{v}");
+    let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["check", FRONT]);
+    assert_eq!((exit, v["runs"][0]["verdict"].as_str()), (Some(0), Some("pass")), "{v}");
+    let s = spec(tmp.path(), "bad.yaml", &MACHINE.replace("{id: open, noun: open}", "{id: open}"));
+    let (exit, v) = bp(root, &["diagram", FRONT, "work", "--spec-file", &s]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("diagram_invalid")), "a state still needs its noun: {v}");
+    assert_eq!(
+        (v["findings"][0]["rule"].as_str(), v["findings"][0]["id"].as_str()),
+        (Some("nodes/resolve"), Some("open"))
     );
 }
