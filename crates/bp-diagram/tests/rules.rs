@@ -253,6 +253,36 @@ fn refuses_an_unlinked_state() {
 }
 
 #[test]
+fn a_state_or_step_draws_its_note() {
+    let noted = MACHINE.replace("{id: open, noun: open}", "{id: open, noun: open, note: Waits for a worker.}");
+    let known = |_: Link<'_>| true;
+    let html = render(&noted, None, Some(&known)).expect("a state takes a note").html;
+    assert!(html.contains(">Waits for a worker.</text>"), "the note is drawn, not dropped");
+    let flow = "type: workflow\ntitle: Review\nlede: A change is reviewed.\nlanes:\n  - {id: h, label: Human}\nnodes:\n  - {id: r, noun: \
+                review, lane: h, note: By the owner.}\n";
+    assert!(render(flow, None, None).expect("a step takes a note").html.contains(">By the owner.</text>"));
+}
+
+#[test]
+fn refuses_a_note_on_a_start_end_or_branch() {
+    let f = refused(&MACHINE.replace("role: choice,", "role: choice, note: Did it land?,"));
+    assert!(
+        f.iter().any(|f| f.rule == "spec/schema" && f.id == "which" && f.detail.contains("draws no `note`")),
+        "{f:?}"
+    );
+}
+
+#[test]
+fn refuses_a_legend_item_without_a_label() {
+    let spec = format!("{ONE}legend:\n  - {{role: application}}\nnodes:\n  - {{id: a, noun: A, at: [0, 0]}}\n");
+    let f = refused(&spec);
+    assert!(
+        f.iter().any(|f| f.rule == "spec/schema" && f.id == "legend" && f.detail.contains("needs a `label`")),
+        "{f:?}"
+    );
+}
+
+#[test]
 fn refuses_unknown_role() {
     let spec = format!("{ONE}nodes:\n  - {{id: a, noun: A, role: database, at: [0, 0]}}\n");
     assert!(names(&refused(&spec), "spec/schema", "a"));

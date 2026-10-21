@@ -232,9 +232,8 @@ fn spec_rules(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Findi
 fn links(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Finding> {
     let mut out = Vec::new();
     for n in &s.nodes {
-        let pseudo = matches!(n.role.as_str(), "start" | "end" | "choice" | "decision");
         let Some(link) = n.link() else {
-            if pseudo && n.term.is_none() && n.noun.is_none() {
+            if nodes::pseudo(&n.role) && n.term.is_none() && n.noun.is_none() {
                 continue;
             }
             out.push(Finding::error(

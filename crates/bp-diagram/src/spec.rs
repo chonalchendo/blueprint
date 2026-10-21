@@ -324,7 +324,12 @@ pub(crate) fn parse(text: &str) -> Result<Spec, Vec<Finding>> {
         let mut legend = Vec::new();
         for item in r.list(root, "legend") {
             let key = r.text(item, "role", "legend").or_else(|| r.text(item, "style", "legend")).unwrap_or_default();
-            legend.push((key, r.text(item, "label", "legend").unwrap_or_default()));
+            let label = r.text(item, "label", "legend").unwrap_or_default();
+            // An entry with no words leaves a bare swatch the reader cannot decode.
+            if label.trim().is_empty() {
+                r.bad("legend", format!("legend item `{key}` needs a `label`: the words beside its swatch"));
+            }
+            legend.push((key, label));
         }
         spec.legend = Some(legend);
     }
@@ -354,6 +359,9 @@ fn nodes(r: &mut Reader, root: &Yaml, ty: Type) -> Vec<Node> {
             }
             (note, sub) => note.or(sub),
         };
+        if note.is_some() && crate::nodes::pseudo(&role) {
+            r.bad(&id, format!("a `{role}` node draws no `note`; put the words on an edge's `label`"));
+        }
         out.push(Node {
             at: r.pair(n, "at", &id, 0),
             span: r.pair(n, "span", &id, 1).unwrap_or((1, 1)),
