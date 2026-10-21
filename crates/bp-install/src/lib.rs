@@ -239,6 +239,11 @@ fn check_target(top: &Path, spec: &Spec, hashes: &mut Hashes) -> Result<(), Refu
         return Err(refuse(entry.clone(), why));
     }
     for (entry, want) in &ships {
+        if current(top, spec, entry, hashes).as_ref() == Some(want) {
+            continue;
+        }
+        // Only a fresh hash refuses: a wrong cached one is read again, and the cache heals.
+        hashes.forget(entry);
         if current(top, spec, entry, hashes).as_ref() != Some(want) {
             return Err(refuse(entry.clone(), format!("{entry} is absent or does not hash to the manifest")));
         }

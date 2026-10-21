@@ -78,7 +78,8 @@ pub struct Intents<'a> {
     integrity: RefCell<BTreeMap<String, Option<IntegrityRun>>>,
     /// Each design's latest acceptance, read once per call for `stale`.
     accepted: RefCell<BTreeMap<String, Option<String>>>,
-    /// Each learning's creation, read once per call for `stale` with no evidence row: learnings share one directory.
+    /// Each learning's creation, read once per call for `stale` with no evidence row. Every learning lives in
+    /// `shared/learnings` (13), so one read serves them all.
     created: OnceCell<BTreeMap<String, String>>,
 }
 
@@ -135,8 +136,8 @@ impl<'a> Intents<'a> {
         }
         // With no evidence row, the last verification is the learning's creation (13, Learning).
         let created = || {
-            let dir = id.rsplit_once('/').map_or("", |(d, _)| d);
-            self.created.get_or_init(|| self.vault.created(dir)).get(id).cloned()
+            let dir = format!("shared/{}", Kind::Learning.dir());
+            self.created.get_or_init(|| self.vault.created(&dir)).get(id).cloned()
         };
         let last = self.index.records(id, Kind::Evidence)?.pop().map_or_else(created, |r| text(&r.header, "at"));
         Ok(LearningStatus::stale(&text(header, "status").unwrap_or_default(), last.as_deref(), &changed))

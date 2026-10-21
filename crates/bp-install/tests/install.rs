@@ -130,19 +130,30 @@ fn check_catches_each_drift_and_install_repairs_it() {
 }
 
 #[test]
-fn a_cached_hash_never_hides_an_edit() {
+fn a_cached_hash_never_hides_an_edit_and_a_wrong_one_heals() {
     let dir = top();
     let t = dir.path();
     install(t, Target::Claude).unwrap();
-    let skill = ".claude/skills/bp-complete/SKILL.md";
+    let (skill, cache) = (".claude/skills/bp-complete/SKILL.md", ".git/bp-bundle-hashes");
     let held = std::fs::metadata(t.join(skill)).unwrap().modified().unwrap();
-    // The cache takes only a file changed before the check's second, so the check waits for the next one.
-    let secs = |at: std::time::SystemTime| at.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    while secs(std::time::SystemTime::now()) <= secs(held) {
+    let cached = |t: &Path| {
+        let text = std::fs::read_to_string(t.join(cache)).unwrap_or_default();
+        text.lines().find(|l| l.starts_with(&format!("{skill}\t"))).map(str::to_string)
+    };
+    // A file changed within a second of the check is not cached, as a coarse clock can give a second write its time.
+    let fresh = held.elapsed().unwrap() < std::time::Duration::from_millis(900);
+    assert_eq!(checked(t), "ok");
+    assert!(!fresh || cached(t).is_none(), "too new to cache");
+    while held.elapsed().unwrap() < std::time::Duration::from_millis(1100) {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert_eq!(checked(t), "ok");
-    assert!(read(t, ".git/bp-bundle-hashes").contains(skill), "the check cached the skill's hash");
+    let line = cached(t).expect("the check cached the skill's hash");
+    // A wrong cached hash is read again before any refusal, and the cache heals.
+    let (stat, hash) = line.rsplit_once('\t').unwrap();
+    write(t, cache, &read(t, cache).replace(&line, &format!("{stat}\t{}", "0".repeat(64))));
+    assert_eq!(checked(t), "ok");
+    assert_eq!(cached(t).unwrap(), format!("{stat}\t{hash}"));
     // The same size and modification time: only the change time tells the edit.
     write(t, skill, &read(t, skill).replacen("name:", "nAme:", 1));
     std::fs::File::options().write(true).open(t.join(skill)).unwrap().set_modified(held).unwrap();

@@ -179,9 +179,10 @@ impl Vault {
     }
 
     /// When each node file directly under `dir` entered the vault, by id: the commit that added it, through any
-    /// rename, as a UTC instant with `Z`, the form every vault instant takes. Empty outside git or before the first
+    /// rename inside `dir`, as a UTC instant with `Z`, the form every vault instant takes. Empty outside git or before the first
     /// commit. One `git log` over the directory serves every node in it, as a list of 50 learnings paid 50 (27, issue
-    /// 13). A rename keeps a node's kind, so its directory too, and the log follows each rename inside `dir`.
+    /// 13). `bp rename` keeps a node's kind, so its directory too. A file moved in by hand dates from the move, when it
+    /// became a node of the directory's kind.
     pub fn created(&self, dir: &str) -> BTreeMap<String, String> {
         let Ok(out) = std::process::Command::new("git")
             .arg("-C")
@@ -210,7 +211,9 @@ impl Vault {
             let mut f = line.split('\t');
             match (f.next(), f.next(), f.next()) {
                 (Some(l), None, None) if l.starts_with('@') => at = l[1..].to_string(),
-                (Some("A"), Some(path), None) => drop(born.entry(path.to_string()).or_insert_with(|| at.clone())),
+                (Some("A"), Some(path), None) => {
+                    born.entry(path.to_string()).or_insert_with(|| at.clone());
+                }
                 (Some(r), Some(old), Some(new)) if r.starts_with('R') => {
                     if let Some(t) = born.remove(old) {
                         born.insert(new.to_string(), t);
