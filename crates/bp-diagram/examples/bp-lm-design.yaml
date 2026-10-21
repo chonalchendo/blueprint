@@ -17,7 +17,7 @@ nodes:
     role: node
     at: [1, 0]
     label: Design
-    fields: ["# id", "design_kind, scope", "→ under: Design | Project", "→ cites: Design, Decision, Term", aliases, status]
+    fields: ["# id", "design_kind, scope", "→ under: Design | Project", "→ cites: Design, Decision, Convention, Term", aliases, status]
     time: processing · as-of by version
   - id: diagram
     term: diagram
@@ -27,14 +27,14 @@ nodes:
     fields: ["#→ design", "# name", type, "nodes: Term | noun"]
     time: processing
   - id: glossary-term
-    term: glossary
+    noun: GlossaryTerm
     role: row
     at: [3, 0]
     label: GlossaryTerm
     fields: ["#→ project", "# slug", definition, status]
     time: processing
   - id: concern-answer
-    term: concern
+    term: answer
     role: record
     at: [0, 1]
     label: ConcernAnswer

@@ -68,6 +68,42 @@ fn refuses_through_box() {
 }
 
 #[test]
+fn refuses_a_route_along_a_border() {
+    let mut g = clean();
+    g.boxes.push(("c".into(), Rect::new(120, 32, 40, 40)));
+    let f = lint(&g);
+    assert!(f.iter().any(|f| f.rule == "route/through-box" && f.detail.contains("`c`")), "{f:?}");
+}
+
+#[test]
+fn refuses_touching_routes() {
+    let mut g = clean();
+    let mut t = route("c--b", vec![vec![(152, 100), (152, 32)]]);
+    t.from = "c".into();
+    g.routes.push(t);
+    assert!(names(&lint(&g), "route/touches", "c--b"), "an end on another route");
+    g.routes[1].pieces = vec![vec![(200, 32), (240, 32)]];
+    assert!(names(&lint(&g), "route/touches", "c--b"), "two collinear runs that meet end to end");
+}
+
+#[test]
+fn refuses_a_route_through_a_group_label() {
+    let mut g = clean();
+    g.boxes.push(("g:label".into(), Rect::new(120, 24, 48, 16)));
+    let f = lint(&g);
+    assert!(f.iter().any(|f| f.rule == "route/through-box" && f.detail.contains("`g:label`")), "{f:?}");
+}
+
+#[test]
+fn refuses_an_edge_label_over_a_group_label() {
+    let mut g = clean();
+    g.boxes.push(("g:label".into(), Rect::new(120, 80, 48, 16)));
+    g.labels.push(Label { id: "a--b:label".into(), of: "a--b".into(), rect: Rect::new(128, 72, 48, 24) });
+    let f = lint(&g);
+    assert!(f.iter().any(|f| f.rule == "label/collision" && f.detail.contains("`g:label`")), "{f:?}");
+}
+
+#[test]
 fn refuses_stacked() {
     let mut g = clean();
     g.routes.push(route("a--b2", vec![vec![(100, 40), (200, 40)]]));
@@ -125,6 +161,32 @@ fn refuses_off_grid() {
     let mut g = clean();
     g.boxes[0].1.x = 3;
     assert!(names(&lint(&g), "grid/4px", "a"));
+    g.labels.push(Label { id: "a--b:label".into(), of: "a--b".into(), rect: Rect::new(130, 80, 40, 18) });
+    assert!(names(&lint(&g), "grid/4px", "a--b:label"), "a label sits on the grid too");
+}
+
+#[test]
+fn refuses_a_zero_or_negative_size() {
+    for size in ["[0, 1]", "[1, 0]", "[-1, 1]"] {
+        let f = refused(&format!("{ONE}nodes:\n  - {{id: a, noun: A, at: [0, 0], span: {size}}}\n"));
+        assert!(names(&f, "spec/schema", "a"), "{size}: {f:?}");
+    }
+    assert!(names(&refused(&format!("{ONE}nodes:\n  - {{id: a, noun: A, at: [-1, 0]}}\n")), "spec/schema", "a"));
+}
+
+#[test]
+fn refuses_a_field_it_would_otherwise_drop() {
+    let edge = |extra: &str| {
+        format!(
+            "{ONE}nodes:\n  - {{id: a, noun: A, at: [0, 0]}}\n  - {{id: b, noun: B, at: [1, 0]}}\nedges:\n  - {{from: a, to: b, {extra}}}\n"
+        )
+    };
+    assert!(names(&refused(&edge("both: \"yes\"")), "spec/schema", "a--b"), "both is a boolean");
+    assert!(names(&refused(&edge("card: [\"1\", \"N\", \"M\"]")), "spec/schema", "a--b"), "card is two items");
+    let both = format!("{ONE}nodes:\n  - {{id: a, noun: A, at: [0, 0], note: One., sub: Two}}\n");
+    assert!(names(&refused(&both), "spec/schema", "a"), "note or sub, not both");
+    let id = format!("{ONE}nodes:\n  - {{id: 'a\"><b', noun: A, at: [0, 0]}}\n");
+    assert!(refused(&id).iter().any(|f| f.rule == "spec/schema" && f.detail.contains("no slug")), "ids are slugs");
 }
 
 #[test]

@@ -111,7 +111,7 @@
     function focus(id) {
       const set = id ? keep(id) : null;
       for (const p of parts) {
-        const pid = p.dataset.id || p.dataset.of;
+        const pid = p.classList.contains('life') ? p.dataset.of : p.dataset.id || p.dataset.of;
         p.classList.toggle('dim', !!set && !set.has(pid) && !(p.classList.contains('group') && set.size > 1));
       }
     }

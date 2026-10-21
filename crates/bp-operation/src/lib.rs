@@ -113,7 +113,7 @@ impl Role {
     /// `None` for the human, whom no list bounds: the forge is the gate.
     pub fn verbs(self) -> Option<&'static [&'static str]> {
         Some(match self {
-            Self::Session => &["create", "set", "link", "record", "transition", "release"],
+            Self::Session => &["create", "set", "link", "diagram", "record", "transition", "release"],
             Self::Worker => &["cut", "check", "record", "pr", "release"],
             Self::Reviewer | Self::Researcher => &[],
             Self::Human => return None,

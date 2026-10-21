@@ -1,6 +1,7 @@
 //! One diff render (28, design change 13): base and head paired by node `id` and edge `from→to` (or its `id`),
-//! never by label or place. The head is drawn whole; a removed item stays as a ghost at its base cell, and a moved
-//! node leaves a ghost there too. CSS alone then shows base, head or diff.
+//! never by label or place. The head is drawn whole; a removed item stays as a ghost at its base cell (a party or a
+//! step, at its place in the base order), and a moved node leaves a ghost there too. CSS alone then shows base,
+//! head or diff.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,12 +51,16 @@ pub(crate) fn merge(base: &Spec, head: &Spec) -> Merged {
             }
         }
     }
-    if head.ty != Type::Sequence {
-        for b in base.nodes.iter().filter(|b| head.node(&b.id).is_none()) {
+    for (i, b) in base.nodes.iter().enumerate().filter(|(_, b)| head.node(&b.id).is_none()) {
+        classes.insert(b.id.clone(), vec!["removed"]);
+        ghosts.insert(b.id.clone());
+        if head.ty == Type::Sequence {
+            // A party takes no cell: its ghost keeps its place in the base order.
+            let prev = i.checked_sub(1).map(|k| base.nodes[k].id.as_str());
+            insert_after(&mut spec.nodes, prev, |n| &n.id, b.clone());
+        } else {
             let mut ghost = b.clone();
             ghost.at = b.at.map(|at| free(at, &mut taken));
-            classes.insert(b.id.clone(), vec!["removed"]);
-            ghosts.insert(b.id.clone());
             spec.nodes.push(ghost);
         }
     }
@@ -81,5 +86,18 @@ pub(crate) fn merge(base: &Spec, head: &Spec) -> Merged {
         classes.insert(s.id.clone(), vec![class]);
         classes.insert(format!("{}.back", s.id), vec![class]);
     }
+    for (i, b) in base.steps.iter().enumerate().filter(|(_, b)| head.steps.iter().all(|s| s.id != b.id)) {
+        classes.insert(b.id.clone(), vec!["removed"]);
+        classes.insert(format!("{}.back", b.id), vec!["removed"]);
+        let prev = i.checked_sub(1).map(|k| base.steps[k].id.as_str());
+        insert_after(&mut spec.steps, prev, |s| &s.id, b.clone());
+    }
     Merged { spec, classes, ghosts }
+}
+
+/// Puts a removed item back after the item that came before it in the base, which is already in place: the base is
+/// walked in order. With none before it, it goes first.
+fn insert_after<T>(items: &mut Vec<T>, prev: Option<&str>, id: impl Fn(&T) -> &String, item: T) {
+    let at = prev.and_then(|p| items.iter().position(|x| id(x) == p)).map_or(0, |k| k + 1);
+    items.insert(at, item);
 }

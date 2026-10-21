@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use crate::Finding;
 use crate::font::Font;
-use crate::nodes::role_words;
+use crate::nodes::{role_words, up4};
 use crate::scene::{Key, Scene};
 use crate::spec::{Spec, Type};
 use crate::svg::esc;
@@ -68,7 +68,7 @@ pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec) {
     }
     let (mut x, mut y) = (88, scene.legend_y + 20);
     for (key, label) in keys {
-        let w = 28 + Font::Body.width(&label, 11, 0) + 28;
+        let w = up4(28 + Font::Body.width(&label, 11, 0) + 28);
         if x + w > scene.w - 24 && x > 88 {
             (x, y) = (88, y + 24);
         }
@@ -113,7 +113,7 @@ pub(crate) fn draw(scene: &Scene) -> String {
         let swatch = match k.kind.as_str() {
             "dashed" | "call" | "return" => {
                 let dashed = if k.kind == "call" { "" } else { " dashed" };
-                format!("<g class=\"swatch edge{dashed}\"><path class=\"stroke\" d=\"M{x},{}H{}\"/></g>", y + 6, x + 20)
+                format!("<g class=\"swatch edge{dashed}\"><path class=\"stroke\" d=\"M{x},{}H{}\"/></g>", y + 4, x + 20)
             }
             "note" => format!(
                 "<g class=\"swatch note\"><rect class=\"notebox\" x=\"{x}\" y=\"{y}\" width=\"20\" height=\"12\" rx=\"3\"/></g>"

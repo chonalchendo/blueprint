@@ -58,18 +58,18 @@ pub(crate) fn lay_out(spec: &Spec) -> Scene {
     for (k, m) in msgs.iter().enumerate() {
         let y = ys[k];
         let (chip, text) = labels[k].clone();
-        let lw = chip.w + 6 + text.w + 8;
+        let lw = up4(chip.w + 6 + text.w + 8);
         let pts: Vec<Point>;
         let rect;
         if m.from == m.to {
             let x = edge_x(m.from, k, 1);
             pts = vec![(x, y), (x + 28, y), (x + 28, y + 20), (x, y + 20)];
-            rect = Rect::new(x + 40, y + 2, lw, 16);
+            rect = Rect::new(x + 40, y + 4, lw, 16);
         } else {
             let dir = (cx[m.to] - cx[m.from]).signum();
             let (a, b) = (edge_x(m.from, k, dir), edge_x(m.to, k, -dir));
             pts = vec![(a, y), (b, y)];
-            rect = Rect::new(a.midpoint(b) - lw / 2, y - 6 - 16, lw, 16);
+            rect = Rect::new((a.midpoint(b) - lw / 2).div_euclid(4) * 4, y - 8 - 16, lw, 16);
         }
         let runs = vec![chip.at(rect.x + 4, rect.y + 12), text.at(rect.x + 4 + labels[k].0.w + 6, rect.y + 12)];
         let focus = spec.focus.iter().any(|f| f == m.step);

@@ -19,6 +19,7 @@ steps:
   - {id: push, from: tool, to: forge, say: push · open pr · run checks}
   - {id: opened, from: worker, to: session, say: pull request opened, kind: return}
   - {id: review, from: session, to: reviewer, say: dispatch reviewer, back: findings}
+  - {id: record-review, from: session, to: tool, say: record review}
   - {id: respond, from: session, to: worker, say: dispatch · respond}
   - {id: dispositions, from: worker, to: tool, say: record dispositions · pr}
   - {id: new-head, from: tool, to: forge, say: push new head}

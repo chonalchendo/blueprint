@@ -18,12 +18,13 @@ pub fn check(g: &Geometry) -> Vec<Finding> {
             if a.0 != b.0 && a.1 != b.1 {
                 out.push(Finding::error("route/diagonal", &r.id, format!("segment {a:?} to {b:?} is diagonal")));
             }
-            let seg = Rect::of_segment(a, b);
-            for (id, rect) in &g.boxes {
-                if *id != r.from && *id != r.to && seg.meets(rect) {
-                    out.push(Finding::error("route/through-box", &r.id, format!("the route passes through `{id}`")));
-                }
-            }
+        }
+        // A route that only touches a box, or runs along its border, reads as joined to it: the closed segment counts.
+        let hit = g.boxes.iter().find(|(id, rect)| {
+            *id != r.from && *id != r.to && r.segments().any(|(a, b)| Rect::of_segment(a, b).gap2(rect) == 0)
+        });
+        if let Some((id, _)) = hit {
+            out.push(Finding::error("route/through-box", &r.id, format!("the route enters or touches `{id}`")));
         }
     }
     pairs(g, &mut out);
@@ -40,6 +41,12 @@ pub fn check(g: &Geometry) -> Vec<Finding> {
             out.push(Finding::error("grid/4px", id, format!("box {b:?} is off the 4 px grid")));
         }
     }
+    for l in &g.labels {
+        let b = l.rect;
+        if off(b.x) || off(b.y) || off(b.w) || off(b.h) {
+            out.push(Finding::error("grid/4px", &l.id, format!("label {b:?} is off the 4 px grid")));
+        }
+    }
     for r in &g.routes {
         if let Some(p) = r.pieces.iter().flatten().chain(&r.bridges).find(|p| off(p.0) || off(p.1)) {
             out.push(Finding::error("grid/4px", &r.id, format!("point {p:?} is off the 4 px grid")));
@@ -48,15 +55,17 @@ pub fn check(g: &Geometry) -> Vec<Finding> {
     out
 }
 
-/// Stacked routes and unbridged crossings: each pair of routes once.
+/// Stacked, touching and unbridged crossing routes: each pair of routes once.
 fn pairs(g: &Geometry, out: &mut Vec<Finding>) {
     for (i, a) in g.routes.iter().enumerate() {
         for b in &g.routes[i + 1..] {
             let mut stacked = false;
+            let mut touch = None;
             let mut unbridged = None;
             for (p, q) in a.segments() {
                 for (s, t) in b.segments() {
                     stacked |= parallel_overlap((p, q), (s, t));
+                    touch = touch.or_else(|| meet((p, q), (s, t)));
                     if let Some(x) = crossing((p, q), (s, t))
                         && !a.bridges.contains(&x)
                         && !b.bridges.contains(&x)
@@ -67,6 +76,13 @@ fn pairs(g: &Geometry, out: &mut Vec<Finding>) {
             }
             if stacked {
                 out.push(Finding::error("route/stacked", &b.id, format!("runs within {TRACK} px of `{}`", a.id)));
+            }
+            if let (false, Some(x)) = (stacked, touch) {
+                out.push(Finding::error(
+                    "route/touches",
+                    &b.id,
+                    format!("meets `{}` at {x:?}: two routes share a point only at a bridged crossing", a.id),
+                ));
             }
             if let Some(x) = unbridged {
                 out.push(Finding::error(
@@ -87,6 +103,27 @@ fn parallel_overlap((p, q): (Point, Point), (s, t): (Point, Point)) -> bool {
         (p.0 - s.0).abs() < TRACK && overlap(p.1, q.1, s.1, t.1)
     } else {
         false
+    }
+}
+
+/// A point two segments share that is not a crossing inside both: an end on the other, a shared corner, or two
+/// collinear runs that meet. Drawn, either reads as one line that goes to the wrong box.
+fn meet(one: (Point, Point), two: (Point, Point)) -> Option<Point> {
+    let within = |v: i32, a: i32, b: i32| v >= a.min(b) && v <= a.max(b);
+    let flat = |s: (Point, Point)| s.0.1 == s.1.1;
+    match (flat(one), flat(two)) {
+        (true, true) | (false, false) => {
+            let axis = |p: Point| if flat(one) { (p.1, p.0) } else { (p.0, p.1) };
+            let ((l1, a1), (_, b1), (l2, a2), (_, b2)) = (axis(one.0), axis(one.1), axis(two.0), axis(two.1));
+            let lo = a1.min(b1).max(a2.min(b2));
+            (l1 == l2 && lo <= a1.max(b1).min(a2.max(b2))).then(|| if flat(one) { (lo, l1) } else { (l1, lo) })
+        }
+        _ => {
+            let (across, down) = if flat(one) { (one, two) } else { (two, one) };
+            let x = (down.0.0, across.0.1);
+            let shared = within(x.0, across.0.0, across.1.0) && within(x.1, down.0.1, down.1.1);
+            (shared && crossing(one, two).is_none()).then_some(x)
+        }
     }
 }
 

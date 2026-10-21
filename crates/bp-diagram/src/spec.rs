@@ -172,15 +172,16 @@ impl Reader {
         }
     }
 
-    fn pair(&mut self, map: &Yaml, key: &str, owner: &str) -> Option<(i32, i32)> {
+    /// Two whole numbers from `min` to 63: a cell (`at`, from 0) or a size in cells (`span`, from 1).
+    fn pair(&mut self, map: &Yaml, key: &str, owner: &str, min: i64) -> Option<(i32, i32)> {
         match &map[key] {
             Yaml::BadValue => None,
             Yaml::Array(a) if a.len() == 2 => match (a[0].as_i64(), a[1].as_i64()) {
-                (Some(c), Some(r)) if (0..64).contains(&c) && (0..64).contains(&r) => {
+                (Some(c), Some(r)) if (min..64).contains(&c) && (min..64).contains(&r) => {
                     Some((i32::try_from(c).ok()?, i32::try_from(r).ok()?))
                 }
                 _ => {
-                    self.bad(owner, format!("`{key}` is two whole numbers from 0 to 63"));
+                    self.bad(owner, format!("`{key}` is two whole numbers from {min} to 63"));
                     None
                 }
             },
@@ -331,13 +332,16 @@ fn nodes(r: &mut Reader, root: &Yaml, ty: Type) -> Vec<Node> {
         }
         let (term, noun) = (r.text(n, "term", &id), r.text(n, "noun", &id));
         let label = r.text(n, "label", &id).or_else(|| noun.clone()).or_else(|| term.clone()).unwrap_or_default();
-        let mut note = r.text(n, "note", &id);
-        if let Some(sub) = r.text(n, "sub", &id) {
-            note = Some(sub);
-        }
+        let note = match (r.text(n, "note", &id), r.text(n, "sub", &id)) {
+            (Some(_), Some(_)) => {
+                r.bad(&id, "give `note` (a box's line) or `sub` (a party's line), not both".into());
+                None
+            }
+            (note, sub) => note.or(sub),
+        };
         out.push(Node {
-            at: r.pair(n, "at", &id),
-            span: r.pair(n, "span", &id).unwrap_or((1, 1)),
+            at: r.pair(n, "at", &id, 0),
+            span: r.pair(n, "span", &id, 1).unwrap_or((1, 1)),
             fields: r.texts(n, "fields", &id),
             time: r.text(n, "time", &id),
             owner: r.text(n, "owner", &id),
@@ -369,9 +373,20 @@ fn edges(r: &mut Reader, root: &Yaml) -> Vec<Edge> {
             }
         };
         let card = r.texts(e, "card", &id);
+        if !matches!(card.len(), 0 | 2) {
+            r.bad(&id, "`card` is two items: the cardinality at `from`, then at `to`".into());
+        }
+        let both = match &e["both"] {
+            Yaml::BadValue => false,
+            Yaml::Boolean(b) => *b,
+            _ => {
+                r.bad(&id, "`both` is true or false".into());
+                false
+            }
+        };
         out.push(Edge {
             label: r.text(e, "label", &id).unwrap_or_default(),
-            both: e["both"].as_bool().unwrap_or(false),
+            both,
             exit: r.side(e, "exit", &id),
             enter: r.side(e, "enter", &id),
             card: (card.len() == 2).then(|| (card[0].clone(), card[1].clone())),
@@ -420,6 +435,12 @@ fn references(r: &mut Reader, spec: &Spec) {
         .chain(spec.edges.iter().map(|e| &e.id))
         .chain(spec.steps.iter().map(|s| &s.id));
     for id in ids.chain(spec.groups.iter().map(|g| &g.id)) {
+        // An id is a stable slug (§5.1): the view and a later diff pair elements by it.
+        let slug = id.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !slug {
+            r.bad(id, format!("`{id}` is no slug: lowercase letters, digits and hyphens"));
+        }
         if !seen.insert(id.as_str()) {
             r.bad(id, format!("`{id}` is used twice; give each node, group and edge its own id"));
         }

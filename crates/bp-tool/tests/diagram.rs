@@ -6,14 +6,17 @@ use std::path::Path;
 
 /// `bp <args> --json` in `dir`, outside any vault: the exit code and the parsed result.
 fn bp(dir: &Path, args: &[&str]) -> (Option<i32>, serde_json::Value) {
-    let out = assert_cmd::Command::cargo_bin("bp")
-        .unwrap()
-        .current_dir(dir)
-        .env_remove("BP_VAULT")
-        .args(args)
-        .arg("--json")
-        .output()
-        .unwrap();
+    bp_in(dir, None, args)
+}
+
+/// The same, with `BP_VAULT` set to `vault` when one is given.
+fn bp_in(dir: &Path, vault: Option<&Path>, args: &[&str]) -> (Option<i32>, serde_json::Value) {
+    let mut cmd = assert_cmd::Command::cargo_bin("bp").unwrap();
+    cmd.current_dir(dir).env_remove("BP_VAULT");
+    if let Some(v) = vault {
+        cmd.env("BP_VAULT", v);
+    }
+    let out = cmd.args(args).arg("--json").output().unwrap();
     (out.status.code(), serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null))
 }
 
@@ -33,7 +36,11 @@ fn the_preview_writes_its_file_and_lists_the_warnings() {
     let (code, v) = bp(dir.path(), &["diagram", "--spec-file", "s.yaml", "--out", "s.html"]);
     assert_eq!(code, Some(0), "{v}");
     assert_eq!(v["out"], "s.html");
-    assert_eq!(v["findings"], serde_json::json!([]));
+    assert_eq!(v["findings"].as_array().unwrap().len(), 1, "one warning: no vault, so no term was checked: {v}");
+    assert_eq!(
+        (v["findings"][0]["rule"].as_str(), v["findings"][0]["severity"].as_str()),
+        (Some("nodes/resolve"), Some("warn"))
+    );
     let html = std::fs::read_to_string(dir.path().join("s.html")).unwrap();
     assert_eq!(v["bytes"], html.len());
     assert!(html.contains("data-id=\"v\" data-term=\"vault\""));
@@ -86,4 +93,25 @@ fn an_unreadable_spec_could_not_run() {
     let dir = tempfile::tempdir().unwrap();
     let (code, v) = bp(dir.path(), &["diagram", "--spec-file", "none.yaml", "--out", "x.html"]);
     assert_eq!((code, v["code"].as_str()), (Some(1), Some("could_not_run")));
+}
+
+#[test]
+fn with_a_vault_a_term_resolves_and_the_page_stays_outside() {
+    let vault = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(vault.path().join("projects/bp/designs")).unwrap();
+    std::fs::create_dir_all(vault.path().join("shared")).unwrap();
+    std::fs::write(vault.path().join("projects/bp/designs/glossary.md"), "# Glossary\n\n- `vault` — the files.\n")
+        .unwrap();
+    let dir = dir_with(&[("s.yaml", SPEC), ("bad.yaml", &SPEC.replace("term: vault", "term: no-such-term"))]);
+    let (code, v) = bp_in(dir.path(), Some(vault.path()), &["diagram", "--spec-file", "s.yaml", "--out", "s.html"]);
+    assert_eq!((code, v["findings"].clone()), (Some(0), serde_json::json!([])), "{v}");
+    let (code, v) = bp_in(dir.path(), Some(vault.path()), &["diagram", "--spec-file", "bad.yaml", "--out", "b.html"]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("diagram_invalid")), "{v}");
+    assert_eq!(v["findings"][0]["rule"], "nodes/resolve");
+    let inside = vault.path().join("projects/x.html");
+    let (code, v) =
+        bp_in(dir.path(), Some(vault.path()), &["diagram", "--spec-file", "s.yaml", "--out", inside.to_str().unwrap()]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("usage")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("such as /tmp/x.html"), "{v}");
+    assert!(!inside.exists(), "a refusal writes nothing");
 }

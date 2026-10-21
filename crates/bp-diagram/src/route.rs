@@ -167,15 +167,21 @@ impl Taken {
             if owner == me {
                 continue;
             }
-            let overlap = |a1: i32, a2: i32, b1: i32, b2: i32| a1.max(a2).min(b1.max(b2)) > a1.min(a2).max(b1.min(b2));
+            // The shared length along the axis: above 0 overlaps, 0 meets end to end.
+            let overlap = |a1: i32, a2: i32, b1: i32, b2: i32| a1.max(a2).min(b1.max(b2)) - a1.min(a2).max(b1.min(b2));
             let horizontal = a.1 == b.1;
+            // Landing on another route's corner or end shares a point that is no crossing: it reads as one line.
+            if b == p || b == q {
+                c += STACK;
+                continue;
+            }
             if horizontal == (p.1 == q.1) {
-                let stacked = if horizontal {
-                    (a.1 - p.1).abs() < TRACK && overlap(a.0, b.0, p.0, q.0)
+                let (apart, shared) = if horizontal {
+                    ((a.1 - p.1).abs(), overlap(a.0, b.0, p.0, q.0))
                 } else {
-                    (a.0 - p.0).abs() < TRACK && overlap(a.1, b.1, p.1, q.1)
+                    ((a.0 - p.0).abs(), overlap(a.1, b.1, p.1, q.1))
                 };
-                c += if stacked { STACK } else { 0 };
+                c += if (apart < TRACK && shared > 0) || (apart == 0 && shared >= 0) { STACK } else { 0 };
             } else {
                 // A crossing counts at the vertex where this move ends inside the other segment.
                 let inside = |v: i32, s: i32, t: i32| v > s.min(t) && v < s.max(t);
@@ -281,12 +287,15 @@ pub(crate) fn lines(bands: &[(i32, i32)], borders: &[i32], end: i32) -> Vec<i32>
 /// Routes every wanted edge in `order`. Returns per edge its points, port to port, and the sides it uses.
 pub(crate) fn route(
     boxes: &[Rect],
+    marks: &[Rect],
     xs: &[i32],
     ys: &[i32],
     wants: &[Want],
     order: &[usize],
 ) -> Vec<(Vec<Point>, Side, Side)> {
-    let sides = pick_sides(boxes, xs, ys, wants, order);
+    // Group labels block a route as a box does, but take no ends.
+    let walls: Vec<Rect> = boxes.iter().chain(marks).copied().collect();
+    let sides = pick_sides(boxes, &walls, xs, ys, wants, order);
     let ends = spread(boxes, wants, &sides);
     let mut px = xs.to_vec();
     let mut py = ys.to_vec();
@@ -297,7 +306,7 @@ pub(crate) fn route(
         py.extend([port_a.1, stub_a.1, port_b.1, stub_b.1]);
         taken.segs.extend([(port_a, stub_a, edge), (stub_b, port_b, edge)]);
     }
-    let graph = Graph::new(boxes, px, py);
+    let graph = Graph::new(&walls, px, py);
     let mut out = vec![(Vec::new(), Side::Right, Side::Left); wants.len()];
     for &edge in order {
         let ((port_a, stub_a), (port_b, stub_b)) = ends[edge];
@@ -316,7 +325,14 @@ pub(crate) fn route(
 }
 
 /// The first pass: each edge's sides, from its cheapest route with every end where it would sit alone.
-fn pick_sides(boxes: &[Rect], xs: &[i32], ys: &[i32], wants: &[Want], order: &[usize]) -> Vec<(Side, Side)> {
+fn pick_sides(
+    boxes: &[Rect],
+    walls: &[Rect],
+    xs: &[i32],
+    ys: &[i32],
+    wants: &[Want],
+    order: &[usize],
+) -> Vec<(Side, Side)> {
     let mut px = xs.to_vec();
     let mut py = ys.to_vec();
     for want in wants {
@@ -328,7 +344,7 @@ fn pick_sides(boxes: &[Rect], xs: &[i32], ys: &[i32], wants: &[Want], order: &[u
             }
         }
     }
-    let graph = Graph::new(boxes, px, py);
+    let graph = Graph::new(walls, px, py);
     let mut taken = Taken::default();
     let mut sides = vec![(Side::Right, Side::Left); wants.len()];
     for &edge in order {

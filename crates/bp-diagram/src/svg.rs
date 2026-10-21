@@ -228,8 +228,11 @@ pub(crate) fn svg(scene: &Scene, head: &crate::Head, classes: &dyn Fn(&str) -> V
     }
     for n in scene.nodes.iter().filter(|n| n.lifeline.is_some()) {
         let (x, a, b) = n.lifeline.expect("filtered on lifeline");
-        let _ =
-            write!(out, "<g class=\"life\" data-of=\"{}\"><path class=\"lifeline\" d=\"M{x},{a}V{b}\"/>", esc(&n.id));
+        let _ = write!(
+            out,
+            "<g class=\"life\" data-id=\"{0}.life\" data-of=\"{0}\"><path class=\"lifeline\" d=\"M{x},{a}V{b}\"/>",
+            esc(&n.id)
+        );
         for bar in &n.bars {
             rect(&mut out, "bar", bar, 1);
         }
@@ -288,6 +291,8 @@ fn bx(r: &Rect) -> Value {
 
 /// The JSON index: each id with its box, ports and label boxes, and the step order for a sequence.
 fn index(scene: &Scene, head: &crate::Head) -> Value {
+    // serde_json's `Map` is a `BTreeMap` while no crate turns on its `preserve_order` feature: the index's key order,
+    // and so the page's bytes, then never follow insertion order or a hash seed.
     let mut ids = serde_json::Map::new();
     for g in &scene.groups {
         ids.insert(g.id.clone(), json!({"kind": "group", "box": bx(&g.rect), "members": g.members}));
@@ -310,6 +315,9 @@ fn index(scene: &Scene, head: &crate::Head) -> Value {
             v["noun"] = noun.clone().into();
         }
         ids.insert(n.id.clone(), v);
+        if n.lifeline.is_some() {
+            ids.insert(format!("{}.life", n.id), json!({"kind": "life", "of": n.id}));
+        }
     }
     for e in &scene.edges {
         let pts: Vec<Value> =

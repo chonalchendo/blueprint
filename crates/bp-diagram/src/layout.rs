@@ -9,7 +9,7 @@ use crate::font::Font;
 use crate::geom::{Point, Rect};
 use crate::grid::{self, GROUP_SIDE, GROUP_TOP, Item, Span};
 use crate::label::{self, Clear};
-use crate::nodes::{self, shift};
+use crate::nodes::{self, shift, up4};
 use crate::route::{self, Want};
 use crate::scene::{Run, SEdge, SGroup, SLabel, SNode, Scene};
 use crate::spec::{Spec, Type};
@@ -118,9 +118,11 @@ fn attempt(plan: &Plan<'_>, wide: &mut BTreeMap<(bool, i32), i32>, retry: bool) 
     let border_y: Vec<i32> = groups.iter().filter(|s| !s.lane).flat_map(|s| [s.rect.y, s.rect.bottom()]).collect();
     let xs = route::lines(&grid.xbands(), &border_x, grid.w);
     let ys = route::lines(&grid.ybands(), &border_y, grid.h);
+    let marks: Vec<Rect> = groups.iter().map(SGroup::label_box).collect();
     let pts: Vec<Vec<Point>> =
-        route::route(&rects, &xs, &ys, &plan.wants, &plan.order).into_iter().map(|r| r.0).collect();
-    let edges = label_edges(plan, &grid, &rects, &pts, wide, retry)?;
+        route::route(&rects, &marks, &xs, &ys, &plan.wants, &plan.order).into_iter().map(|r| r.0).collect();
+    let walls: Vec<Rect> = rects.iter().chain(&marks).copied().collect();
+    let edges = label_edges(plan, &grid, &walls, &pts, wide, retry)?;
     Some(Scene { w: grid.w, h: grid.h, groups, edges, nodes: placed, legend_y: grid.h, ..Scene::default() })
 }
 
@@ -145,7 +147,7 @@ fn label_edges(
         if let Some((from, to)) = &edge.card {
             for (text, start, end) in [(from, true, "from"), (to, false, "to")] {
                 let run = Run::new(Font::Mono, 10, 0, "card", text.as_str());
-                let (rect, ok) = label::card(&pts[e], start, e, run.w, &clear);
+                let (rect, ok) = label::card(&pts[e], start, e, up4(run.w), &clear);
                 short |= !ok && retry;
                 clear.labels.push(rect);
                 labels.push(SLabel {
@@ -158,7 +160,7 @@ fn label_edges(
         }
         if !edge.label.is_empty() {
             let (mut pill, width) = label::pill(&edge.id, &edge.label);
-            match label::place(&pts[e], e, width, 20, &clear) {
+            match label::place(&pts[e], e, width, label::PILL_H, &clear) {
                 Some(spot) => {
                     pill.rect = spot.rect;
                     cut = spot.cut;
@@ -167,7 +169,7 @@ fn label_edges(
                     short = true;
                     widen(grid, &pts[e], width, wide);
                 }
-                None => pill.rect = Rect::new(pts[e][0].0, pts[e][0].1, width, 20),
+                None => pill.rect = Rect::new(pts[e][0].0, pts[e][0].1, width, label::PILL_H),
             }
             center(&mut pill);
             clear.labels.push(pill.rect);

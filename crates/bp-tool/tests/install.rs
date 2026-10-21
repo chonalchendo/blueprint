@@ -259,6 +259,7 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
         ("bp list issue --json", Some("bp-reviewer"), "export BP_ROLE=reviewer"),
         ("bp --help", Some("bp-worker"), "export BP_ROLE=worker"),
         ("bp where && bp show x", Some("Explore"), ""),
+        ("bp diagram --spec-file a.yaml --out /tmp/a.html --json", None, "export BP_ROLE=session"),
     ] {
         let out = call(command, agent);
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -272,6 +273,13 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
         ("bp stamp m", None, "bp stamp is outside the session role"),
         ("bp install --target claude", None, "ask the human to run it from a shell"),
         ("bp set x tags a", Some("bp-reviewer"), "(where show list search walk), so"),
+        ("bp diagram --spec-file a.yaml --out a.html", Some("bp-worker"), "bp diagram is outside the worker role"),
+        ("bp diagram --spec-file a.yaml --out a.html", Some("bp-reviewer"), "bp diagram is outside the reviewer role"),
+        (
+            "bp diagram --spec-file a.yaml --out a.html",
+            Some("bp-researcher"),
+            "bp diagram is outside the researcher role",
+        ),
     ] {
         let out = call(command, agent);
         assert_eq!(out.status.code(), Some(2), "{command}");

@@ -104,6 +104,19 @@ pub(crate) struct SGroup {
     pub(crate) lane: bool,
 }
 
+impl SGroup {
+    /// The label's extent, grown out to the 4 px grid: routes and edge labels keep off it, as off a box.
+    pub(crate) fn label_box(&self) -> Rect {
+        let r = self.runs.iter().map(Run::rect).reduce(|a, b| {
+            let (x, y) = (a.x.min(b.x), a.y.min(b.y));
+            Rect::new(x, y, a.right().max(b.right()) - x, a.bottom().max(b.bottom()) - y)
+        });
+        let r = r.unwrap_or_default();
+        let (x, y) = (r.x.div_euclid(4) * 4, r.y.div_euclid(4) * 4);
+        Rect::new(x, y, (r.right() - x + 3) / 4 * 4, (r.bottom() - y + 3) / 4 * 4)
+    }
+}
+
 /// A sequence note: a box beside a lifeline that names a state effect.
 #[derive(Clone, Debug)]
 pub(crate) struct SNote {
@@ -145,6 +158,12 @@ impl Scene {
             g.boxes.push((n.id.clone(), n.rect));
             let within = n.rect.inflate(-4);
             g.texts.extend(n.runs.iter().map(|r| Text { id: n.id.clone(), rect: r.rect(), within }));
+        }
+        for gr in self.groups.iter().filter(|gr| !gr.runs.is_empty()) {
+            g.boxes.push((format!("{}:label", gr.id), gr.label_box()));
+        }
+        if !self.legend.is_empty() {
+            g.boxes.push(("legend".into(), Rect::new(0, self.legend_y, self.w, self.h - self.legend_y)));
         }
         for n in &self.notes {
             g.boxes.push((n.id.clone(), n.rect));

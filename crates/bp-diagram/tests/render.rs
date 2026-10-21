@@ -74,13 +74,51 @@ fn state_and_workflow_render_from_order() {
     html(flow, None);
 }
 
+#[test]
+fn a_sequence_diff_keeps_removed_steps_and_parties_as_ghosts() {
+    let head = example("bp-seq-issue-to-landed");
+    let base = head.replace(
+        "  - {id: forge, term: forge, label: Forge, sub: github}\n",
+        "  - {id: forge, term: forge, label: Forge, sub: github}\n  - {id: ci, noun: CI, sub: runner}\n",
+    );
+    let base = base.replace("  - {id: build,", "  - {id: lint, from: worker, to: worker, say: lint}\n  - {id: build,");
+    let page = html(&head, Some(&base));
+    assert!(page.contains("removed\" data-id=\"ci\""), "the removed party stays as a ghost");
+    assert!(page.contains("class=\"edge call removed\" data-id=\"lint\""), "the removed step stays in its place");
+    assert!(page.contains("\"steps\":[\"walk\",\"walk.back\",\"dispatch\",\"cut\",\"lint\",\"build\""));
+}
+
+/// The review of PR 42 planted two routes that met end to end under a long group label; they now route apart, and
+/// the render's own rules (`route/touches`, the label as an obstacle) passed it.
+#[test]
+fn routes_keep_apart_and_off_a_group_label() {
+    let spec = "type: architecture\nlevel: container\ntitle: T\nlede: One line.\ngroups:\n  - {id: g, label: A rather long group label that spans the top, members: [m1, m2]}\nnodes:\n  - {id: x, noun: X, role: external, at: [0, 0]}\n  - {id: m1, noun: M1, at: [0, 1]}\n  - {id: m2, noun: M2, at: [1, 1]}\n  - {id: y, noun: Y, role: external, at: [1, 0]}\nedges:\n  - {from: x, to: m2, label: calls, exit: bottom, enter: top}\n  - {from: y, to: m1, label: reads, exit: bottom, enter: top}\n";
+    let page = html(spec, None);
+    let json = &page[page.find("<metadata").unwrap()..];
+    let json = &json[json.find('>').unwrap() + 1..json.find("</metadata>").unwrap()];
+    let meta: serde_json::Value = serde_json::from_str(json).unwrap();
+    let points = |id: &str| -> BTreeSet<(i64, i64)> {
+        let pieces = meta["ids"][id]["pieces"].as_array().unwrap();
+        let pts = pieces
+            .iter()
+            .flat_map(|p| p.as_array().unwrap().iter().map(|q| (q[0].as_i64().unwrap(), q[1].as_i64().unwrap())));
+        pts.collect()
+    };
+    assert!(points("x--m2").is_disjoint(&points("y--m1")), "no corner or end is shared");
+}
+
 /// FNV-1a: a fixed hash of the bytes, so a platform that renders other bytes fails here (28, design change 3).
 #[test]
 fn the_bytes_are_the_same_on_every_platform() {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in html(&example("bp-lm-design"), None).bytes() {
-        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
-    }
-    // A deliberate change to the renderer, the style or the viewer changes this; update it in the same commit.
-    assert_eq!(format!("{h:016x}"), "34a0c9be7ceadb5b");
+    let fnv =
+        |s: &str| s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    let diff = html(&example("bp-containers-changed"), Some(&example("bp-containers")));
+    let got: Vec<String> = ["bp-containers", "bp-lm-design", "bp-seq-issue-to-landed"]
+        .iter()
+        .map(|n| html(&example(n), None))
+        .chain([diff])
+        .map(|page| format!("{:016x}", fnv(&page)))
+        .collect();
+    // A deliberate change to the renderer, the style or the viewer changes these; update them in the same commit.
+    assert_eq!(got, ["8ac3a82258b35680", "bba9ee14cbb455f7", "c46cb21072e82890", "d957e461076e657e"]);
 }

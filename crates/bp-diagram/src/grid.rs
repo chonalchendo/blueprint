@@ -8,7 +8,7 @@ use crate::nodes::up4;
 
 /// The room between a group's border and its members, at the sides and at the top (which holds its label).
 pub(crate) const GROUP_SIDE: i32 = 24;
-pub(crate) const GROUP_TOP: i32 = 40;
+pub(crate) const GROUP_TOP: i32 = 56;
 /// The outer channel: routes may run around the whole grid.
 pub(crate) const MARGIN: i32 = 48;
 
