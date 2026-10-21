@@ -44,8 +44,6 @@ impl Run {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Shape {
     Box,
-    Store,
-    Deployable,
     Pill,
     Dot,
     Ring,
@@ -127,10 +125,11 @@ pub(crate) struct SNote {
     pub(crate) step: usize,
 }
 
-/// One legend entry: the swatch's kind and its words.
+/// One legend entry: the swatch's kind, the tag its swatch shows when the role tags its nodes, and its words.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Key {
     pub(crate) kind: String,
+    pub(crate) tag: Option<String>,
     pub(crate) label: String,
     pub(crate) x: i32,
     pub(crate) y: i32,

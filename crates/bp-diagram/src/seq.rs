@@ -162,7 +162,7 @@ fn messages(spec: &Spec) -> Vec<Msg<'_>> {
 /// A party's header box at the top, its name over its role, at x 0 until the columns are known.
 fn header(n: &crate::spec::Node, focus: bool) -> SNode {
     let name = Run::new(Font::Strong, 13, 0, "name", &n.label);
-    let sub = n.note.as_deref().map(|s| Run::new(Font::Mono, 10, 0, "kind", s));
+    let sub = n.note.as_deref().map(|s| Run::new(Font::Body, 11, 0, "note", s));
     let w = ((name.w.max(sub.as_ref().map_or(0, |s| s.w)) + 32 + 7) / 8 * 8).max(120);
     let mut runs = vec![name.centred(w / 2, if sub.is_some() { 24 } else { 31 })];
     runs.extend(sub.map(|s| s.centred(w / 2, 40)));

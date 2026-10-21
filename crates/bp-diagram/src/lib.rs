@@ -90,7 +90,7 @@ pub(crate) struct Head {
     pub(crate) level: Option<String>,
     pub(crate) title: String,
     pub(crate) lede: String,
-    pub(crate) eyebrow: String,
+    pub(crate) tag: String,
     pub(crate) prefix: String,
     pub(crate) focus: Vec<String>,
     pub(crate) diff: bool,
@@ -132,7 +132,7 @@ pub fn render(
     let head = Head {
         ty: head.ty.as_str(),
         level: head.level.clone(),
-        eyebrow: eyebrow(&head),
+        tag: tag(&head),
         prefix: format!("bp-{}", slug(&head.title)),
         focus: head.focus.clone(),
         diff: base.is_some(),
@@ -213,7 +213,8 @@ fn spec_rules(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Findi
     out
 }
 
-fn eyebrow(s: &Spec) -> String {
+/// The page header's type tag: the diagram's type and level.
+fn tag(s: &Spec) -> String {
     match (s.ty, s.level.as_deref()) {
         (Type::Architecture, Some("context")) => "System context · C4 level 1".into(),
         (Type::Architecture, Some("component")) => "Component view · C4 level 3".into(),

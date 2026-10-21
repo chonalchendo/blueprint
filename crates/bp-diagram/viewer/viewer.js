@@ -217,8 +217,9 @@
     }
     document.addEventListener('keydown', onKey);
 
-    // Every reader state comes back from the URL.
+    // Every reader state comes back from the URL. `chrome=off` hides the controls, for a still of the drawing alone.
     const h = hash();
+    stage.classList.toggle('bp-bare', h.get('chrome') === 'off');
     cam = { k: Math.min(4, Math.max(0.25, (+h.get('z') || 100) / 100)), x: +h.get('x') || 0, y: +h.get('y') || 0 };
     draw(false);
     setMode(h.get('m') || 'diff', false);

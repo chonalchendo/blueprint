@@ -262,8 +262,7 @@ fn group_boxes(spec: &Spec, spans: &[Span], g: &grid::Grid) -> Vec<SGroup> {
                 x2 + w2 - x + 2 * GROUP_SIDE,
                 y2 + h2 - y + GROUP_TOP + GROUP_SIDE,
             );
-            let runs =
-                vec![Run::new(Font::Mono, 10, 1, "glabel", gr.label.to_uppercase()).at(rect.x + 16, rect.y + 22)];
+            let runs = vec![Run::new(Font::Strong, 12, 0, "glabel", &gr.label).at(rect.x + 16, rect.y + 24)];
             SGroup { id: gr.id.clone(), rect, runs, members: gr.members.clone(), lane: false }
         })
         .collect();
@@ -272,7 +271,7 @@ fn group_boxes(spec: &Spec, spans: &[Span], g: &grid::Grid) -> Vec<SGroup> {
         let (_, y, _, h) = g.cell(0, row, 1, 1);
         let pad = 16;
         let rect = Rect::new(16, y - pad, g.w - 32, h + 2 * pad);
-        let runs = vec![Run::new(Font::Mono, 10, 1, "glabel", label.to_uppercase()).at(32, y + h / 2 + 4)];
+        let runs = vec![Run::new(Font::Strong, 12, 0, "glabel", label).at(32, y + h / 2 + 4)];
         let members = spec.nodes.iter().filter(|n| n.lane.as_ref() == Some(id)).map(|n| n.id.clone()).collect();
         out.push(SGroup { id: id.clone(), rect, runs, members, lane: true });
     }

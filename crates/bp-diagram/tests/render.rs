@@ -120,5 +120,5 @@ fn the_bytes_are_the_same_on_every_platform() {
         .map(|page| format!("{:016x}", fnv(&page)))
         .collect();
     // A deliberate change to the renderer, the style or the viewer changes these; update them in the same commit.
-    assert_eq!(got, ["8ac3a82258b35680", "bba9ee14cbb455f7", "c46cb21072e82890", "d957e461076e657e"]);
+    assert_eq!(got, ["c280d170bcd6efdb", "93d83886af042173", "fd7e9c2791edd1c0", "2616901b914130f4"]);
 }

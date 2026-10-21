@@ -128,7 +128,7 @@ fn node(out: &mut String, n: &SNode, diff: &[&str]) {
     let r = n.rect;
     let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
     match n.shape {
-        Shape::Box | Shape::Store | Shape::Deployable => rect(out, "box", &r, 6),
+        Shape::Box => rect(out, "box", &r, 8),
         Shape::Pill => rect(out, "box", &r, r.h / 2),
         Shape::Dot => {
             let _ = write!(out, "<circle class=\"box solid\" cx=\"{cx}\" cy=\"{cy}\" r=\"{}\"/>", r.w / 2 - 2);
@@ -151,19 +151,14 @@ fn node(out: &mut String, n: &SNode, diff: &[&str]) {
             );
         }
     }
-    match n.shape {
-        Shape::Store => {
-            let _ = write!(out, "<path class=\"cap\" d=\"M{},{}H{}\"/>", r.x, r.y + 6, r.right());
-        }
-        Shape::Deployable => {
-            let _ = write!(out, "<path class=\"cap\" d=\"M{},{}V{}H{}\"/>", r.right() - 12, r.y, r.y + 12, r.right());
-        }
-        _ => {}
-    }
     for y in &n.rules {
         let _ = write!(out, "<path class=\"rule\" d=\"M{},{y}H{}\"/>", r.x, r.right());
     }
     for t in &n.runs {
+        // The badge reaches 6 px past the tag; `nodes::title` counts that reach in the box width.
+        if t.class == "tag" {
+            rect(out, "tagbox", &Rect::new(t.x - 6, t.y - 13, t.w + 12, 18), 9);
+        }
         run(out, t);
     }
     if diff.contains(&"changed") {
@@ -180,7 +175,7 @@ fn label(out: &mut String, l: &SLabel, of: &str, class: &[&str]) {
     });
     let _ = write!(out, "<g class=\"label{extra}\" data-id=\"{}\" data-of=\"{}\">", esc(&l.id), esc(of));
     if l.pill {
-        rect(out, "pill", &l.rect, 4);
+        rect(out, "pill", &l.rect, 12);
     } else {
         rect(out, "mask", &l.rect, 2);
     }
@@ -274,7 +269,7 @@ pub(crate) fn svg(scene: &Scene, head: &crate::Head, classes: &dyn Fn(&str) -> V
     }
     for n in &scene.notes {
         let _ = write!(out, "<g class=\"note\" data-id=\"{}\" data-of=\"{}\">", esc(&n.id), esc(&n.of));
-        rect(&mut out, "notebox", &n.rect, 4);
+        rect(&mut out, "notebox", &n.rect, 6);
         for r in &n.runs {
             run(&mut out, r);
         }
