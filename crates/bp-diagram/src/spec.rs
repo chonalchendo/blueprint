@@ -359,8 +359,8 @@ fn nodes(r: &mut Reader, root: &Yaml, ty: Type) -> Vec<Node> {
             }
             (note, sub) => note.or(sub),
         };
-        if note.is_some() && crate::nodes::pseudo(&role) {
-            r.bad(&id, format!("a `{role}` node draws no `note`; put the words on an edge's `label`"));
+        if note.is_some() && (ty == Type::Er || crate::nodes::pseudo(&role)) {
+            r.bad(&id, format!("a `{}` `{role}` node draws no `note`; use a `label` or the design", ty.as_str()));
         }
         out.push(Node {
             at: r.pair(n, "at", &id, 0),

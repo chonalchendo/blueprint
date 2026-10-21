@@ -273,6 +273,13 @@ fn refuses_a_note_on_a_start_end_or_branch() {
 }
 
 #[test]
+fn refuses_a_note_on_an_entity() {
+    let spec = "type: er\nlevel: logical\ntitle: T\nlede: One entity.\nnodes:\n  - {id: a, noun: A, at: [0, 0], note: Dropped.}\n";
+    let f = refused(spec);
+    assert!(f.iter().any(|f| f.rule == "spec/schema" && f.id == "a" && f.detail.contains("draws no `note`")), "{f:?}");
+}
+
+#[test]
 fn refuses_a_legend_item_without_a_label() {
     let spec = format!("{ONE}legend:\n  - {{role: application}}\nnodes:\n  - {{id: a, noun: A, at: [0, 0]}}\n");
     let f = refused(&spec);
