@@ -161,9 +161,20 @@ fn open_head(
     id: &Id,
     forge_age: &mut Option<i64>,
 ) -> Result<Option<(String, Option<PathBuf>)>, Refusal> {
+    Ok(open(root, index, id, forge_age)?.map(|(p, worktree)| (p.head_ref_oid, worktree)))
+}
+
+/// The issue's open pull request and the claim's worktree, as `open_head` reads them. The review slice carries its
+/// number and head, so a reviewer reviews the head its stop compares (27, issue 9).
+pub(crate) fn open(
+    root: &Path,
+    index: &Index,
+    id: &Id,
+    forge_age: &mut Option<i64>,
+) -> Result<Option<(bp_forge::PullRequest, Option<PathBuf>)>, Refusal> {
     let Some(claim) = held(index, id)? else { return Ok(None) };
     let worktree = field(&claim, "worktree").map(PathBuf::from).filter(|w| w.is_dir());
     let world = crate::intent::World::read(root, &id.project().into_iter().collect())?;
     *forge_age = world.forge_age();
-    Ok(world.pr(id.as_str()).map(|p| (p.head_ref_oid.clone(), worktree)))
+    Ok(world.pr(id.as_str()).map(|p| (p.clone(), worktree)))
 }

@@ -101,6 +101,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             records.push(serde_json::json!({ "id": r.id, "kind": kind, "header": r.header, "body": r.body }));
         }
     }
+    let pull_request = pull_request(&vault, &index, &id, action)?;
     let line =
         |r: &bp_vault::Reached| serde_json::json!({ "id": r.id, "kind": r.kind, "title": r.title, "rank": r.rank });
     if walk.ids {
@@ -110,12 +111,18 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             .iter()
             .map(|r| serde_json::json!({ "id": r["id"], "kind": r["kind"], "title": null, "rank": null }));
         let ids: Vec<Value> = answered.chain(rest.into_iter().chain(conventions).map(line)).collect();
-        return Ok(serde_json::json!({ "seed": id, "for": action, "ids": ids, "intents": intents }));
+        return Ok(with(
+            serde_json::json!({ "seed": id, "for": action, "ids": ids, "intents": intents }),
+            pull_request,
+        ));
     }
     let budget = walk.budget.unwrap_or_else(|| action.budget());
-    // The intents and the answered records are always sent, so they spend the budget before the fill does.
+    // The intents, the answered records and the pull request are always sent, so they spend the budget before the
+    // fill does.
+    let pr = pull_request.as_ref().map(serde_json::to_string);
     let named = [serde_json::to_string(&intents), serde_json::to_string(&records)]
         .into_iter()
+        .chain(pr)
         .map(|s| s.expect("plain JSON serialises").len().div_ceil(4))
         .sum::<usize>();
     let f = bp_vault::fill(&reached, action.bodies(), budget.saturating_sub(named));
@@ -127,10 +134,29 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         bodies.push(v);
     }
     let ids: Vec<Value> = f.ids.iter().map(|i| line(by_id(i))).collect();
-    Ok(serde_json::json!({
+    let slice = serde_json::json!({
         "seed": id, "for": action, "budget": budget, "used": f.used + named,
         "bodies": bodies, "ids": ids, "cut": f.cut, "intents": intents,
-    }))
+    });
+    Ok(with(slice, pull_request))
+}
+
+/// Review carries the pull request whose head its stop compares; null when no pull request is in view (27, issue
+/// 9). Other actions carry no such field.
+fn pull_request(vault: &Vault, index: &Index, id: &Id, action: Action) -> Result<Option<Value>, Refusal> {
+    if action != Action::Review {
+        return Ok(None);
+    }
+    let open = crate::done::open(&vault.root, index, id, &mut None)?;
+    Ok(Some(open.map_or(Value::Null, |(p, _)| serde_json::json!({ "number": p.number, "head": p.head_ref_oid }))))
+}
+
+/// The walk's answer, with the pull request when the action carries one.
+fn with(mut answer: Value, pull_request: Option<Value>) -> Value {
+    if let Some(p) = pull_request {
+        answer["pull_request"] = p;
+    }
+    answer
 }
 
 /// The context the action cannot run without (21, rule 3), by the predicate the integrity check shares: a target
