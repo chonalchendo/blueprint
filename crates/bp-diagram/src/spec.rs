@@ -64,6 +64,8 @@ pub(crate) struct Node {
     pub(crate) lane: Option<String>,
     /// The lower diagrams the node drills into. The caller says, from its vault; the spec never does.
     pub(crate) children: usize,
+    /// Whether a diff marks the node changed, so its name row keeps room for the dot. The spec never says.
+    pub(crate) changed: bool,
 }
 
 impl Node {
@@ -360,6 +362,7 @@ fn nodes(r: &mut Reader, root: &Yaml, ty: Type) -> Vec<Node> {
             owner: r.text(n, "owner", &id),
             lane: r.text(n, "lane", &id),
             children: 0,
+            changed: false,
             id,
             term,
             noun,

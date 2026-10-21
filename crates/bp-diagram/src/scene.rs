@@ -59,7 +59,6 @@ pub(crate) struct SNode {
     pub(crate) label: String,
     pub(crate) rect: Rect,
     pub(crate) shape: Shape,
-    pub(crate) dashed: bool,
     pub(crate) runs: Vec<Run>,
     /// Horizontal rules inside the box, as `y`.
     pub(crate) rules: Vec<i32>,
@@ -70,6 +69,9 @@ pub(crate) struct SNode {
     /// The drill badge's count: the lower diagrams the caller named. Only architecture boxes and entities keep room
     /// for it at the top right.
     pub(crate) children: usize,
+    /// The changed dot's centre `x`, from the box's left edge, in the room the name row keeps for it. None puts the
+    /// dot in the top right corner.
+    pub(crate) dot: Option<i32>,
 }
 
 /// A label: its mask and its runs. A pill draws its mask; a bare label masks with the canvas only.

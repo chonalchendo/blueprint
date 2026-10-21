@@ -177,13 +177,13 @@ fn header(n: &crate::spec::Node, focus: bool) -> SNode {
         label: n.label.clone(),
         rect: Rect::new(0, TOP, w, HEAD_H),
         shape: Shape::Box,
-        dashed: false,
         runs,
         rules: Vec::new(),
         lifeline: None,
         bars: Vec::new(),
         class: if focus { vec!["focus"] } else { Vec::new() },
         children: 0,
+        dot: None,
     }
 }
 

@@ -57,9 +57,9 @@ pub(crate) fn rule(spec: &Spec) -> Vec<Finding> {
     out
 }
 
-/// Places the legend under the drawing and grows the scene to hold it. A diff adds its four states, which the author
-/// never names.
-pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec, diff: bool) {
+/// Places the legend under the drawing and grows the scene to hold it. A diff adds the states its drawing uses, which
+/// the author never names.
+pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec, states: &[&str]) {
     let named = |k: &str| spec.legend.as_ref().and_then(|l| l.iter().find(|(n, _)| n == k)).map(|(_, l)| l.clone());
     let mut keys: Vec<(String, String)> = in_use(spec)
         .into_iter()
@@ -71,10 +71,8 @@ pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec, diff: bool) {
     if spec.ty == Type::Er && spec.level.as_deref() != Some("conceptual") {
         keys.push(("marks".into(), "# key · → reference · #→ key part that is a reference".into()));
     }
-    if diff {
-        for (k, words) in DIFF {
-            keys.push(((*k).into(), (*words).into()));
-        }
+    for (k, words) in DIFF.iter().filter(|(k, _)| states.contains(k)) {
+        keys.push(((*k).into(), (*words).into()));
     }
     // A tagged role's swatch is the tag itself, as its nodes draw it: the reader matches words, not fills.
     let tag = |k: &str| match k {

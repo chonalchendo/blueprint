@@ -57,16 +57,26 @@ fn nodes_carry_their_link_and_role() {
 #[test]
 fn the_diff_marks_added_and_removed_and_keeps_the_ghost() {
     let page = html(&example("bp-containers-changed"), Some(&example("bp-containers")));
-    assert!(page.contains("class=\"node role-external added dashed\" data-id=\"forge\""), "forge is added");
+    assert!(page.contains("class=\"node role-external added\" data-id=\"forge\""), "forge is added");
     assert!(
-        page.contains("class=\"node role-external removed dashed\" data-id=\"repository\""),
+        page.contains("class=\"node role-external removed\" data-id=\"repository\""),
         "repository stays as a ghost"
     );
     assert!(page.contains("class=\"edge removed\" data-id=\"tool--repository\""));
     assert!(page.contains("class=\"bp bp-architecture diff mode-diff\""));
-    for state in ["added", "removed", "changed", "moved"] {
-        assert!(page.contains(&format!("swatch key-{state}")), "the diff legend lists {state}");
-    }
+    // The legend lists the states the drawing uses, and no other (`legend/truthful`).
+    let keys: Vec<&str> = ["added", "removed", "changed", "moved"]
+        .into_iter()
+        .filter(|s| page.contains(&format!("swatch key-{s}")))
+        .collect();
+    assert_eq!(keys, ["added", "removed"]);
+    let note = example("bp-containers").replace("note: Skills and roles", "note: Skills and all roles");
+    let changed = html(&note, Some(&example("bp-containers")));
+    let keys: Vec<&str> = ["added", "removed", "changed", "moved"]
+        .into_iter()
+        .filter(|s| changed.contains(&format!("swatch key-{s}")))
+        .collect();
+    assert_eq!(keys, ["changed"], "a changed note draws the dot and lists only `changed`");
 }
 
 /// The drill badge is the caller's input, never the spec's (28, design change 12): the preview draws none, and a
@@ -79,7 +89,10 @@ fn a_drill_badge_comes_from_the_caller() {
     let page = render_with(&spec, None, None, &counts).unwrap_or_else(|f| panic!("refused: {f:#?}")).html;
     assert!(page.contains("class=\"node role-application focus drill\" data-id=\"tool\""));
     assert_eq!(page.matches("<g class=\"badge\">").count(), 1);
-    assert!(page.contains("\"children\":2"));
+    assert!(
+        page.contains("\"children\":2") && page.contains("\"badge\":["),
+        "the index holds the count and the badge box"
+    );
 }
 
 #[test]
@@ -136,5 +149,5 @@ fn the_bytes_are_the_same_on_every_platform() {
         .map(|page| format!("{:016x}", fnv(&page)))
         .collect();
     // A deliberate change to the renderer, the style or the viewer changes these; update them in the same commit.
-    assert_eq!(got, ["88438aad52eeac7d", "9d2a092b27c41e4c", "d4a8b9e072b8f10f", "fba83aceb6b18bc0"]);
+    assert_eq!(got, ["f91d94207fd3f9ec", "f117ac4b16d01f14", "12bdf6dc9aecf17e", "9331afa85300ad81"]);
 }

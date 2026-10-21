@@ -107,12 +107,15 @@ fn arrow(tip: Point, u: Point) -> String {
     format!("M{},{}L{},{}L{},{}L{},{}Z", tip.0, tip.1, bx + px, by + py, nx, ny, bx - px, by - py)
 }
 
+/// The drill badge's box: at the top right, on the name's row.
+fn drill_box(n: &SNode) -> Rect {
+    let w = crate::nodes::drill_w(n.children);
+    Rect::new(n.rect.right() - 12 - w, n.rect.y + 14, w, 18)
+}
+
 fn node(out: &mut String, n: &SNode, diff: &[&str]) {
     let mut class = vec!["node".to_string(), format!("role-{}", n.role)];
     class.extend(n.class.iter().chain(diff).map(|c| (*c).to_string()));
-    if n.dashed {
-        class.push("dashed".into());
-    }
     if n.children > 0 {
         class.push("drill".into());
     }
@@ -158,17 +161,14 @@ fn node(out: &mut String, n: &SNode, diff: &[&str]) {
         let _ = write!(out, "<path class=\"rule\" d=\"M{},{y}H{}\"/>", r.x, r.right());
     }
     for t in &n.runs {
-        // The badge reaches 6 px past the tag; `nodes::title` counts that reach in the box width.
+        // The tag's pill reaches 6 px past its text; `nodes::title` counts that reach in the box width.
         if t.class == "tag" {
             rect(out, "tagbox", &Rect::new(t.x - 6, t.y - 13, t.w + 12, 18), 9);
         }
         run(out, t);
     }
-    // The drill badge sits at the top right, on the name's row; the changed dot moves left of it.
-    let mut dot = r.right() - 12;
     if n.children > 0 {
-        let width = crate::nodes::drill_w(n.children);
-        let (left, top) = (r.right() - 12 - width, r.y + 14);
+        let Rect { x: left, y: top, w: width, .. } = drill_box(n);
         let _ = write!(
             out,
             "<g class=\"badge\"><rect x=\"{left}\" y=\"{top}\" width=\"{width}\" height=\"18\" rx=\"9\"/><circle cx=\"{}\" cy=\"{}\" r=\"3\"/><path d=\"M{},{}L{},{}\"/><text class=\"t-mono\" x=\"{}\" y=\"{}\" font-size=\"10\">{}</text></g>",
@@ -182,10 +182,12 @@ fn node(out: &mut String, n: &SNode, diff: &[&str]) {
             top + 13,
             n.children
         );
-        dot = left - 10;
     }
     if diff.contains(&"changed") {
-        let _ = write!(out, "<circle class=\"dot\" cx=\"{dot}\" cy=\"{}\" r=\"4\"/>", r.y + 23);
+        // On the name row in the room `nodes::title` kept; a box without that room takes it in its top right corner,
+        // with a smaller dot 6 px clear of a centred name.
+        let (cx, cy, radius) = n.dot.map_or((r.right() - 9, r.y + 8, 3), |dx| (r.x + dx, r.y + 23, 4));
+        let _ = write!(out, "<circle class=\"dot\" cx=\"{cx}\" cy=\"{cy}\" r=\"{radius}\"/>");
     }
     out.push_str("</g>");
 }
@@ -332,6 +334,7 @@ fn index(scene: &Scene, head: &crate::Head) -> Value {
         let mut v = json!({"kind": "node", "box": bx(&n.rect), "role": n.role, "label": n.label, "ports": ports});
         if n.children > 0 {
             v["children"] = n.children.into();
+            v["badge"] = bx(&drill_box(n));
         }
         if let Some(t) = &n.term {
             v["term"] = t.clone().into();
