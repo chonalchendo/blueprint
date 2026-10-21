@@ -98,8 +98,9 @@ pub(crate) struct Head {
 }
 
 /// Renders `spec`, or, with `base`, the diff of the two. `resolve` answers whether a node's link resolves; without
-/// it, each node still needs exactly one of `term` and `noun`. Returns every finding when any is an error. No node
-/// shows a drill badge: the preview knows no lower diagram.
+/// it, each node still needs exactly one of `term` and `noun`, but a `start`, `end`, `choice` or `decision` needs
+/// neither. Returns every finding when any is an error. No node shows a drill badge: the preview knows no lower
+/// diagram.
 pub fn render(
     spec: &str,
     base: Option<&str>,
@@ -225,15 +226,23 @@ fn spec_rules(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Findi
     out
 }
 
-/// A `nodes/resolve` finding for each node with no link, or whose link `resolve` refuses.
+/// A `nodes/resolve` finding for each node with no link where it needs one, or whose link `resolve` refuses. A
+/// `start`, `end`, `choice` or `decision` node marks a place in a flow and names no thing of the vault, so it needs
+/// no link (28, design change 1); one that gives a link anyway is held to it.
 fn links(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Finding> {
     let mut out = Vec::new();
     for n in &s.nodes {
+        let pseudo = matches!(n.role.as_str(), "start" | "end" | "choice" | "decision");
         let Some(link) = n.link() else {
+            if pseudo && n.term.is_none() && n.noun.is_none() {
+                continue;
+            }
             out.push(Finding::error(
                 "nodes/resolve",
                 &n.id,
-                "give exactly one of `term` (a glossary slug) and `noun` (a noun of the home design)".into(),
+                "give exactly one of `term` (a glossary slug) and `noun` (a noun of the home design); only a \
+                 `start`, `end`, `choice` or `decision` node may give neither"
+                    .into(),
             ));
             continue;
         };

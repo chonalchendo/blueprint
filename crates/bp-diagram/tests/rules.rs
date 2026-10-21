@@ -223,6 +223,35 @@ fn refuses_unresolved_term() {
     assert!(names(&refused(&neither), "nodes/resolve", "a"));
 }
 
+/// A state machine whose entry, exit and branch name nothing: each state is a noun of its design.
+const MACHINE: &str = "type: state\ntitle: An issue\nlede: An issue moves from open to resolved.\nnodes:\n  - {id: in, \
+                       role: start}\n  - {id: open, noun: open}\n  - {id: which, role: choice, label: landed?}\n  - \
+                       {id: resolved, noun: resolved}\n  - {id: out, role: end}\nedges:\n  - {from: in, to: open}\n  \
+                       - {from: open, to: which, label: land}\n  - {from: which, to: resolved, label: yes}\n  - {from: \
+                       which, to: open, label: no}\n  - {from: resolved, to: out}\n";
+
+#[test]
+fn a_start_end_or_branch_needs_no_link() {
+    let known = |l: Link<'_>| matches!(l, Link::Noun("open" | "resolved"));
+    let r = render(MACHINE, None, Some(&known)).expect("start, end and choice name nothing");
+    assert!(r.findings.iter().all(|f| f.severity != Severity::Error), "{:?}", r.findings);
+    let flow = "type: workflow\ntitle: Review\nlede: A change is reviewed.\nlanes:\n  - {id: h, label: Human}\nnodes:\n  \
+                - {id: in, role: start, lane: h}\n  - {id: ok, role: decision, lane: h, label: approve?}\n  - {id: \
+                out, role: end, lane: h}\nedges:\n  - {from: in, to: ok}\n  - {from: ok, to: out, label: yes}\n";
+    render(flow, None, None).expect("start, end and decision name nothing");
+    // A link given anyway is still resolved.
+    let linked = MACHINE.replace("role: choice,", "role: choice, noun: verdict,");
+    assert!(names(&render(&linked, None, Some(&known)).expect_err("no verdict noun"), "nodes/resolve", "which"));
+}
+
+#[test]
+fn refuses_an_unlinked_state() {
+    let f = refused(&MACHINE.replace("{id: open, noun: open}", "{id: open}"));
+    assert!(names(&f, "nodes/resolve", "open") && f.len() == 1, "{f:?}");
+    let both = MACHINE.replace("role: start}", "role: start, term: issue, noun: start}");
+    assert!(names(&refused(&both), "nodes/resolve", "in"), "a start that gives two links");
+}
+
 #[test]
 fn refuses_unknown_role() {
     let spec = format!("{ONE}nodes:\n  - {{id: a, noun: A, role: database, at: [0, 0]}}\n");

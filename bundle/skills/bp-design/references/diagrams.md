@@ -42,7 +42,7 @@ Top keys: `type`, `level`, `title`, `lede`, `focus`, `nodes`, `groups`, `edges`,
 
 - `title` names the scope. The `lede` is one sentence: what the reader sees.
 - A node has a stable `id`: lowercase letters, digits and hyphens. A diff pairs nodes by this id.
-- A node takes exactly one of `term` and `noun`. A `term` is a glossary term. A `noun` is a noun that the home design names in a heading or the first column of a table.
+- A node takes exactly one of `term` and `noun`. A `start`, `end`, `choice` or `decision` node needs neither. If it gives one, `bp` checks it. A `term` is a glossary term. A `noun` is a noun that the home design names in a heading or the first column of a table. A state is a noun: the home design names each state in a table.
 - `label` is the text in the box. It defaults to the term or the noun.
 - `role` takes one value from the closed set of its type.
   - `architecture`: `application`, `library`, `store`, `deployable`, `component`, `system`, `person`, `external`.

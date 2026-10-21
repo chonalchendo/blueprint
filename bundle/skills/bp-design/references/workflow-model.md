@@ -32,7 +32,7 @@ Show the human one subsection at a time. Go on only after the human confirms it.
    Output: `### Actions`, one row per action.
 
 4. **Draw the states and transitions**. Do this for each entity with a lifecycle. List its states. Give each transition the action and the role that cause it. Store a state only when no record can derive it, such as a decision or an outside outcome. Derive every other state from the records, and say how.
-   Output: `### State machines`, one per entity.
+   Output: `### State machines`, one per entity. Each holds a states table. Its first column is the state, so each state node of the diagram resolves as a `noun`.
 
 5. **Walk the scenarios**. Pick three to five real scenarios: the main path, one failure, one escalation and one manual step. Walk each one through the actions. Each step names its role and its effect on state. A step with no action is a gap in the model.
    Output: `### Scenario walks`, with each gap in `## Open`.
@@ -73,8 +73,8 @@ Output: `### Action rows`, one row per action, and each check in the system desi
 
 A workflow model draws three types. None of them takes a level. Read `references/diagrams.md` for the spec fields and the editorial rules. Preview each view with `bp diagram --spec-file <f> --out <path> --json` before you write it under the system design.
 
-- **`state`**. Draw one view per entity with a lifecycle, from step 4. Label each transition with its action. Add the acting role to the label when two roles share the entity. Give the entry the node role `start`. Give each terminal state the node role `end`, and each branch `choice`. Make the state that the lifecycle exists to reach the focus.
+- **`state`**. Draw one view per entity with a lifecycle, from step 4. Label each transition with its action. Add the acting role to the label when two roles share the entity. Give the entry the node role `start`. Give each terminal state the node role `end`, and each branch `choice`. These three need no `term` or `noun`. Give each `state` node its state from the states table as its `noun`. Make the state that the lifecycle exists to reach the focus.
 - **`sequence`**. Draw one view per scenario walk that crosses three or more roles, from step 5. Each party is a role or a system. Each step is one message, and a reply is a return step. Make one or two decisive steps the focus, such as a person's approval. Past five parties, `bp` warns; merge the parties that never talk to each other.
-- **`workflow`**. Draw this view when the handoffs between roles matter more than the messages. Give each role one lane. Place each step in its lane, in order. Give the start the node role `start`, each end the node role `end` and each branch the node role `decision`.
+- **`workflow`**. Draw this view when the handoffs between roles matter more than the messages. Give each role one lane. Place each step in its lane, in order. Give the start the node role `start`, each end the node role `end` and each branch the node role `decision`. These three need no `term` or `noun`.
 
 `bp` places all three types from their order, so give no cells.
