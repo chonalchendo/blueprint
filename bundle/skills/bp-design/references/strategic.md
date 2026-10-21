@@ -2,7 +2,9 @@
 
 Load this file for a system design that holds more than one model. Load it for a container design when its cut is in dispute. Two signs show more than one model: a word with two meanings, or parts that change at different rates.
 
-It produces three sections of the system design: `## Subdomains`, `## Bounded contexts` and `## Context map`. It adds the team fit to `## Constraints`. Its input is the candidate contexts from `references/discovery.md`. Its output feeds `references/system.md` and `references/container.md`.
+It produces three sections of the system design: `## Subdomains`, `## Bounded contexts` and `## Context map`. It adds the team fit to `## Constraints`.
+
+Loaded for a container design, it writes the canvas of that container's context only. The canvas goes into the sections that `references/container.md` names. A changed cut changes `## Containers` of the system design. Change an active system design through `references/revision.md`. Its input is the candidate contexts from `references/discovery.md`. Its output feeds `references/system.md` and `references/container.md`.
 
 ## Subdomains
 
@@ -12,7 +14,7 @@ The classes come from Evans, *Domain-Driven Design*, and Khononov, *Learning Dom
 2. Ask the human to rate the differentiation of each subdomain first. The question is: can a competitor copy it easily?
 3. Rate the complexity of each subdomain from evidence: churn, defect history, size and co-change clusters. Cite each number.
 4. Classify each subdomain. Core differentiates. Supporting is necessary but gives no edge. Generic is the same for everyone.
-5. Write the investment for each class. Core gets a domain model and the best effort. Generic is bought or kept simple.
+5. Write the investment for each class. Give each core subdomain a domain model and the best effort. Buy a generic subdomain, or keep it simple.
 6. A bought subdomain is a decision. Load `references/decision.md` for it.
 
 Output: `## Subdomains`, a table of subdomain, class, differentiation, complexity and reason. A class is a hypothesis. Put a class that the human doubts in `## Open`.
@@ -26,8 +28,8 @@ The cut by language comes from Evans and from Fowler, "BoundedContext". The canv
 3. Fill the messages from code: imports, calls and events. Ask the human for the purpose and the business decisions.
 4. Write a verification metric for each context. The metric shows when the boundary is wrong.
 5. Test each boundary against the cut reasons of `references/system.md`, step 9.
-6. Dispatch a fresh agent with the same evidence and without your cut. Ask it for an independent cut.
-7. Compare the two cuts. Write each difference as a hotspot in `## Open`.
+6. Dispatch the `bp-researcher` role with its `research` template. Below its five lines, give the evidence and ask for an independent cut. Do not give your cut.
+7. The report returns the second cut, with a reason for each boundary. Compare the two cuts. Write each difference as a hotspot in `## Open`.
 
 Output: `## Bounded contexts`, one `###` heading for each context. Each holds its purpose in one sentence of business language. It also holds its terms, messages, decisions, assumptions and metrics. Each term goes to the glossary. Many open questions on a canvas show high uncertainty.
 
@@ -40,9 +42,9 @@ The relations and patterns come from DDD Crew, "Context Mapping".
 3. Name the pattern of each edge. The patterns are open-host service, published language, conformist, anticorruption layer and shared kernel. Four more are partnership, customer and supplier, separate ways, and big ball of mud.
 4. Ask the human to pick the pattern where it is a choice, such as conformist or anticorruption layer. Each such pick is a decision.
 5. Name the owner of change for each shared kernel.
-6. Draw one map for each question. Do not put every pattern on one map.
+6. Write one table for each question. Do not put every pattern in one table.
 
-Output: `## Context map`, a table of upstream, downstream, pattern and reason. Each upstream and downstream pair becomes a permitted connection in a `deps` check block of the container design. Each open-host service or published language becomes the baseline of a `contract` check block.
+Output: `## Context map`, with one table for each question. Each table has the columns upstream, downstream, pattern and reason. Each upstream and downstream pair becomes a permitted connection in a `deps` check block of the container design. Each open-host service or published language becomes the baseline of a `contract` check block.
 
 ## Team fit
 

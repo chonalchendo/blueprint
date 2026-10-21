@@ -4,7 +4,7 @@ Load this file when the human cannot name the key events and nouns of an area. L
 
 Discovery produces no design of its own. It produces three outputs:
 
-- Glossary rows, one for each noun.
+- Terms, one for each noun, in the glossary or its interim home.
 - Hotspots, as rows in `## Open` of the design that discovery feeds.
 - Candidate contexts, for `references/strategic.md`.
 
@@ -40,18 +40,20 @@ The grammar comes from DDD Crew, "EventStorming Glossary & Cheat Sheet".
 
 ## The outputs
 
-1. Write one glossary row for each noun on an event and each work object. The row form is ``- `slug` — definition.``, with a definition of one sentence.
-2. The glossary is `projects/<p>/designs/glossary`, under the system design. Before the system design exists, put the rows in the `## Vocabulary` table of the product design.
-3. Create a missing glossary with `bp create design --project <p> --title Glossary --slug glossary --under projects/<p>/designs/system --body-file <file> --json`. Write a draft glossary with `bp set <glossary> --body-file <file> --json`. Change an active glossary through `references/revision.md`.
-4. Write each hotspot as one row in `## Open` of the design that discovery feeds. Give its source.
-5. Hand the candidate contexts to `references/strategic.md`. They are the phases, the words with two meanings and the story groups.
-6. Keep the timeline and the stories as working notes outside the vault. Quote in a design only the part that the design cites.
+1. Write one term for each noun on an event and each work object. Give it a definition of one sentence.
+2. Choose the home of the terms. When the glossary `projects/<p>/designs/glossary` exists, it is the home. A draft glossary takes the rows through `bp set <glossary> --body-file <file> --json`. An active glossary changes through `references/revision.md`.
+3. With no glossary, a draft product design is the home. Add the terms to its `## Vocabulary` table with `bp set <product> --body-file <file> --json`.
+4. With no glossary and an active product design, hold the terms in the working notes. The system design session creates the glossary from them: `references/system.md`, "The glossary".
+5. Use one row form for each table. A `## Vocabulary` row is `| <Noun> | <definition> |`. A glossary row is ``- `<slug>` — <definition>.``. The slug is the noun in lower case, with each space as a hyphen.
+6. Write each hotspot as one row in `## Open` of the design that discovery feeds. Give its source.
+7. Hand the candidate contexts to `references/strategic.md`. They are the phases, the words with two meanings and the story groups.
+8. Keep the timeline and the stories as working notes outside the vault. Quote in a design only the part that the design cites.
 
 ## Diagram
 
 The event timeline is not among the five diagram types. Keep it as a numbered list, grouped by phase.
 
-Draw a domain story as a `workflow` diagram when the human asks to see it. Each actor is a lane. Each numbered sentence is one step, in order. The label of a step is its activity. The `term` of a step is the glossary slug of its work object. The spec and the rules are in `references/diagrams.md`.
+A domain story is a working note, so its diagram is a preview outside the vault. Draw it as a `workflow` diagram when the human asks to see it. Each actor is a lane. Each numbered sentence is one step, in order. The label of a step is its activity. The `term` of a step is the glossary slug of its work object. Until the glossary holds that slug, the preview warns on the step. Preview it with `bp diagram --spec-file <f> --out <path> --json`. To keep the flow in the vault, draw it in the workflow model through `references/workflow-model.md`. The spec and the rules are in `references/diagrams.md`.
 
 ## Gate questions
 

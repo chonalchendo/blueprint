@@ -21,11 +21,12 @@ The utility tree, the six-part scenario and the ranking come from Bass, Clements
     - A layering rule or a permitted connection is a `deps` block.
     - An architecture test is a `shell` block that names the test.
 12. Write each continual or dynamic fitness function as prose with its measure. It does not run at a commit. When a commit can sample it, also write a block with `severity=warn`.
-13. Test each fitness function. Seed one violation, and confirm that the block fails. Then remove the seed.
+13. Prove each `shell` and `scenario` block. Make a scratch change in the code that breaks the rule. Run the block's command in a shell on that change, and see it fail. Then drop the change.
+14. Claim no proof for a `deps` block. Its runner is not built yet, so a run records `skipped`.
 
-The quality goals table has one row for each scenario. Its columns are attribute, source and stimulus, environment and artifact, response and measure, Today, and value and difficulty.
+The quality goals table has one row for each scenario. Its first columns are attribute, source and stimulus, environment and artifact, and response and measure. The next columns are threshold, Today, and value and difficulty. The last columns are the decision that serves it and the name of its check block.
 
-This block measures one threshold:
+For example, this block measures one threshold with a script of the project.
 
 ```check scenario {name=p95-latency measure=ms max=500}
 ./scripts/p95-latency.sh  # It prints the p95 in ms.
@@ -44,5 +45,5 @@ The utility tree and the characteristics radar are not among the five diagram ty
 - Did the human set each threshold?
 - Does a decision serve each top scenario?
 - Does each triggered fitness function have a check block?
-- Does each block fail on a seeded violation?
+- Does each `shell` and `scenario` block fail on a scratch change that breaks its rule?
 - Does a continual fitness function stay out of a commit check?

@@ -2,7 +2,7 @@
 
 Load this file when the kind is decision. Load it in the middle of another procedure when a section settles a choice with a rejected option. It produces one decision node in the `proposed` state, and the links that cite it.
 
-The record form comes from Nygard, "Documenting Architecture Decisions". The classes of significant choice come from Richards and Ford, *Fundamentals of Software Architecture*. The trade-off table comes from Ford, Richards, Sadalage and Dehghani, *Software Architecture: The Hard Parts*.
+The record form and the classes of significant choice come from Nygard, "Documenting Architecture Decisions". The trade-off table comes from Ford, Richards, Sadalage and Dehghani, *Software Architecture: The Hard Parts*.
 
 ## A decision or a design line
 
@@ -28,7 +28,7 @@ Otherwise the choice is a design line. Write it in its section, with its reason 
 10. Get the body template: `bp create decision --template --json`. Fill it in a file outside the vault. The lead is the "We will" sentence. `## Reason` holds the forces and the consequences. `## Options rejected` holds the options, the strongest case and the trade-off table. `## Enforcement` holds the check.
 11. Validate: `bp create decision --project <p> --title "<title>" --body-file <file> --dry-run --json`. Fix each item of `findings`. Then run the same call without `--dry-run`.
 12. Link the design that the choice governs: `bp link <design> cites <decision> --json`.
-13. Link the thread that the choice settles: `bp link <decision> answers <thread> --json`.
+13. When a thread asked the question, link it: `bp link <decision> answers <thread> --json`.
 14. A new choice never edits an accepted decision. Write a new decision, and link it: `bp link <decision> supersedes <old> --json`.
 15. Tell the human that the decision is `proposed`. The human accepts it with `bp transition <decision> accepted --json`.
 
