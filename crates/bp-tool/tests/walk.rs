@@ -285,21 +285,65 @@ fn a_stop_reads_the_vault_snapshot_and_never_calls_gh() {
 fn triage_drift_needs_a_citation_for_each_failed_drift_run() {
     let d = vault();
     let s = "projects/bp/designs/system";
-    let run = |key: &str, kind: &str| {
+    let run = |key: &str, kind: &str, verdict: &str| {
         let id = format!("{s}/runs/{key}-aaaa-1");
         let text = format!(
-            "---\nkind: run\nunder: {s}\ncheck: {key}\ncheck_kind: {kind}\ncommit: aaaa\nattempt: 1\nverdict: fail\n---\n"
+            "---\nkind: run\nunder: {s}\ncheck: {key}\ncheck_kind: {kind}\ncommit: aaaa\nattempt: 1\nat: 2026-10-01T00:00:00Z\nverdict: {verdict}\n---\n"
         );
         write(d.path(), &format!("{id}.md"), &text);
         id
     };
-    run("vault", "integrity");
-    assert_eq!(done(d.path(), None, s, "triage-drift"), true, "an integrity run is no drift run");
-    let drift = run("drift", "shell");
+    run("vault", "integrity", "fail");
+    run("flaky", "shell", "could-not-run");
+    assert_eq!(done(d.path(), None, s, "triage-drift"), true, "an integrity run and an unrun block are no drift");
+    let slow = run("slow", "shell", "timed-out");
+    assert_eq!(done(d.path(), None, s, "triage-drift"), false, "a timed-out design check drifts");
+    // Forty cited runs: the slice answers only the uncited one, and the design it checked follows the seed.
+    let mut cited = format!("---\nkind: thread\ntitle: Old\nstatus: open\n---\n\nWhy did [[{slow}]] fail?\n");
+    for n in 0..40 {
+        let old = run(&format!("old{n}"), "shell", "fail");
+        cited.push_str("- [[");
+        cited.push_str(&old);
+        cited.push_str("]]\n");
+    }
+    write(d.path(), "projects/bp/threads/old.md", &cited);
+    let drift = run("drift", "shell", "fail");
     assert_eq!(done(d.path(), None, s, "triage-drift"), false);
+    assert_eq!(done(d.path(), None, "projects/bp/project", "triage-drift"), false, "a project covers its designs");
+    let (_, v) = walk(d.path(), &["projects/bp/project", "--for", "triage-drift"]);
+    assert_eq!(ids(&v["bodies"])[..3], [drift.as_str(), "projects/bp/project", s], "{v}");
+    // The project does not reach the design, so the drift step adds it, and its intent still shows.
+    let drifted =
+        v["intents"].as_array().unwrap().iter().find(|i| i["id"] == s).expect("the added design has an intent");
+    assert_eq!(drifted["intent"], "drifted", "{v}");
     let thread = format!("---\nkind: thread\ntitle: T\nstatus: open\n---\n\nWhy did [[{drift}]] fail?\n");
     write(d.path(), "projects/bp/threads/drift.md", &thread);
     assert_eq!(done(d.path(), None, s, "triage-drift"), true);
+    assert_eq!(done(d.path(), None, "projects/bp/project", "triage-drift"), true);
+    let (_, v) = walk(d.path(), &[s, "--for", "triage-drift"]);
+    assert!(v["bodies"].as_array().unwrap().iter().all(|b| b["kind"] != "run"), "no run waits: {v}");
+    assert!(v["intents"].as_array().unwrap().iter().all(|i| i["id"] != s), "a cited run no longer drifts: {v}");
+}
+
+#[test]
+fn the_triage_slice_ranks_uncited_runs_under_half_the_budget() {
+    let d = vault();
+    let s = "projects/bp/designs/system";
+    let evidence = "x".repeat(2_000);
+    for n in 0..9 {
+        let text = format!(
+            "---\nkind: run\nunder: {s}\ncheck: d{n}\ncheck_kind: shell\ncommit: aaaa\nattempt: 1\nat: 2026-10-0{}T00:00:00Z\nverdict: fail\n---\n\n{evidence}\n",
+            n + 1
+        );
+        write(d.path(), &format!("{s}/runs/d{n}-aaaa-1.md"), &text);
+    }
+    done(d.path(), None, s, "triage-drift");
+    let (_, v) = walk(d.path(), &[s, "--for", "triage-drift"]);
+    let runs: Vec<&str> = ids(&v["bodies"]).into_iter().filter(|b| b.contains("/runs/")).collect();
+    assert_eq!(runs[0], format!("{s}/runs/d8-aaaa-1"), "the newest leads");
+    assert!(runs.len() < 9 && v["cut"].as_u64().unwrap() >= (9 - runs.len()) as u64, "{v}");
+    assert!(v["used"].as_u64().unwrap() <= v["budget"].as_u64().unwrap(), "{v}");
+    assert!(ids(&v["bodies"]).contains(&s), "the design follows: {v}");
 }
 
 #[test]
@@ -315,6 +359,56 @@ fn distil_needs_a_citing_learning_that_search_finds_by_its_cue() {
     assert_eq!(done(d.path(), None, SEED, "distil"), false, "a learning with no cue reads false, title or not");
     learning("cued", "cue: quokkas nap at noon\n");
     assert_eq!(done(d.path(), None, SEED, "distil"), true);
+}
+
+#[test]
+fn with_no_evidence_a_learning_ages_from_its_creation_and_a_recheck_renews_it() {
+    let d = vault();
+    let git = |args: &[&str], at: &str| {
+        let out = std::process::Command::new("git")
+            .current_dir(d.path())
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", at)
+            .env("GIT_COMMITTER_DATE", at)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    let l = "shared/learnings/naps";
+    let text = "---\nkind: learning\ntitle: Naps\nstatus: draft\ncites: [projects/bp/designs/system]\n---\n\nNap.\n";
+    write(d.path(), &format!("{l}.md"), text);
+    git(&["init", "-q"], "2026-10-05T00:00:00Z");
+    // `bp record` commits through the vault's own config; a CI runner has no global identity.
+    git(&["config", "user.name", "t"], "2026-10-05T00:00:00Z");
+    git(&["config", "user.email", "t@t"], "2026-10-05T00:00:00Z");
+    git(&["add", "-A"], "2026-10-05T00:00:00Z");
+    git(&["commit", "-qm", "init"], "2026-10-05T00:00:00Z");
+    let bp = |args: &[&str]| {
+        let out = Command::cargo_bin("bp")
+            .unwrap()
+            .current_dir(d.path())
+            .env_remove("BP_VAULT")
+            .env_remove("BP_ROLE")
+            .env("BP_NOW", "2026-10-20T00:00:00Z")
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap();
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    assert_eq!(bp(&["show", l])["stale"], false, "no design changed");
+    let delta = "---\nkind: delta\nunder: projects/bp/designs/system\nstamp: \"2026-10-02T00:00:00Z\"\nmilestone: projects/bp/milestones/m\n---\n\nThe system.\n\n## Accepted\n\naccepted_at: 2026-10-10T00:00:00Z\nversion: [[projects/bp/versions/1]]\n";
+    write(d.path(), "projects/bp/designs/system/deltas/2026-10-02T00-00-00Z.md", delta);
+    git(&["add", "-A"], "2026-10-10T00:00:00Z");
+    git(&["commit", "-qm", "accept"], "2026-10-10T00:00:00Z");
+    let before = bp(&["show", l]);
+    assert_eq!(before["stale"], true, "created before the change, with no row: {before}");
+    let row = bp(&["record", "evidence", l, "--field", "outcome=rechecked", "--field", "note=still holds"]);
+    assert!(row["code"].is_null(), "{row}");
+    let after = bp(&["show", l]);
+    assert_eq!(after["stale"], false, "a re-check renews it: {after}");
+    assert_eq!(after["confidence"], before["confidence"], "a re-check is no application");
 }
 
 #[test]

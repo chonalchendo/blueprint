@@ -2,8 +2,8 @@
 //! first, because a blocked issue must never read as ready. Pure: the caller hands in the node's records, its
 //! dependencies' states and the forge's view of its pull request.
 //!
-//! Predicates whose records do not exist yet (dispositions, drift runs, finish-line runs, concern answers) never
-//! hold; they arrive with the milestones that write those records. Re-asked is [`reasked`], over a project's waivers.
+//! Predicates whose records do not exist yet (dispositions, finish-line runs, concern answers) never hold; they
+//! arrive with the milestones that write those records. Re-asked is [`reasked`], over a project's waivers.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,6 +26,7 @@ pub enum Intent {
     NeedsReview,
     NeedsApproval,
     NeedsLanding,
+    Drifted,
     NeedsMilestoneApproval,
 }
 
@@ -381,6 +382,21 @@ pub fn milestone(status: &str, integrity: Option<String>) -> Verdict {
     }
 }
 
+/// A drift run (21, drifted; 13, Run): a run of a design's check that failed or timed out. An integrity run checks the
+/// vault, not a design, and a run that could not run or was skipped says nothing about the code.
+pub fn is_drift(verdict: &str, check_kind: &str) -> bool {
+    matches!(verdict, "fail" | "timed-out") && check_kind != "integrity"
+}
+
+/// The intent of one design (21, drifted): `uncited` holds its failed drift runs that no delta or thread cites. The
+/// note names them and the action that answers them.
+pub fn design(id: &str, uncited: &[String]) -> Verdict {
+    if uncited.is_empty() {
+        return Verdict::NONE;
+    }
+    Verdict::of(Intent::Drifted, format!("{}; bp walk {id} --for triage-drift", uncited.join(", ")))
+}
+
 /// A waiver record, reduced (13, Waiver). Its key is the milestone, the block, its `check`, and the sequence, read
 /// from the record key relative to `check`: `<check>` is 1, `<check>-<n>` is n.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -494,6 +510,20 @@ mod tests {
 
     fn released(at: i64) -> Claim {
         Claim { at: Some(at), released: Some(at + 60), escalated: false }
+    }
+
+    #[test]
+    fn a_design_drifts_while_a_failed_drift_run_is_uncited() {
+        assert_eq!(design("d", &[]), Verdict::NONE);
+        let v = design("d", &["d/runs/x-1".to_string()]);
+        assert_eq!(v, Verdict::of(Intent::Drifted, "d/runs/x-1; bp walk d --for triage-drift"));
+    }
+
+    #[test]
+    fn a_failed_or_timed_out_design_run_is_drift() {
+        assert!(is_drift("fail", "shell") && is_drift("timed-out", "scenario"));
+        assert!(!is_drift("could-not-run", "shell") && !is_drift("skipped", "shell") && !is_drift("pass", "shell"));
+        assert!(!is_drift("fail", "integrity"), "an integrity run checks the vault");
     }
 
     #[test]

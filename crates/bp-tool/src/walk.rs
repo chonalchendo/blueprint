@@ -84,16 +84,11 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             }
         }
     }
-    let projects: BTreeSet<&str> =
-        reached.iter().filter(|r| r.kind == Kind::Issue).filter_map(|r| intent::split(&r.id)).map(|(p, _)| p).collect();
-    let read = intent::Intents::new(&vault, &index, (!projects.is_empty()).then_some(&projects))?;
-    let mut intents = Vec::new();
-    for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone)) {
-        let verdict = read.row(r.kind, &r.id, r.status.as_deref())?;
-        if let Some(intent) = verdict.intent {
-            intents.push(serde_json::json!({ "id": r.id, "intent": intent, "note": verdict.note }));
-        }
-    }
+    let budget = walk.budget.unwrap_or_else(|| action.budget());
+    // The drift runs and their designs join the reached before the intents, so each added design shows its own.
+    let (runs, waiting) =
+        if action == Action::TriageDrift { drift(&index, &id, kind, budget, &mut reached)? } else { (Vec::new(), 0) };
+    let (read, intents) = intents(&vault, &index, &reached)?;
     // The latest record of each kind the action answers, latest by its time field, as `index.records` orders them.
     let mut records = Vec::new();
     for kind in action.records() {
@@ -101,22 +96,28 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             records.push(serde_json::json!({ "id": r.id, "kind": kind, "header": r.header, "body": r.body }));
         }
     }
+    records.extend(runs);
     let pull_request = pull_request(&vault, &index, &id, action)?;
-    let line =
-        |r: &bp_vault::Reached| serde_json::json!({ "id": r.id, "kind": r.kind, "title": r.title, "rank": r.rank });
+    let line = |r: &bp_vault::Reached| -> Result<Value, Refusal> {
+        let mut v = serde_json::json!({ "id": r.id, "kind": r.kind, "title": r.title, "rank": r.rank });
+        if r.kind == Kind::Learning {
+            v["stale"] = read.stale(&r.id, &index.header(&r.id)?.unwrap_or_default())?.into();
+        }
+        Ok(v)
+    };
     if walk.ids {
         // The map keeps the fill's order: conventions close the tail (21).
         let (conventions, rest): (Vec<_>, Vec<_>) = reached.iter().partition(|r| r.kind == Kind::Convention);
         let answered = records
             .iter()
             .map(|r| serde_json::json!({ "id": r["id"], "kind": r["kind"], "title": null, "rank": null }));
-        let ids: Vec<Value> = answered.chain(rest.into_iter().chain(conventions).map(line)).collect();
+        let lines = rest.into_iter().chain(conventions).map(line).collect::<Result<Vec<_>, _>>()?;
+        let ids: Vec<Value> = answered.chain(lines).collect();
         return Ok(with(
             serde_json::json!({ "seed": id, "for": action, "ids": ids, "intents": intents }),
             pull_request,
         ));
     }
-    let budget = walk.budget.unwrap_or_else(|| action.budget());
     // The intents, the answered records and the pull request are always sent, so they spend the budget before the
     // fill does.
     let pr = pull_request.as_ref().map(serde_json::to_string);
@@ -129,14 +130,14 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     let by_id = |want: &String| reached.iter().find(|r| &r.id == want).expect("the fill chose from the reached");
     let mut bodies = records;
     for b in &f.bodies {
-        let mut v = line(by_id(b));
+        let mut v = line(by_id(b))?;
         v["body"] = index.body(b)?.into();
         bodies.push(v);
     }
-    let ids: Vec<Value> = f.ids.iter().map(|i| line(by_id(i))).collect();
+    let ids = f.ids.iter().map(|i| line(by_id(i))).collect::<Result<Vec<_>, _>>()?;
     let slice = serde_json::json!({
         "seed": id, "for": action, "budget": budget, "used": f.used + named,
-        "bodies": bodies, "ids": ids, "cut": f.cut, "intents": intents,
+        "bodies": bodies, "ids": ids, "cut": f.cut + waiting, "intents": intents,
     });
     Ok(with(slice, pull_request))
 }
@@ -157,6 +158,62 @@ fn with(mut answer: Value, pull_request: Option<Value>) -> Value {
         answer["pull_request"] = p;
     }
     answer
+}
+
+/// The intent of each reached issue, milestone and design, and the reader that computed them, which the lines reuse.
+fn intents<'a>(
+    vault: &'a Vault,
+    index: &'a Index,
+    reached: &[bp_vault::Reached],
+) -> Result<(intent::Intents<'a>, Vec<Value>), Refusal> {
+    let projects: BTreeSet<&str> =
+        reached.iter().filter(|r| r.kind == Kind::Issue).filter_map(|r| intent::split(&r.id)).map(|(p, _)| p).collect();
+    let read = intent::Intents::new(vault, index, (!projects.is_empty()).then_some(&projects))?;
+    let mut intents = Vec::new();
+    for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone | Kind::Design)) {
+        let verdict = read.row(r.kind, &r.id, r.status.as_deref())?;
+        if let Some(intent) = verdict.intent {
+            intents.push(serde_json::json!({ "id": r.id, "intent": intent, "note": verdict.note }));
+        }
+    }
+    Ok((read, intents))
+}
+
+/// Triage drift answers the drift runs that no delta or thread cites, newest first, in at most half the budget and
+/// at least one; the rest wait for the next walk and count in `cut`. The designs they checked lead the fill, so they
+/// come next when their bodies fit (21, the context column).
+fn drift(
+    index: &Index,
+    id: &Id,
+    kind: Kind,
+    budget: usize,
+    reached: &mut Vec<bp_vault::Reached>,
+) -> Result<(Vec<Value>, usize), Refusal> {
+    let mut all = Vec::new();
+    for d in intent::drift_designs(index, id, kind)? {
+        all.extend(intent::drift(index, &d)?.into_iter().map(|r| (d.clone(), r)));
+    }
+    let at = |r: &bp_vault::Record| r.header.get("at").and_then(Value::as_str).unwrap_or_default().to_string();
+    all.sort_by_key(|(_, r)| std::cmp::Reverse(at(r)));
+    let (mut runs, mut checked, mut used, mut waiting) = (Vec::new(), BTreeSet::new(), 0, 0);
+    for (d, r) in all {
+        let run = serde_json::json!({ "id": r.id, "kind": Kind::Run, "header": r.header, "body": r.body });
+        let tokens = run.to_string().len().div_ceil(4);
+        if !runs.is_empty() && used + tokens > budget / 2 {
+            waiting += 1;
+            continue;
+        }
+        used += tokens;
+        checked.insert(d);
+        runs.push(run);
+    }
+    for d in &checked {
+        if !reached.iter().any(|r| &r.id == d) {
+            reached.extend(index.reach(d, 0)?);
+        }
+    }
+    reached[1..].sort_by_key(|r| !checked.contains(&r.id));
+    Ok((runs, waiting))
 }
 
 /// The context the action cannot run without (21, rule 3), by the predicate the integrity check shares: a target

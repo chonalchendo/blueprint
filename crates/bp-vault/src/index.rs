@@ -379,6 +379,17 @@ impl Index {
         Ok(text.map(|t| object(&t)))
     }
 
+    /// The ids of a project's nodes of one kind, in id order. It runs inside the caller's read, which `list`, with
+    /// its own transaction, cannot: a walk holds one read across its statements.
+    pub fn ids_of(&self, kind: Kind, project: &str) -> Result<Vec<String>, Refusal> {
+        let run = || -> rusqlite::Result<Vec<String>> {
+            let mut st =
+                self.conn.prepare_cached("select id from nodes where kind = ?1 and project = ?2 order by id")?;
+            st.query_map([kind.as_str(), project], |r| r.get(0))?.collect()
+        };
+        run().map_err(|e| failed(Path::new(".bp/index.db"), &e))
+    }
+
     /// The header and body of every record of one kind under a node, in time order: by the kind's time field, then
     /// by the `-N` a second record with one key took, as a number (13, rule 1). A record's body holds what its
     /// appends wrote, such as a claim's `## Released` section (13).
