@@ -130,10 +130,18 @@ fn a_delta_carries_its_diagrams_through_record_and_stamp() {
     let delta = v["id"].as_str().unwrap().to_string();
     assert_eq!(std::fs::read_to_string(root.join(&delta).join("new.yaml")).unwrap(), NEW, "the spec in the delta");
     let shown = bp(root, &["show", &delta]).1;
-    assert_eq!(shown["remove_diagrams"], json!(["old"]), "{shown}");
-    assert_eq!(shown["base"], bp(root, &["show", FRONT]).1["hash"], "the base is the design's hash");
+    assert_eq!((&shown["diagrams"], &shown["remove_diagrams"]), (&json!(["keep", "new"]), &json!(["old"])), "{shown}");
+    let mut base = blake3::Hasher::new();
+    base.update(std::fs::read(root.join(format!("{FRONT}.md"))).unwrap().as_slice());
+    for (name, text) in [("keep", KEEP), ("old", OLD)] {
+        base.update(b"\0").update(name.as_bytes()).update(b"\0").update(text.as_bytes());
+    }
+    assert_eq!(shown["base"], base.finalize().to_hex().to_string(), "the base covers the design and its specs");
+    let diff = std::fs::read_to_string(root.join(&delta).join("keep.diff.html")).unwrap();
+    assert!(diff.contains("<script>"), "the replaced view's diff page");
+    assert!(!root.join(&delta).join("new.diff.html").exists(), "an added view has no diff page");
     let files = git(root, &["show", "--name-only", "--format=", "HEAD"]);
-    assert_eq!(files.lines().count(), 3, "the record and its two specs, one commit: {files}");
+    assert_eq!(files.lines().count(), 4, "the record, its two specs and a diff page, one commit: {files}");
     assert!(git(root, &["status", "--porcelain"]).is_empty());
     assert!(!root.join(FRONT).join("diagrams/new.yaml").exists(), "the design is untouched until the stamp");
 
@@ -206,14 +214,16 @@ fn pr_lists_each_diagram_a_delta_changes() {
     let (exit, out) = bp_env(&code, &env, &["pr", ISSUE]);
     assert_eq!(exit, Some(0), "{out}");
     let want = json!([
-        { "delta": delta, "name": "keep", "change": "replaced" },
+        { "delta": delta, "name": "keep", "change": "replaced", "diff": format!("{delta}/keep.diff.html") },
         { "delta": delta, "name": "new", "change": "added" },
         { "delta": delta, "name": "old", "change": "removed" },
     ]);
     assert_eq!(out["diagrams"], want, "{out}");
     let body = std::fs::read_to_string(t.join("body")).unwrap();
-    let listed =
-        format!("- {delta}\n  - diagram `keep`: replaced\n  - diagram `new`: added\n  - diagram `old`: removed\n");
+    let listed = format!(
+        "- {delta}\n  - diagram `keep`: replaced; diff page `{delta}/keep.diff.html`\n  - diagram `new`: added\n  - \
+         diagram `old`: removed\n"
+    );
     assert!(body.contains(&listed), "{body}");
 }
 

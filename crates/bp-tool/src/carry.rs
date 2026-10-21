@@ -18,8 +18,9 @@ use crate::claim::git;
 pub(crate) struct Carried {
     issue: Id,
     pub(crate) deltas: Vec<Id>,
-    /// Each diagram a delta changes: the delta, the name, and `added`, `replaced` or `removed`.
-    diagrams: Vec<(Id, String, &'static str)>,
+    /// Each diagram a delta changes: the delta, the name, `added`, `replaced` or `removed`, and a replaced one's diff
+    /// page (28, design change 13).
+    diagrams: Vec<(Id, String, &'static str, Option<String>)>,
     changes: Vec<Change>,
     set: String,
     claimed: String,
@@ -64,13 +65,15 @@ pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id) -> Result<Carried, 
             let body = Body::parse(&d.body);
             if caused && DeltaState::of(&body) == DeltaState::Proposed {
                 let delta = Id::parse(&d.id).expect("the index holds ids");
-                for (name, spec) in crate::delta::carried(vault, &delta, &d.header) {
+                for (name, spec) in crate::delta::carried(vault, &delta, &d.header)? {
+                    let page = format!("{delta}/{name}.diff.html");
+                    let diff = vault.root.join(&page).exists().then_some(page);
                     let change = match spec {
                         None => "removed",
                         Some(_) if vault.root.join(format!("{design}/diagrams/{name}.yaml")).exists() => "replaced",
                         Some(_) => "added",
                     };
-                    diagrams.push((delta.clone(), name, change));
+                    diagrams.push((delta.clone(), name, change, diff));
                 }
                 deltas.push((delta, design.clone(), body));
             }
@@ -154,7 +157,14 @@ impl Carried {
 
     /// The result's `diagrams`.
     pub(crate) fn diagrams(&self) -> Value {
-        self.diagrams.iter().map(|(d, name, change)| json!({ "delta": d, "name": name, "change": change })).collect()
+        let row = |(d, name, change, diff): &(Id, String, &str, Option<String>)| {
+            let mut row = json!({ "delta": d, "name": name, "change": change });
+            if let Some(diff) = diff {
+                row["diff"] = diff.as_str().into();
+            }
+            row
+        };
+        self.diagrams.iter().map(row).collect()
     }
 
     /// The result's `check_changes`.
@@ -183,7 +193,10 @@ impl Carried {
         for d in &self.deltas {
             deltas.push(format!("- {d}\n"));
             let drawn = self.diagrams.iter().filter(|(of, ..)| of == d);
-            deltas.extend(drawn.map(|(_, name, change)| format!("  - diagram `{name}`: {change}\n")));
+            deltas.extend(drawn.map(|(_, name, change, diff)| match diff {
+                Some(diff) => format!("  - diagram `{name}`: {change}; diff page `{diff}`\n"),
+                None => format!("  - diagram `{name}`: {change}\n"),
+            }));
         }
         let deltas = if deltas.is_empty() { "None.\n".into() } else { deltas.concat() };
         let hash = |h: &Option<String>| h.as_deref().map_or("-".into(), |h| format!("`{h}`"));

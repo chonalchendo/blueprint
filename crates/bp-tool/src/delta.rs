@@ -1,9 +1,10 @@
-//! What a delta carries beside its body (28, design changes 7 and 8; 13, Delta): its diagrams and its base.
-//! `record delta --diagram <name>=<f>` puts the spec in the delta's own directory, `<delta>/<name>.yaml`, and
-//! `--remove-diagram <name>` lists the name in the header's `remove_diagrams`. The `nodes` check runs on the proposed
-//! body and the proposed specs together before the record is written. `base` is the design's content hash when the
-//! delta is proposed, so `stamp` refuses `base_moved` rather than write a body over a change the delta never saw
-//! (`m5-design-evidence.md` §3.2).
+//! What a delta carries beside its body (28, design changes 7, 8 and 13; 13, Delta): its diagrams and its base.
+//! `record delta --diagram <name>=<f>` puts the spec in the delta's own directory, `<delta>/<name>.yaml`, lists the
+//! name in the header's `diagrams`, and, when it replaces a spec of the design, writes the diff page
+//! `<delta>/<name>.diff.html` against it. `--remove-diagram <name>` lists the name in `remove_diagrams`. The `nodes`
+//! check runs on the proposed body and the proposed specs together before the record is written. `base` hashes the
+//! design file and its specs when the delta is proposed, so `stamp` refuses `base_moved` rather than write over a
+//! change the delta never saw (`m5-design-evidence.md` §3.2).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -61,23 +62,42 @@ pub(crate) fn given(cwd: &Path, kind: Kind, puts: &[String], removes: &[String])
     Ok(diagrams)
 }
 
-/// The diagrams a recorded delta carries: each spec in its directory, and each name of its `remove_diagrams`.
-pub(crate) fn carried(vault: &Vault, delta: &Id, header: &Map<String, Value>) -> Diagrams {
-    let removed = header.get("remove_diagrams").and_then(Value::as_array).into_iter().flatten();
-    let mut diagrams: Diagrams = removed.filter_map(|n| Some((n.as_str()?.to_string(), None))).collect();
-    let Ok(dir) = std::fs::read_dir(vault.root.join(delta.as_str())) else { return diagrams };
-    for path in dir.filter_map(|e| Some(e.ok()?.path())) {
-        let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-        let name = file.strip_suffix(".yaml").filter(|n| is_name(n));
-        if let (Some(name), Ok(text)) = (name, std::fs::read_to_string(&path)) {
-            diagrams.insert(name.to_string(), Some(Spec { file: format!("{delta}/{file}").into(), text }));
-        }
-    }
-    diagrams
+/// The names a header field of a delta lists.
+fn names<'h>(header: &'h Map<String, Value>, field: &str) -> impl Iterator<Item = &'h str> {
+    header.get(field).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str)
 }
 
-/// What the record of `delta` writes beside its file: each spec in its directory, and the `## Rejected` append of the
-/// `stale` delta it replaces (13, Delta: the record's one closing append).
+/// The diagrams a recorded delta carries: each spec its `diagrams` lists, read from its directory, and each name of
+/// its `remove_diagrams`.
+pub(crate) fn carried(vault: &Vault, delta: &Id, header: &Map<String, Value>) -> Result<Diagrams, Refusal> {
+    let mut diagrams: Diagrams = names(header, "remove_diagrams").map(|n| (n.to_string(), None)).collect();
+    for name in names(header, "diagrams") {
+        let file = PathBuf::from(format!("{delta}/{name}.yaml"));
+        let text = std::fs::read_to_string(vault.root.join(&file)).map_err(|e| {
+            Refusal::failed(
+                file.display().to_string(),
+                format!("{e}; the delta lists `{name}` in `diagrams`, so restore its spec from git"),
+            )
+        })?;
+        diagrams.insert(name.to_string(), Some(Spec { file, text }));
+    }
+    Ok(diagrams)
+}
+
+/// The content hash `base` holds (28, design change 8): blake3 of the design file, then, for each spec under its
+/// `diagrams/` by name, a NUL, the name, a NUL and the spec, so a diagram-only change moves it too.
+pub(crate) fn base(vault: &Vault, design: &Id) -> Result<String, Refusal> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(vault.text(design)?.as_bytes());
+    for (name, text) in specs(vault, design).0 {
+        hasher.update(b"\0").update(name.as_bytes()).update(b"\0").update(text.as_bytes());
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// What the record of `delta` writes beside its file: each spec in its directory, the diff page of each spec that
+/// replaces one of its design's (28, design change 13), and the `## Rejected` append of the `stale` delta it replaces
+/// (13, Delta: the record's one closing append).
 pub(crate) fn close(
     vault: &Vault,
     delta: &Id,
@@ -94,9 +114,19 @@ pub(crate) fn close(
         changes.insert(old.clone(), format!("{held}{gap}## Rejected\n\nrejected_at: {instant}\n"));
         result["rejected"] = old.as_str().into();
     }
-    let writes =
-        diagrams.iter().filter_map(|(n, s)| Some((format!("{delta}/{n}.yaml"), Some(s.as_ref()?.text.clone()))));
-    Ok(Moves { writes: writes.collect(), ..Moves::default() })
+    let design = Kind::Delta.parent(delta).expect("a delta sits under its design");
+    let mut writes = Vec::new();
+    for (name, spec) in diagrams.iter().filter_map(|(n, s)| Some((n, s.as_ref()?))) {
+        writes.push((format!("{delta}/{name}.yaml"), Some(spec.text.clone())));
+        // The `nodes` check passed, so the diff page needs no resolver; a design with no such spec has no diff.
+        let Ok(held) = std::fs::read_to_string(vault.root.join(format!("{design}/diagrams/{name}.yaml"))) else {
+            continue;
+        };
+        let then = format!("rerun bp record delta {design}");
+        let diff = bp_diagram::render(&spec.text, Some(&held), None).map_err(|f| invalid(&spec.file, &f, &then).0)?;
+        writes.push((format!("{delta}/{name}.diff.html"), Some(diff.html)));
+    }
+    Ok(Moves { writes, ..Moves::default() })
 }
 
 /// The glossary text a delta's diagrams resolve against: the body of the glossary's proposed delta under the same
@@ -139,10 +169,13 @@ pub(crate) fn propose(
     };
     let names = Names::with(glossary.as_deref(), design, body);
     check(vault, design, &names, diagrams, &format!("rerun bp record delta {design}"))?;
-    fields.insert("base".into(), vault.read(design)?.hash.into());
-    let removed: Vec<Value> = diagrams.iter().filter(|(_, s)| s.is_none()).map(|(n, _)| n.as_str().into()).collect();
-    if !removed.is_empty() {
-        fields.insert("remove_diagrams".into(), removed.into());
+    fields.insert("base".into(), base(vault, design)?.into());
+    for (field, puts) in [("diagrams", true), ("remove_diagrams", false)] {
+        let listed: Vec<Value> =
+            diagrams.iter().filter(|(_, s)| s.is_some() == puts).map(|(n, _)| n.as_str().into()).collect();
+        if !listed.is_empty() {
+            fields.insert(field.into(), listed.into());
+        }
     }
     Ok(stale)
 }
@@ -178,8 +211,10 @@ fn pending(vault: &Vault, index: &Index, design: &Id, milestone: &str) -> Result
         return Ok(None);
     };
     let delta = Id::parse(&d.id).expect("the index holds ids");
-    if moved(vault, design, &delta, d.header.get("base").and_then(Value::as_str), milestone).is_err() {
-        return Ok(Some(delta));
+    match moved(vault, design, &delta, d.header.get("base").and_then(Value::as_str), milestone) {
+        Err(r) if r.code == Code::BaseMoved => return Ok(Some(delta)),
+        Err(r) => return Err(r),
+        Ok(()) => {}
     }
     Err(Refusal::new(
         Code::DeltaPending,
@@ -199,7 +234,7 @@ pub(crate) fn moved(
 ) -> Result<(), Refusal> {
     // A delta recorded before deltas held a base has nothing to compare.
     let Some(base) = base else { return Ok(()) };
-    if vault.read(design)?.hash == base {
+    if self::base(vault, design)? == base {
         return Ok(());
     }
     Err(Refusal::new(
@@ -208,7 +243,7 @@ pub(crate) fn moved(
         "a delta is accepted only onto the design it was proposed on, so a stamp never reverts a change the delta did \
          not see (28, design change 8)",
         format!(
-            "{design} changed since {delta} was proposed; read it (bp show {design}), then propose the change on it: \
+            "{design} or a spec under its diagrams/ changed since {delta} was proposed; read it (bp show {design}), then propose the change on it: \
              bp record delta {design} --field milestone={milestone} --body-file <f>, which closes {delta} as \
              rejected; then rerun the stamp"
         ),

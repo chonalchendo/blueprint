@@ -358,7 +358,7 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Re
             let carried = d.header.get("milestone").and_then(Value::as_str) == Some(id.as_str());
             if carried && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed {
                 let delta = Id::parse(&d.id).expect("the index holds ids");
-                let diagrams = crate::delta::carried(vault, &delta, &d.header);
+                let diagrams = crate::delta::carried(vault, &delta, &d.header)?;
                 let base = d.header.get("base").and_then(Value::as_str).map(str::to_string);
                 deltas.push(Carried { design: design.clone(), delta, body: d.body, base, diagrams });
             }
