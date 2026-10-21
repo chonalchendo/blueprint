@@ -16,6 +16,7 @@ name = "bp"
 path = "src/main.rs"
 
 [dependencies]
+bp-diagram.workspace = true
 bp-vault.workspace = true
 bp-design.workspace = true
 bp-change.workspace = true

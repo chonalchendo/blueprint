@@ -6,6 +6,7 @@ mod check;
 mod claim;
 mod clock;
 mod create;
+mod diagram;
 mod done;
 mod install;
 mod intent;
@@ -98,6 +99,8 @@ pub enum Verb {
     Stamp(stamp::Stamp),
     /// The bundle into a harness, at the clone's top, with its manifest; local, so it calls no forge.
     Install(install::Install),
+    /// Check and render a diagram spec, or the diff of two, to a file outside the vault.
+    Diagram(diagram::Diagram),
 }
 
 /// `bp show <id> [--section <heading>] [--no-body] [--at <ref>]`.
@@ -196,6 +199,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Check(c) => check::run(cwd, c, cli.json, out),
         Verb::Stamp(s) => stamp::run(cwd, s, cli.json, out),
         Verb::Install(i) => wrote(install::install(cwd, i), cli.json, out),
+        Verb::Diagram(d) => diagram::run(cwd, d, cli.json, out),
     }
 }
 

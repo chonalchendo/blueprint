@@ -1,0 +1,35 @@
+# bp-containers.yaml with one node added (forge) and one removed (repository and forge, which it replaces). The
+# diff render pairs nodes by id and edges by from→to, so the checks edge shows as removed and added.
+type: architecture
+level: container
+title: "Inside Blueprint: four containers and one library"
+lede: The vault is the only source of truth. The tool is the only writer.
+focus: [tool]
+groups:
+  - {id: blueprint, label: System · Blueprint, members: [tool, human-view, model-library, vault, bundle]}
+nodes:
+  - {id: tool, noun: Tool, role: application, at: [1, 0], note: The one way to change the vault.}
+  - {id: human-view, noun: Human view, role: application, at: [0, 0], note: The blueprint as a tree. Read only.}
+  - {id: model-library, noun: Model library, role: library, at: [0, 1], span: [2, 1], note: "Schema, graph, index, walk. The only reader and writer of vault files."}
+  - {id: vault, noun: Vault, role: store, at: [0, 2], note: "Every project's blueprint, as files."}
+  - {id: bundle, noun: Bundle, role: deployable, at: [1, 2], note: Skills and roles per harness dialect.}
+  - {id: harness, term: harness, role: external, at: [2, 2], label: Agent harness, note: Runs sessions and dispatches.}
+  - {id: forge, term: forge, role: external, at: [2, 1], label: Forge, note: "Pull requests, reviews, CI."}
+edges:
+  - {from: harness, to: tool, label: operates}
+  - {from: tool, to: model-library, label: uses}
+  - {from: human-view, to: model-library, label: uses}
+  - {from: model-library, to: vault, label: reads · writes, both: true}
+  - {from: tool, to: bundle, label: ships}
+  - {from: tool, to: human-view, label: ships with, style: dashed}
+  - {from: bundle, to: vault, label: stored in, style: dashed}
+  - {from: bundle, to: harness, label: installed into}
+  - {from: tool, to: forge, label: runs checks on}
+legend:
+  - {role: focus, label: "Focus: the only writer"}
+  - {role: application, label: Application}
+  - {role: library, label: Library}
+  - {role: store, label: Data store}
+  - {role: deployable, label: Deployable unit}
+  - {role: external, label: Outside Blueprint}
+  - {style: dashed, label: "Ships with, stored in"}
