@@ -113,6 +113,20 @@ fn refuses_base_moved_after_a_spec_change() {
 }
 
 #[test]
+fn a_dirty_spec_refuses_path_dirty_before_base_moved() {
+    let spec = "type: architecture\nlevel: container\ntitle: One\nlede: One box.\nnodes:\n  - {id: o, noun: One, at: [0, 0]}\n";
+    let path = format!("{S}/diagrams/one.yaml");
+    let v = vault(&[(&path, spec)]);
+    let code = common::vault(&[("marker.txt", "here\n")]);
+    let (root, code) = (v.path(), code.path());
+    assert_eq!(bp(root, &["transition", B, "approved"]).0, Some(0));
+    assert_eq!(record(root, B, "## One\n\nB's.\n").0, Some(0));
+    std::fs::write(root.join(&path), spec.replace("One box.", "Dirty.")).unwrap();
+    let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", B]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+}
+
+#[test]
 fn a_stale_delta_of_another_cause_still_refuses_delta_pending() {
     let v = vault(&[]);
     let code = common::vault(&[("marker.txt", "here\n")]);

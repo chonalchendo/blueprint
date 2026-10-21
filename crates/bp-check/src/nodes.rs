@@ -156,7 +156,7 @@ fn unnumbered(heading: &str) -> &str {
 
 /// The nouns a design body names: each ATX heading, and the first cell of each table row below the header row.
 /// Fenced code names none, so a check block's comment is no heading.
-fn nouns(body: &str) -> BTreeSet<String> {
+pub fn nouns(body: &str) -> BTreeSet<String> {
     let lines: Vec<&str> = body.lines().map(str::trim_start).collect();
     let rule = |l: &str| l.starts_with('|') && l.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '));
     let mut out = BTreeSet::new();

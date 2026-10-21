@@ -4,6 +4,7 @@
 //! `noun` resolves.
 
 mod diff;
+mod editorial;
 mod font;
 pub mod geom;
 mod grid;
@@ -24,6 +25,8 @@ mod svg;
 use std::collections::BTreeSet;
 
 use spec::{Spec, Type};
+
+pub use editorial::editorial_change;
 
 /// How bad a finding is: an error refuses the spec; a warning (a size budget) does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

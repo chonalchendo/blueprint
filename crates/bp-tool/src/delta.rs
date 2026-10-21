@@ -350,7 +350,7 @@ fn pending(
     Err(Refusal::new(
         Code::DeltaPending,
         format!("{design} {}", milestone.unwrap_or("editorial")),
-        "a design carries at most one proposed delta per milestone (13, Delta)",
+        "a design carries at most one proposed delta per milestone, and one editorial delta (13, Delta)",
         fix,
     ))
 }

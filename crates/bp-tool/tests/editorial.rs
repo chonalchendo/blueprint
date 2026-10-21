@@ -1,6 +1,6 @@
 //! The editorial delta (28, design change 9) through the binary: `record delta --editorial` needs no milestone and
-//! refuses `not_editorial` on a change to a check block, a heading, a link, or a diagram's node ids, edges or terms;
-//! `bp stamp <delta>` is the human's, writes the delta alone and stamps no version.
+//! refuses `not_editorial` on a change to a check block, a heading, a link, a glossary term, a noun, or any part of a
+//! spec but its text and layout; `bp stamp <delta>` is the human's, writes the delta alone and stamps no version.
 
 mod common;
 
@@ -18,18 +18,31 @@ const BODY: &str = "Lead words. See [[shared/threads/t]].\n\n## Store\n\nThe sto
 const SPEC: &str = "type: architecture\nlevel: container\ntitle: One\nlede: Two boxes.\nnodes:\n  - {id: s, noun: Store, \
                     at: [0, 0]}\n  - {id: i, noun: Index, at: [1, 0]}\nedges:\n  - {from: s, to: i, label: reads}\n";
 
-/// A project, the active design [`S`] with [`BODY`] and the view `one`, two threads and the planned milestone [`A`].
+const ER: &str = "type: er\nlevel: conceptual\ntitle: One\nlede: Two entities.\nnodes:\n  - {id: s, noun: Store, at: [0, 0]}\n  \
+                  - {id: i, noun: Index, at: [1, 0]}\nedges:\n  - {from: s, to: i, label: holds, card: [\"1\", \"*\"]}\n";
+const SEQ: &str = "type: sequence\ntitle: One\nlede: A call.\nparties:\n  - {id: s, noun: Store}\n  - {id: i, noun: Index}\n\
+                   steps:\n  - {id: read, from: s, to: i, say: read}\n  - {id: ack, from: i, to: s, say: ack}\n";
+const GLOSSARY: &str = "projects/bp/designs/glossary";
+
 fn vault() -> tempfile::TempDir {
+    vault_with(SPEC)
+}
+
+/// A project, the active design [`S`] with [`BODY`] and the view `one` as `spec`, the glossary, two threads and the
+/// planned milestone [`A`].
+fn vault_with(spec: &str) -> tempfile::TempDir {
     let (s, one, page, a) =
         (format!("{S}.md"), format!("{S}/diagrams/one.yaml"), format!("{S}/diagrams/one.html"), format!("{A}.md"));
     let design = format!("---\nkind: design\ntitle: S\nstatus: active\n---\n\n{BODY}");
+    let glossary = "---\nkind: design\ntitle: G\nstatus: active\n---\n\nTerms.\n\n- `index` — the rows\n";
     let milestone = "---\nkind: milestone\ntitle: A\nstatus: planned\n---\n\n## Finish line\n\n\
                      ~~~check shell {name=p expect=0}\ntrue\n~~~\n";
     common::vault(&[
         ("projects/bp/project.md", "---\nkind: project\ntitle: bp\nstatus: active\n---\n"),
         (&s, &design),
-        (&one, SPEC),
+        (&one, spec),
         (&page, "<p>one</p>\n"),
+        (&format!("{GLOSSARY}.md"), glossary),
         (&a, milestone),
         ("shared/threads/t.md", "---\nkind: thread\ntitle: T\nstatus: open\n---\n"),
         ("shared/threads/u.md", "---\nkind: thread\ntitle: U\nstatus: open\n---\n"),
@@ -38,9 +51,13 @@ fn vault() -> tempfile::TempDir {
 
 /// `bp record delta <S> --editorial` with `body` and, when given, the spec `one`.
 fn record(root: &Path, body: &str, spec: Option<&str>, extra: &[&str]) -> (Option<i32>, Value) {
+    record_on(root, S, body, spec, extra)
+}
+
+fn record_on(root: &Path, design: &str, body: &str, spec: Option<&str>, extra: &[&str]) -> (Option<i32>, Value) {
     let file = root.join(".bp/body.md");
     std::fs::write(&file, body).unwrap();
-    let mut args = vec!["record", "delta", S, "--editorial", "--body-file", file.to_str().unwrap()];
+    let mut args = vec!["record", "delta", design, "--editorial", "--body-file", file.to_str().unwrap()];
     let flag;
     if let Some(spec) = spec {
         std::fs::write(root.join(".bp/one.yaml"), spec).unwrap();
@@ -53,17 +70,21 @@ fn record(root: &Path, body: &str, spec: Option<&str>, extra: &[&str]) -> (Optio
 
 /// Asserts the record refuses `not_editorial` with `subject` and commits nothing.
 fn refuses(body: &str, spec: Option<&str>, subject: &str, names: &str) {
-    let v = vault();
+    refuses_on(&vault(), S, body, spec, subject, names);
+}
+
+/// [`refuses`] on `design` of the vault `v`.
+fn refuses_on(v: &tempfile::TempDir, design: &str, body: &str, spec: Option<&str>, subject: &str, names: &str) {
     let root = v.path();
     let before = commits(root);
-    let (exit, r) = record(root, body, spec, &[]);
+    let (exit, r) = record_on(root, design, body, spec, &[]);
     assert_eq!(
         (exit, r["code"].as_str(), r["subject"].as_str()),
         (Some(2), Some("not_editorial"), Some(subject)),
         "{r}"
     );
     assert!(r["fix"].as_str().unwrap().contains(names), "{r}");
-    assert!(r["fix"].as_str().unwrap().contains(&format!("bp record delta {S} --field milestone=")), "{r}");
+    assert!(r["fix"].as_str().unwrap().contains(&format!("bp record delta {design} --field milestone=")), "{r}");
     assert_eq!(commits(root), before, "nothing is committed");
 }
 
@@ -87,19 +108,24 @@ fn refuses_not_editorial_link() {
 #[test]
 fn refuses_not_editorial_diagram_ids() {
     let one = format!("{S}/diagrams/one.yaml");
-    refuses(BODY, Some(&SPEC.replace("id: i,", "id: ix,").replace("to: i,", "to: ix,")), &one, "drops node `i`");
+    refuses(
+        BODY,
+        Some(&SPEC.replace("id: i,", "id: ix,").replace("to: i,", "to: ix,")),
+        &one,
+        "changes the id of node `i`",
+    );
 }
 
 #[test]
 fn refuses_not_editorial_diagram_edges() {
     let one = format!("{S}/diagrams/one.yaml");
-    refuses(BODY, Some(&SPEC.replace("from: s, to: i", "from: i, to: s")), &one, "drops edge `s→i`");
+    refuses(BODY, Some(&SPEC.replace("from: s, to: i", "from: i, to: s")), &one, "changes the id of edge `s--i`");
 }
 
 #[test]
 fn refuses_not_editorial_diagram_terms() {
     let one = format!("{S}/diagrams/one.yaml");
-    refuses(BODY, Some(&SPEC.replace("noun: Index", "noun: Detail")), &one, "changes the link of node `i`");
+    refuses(BODY, Some(&SPEC.replace("noun: Index", "noun: Detail")), &one, "changes the noun of node `i`");
 }
 
 #[test]
@@ -115,6 +141,82 @@ fn refuses_not_editorial_a_new_diagram() {
         (Some(2), Some("not_editorial"), Some(two.as_str())),
         "{r}"
     );
+}
+
+/// [`refuses`] on the spec `one`, whose base is `base`.
+fn refuses_spec(base: &str, spec: &str, names: &str) {
+    refuses_on(&vault_with(base), S, BODY, Some(spec), &format!("{S}/diagrams/one.yaml"), names);
+}
+
+#[test]
+fn refuses_not_editorial_diagram_role() {
+    refuses_spec(SPEC, &SPEC.replace("noun: Store,", "noun: Store, role: external,"), "changes the role of node `s`");
+}
+
+#[test]
+fn refuses_not_editorial_diagram_group() {
+    let group = "groups:\n  - {id: g, label: Trust boundary, members: [s, i]}\nedges:";
+    refuses_spec(SPEC, &SPEC.replace("edges:", group), "adds group `g`");
+}
+
+#[test]
+fn refuses_not_editorial_diagram_step_order() {
+    let swapped = SEQ
+        .replace("{id: read, from: s, to: i, say: read}", "TMP")
+        .replace("{id: ack, from: i, to: s, say: ack}", "{id: read, from: s, to: i, say: read}");
+    let swapped = swapped.replace("TMP", "{id: ack, from: i, to: s, say: ack}");
+    refuses_spec(SEQ, &swapped, "changes the id of step `read`");
+}
+
+#[test]
+fn refuses_not_editorial_diagram_dashed() {
+    refuses_spec(
+        SPEC,
+        &SPEC.replace("label: reads}", "label: reads, style: dashed}"),
+        "changes the dashed of edge `s--i`",
+    );
+}
+
+#[test]
+fn refuses_not_editorial_diagram_card() {
+    refuses_spec(ER, &ER.replace("[\"1\", \"*\"]", "[\"*\", \"1\"]"), "changes the card of edge `s--i`");
+}
+
+#[test]
+fn refuses_not_editorial_diagram_focus() {
+    refuses_spec(
+        SPEC,
+        &SPEC.replace("lede: Two boxes.\n", "lede: Two boxes.\nfocus: [i]\n"),
+        "changes the spec's focus",
+    );
+}
+
+#[test]
+fn refuses_not_editorial_diagram_level() {
+    refuses_spec(SPEC, &SPEC.replace("level: container", "level: component"), "changes the spec's level");
+}
+
+#[test]
+fn refuses_not_editorial_diagram_type() {
+    refuses_spec(
+        SPEC,
+        &SPEC.replace("type: architecture\nlevel: container\n", "type: state\n"),
+        "changes the spec's type",
+    );
+}
+
+#[test]
+fn refuses_not_editorial_a_glossary_term() {
+    let v = vault();
+    let body = "Terms.\n\n- `index` — the rows\n";
+    refuses_on(&v, GLOSSARY, &body.replace("`index`", "`catalogue`"), None, GLOSSARY, "drops glossary term `index`");
+    refuses_on(&v, GLOSSARY, &format!("{body}- `widget` — a part\n"), None, GLOSSARY, "adds glossary term `widget`");
+}
+
+#[test]
+fn refuses_not_editorial_a_noun() {
+    let body = BODY.replace("| Index | the rows |", "| Index | the rows |\n| Extra | more |");
+    refuses(&body, None, S, "adds noun `extra`");
 }
 
 /// Wording, a table cell, a node label and a node's cell change: the delta records with no milestone, and the
@@ -165,6 +267,11 @@ fn an_editorial_stamp_refuses_base_moved_and_path_dirty() {
     let delta = r["id"].as_str().unwrap().to_string();
 
     std::fs::write(root.join(format!("{S}.md")), "dirty\n").unwrap();
+    let (exit, r) = bp(root, &["stamp", &delta]);
+    assert_eq!((exit, r["code"].as_str()), (Some(2), Some("path_dirty")), "{r}");
+    git(root, &["checkout", "--", "."]);
+    // A dirty spec is `path_dirty`, not a moved base: the check runs before the base is hashed.
+    std::fs::write(root.join(format!("{S}/diagrams/one.yaml")), SPEC.replace("reads", "reads dirty")).unwrap();
     let (exit, r) = bp(root, &["stamp", &delta]);
     assert_eq!((exit, r["code"].as_str()), (Some(2), Some("path_dirty")), "{r}");
     git(root, &["checkout", "--", "."]);

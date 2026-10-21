@@ -35,7 +35,7 @@ pub struct Record {
     /// A diagram the delta removes from its design, with its page. Repeat for each.
     #[arg(long = "remove-diagram", value_name = "NAME")]
     pub remove_diagrams: Vec<String>,
-    /// A delta that changes only wording, labels and cells: no milestone; the human accepts it with `bp stamp <delta>`.
+    /// A delta that changes only wording and layout: no milestone; the human accepts it with `bp stamp <delta>`.
     #[arg(long)]
     pub editorial: bool,
     /// A forge URI the record names, such as its pull request.

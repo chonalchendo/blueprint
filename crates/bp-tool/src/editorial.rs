@@ -1,7 +1,7 @@
 //! The editorial delta (28, design change 9; 13, Delta; 21, a human act). `record delta <design> --editorial` needs
-//! no milestone. It refuses `not_editorial` when the proposed body or a spec it carries changes what another file, a
-//! check or a view relies on: a check block, a heading, a link, or a diagram's node ids, edges or terms. Wording,
-//! labels and cells may change. The human accepts it alone with `bp stamp <delta>`: no finish line runs and no
+//! no milestone. The rule is an allow-list: only wording and layout may change. It refuses `not_editorial` when the
+//! proposed body changes a check block, a heading, a link, a glossary term or a noun, or a spec it carries changes
+//! any part but its text and layout (`bp_diagram::editorial_change`). The human accepts it alone with `bp stamp <delta>`: no finish line runs and no
 //! version is stamped, because a version is one milestone's acceptance (13, `BlueprintVersion`); the next milestone's
 //! manifest pins what it wrote.
 
@@ -28,42 +28,10 @@ pub(crate) fn usage(kind: Kind, editorial: bool, milestone: bool) -> Result<(), 
             Code::SchemaInvalid,
             "delta milestone",
             "a record holds its kind's fields (13, the record tables)",
-            "`milestone` is required: --field milestone=<milestone>; or --editorial when only wording, labels and cells \
-             change",
+            "`milestone` is required: --field milestone=<milestone>; or --editorial when only wording and layout change",
         )),
         _ => Ok(()),
     }
-}
-
-/// What an editorial delta keeps of a diagram: each node's link by id, and each edge as `from→to`, as the rendered
-/// SVG states them (28, design change 12: the SVG is the view's contract).
-#[derive(Default)]
-struct Shape {
-    nodes: BTreeMap<String, String>,
-    edges: Vec<String>,
-}
-
-/// The shape of a rendered page: each `<g>` of its SVG with `data-role` is a node, and each with `data-from` an edge.
-fn shape(html: &str) -> Shape {
-    let svg = html.find("<svg").map_or("", |at| &html[at..html[at..].find("</svg>").map_or(html.len(), |e| at + e)]);
-    let mut s = Shape::default();
-    for tag in svg.split("<g ").skip(1) {
-        let tag = format!(" {}", &tag[..tag.find('>').unwrap_or(tag.len())]);
-        let attr = |name: &str| {
-            let at = tag.find(&format!(" {name}=\""))? + name.len() + 3;
-            Some(tag[at..].split('"').next().unwrap_or_default().to_string())
-        };
-        if let (Some(from), Some(to)) = (attr("data-from"), attr("data-to")) {
-            s.edges.push(format!("{from}→{to}"));
-        } else if let (Some(id), Some(_)) = (attr("data-id"), attr("data-role")) {
-            let link = attr("data-term")
-                .map(|t| format!("term {t}"))
-                .or_else(|| attr("data-noun").map(|n| format!("noun {n}")));
-            s.nodes.insert(id, link.unwrap_or_default());
-        }
-    }
-    s.edges.sort();
-    s
 }
 
 /// The first item one side holds more often than the other, and whether `new` drops or adds it.
@@ -73,9 +41,9 @@ fn first<T: PartialEq + Clone>(old: &[T], new: &[T]) -> Option<(T, &'static str)
     dropped.or_else(|| new.iter().find(|x| count(new, x) > count(old, x)).map(|x| (x.clone(), "adds")))
 }
 
-/// Refuses `not_editorial` when `body`, the proposed body of `design`, or a spec of `diagrams` changes a check block,
-/// a heading, a link, or a diagram's node ids, edges or terms. A diagram added or removed changes its node ids. A
-/// link may move within the prose; a heading or a check block may not.
+/// Refuses `not_editorial` when `body`, the proposed body of `design`, or a spec of `diagrams` changes more than
+/// wording and layout. A diagram added or removed is a change. A link may move within the prose; a heading or a check
+/// block may not.
 pub(crate) fn refuse(vault: &Vault, design: &Id, body: &str, diagrams: &Diagrams) -> Result<(), Refusal> {
     let (old, new) = (vault.read(design)?.body, Body::parse(body));
     let check = (old.checks != new.checks).then(|| {
@@ -98,28 +66,26 @@ pub(crate) fn refuse(vault: &Vault, design: &Id, body: &str, diagrams: &Diagrams
     if let Some(what) = check.or_else(heading).or_else(link) {
         return Err(not_editorial(design.as_str(), &format!("the proposed body {what}"), design));
     }
+    let project = design.project().expect("a design sits in a project");
+    let terms = |b: &Body| -> Vec<String> {
+        let all = (*design == crate::delta::glossary_id(project)).then(|| bp_check::nodes::terms(&b.text));
+        all.into_iter().flatten().map(str::to_string).collect::<BTreeSet<_>>().into_iter().collect()
+    };
+    let nouns = |b: &Body| bp_check::nodes::nouns(&b.text).into_iter().collect::<Vec<_>>();
+    let term = || first(&terms(&old), &terms(&new)).map(|(t, how)| format!("{how} glossary term `{t}`"));
+    let noun = || first(&nouns(&old), &nouns(&new)).map(|(n, how)| format!("{how} noun `{n}`"));
+    if let Some(what) = term().or_else(noun) {
+        return Err(not_editorial(design.as_str(), &format!("the proposed body {what}"), design));
+    }
     for (name, spec) in diagrams {
         let path = format!("{design}/diagrams/{name}.yaml");
-        let draw = |text: &str, file: &str| {
-            bp_diagram::render(text, None, None).map(|r| shape(&r.html)).map_err(|f| {
-                let fix =
-                    format!("replace it through a milestone delta: bp record delta {design} --field milestone=<m>");
-                crate::delta::in_vault(file, &f, &fix).0
-            })
+        let before = std::fs::read_to_string(vault.root.join(&path)).ok();
+        let found = match (before, spec) {
+            (Some(old), Some(s)) => bp_diagram::editorial_change(&old, &s.text),
+            (None, Some(_)) => Some("adds the diagram".to_string()),
+            (Some(_), None) => Some("removes the diagram".to_string()),
+            (None, None) => None,
         };
-        let before = match std::fs::read_to_string(vault.root.join(&path)) {
-            Ok(text) => draw(&text, &path)?,
-            Err(_) => Shape::default(),
-        };
-        let after = match spec {
-            Some(s) => draw(&s.text, &s.file.display().to_string())?,
-            None => Shape::default(),
-        };
-        let (bn, an): (Vec<&String>, Vec<&String>) = (before.nodes.keys().collect(), after.nodes.keys().collect());
-        let mut found = first(&bn, &an).map(|(id, how)| format!("{how} node `{id}`"));
-        let term = before.nodes.iter().find(|(id, link)| after.nodes.get(*id).is_some_and(|l| l != *link));
-        found = found.or_else(|| term.map(|(id, link)| format!("changes the link of node `{id}` from `{link}`")));
-        found = found.or_else(|| first(&before.edges, &after.edges).map(|(e, how)| format!("{how} edge `{e}`")));
         if let Some(what) = found {
             return Err(not_editorial(&path, &format!("the delta's spec {what}"), design));
         }
@@ -131,11 +97,11 @@ fn not_editorial(subject: &str, what: &str, design: &Id) -> Refusal {
     Refusal::new(
         Code::NotEditorial,
         subject,
-        "an editorial delta changes wording, labels and cells only: no check block, heading, link, or diagram node \
-         id, edge or term (28, design change 9)",
+        "an editorial delta changes wording and layout only: no check block, heading, link, glossary term, noun, or \
+         diagram part but its text and layout (28, design change 9)",
         format!(
             "{what}; keep it as it is, or propose the change under a milestone: bp record delta {design} --field \
-             milestone=<milestone> (bp list milestone --status approved)"
+             milestone=<milestone> (bp list milestone --status planned, then approved)"
         ),
     )
 }
@@ -181,6 +147,7 @@ pub(crate) fn stamp(cwd: &Path, delta: &Id, s: &crate::stamp::Stamp) -> Result<W
         DeltaState::Proposed => {}
     }
     writer.clean([&design, delta])?;
+    crate::delta::clean_specs(vault, std::slice::from_ref(&design), &[])?;
     crate::delta::moved(vault, &design, delta, &header, None)?;
     let diagrams = crate::delta::carried(vault, delta, &header)?;
     let designs = crate::delta::all(writer.index(), design.project().expect("a design sits in a project"))?;

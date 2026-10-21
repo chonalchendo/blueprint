@@ -148,8 +148,8 @@ fn write(cwd: &Path, d: &Diagram, design: &str, name: &str) -> Result<Wrote, Ref
             id.as_str(),
             "a design past draft changes only through a delta record; its diagrams change with it (13, Design history)",
             format!(
-                "bp record delta {id} --field milestone=<milestone> --body-file <f> --diagram {name}=<f>; {preview} \
-                 renders it first"
+                "bp record delta {id} --field milestone=<milestone> --body-file <f> --diagram {name}=<f>; or --editorial \
+                 when only wording and layout change; {preview} renders it first"
             ),
         )
         .into());
