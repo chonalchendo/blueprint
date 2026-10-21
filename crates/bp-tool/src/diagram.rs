@@ -10,10 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use bp_check::nodes::{Names, specs, terms};
+use bp_check::nodes::{Names, is_name, specs, terms};
 use bp_design::DesignStatus;
 use bp_diagram::{Finding, Link, Severity};
-use bp_vault::{Code, Id, Kind, Moves, Refusal, SLUG_MAX, Vault, is_slug};
+use bp_vault::{Code, Id, Kind, Moves, Refusal, SLUG_MAX, Vault};
 use clap::Args;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -104,8 +104,7 @@ pub(crate) fn run(cwd: &Path, d: &Diagram, json: bool, out: &mut impl std::io::W
 /// commit with `Bp-Verb: diagram`. A repeat that changes no file exits 3.
 fn write(cwd: &Path, d: &Diagram, design: &str, name: &str) -> Result<Wrote, Refused> {
     let spec = d.spec_file.as_deref().map(|f| read(cwd, f).map(|text| (f, text))).transpose()?;
-    // No dot, so `<name>.yaml` never reads as a converted `<name>.nodes.yaml`.
-    if !is_slug(name) || name.contains('.') {
+    if !is_name(name) {
         return Err(
             Refusal::usage(name, "name the diagram in lowercase letters, digits and `-`, such as containers").into()
         );
@@ -116,14 +115,26 @@ fn write(cwd: &Path, d: &Diagram, design: &str, name: &str) -> Result<Wrote, Ref
     let id = subject(writer.index(), design)?;
     let header = writer.index().header(id.as_str())?;
     let field = |k: &str| header.as_ref().and_then(|h| h.get(k)?.as_str().map(str::to_string));
-    if field("kind").and_then(|k| k.parse::<Kind>().ok()) != Some(Kind::Design) {
-        return Err(Refusal::new(
-            Code::NoNode,
-            id.as_str(),
-            "a diagram belongs to a design (13, Diagram)",
-            format!("name a design: bp list design --project {}", id.project().unwrap_or("<project>")),
-        )
-        .into());
+    match field("kind") {
+        None => {
+            return Err(Refusal::new(
+                Code::NoNode,
+                id.as_str(),
+                "a diagram belongs to a design that exists (13, Diagram)",
+                format!("name a design: bp list design --project {}", id.project().unwrap_or("<project>")),
+            )
+            .into());
+        }
+        Some(k) if k.parse::<Kind>().ok() != Some(Kind::Design) => {
+            return Err(Refusal::new(
+                Code::SchemaInvalid,
+                id.as_str(),
+                "a diagram belongs to a design (13, Diagram)",
+                format!("a diagram belongs to a design; {id} is kind {k}"),
+            )
+            .into());
+        }
+        Some(_) => {}
     }
     let preview = format!("bp diagram --spec-file <f> --out /tmp/{name}.html");
     if field("status").as_deref() != Some(DesignStatus::Draft.as_str()) {
@@ -135,19 +146,25 @@ fn write(cwd: &Path, d: &Diagram, design: &str, name: &str) -> Result<Wrote, Ref
         )
         .into());
     }
+    let project = id.project().expect("a design sits in a project");
     let paths = [format!("{id}/diagrams/{name}.yaml"), format!("{id}/diagrams/{name}.html")];
-    writer.clean_paths(paths.to_vec())?;
+    // The names come from the design's body and the glossary as committed, so the `nodes` check, which runs on the
+    // head, reads the same ones.
+    let read_too = [format!("{id}.md"), format!("projects/{project}/designs/glossary.md")];
+    writer.clean_paths(paths.iter().chain(&read_too).cloned().collect())?;
     let on_disk = |p: &str| std::fs::read_to_string(vault.root.join(p)).ok();
     let (files, findings) = match spec {
         None => (paths.iter().filter(|p| on_disk(p).is_some()).map(|p| (p.clone(), None)).collect::<Vec<_>>(), vec![]),
         Some((file, spec)) => {
             let names = Names::of(&vault, &id, &vault.read(&id)?.body.text);
             let level = bp_diagram::outline(&spec, &|_| true).ok().and_then(|(level, _)| level);
-            let project = id.project().expect("a design sits in a project");
             let children = |link: Link<'_>| children(&vault, project, level.as_deref(), link);
             let then = format!("bp diagram {id} {name} --spec-file {} --json", file.display());
-            let render = bp_diagram::render_with(&spec, None, Some(&|l| names.resolves(l)), &children)
-                .map_err(|f| invalid(file, &f, &then))?;
+            let render =
+                bp_diagram::render_with(&spec, None, Some(&|l| names.resolves(l)), &children).map_err(|mut f| {
+                    names.explain(&mut f);
+                    invalid(file, &f, &then)
+                })?;
             let texts = [spec, render.html];
             let files = paths
                 .iter()
@@ -181,6 +198,7 @@ fn children(vault: &Vault, project: &str, level: Option<&str>, link: Link<'_>) -
     let container = Id::parse(&format!("projects/{project}/designs/containers/{}", bp_vault::slug(text, SLUG_MAX)));
     match (level, container) {
         (Some("container"), Ok(c)) => specs(vault, &c)
+            .0
             .iter()
             .filter(|(_, t)| bp_diagram::outline(t, &|_| true).is_ok_and(|(l, _)| l.as_deref() == Some("component")))
             .count(),

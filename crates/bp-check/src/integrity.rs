@@ -43,7 +43,7 @@ pub(crate) fn clean(vault: &Vault, owner: &Id) -> Result<(), Refusal> {
             Err(Refusal::new(
                 Code::PathDirty,
                 dir.clone(),
-                "an integrity run names the vault's head, so the project's files are committed (15, the check grammar)",
+                "an in-process run names the vault's head, so the project's files are committed (15, the check grammar)",
                 format!("commit or restore the changes under {dir} (first: {first}), then rerun bp check {owner}"),
             ))
         }

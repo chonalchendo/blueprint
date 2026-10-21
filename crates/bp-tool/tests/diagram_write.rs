@@ -104,12 +104,17 @@ fn a_design_past_draft_refuses_design_not_delta() {
     assert!(v["fix"].as_str().unwrap().starts_with(&format!("bp record delta {VAULT}")), "{v}");
     let (exit, v) = bp(root, &["diagram", VAULT, "front", "--remove"]);
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("design_not_delta")), "{v}");
-    for (design, name, want) in
-        [(FRONT, "a.b", (4, "usage")), (FRONT, "Front", (4, "usage")), ("projects/bp/project", "front", (2, "no_node"))]
-    {
+    for (design, name, want) in [
+        (FRONT, "a.b", (4, "usage")),
+        (FRONT, "Front", (4, "usage")),
+        ("projects/bp/project", "front", (2, "schema_invalid")),
+        ("projects/bp/designs/containers/none", "front", (2, "no_node")),
+    ] {
         let (exit, v) = bp(root, &["diagram", design, name, "--spec-file", &s]);
         assert_eq!((exit, v["code"].as_str()), (Some(want.0), Some(want.1)), "{design} {name}: {v}");
     }
+    let (_, v) = bp(root, &["diagram", "projects/bp/project", "front", "--spec-file", &s]);
+    assert_eq!(v["fix"], "a diagram belongs to a design; projects/bp/project is kind project", "{v}");
     let (exit, _) = bp(root, &["diagram", FRONT, "front", "--spec-file", &s, "--out", "/tmp/x.html"]);
     assert_eq!(exit, Some(4), "the preview's --out takes no design");
 }
@@ -155,11 +160,73 @@ fn the_nodes_check_runs_over_the_specs() {
     git(root, &["commit", "-qam", "hand edit"]);
     let (exit, v) = check();
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("check_failed")), "{v}");
-    assert_eq!(v["runs"][0]["note"], format!("1 finding in 1 of 1 diagram spec of {FRONT}"));
+    assert_eq!(v["runs"][0]["note"], format!("1 finding in 1 of 1 diagram file of {FRONT}"));
     let (_, run) = bp(root, &["show", v["runs"][0]["id"].as_str().unwrap()]);
     let body = run["body"].as_str().unwrap_or_default();
     assert!(body.contains("nodes/resolve: front#v: noun `Nowhere` is not named by the home design"), "{run}");
+    // A file `bp` cannot have written fails the run, so no spec hides from it; a converted node list does not.
+    let dir = root.join(FRONT).join("diagrams");
+    std::fs::write(dir.join("front.yaml"), SPEC).unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    for name in ["evil.v2.yaml", "evil.yml", "sub/evil.yaml", "old.nodes.yaml"] {
+        std::fs::write(dir.join(name), SPEC.replace("term: harness", "term: no-such-term")).unwrap();
+    }
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "planted"]);
+    let (exit, v) = check();
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("check_failed")), "{v}");
+    assert_eq!(v["runs"][0]["note"], format!("3 findings in 3 of 4 diagram files of {FRONT}"));
+    let (_, run) = bp(root, &["show", v["runs"][0]["id"].as_str().unwrap()]);
+    let body = run["body"].as_str().unwrap_or_default();
+    for name in ["evil.v2.yaml", "evil.yml", "sub"] {
+        assert!(body.contains(&format!("nodes/name: diagrams/{name}: not a diagram spec")), "{name}: {run}");
+    }
+    assert!(!body.contains("old.nodes.yaml"), "{run}");
     // An owner with no named block exits 3 and lists no run.
     let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["check", VAULT]);
     assert_eq!((exit, v["runs"].clone()), (Some(3), serde_json::json!([])), "{v}");
+}
+
+#[test]
+fn the_body_and_the_glossary_it_resolves_against_are_committed() {
+    let (vault, _code) = setup();
+    let root = vault.path();
+    let tmp = tempfile::tempdir().unwrap();
+    let s = spec(tmp.path(), "s.yaml", &SPEC.replace("noun: Vault", "noun: Ghost"));
+    for (file, extra) in
+        [(format!("{FRONT}.md"), "\n## Ghost\n"), ("projects/bp/designs/glossary.md".to_string(), "- `ghost` — a.\n")]
+    {
+        let path = root.join(&file);
+        let committed = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, committed.clone() + extra).unwrap();
+        let (exit, v) = bp(root, &["diagram", FRONT, "front", "--spec-file", &s]);
+        assert_eq!(
+            (exit, v["code"].as_str(), v["subject"].as_str()),
+            (Some(2), Some("path_dirty"), Some(&*file)),
+            "{v}"
+        );
+        std::fs::write(&path, committed).unwrap();
+    }
+    assert!(!root.join(FRONT).join("diagrams").exists());
+}
+
+#[test]
+fn with_no_glossary_a_term_says_how_to_make_one() {
+    let (vault, _code) = setup();
+    let root = vault.path();
+    git(root, &["rm", "-q", "projects/bp/designs/glossary.md"]);
+    git(root, &["commit", "-qm", "no glossary"]);
+    let tmp = tempfile::tempdir().unwrap();
+    let s = spec(tmp.path(), "s.yaml", SPEC);
+    let (exit, v) = bp(root, &["diagram", FRONT, "front", "--spec-file", &s]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("diagram_invalid")), "{v}");
+    let detail = v["findings"][0]["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("term `harness` is no glossary slug: projects/bp/designs/glossary does not exist"),
+        "{v}"
+    );
+    assert!(
+        v["fix"].as_str().unwrap().contains("bp create design --project bp --title Glossary --slug glossary"),
+        "{v}"
+    );
 }
