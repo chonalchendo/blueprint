@@ -97,13 +97,28 @@ pub(crate) struct Head {
 }
 
 /// Renders `spec`, or, with `base`, the diff of the two. `resolve` answers whether a node's link resolves; without
-/// it, each node still needs exactly one of `term` and `noun`. Returns every finding when any is an error.
+/// it, each node still needs exactly one of `term` and `noun`. Returns every finding when any is an error. No node
+/// shows a drill badge: the preview knows no lower diagram.
 pub fn render(
     spec: &str,
     base: Option<&str>,
     resolve: Option<&dyn Fn(Link<'_>) -> bool>,
 ) -> Result<Render, Vec<Finding>> {
-    let head = spec::parse(spec)?;
+    render_with(spec, base, resolve, &|_| 0)
+}
+
+/// [`render`], with `children` giving each node's count of lower diagrams for its drill badge. The crate reads no
+/// vault, so the caller that has one answers: the count is an input, never a field of the spec the agent writes.
+pub fn render_with(
+    spec: &str,
+    base: Option<&str>,
+    resolve: Option<&dyn Fn(Link<'_>) -> bool>,
+    children: &dyn Fn(Link<'_>) -> usize,
+) -> Result<Render, Vec<Finding>> {
+    let mut head = spec::parse(spec)?;
+    for n in &mut head.nodes {
+        n.children = n.link().map_or(0, children);
+    }
     let mut findings = spec_rules(&head, resolve);
     let (drawn, classes, ghosts) = match base {
         Some(b) => {
@@ -164,17 +179,13 @@ fn spec_rules(s: &Spec, resolve: Option<&dyn Fn(Link<'_>) -> bool>) -> Vec<Findi
         out.push(Finding::error("a11y/title", "spec", "a diagram needs a `title` and a one-sentence `lede`".into()));
     }
     for n in &s.nodes {
-        let link = match (&n.term, &n.noun) {
-            (Some(t), None) => Link::Term(t),
-            (None, Some(noun)) => Link::Noun(noun),
-            _ => {
-                out.push(Finding::error(
-                    "nodes/resolve",
-                    &n.id,
-                    "give exactly one of `term` (a glossary slug) and `noun` (a noun of the home design)".into(),
-                ));
-                continue;
-            }
+        let Some(link) = n.link() else {
+            out.push(Finding::error(
+                "nodes/resolve",
+                &n.id,
+                "give exactly one of `term` (a glossary slug) and `noun` (a noun of the home design)".into(),
+            ));
+            continue;
         };
         if let Some(r) = resolve
             && !r(link)

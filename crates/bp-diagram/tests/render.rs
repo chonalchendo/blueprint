@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use bp_diagram::render;
+use bp_diagram::{Link, render, render_with};
 
 fn example(name: &str) -> String {
     std::fs::read_to_string(format!("{}/examples/{name}.yaml", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -66,6 +66,19 @@ fn the_diff_marks_added_and_removed_and_keeps_the_ghost() {
     assert!(page.contains("class=\"bp bp-architecture diff mode-diff\""));
 }
 
+/// The drill badge is the caller's input, never the spec's (28, design change 12): the preview draws none, and a
+/// count from the vault draws one with the count in the index.
+#[test]
+fn a_drill_badge_comes_from_the_caller() {
+    let spec = example("bp-containers");
+    assert!(!html(&spec, None).contains("<g class=\"badge\">"));
+    let counts = |l: Link<'_>| if l == Link::Noun("Tool") { 2 } else { 0 };
+    let page = render_with(&spec, None, None, &counts).unwrap_or_else(|f| panic!("refused: {f:#?}")).html;
+    assert!(page.contains("class=\"node role-application focus drill\" data-id=\"tool\""));
+    assert_eq!(page.matches("<g class=\"badge\">").count(), 1);
+    assert!(page.contains("\"children\":2"));
+}
+
 #[test]
 fn state_and_workflow_render_from_order() {
     let state = "type: state\ntitle: An issue\nlede: An issue moves from open to resolved.\nfocus: [resolved]\nnodes:\n  - {id: start, noun: start, role: start}\n  - {id: open, term: issue, label: open}\n  - {id: in-progress, noun: in-progress, label: in progress}\n  - {id: resolved, noun: resolved}\n  - {id: escalated, noun: escalated}\n  - {id: end, noun: end, role: end}\nedges:\n  - {from: start, to: open}\n  - {from: open, to: in-progress, label: cut}\n  - {from: in-progress, to: resolved, label: land}\n  - {from: in-progress, to: escalated, label: escalate}\n  - {from: escalated, to: open, label: reopen}\n  - {from: resolved, to: end}\n";
@@ -120,5 +133,5 @@ fn the_bytes_are_the_same_on_every_platform() {
         .map(|page| format!("{:016x}", fnv(&page)))
         .collect();
     // A deliberate change to the renderer, the style or the viewer changes these; update them in the same commit.
-    assert_eq!(got, ["c280d170bcd6efdb", "93d83886af042173", "fd7e9c2791edd1c0", "2616901b914130f4"]);
+    assert_eq!(got, ["95cc3e90e8d5c1d8", "8be473fae3472fa3", "b78b0ee0a230382e", "cc056fef711866f2"]);
 }

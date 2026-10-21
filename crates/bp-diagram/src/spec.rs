@@ -62,6 +62,19 @@ pub(crate) struct Node {
     pub(crate) time: Option<String>,
     pub(crate) owner: Option<String>,
     pub(crate) lane: Option<String>,
+    /// The lower diagrams the node drills into. The caller says, from its vault; the spec never does.
+    pub(crate) children: usize,
+}
+
+impl Node {
+    /// The node's link to the vault, or none when it gives both or neither of `term` and `noun`.
+    pub(crate) fn link(&self) -> Option<crate::Link<'_>> {
+        match (&self.term, &self.noun) {
+            (Some(t), None) => Some(crate::Link::Term(t)),
+            (None, Some(noun)) => Some(crate::Link::Noun(noun)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,6 +359,7 @@ fn nodes(r: &mut Reader, root: &Yaml, ty: Type) -> Vec<Node> {
             time: r.text(n, "time", &id),
             owner: r.text(n, "owner", &id),
             lane: r.text(n, "lane", &id),
+            children: 0,
             id,
             term,
             noun,

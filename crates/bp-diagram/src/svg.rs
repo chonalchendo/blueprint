@@ -113,6 +113,9 @@ fn node(out: &mut String, n: &SNode, diff: &[&str]) {
     if n.dashed {
         class.push("dashed".into());
     }
+    if n.children > 0 {
+        class.push("drill".into());
+    }
     let link = match (&n.term, &n.noun) {
         (Some(t), _) => format!(" data-term=\"{}\"", esc(t)),
         (None, Some(noun)) => format!(" data-noun=\"{}\"", esc(noun)),
@@ -161,10 +164,30 @@ fn node(out: &mut String, n: &SNode, diff: &[&str]) {
         }
         run(out, t);
     }
-    if diff.contains(&"changed") {
-        let _ = write!(out, "<circle class=\"dot\" cx=\"{}\" cy=\"{}\" r=\"4\"/>", r.right() - 12, r.y + 12);
+    // The drill badge sits at the top right, on the name's row; the changed dot moves left of it.
+    let mut dot = r.right() - 12;
+    if n.children > 0 {
+        let width = crate::nodes::drill_w(n.children);
+        let (left, top) = (r.right() - 12 - width, r.y + 14);
+        let _ = write!(
+            out,
+            "<g class=\"badge\"><rect x=\"{left}\" y=\"{top}\" width=\"{width}\" height=\"18\" rx=\"9\"/><circle cx=\"{}\" cy=\"{}\" r=\"3\"/><path d=\"M{},{}L{},{}\"/><text class=\"t-mono\" x=\"{}\" y=\"{}\" font-size=\"10\">{}</text></g>",
+            left + 10,
+            top + 8,
+            left + 12,
+            top + 10,
+            left + 15,
+            top + 13,
+            left + 18,
+            top + 13,
+            n.children
+        );
+        dot = left - 10;
     }
-    out.push_str("<g class=\"badge\"></g></g>");
+    if diff.contains(&"changed") {
+        let _ = write!(out, "<circle class=\"dot\" cx=\"{dot}\" cy=\"{}\" r=\"4\"/>", r.y + 23);
+    }
+    out.push_str("</g>");
 }
 
 fn label(out: &mut String, l: &SLabel, of: &str, class: &[&str]) {
@@ -178,6 +201,10 @@ fn label(out: &mut String, l: &SLabel, of: &str, class: &[&str]) {
         rect(out, "pill", &l.rect, 12);
     } else {
         rect(out, "mask", &l.rect, 2);
+    }
+    // A step number sits in a grey chip, the height of its label.
+    for r in l.runs.iter().filter(|r| r.class == "chip") {
+        rect(out, "chipbox", &Rect::new(r.x - 4, l.rect.y, r.w + 8, l.rect.h), 4);
     }
     for r in &l.runs {
         run(out, r);
@@ -303,6 +330,9 @@ fn index(scene: &Scene, head: &crate::Head) -> Value {
             })
             .collect();
         let mut v = json!({"kind": "node", "box": bx(&n.rect), "role": n.role, "label": n.label, "ports": ports});
+        if n.children > 0 {
+            v["children"] = n.children.into();
+        }
         if let Some(t) = &n.term {
             v["term"] = t.clone().into();
         }

@@ -135,7 +135,7 @@
         const word = pill ? pill.textContent.replace(/^\d+/, '').trim() : '';
         links.push({ id: e.from === id ? e.to : e.from, text: e.from === id ? `→ ${word} ${name(e.to)}` : `← ${name(e.from)} ${word}` });
       }
-      return { id, kind: item.kind, label: item.label || id, role: item.role, term: item.term, noun: item.noun, links };
+      return { id, kind: item.kind, label: item.label || id, role: item.role, term: item.term, noun: item.noun, children: item.children || 0, links };
     }
     function select(id, save = true) {
       if (selected) by(selected)?.classList.remove('selected');
@@ -153,6 +153,7 @@
       panel.append(el('p', 'bp-kind', [info.kind, info.role].filter(Boolean).join(' · ')), el('h2', '', info.label));
       if (info.term) panel.append(el('p', '', 'Glossary term: '), el('code', '', info.term));
       if (info.noun) panel.append(el('p', '', 'Noun of its home design: '), el('code', '', info.noun));
+      if (info.children) panel.append(el('p', '', `Drills into ${info.children} lower diagram${info.children > 1 ? 's' : ''}`));
       const list = el('ul');
       for (const l of info.links) { const li = el('li', '', l.text); li.onclick = () => select(l.id); list.appendChild(li); }
       if (info.links.length) panel.append(list);

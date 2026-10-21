@@ -67,6 +67,9 @@ pub(crate) struct SNode {
     pub(crate) lifeline: Option<(i32, i32, i32)>,
     pub(crate) bars: Vec<Rect>,
     pub(crate) class: Vec<&'static str>,
+    /// The drill badge's count: the lower diagrams the caller named. Only architecture boxes and entities keep room
+    /// for it at the top right.
+    pub(crate) children: usize,
 }
 
 /// A label: its mask and its runs. A pill draws its mask; a bare label masks with the canvas only.

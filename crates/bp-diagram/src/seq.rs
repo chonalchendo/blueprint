@@ -17,6 +17,9 @@ const ROW: i32 = 40;
 const LOOP_ROW: i32 = 52;
 const SIDE: i32 = 48;
 
+/// A message label's step chip: the number with 4 px each side in a grey pill, then 6 px before the words.
+const CHIP: i32 = 14;
+
 /// One drawn message: a call, or the return a step's `back` adds.
 struct Msg<'a> {
     id: String,
@@ -58,7 +61,7 @@ pub(crate) fn lay_out(spec: &Spec) -> Scene {
     for (k, m) in msgs.iter().enumerate() {
         let y = ys[k];
         let (chip, text) = labels[k].clone();
-        let lw = up4(chip.w + 6 + text.w + 8);
+        let lw = up4(chip.w + CHIP + text.w + 4);
         let pts: Vec<Point>;
         let rect;
         if m.from == m.to {
@@ -71,7 +74,7 @@ pub(crate) fn lay_out(spec: &Spec) -> Scene {
             pts = vec![(a, y), (b, y)];
             rect = Rect::new((a.midpoint(b) - lw / 2).div_euclid(4) * 4, y - 8 - 16, lw, 16);
         }
-        let runs = vec![chip.at(rect.x + 4, rect.y + 12), text.at(rect.x + 4 + labels[k].0.w + 6, rect.y + 12)];
+        let runs = vec![chip.at(rect.x + 4, rect.y + 12), text.at(rect.x + labels[k].0.w + CHIP, rect.y + 12)];
         let focus = spec.focus.iter().any(|f| f == m.step);
         let mut class = vec![if m.ret { "return" } else { "call" }];
         if focus {
@@ -180,6 +183,7 @@ fn header(n: &crate::spec::Node, focus: bool) -> SNode {
         lifeline: None,
         bars: Vec::new(),
         class: if focus { vec!["focus"] } else { Vec::new() },
+        children: 0,
     }
 }
 
@@ -192,7 +196,7 @@ fn columns(heads: &[SNode], msgs: &[Msg<'_>], labels: &[(Run, Run)]) -> Vec<i32>
         .iter()
         .zip(labels)
         .map(|(m, (chip, text))| {
-            let w = chip.w + 6 + text.w + 8;
+            let w = chip.w + CHIP + text.w + 4;
             if m.from == m.to {
                 (m.from, (m.from + 1).min(n - 1), w + 56)
             } else {

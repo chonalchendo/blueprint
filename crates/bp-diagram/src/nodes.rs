@@ -41,9 +41,14 @@ pub(crate) fn role_words(role: &str) -> (Option<&'static str>, &'static str) {
     }
 }
 
+/// The drill badge's width: a magnifier, then the child count in mono, in a pill.
+pub(crate) fn drill_w(children: usize) -> i32 {
+    25 + Font::Mono.width(&children.to_string(), 10, 0)
+}
+
 /// The name at the top left and, when the kind carries meaning, its tag after it. The tag's badge reaches 6 px past
-/// its text on each side, so the returned right edge includes it.
-fn title(label: &str, tag: Option<&str>) -> (Vec<Run>, i32) {
+/// its text on each side, so the returned right edge includes it, and the room the drill badge needs at the top right.
+fn title(label: &str, tag: Option<&str>, children: usize) -> (Vec<Run>, i32) {
     let name = Run::new(Font::Strong, 14, 0, "name", label).at(PAD, 28);
     let mut right = PAD + name.w;
     let mut runs = vec![name];
@@ -51,6 +56,9 @@ fn title(label: &str, tag: Option<&str>) -> (Vec<Run>, i32) {
         let tag = Run::new(Font::Body, 11, 0, "tag", t).at(right + 14, 27);
         right = tag.x + tag.w + 6;
         runs.push(tag);
+    }
+    if children > 0 {
+        right += 12 + drill_w(children);
     }
     (runs, right)
 }
@@ -70,26 +78,27 @@ fn base(n: &Node, shape: Shape, w: i32, h: i32, runs: Vec<Run>) -> SNode {
         lifeline: None,
         bars: Vec::new(),
         class: Vec::new(),
+        children: 0,
     }
 }
 
 /// An architecture box: the name and its tag, then the description in muted text.
 pub(crate) fn architecture(n: &Node) -> SNode {
-    let (mut runs, right) = title(&n.label, role_words(&n.role).0);
+    let (mut runs, right) = title(&n.label, role_words(&n.role).0, n.children);
     let mut y = 50;
     for line in n.note.as_deref().map(|t| Font::Body.wrap(t, 13, MEASURE)).unwrap_or_default() {
         runs.push(Run::new(Font::Body, 13, 0, "note", line).at(PAD, y));
         y += 18;
     }
     let w = runs.iter().map(|r| r.x + r.w).max().unwrap_or(0).max(right) + PAD;
-    base(n, Shape::Box, w.max(176), y - 18 + 20, runs)
+    SNode { children: n.children, ..base(n, Shape::Box, w.max(176), y - 18 + 20, runs) }
 }
 
 /// An entity: the name and its tag, a rule, then one mono line per field and the muted time line.
 pub(crate) fn entity(n: &Node, level: Option<&str>) -> SNode {
     let tag =
         if n.role == "elsewhere" { Some(n.owner.as_deref().unwrap_or("Elsewhere")) } else { role_words(&n.role).0 };
-    let (mut runs, right) = title(&n.label, tag);
+    let (mut runs, right) = title(&n.label, tag, n.children);
     let mut rules = Vec::new();
     let mut y = 52;
     if level != Some("conceptual") && (!n.fields.is_empty() || n.time.is_some()) {
@@ -108,6 +117,7 @@ pub(crate) fn entity(n: &Node, level: Option<&str>) -> SNode {
     let w = runs.iter().map(|r| r.x + r.w).max().unwrap_or(0).max(right) + PAD;
     let mut node = base(n, Shape::Box, w.max(184), y - 4, runs);
     node.rules = rules;
+    node.children = n.children;
     node
 }
 
