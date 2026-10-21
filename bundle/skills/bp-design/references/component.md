@@ -33,7 +33,7 @@ Show the human one step's output at a time. Go on only after the human confirms 
    - The agent fills the commands and events from step 2.
    - The agent fills the throughput and the size from measurements where the code runs. A value with no measurement is a row in `## Open`.
    - The human confirms each invariant. An invariant is a business rule, and only its owner can say that it is one.
-   Output: `## Invariants`, each naming the command it guards. Add a `shell` check that runs the invariant's test. When no test exists yet, put a row in `## Open` that names the test to write.
+   Output: `## Invariants`, each naming the command it guards. Add a `shell` check that runs the invariant's test. When no test exists yet, put a row in `## Open` that names the test to write. For an aggregate with a lifecycle, add a states table. Its first column is the state, so each state node of the diagram resolves as a `noun`.
 
 5. **Find the edge cases**. Use Example Mapping on each invariant (Wynne, *Introducing Example Mapping*). The invariant is the rule. The agent proposes boundary examples for it, and the human states the outcome of each. An outcome that the human cannot state is a question.
    - Many questions mean that the component is not ready for activation.
@@ -59,7 +59,7 @@ Show the human one step's output at a time. Go on only after the human confirms 
 
 A component design draws two kinds of view. Read `references/diagrams.md` for the spec fields and the editorial rules. Preview each view with `bp diagram --spec-file <f> --out <path> --json` before you write it.
 
-- **Lifecycle: `state`**. Draw one view per aggregate that owns a lifecycle. Take the states and the transitions from the canvas of step 4. Label each transition with the command or the event that moves it. Give the entry the node role `start`, each exit the node role `end` and each branch the node role `choice`. `bp` places the states from their order, with the main path along one row. Make the state that the aggregate exists to reach the focus.
+- **Lifecycle: `state`**. Draw one view per aggregate that owns a lifecycle. Take the states and the transitions from the canvas of step 4. Label each transition with the command or the event that moves it. Give the entry the node role `start`, and each branch the node role `choice`. An exit state is a named `state`: draw an edge from it to one `end` node. Never give a named state the role `end`. Give each `state` node its state from the states table as its `noun`. `bp` places the states from their order, with the main path along one row. Make the state that the aggregate exists to reach the focus.
 - **Parts: `architecture` at level `component`**. Draw this view only when it adds value (Brown, *The C4 model*). One case is a component whose internals split into parts that the container's view does not show. Make this component the focus. Most component designs need no such view, because the parent container already draws it.
 
 A class diagram is not one of the five types. Put the attributes of an aggregate in a table instead.
