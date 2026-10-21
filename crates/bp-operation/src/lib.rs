@@ -113,7 +113,7 @@ impl Role {
     /// `None` for the human, whom no list bounds: the forge is the gate.
     pub fn verbs(self) -> Option<&'static [&'static str]> {
         Some(match self {
-            Self::Session => &["create", "set", "link", "diagram", "record", "transition", "release"],
+            Self::Session => &["create", "set", "link", "diagram", "check", "record", "transition", "release"],
             Self::Worker => &["cut", "check", "record", "pr", "release"],
             Self::Reviewer | Self::Researcher => &[],
             Self::Human => return None,
@@ -143,5 +143,6 @@ mod tests {
             assert!(verbs.iter().all(|v| !["stamp", "land"].contains(v) && !READ_VERBS.contains(v)), "{r}");
         }
         assert!(Role::Reviewer.verbs().unwrap().is_empty(), "the session records the review (21)");
+        assert!(Role::Session.verbs().unwrap().contains(&"check"), "the design action runs check (21)");
     }
 }
