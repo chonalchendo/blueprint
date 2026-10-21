@@ -10,7 +10,7 @@ Each level produces its own content.
 
 The levels are tools, not a fixed order. A physical model can come first, read back from a schema that exists.
 
-The conceptual level sits in the `data-model` design under the system design. The logical level is scoped to one bounded context (Evans, *Domain-Driven Design*). Write it under the container design that owns the context's data. The physical level sits with the container that runs the store.
+A project has one data model: the `data-model` design under the system design. All three levels live in it. Split its views by domain or by container. One bounded context scopes each logical view (Evans, *Domain-Driven Design*). A container's logical or physical level is a section of the data-model design, with its own diagrams. Never create a design node under a container for it. When the data-model design is active, make each change through `references/revision.md`.
 
 ## Every level
 
@@ -24,7 +24,7 @@ The conceptual level sits in the `data-model` design under the system design. Th
 Show the human one domain at a time. Go on only after the human confirms it.
 
 1. **Name the nouns**. The human lists what the system must know. The agent adds nouns from the discovery output, the glossary and the code. One noun holds one concept. A word with two meanings is two nouns, and a hotspot for `references/strategic.md`.
-   Output: one row per noun with a one-sentence definition. Each noun becomes a glossary term.
+   Output: one row per noun with a one-sentence definition. List each new noun in `## Open` as a glossary candidate. The glossary design takes it up in its own write.
 2. **Give one instance per noun**. An instance is one real example: a row, a file or a record that exists today. Mark a noun with no instance yet as a target. A noun that nobody can give an instance for is a phantom candidate.
    Output: an instance column beside each definition.
 3. **Name the verbs**. Join two nouns with a verb, and give both ends a cardinality and an optionality. Read each verb aloud as a sentence: "a design carries zero or more diagrams".
@@ -37,12 +37,12 @@ The conceptual level holds no attributes, keys or types.
 
 ## Logical level
 
-Work one entity at a time, inside one bounded context. The agent drafts from the schema or the code. The human confirms the grain and the time axes of each entity.
+Work one entity at a time, inside one bounded context. The rules for keys, time axes and history below are this bundle's own checklist, not a published method. The agent drafts from the schema or the code. The human confirms the grain and the time axes of each entity.
 
 1. **State the grain**. Write one sentence: "one row is one ...". An entity with two grains is two entities. State how each grain joins and rolls up to its neighbours.
 2. **Choose the keys**. Give each entity one stable key that the system mints. Keep a natural or external identifier as an attribute. Map each family of external identifiers in one table, dated by when each mapping held. Name the part that mints each key that crosses a boundary. State what happens to a key on a merge, a split and a rename.
 3. **List the attributes**. Give each a type class, not a technology type. Mark each reference to another entity.
-4. **Choose the time axes**. Ask three questions per entity. Does a reader need it as it was at a past moment? Does a reader total it over time? Does an audit need each correction? The answers choose the axes:
+4. **Choose the time axes**. Ask three questions per entity (Reis, *Mixed Model Arts*). Does a reader need it as it was at a past moment? Does a reader total it over time? Does an audit need each correction? The answers choose the axes:
    - Event time: when it happened in the world.
    - Valid time: the interval during which a state held.
    - Decision time: when a party decided a change.
@@ -90,6 +90,6 @@ Each level draws `er` views at its own level: `conceptual`, `logical` or `physic
 Keep each view readable:
 
 - **Eight at most by default**. Hold a view to eight entities. Past eight, `bp` warns but does not refuse. Split by domain before you add a ninth.
-- **One view per domain**. Make the domain's root entity the focus. Draw another domain's entity only when a link reaches it. Give it the role `elsewhere` and name its `owner`.
+- **One view per domain**. Make the domain's root entity the focus. Draw another domain's entity only when a link reaches it. Give it the node role `elsewhere` and name its `owner`.
 - **One domain overview**. Draw one group per domain. Put in each group only the entities that carry a link to another domain. Draw those links and no others.
-- **A whole-model view, rarely**. It is worth its density only when the question crosses every domain. Two such questions are where the domains touch, and which entities each domain borrows. Draw it after the per-domain views exist. Give each domain one group. Place each entity that joins two domains on the side where their groups meet. Focus on one or two hubs. Say in the `lede` why the view is whole. Blueprint's source holds one: `crates/bp-diagram/examples/bp-lm-whole.yaml` draws 23 entities and every link between domains. A reviewer reads such a view as a map, not as the place to read one entity.
+- **A whole-model view, rarely**. It is worth its density only when the question crosses every domain. Two such questions are where the domains touch, and which entities each domain borrows. Draw it after the per-domain views exist. Give each domain one group. Place each entity that joins two domains on the side where their groups meet. Focus on one or two hubs. Say in the `lede` why the view is whole. Such a view can hold twenty or more entities and every link between domains. Accept the size warning for this view alone. A reviewer reads it as a map, not as the place to read one entity.

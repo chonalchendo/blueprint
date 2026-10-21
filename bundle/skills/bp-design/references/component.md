@@ -18,13 +18,13 @@ Show the human one step's output at a time. Go on only after the human confirms 
    Output: the lead sentence, `## Scope` and `## Out of scope`.
 
 2. **Run design-level EventStorming**. Lay the flow out left to right in one grammar (Brandolini, *Introducing EventStorming*; DDD Crew, *EventStorming Glossary & Cheat Sheet*). An actor reads a read model and issues a command. A constraint guards the command, and the command produces an event. A policy reacts to the event and issues the next command. At design level, the constraint is the aggregate that holds the rule.
-   - The agent drafts the as-is flow from the code. Each sticky that the agent adds cites its file and line.
+   - The agent drafts the as-is flow from the code. Each item that the agent adds cites its file and line.
    - The human states the to-be flow where it differs from the code.
    - The agent enforces the grammar. Each event follows a command, an external system or a policy. Each policy reads "whenever this event, then that command".
    - A break in the grammar is a hotspot.
 
    Then group the commands and the events by the aggregate that guards them.
-   Output: `## Commands`, `## Events`, a glossary term for each command and event name, and each hotspot in `## Open`.
+   Output: the commands and the events as the first rows of `## Interface`, and each hotspot in `## Open`. List each new command or event name in `## Open` as a glossary candidate. The glossary design takes it up in its own write.
 
 3. **Choose the implementation pattern**. Match the pattern to the subdomain class and to the complexity of the rules (Khononov, *Learning Domain-Driven Design*). Simple logic takes a transaction script or an active record. Complex rules take a domain model. When history and time are first-class, take an event-sourced domain model. The human decides; the agent shows the evidence for each option. A choice with a rejected option loads `references/decision.md`.
    Output: one sentence in `## Constraints`, or a cited decision.
@@ -33,15 +33,15 @@ Show the human one step's output at a time. Go on only after the human confirms 
    - The agent fills the commands and events from step 2.
    - The agent fills the throughput and the size from measurements where the code runs. A value with no measurement is a row in `## Open`.
    - The human confirms each invariant. An invariant is a business rule, and only its owner can say that it is one.
-   Output: `## Invariants`, each naming the command it guards, with a `shell` check that names its test.
+   Output: `## Invariants`, each naming the command it guards. Add a `shell` check that runs the invariant's test. When no test exists yet, put a row in `## Open` that names the test to write.
 
 5. **Find the edge cases**. Use Example Mapping on each invariant (Wynne, *Introducing Example Mapping*). The invariant is the rule. The agent proposes boundary examples for it, and the human states the outcome of each. An outcome that the human cannot state is a question.
    - Many questions mean that the component is not ready for activation.
    - One rule with many examples is two rules. Split it.
-   Output: each example as a `shell` check or as a check on an issue. Each question goes in `## Open`.
+   Output: each example as a `shell` check when its test exists. Otherwise the example waits in `## Open`, and the derive action makes it an issue check. Each question goes in `## Open`.
 
-6. **State the interface**. Give each command, event and error one stable name. Name the input and the result of each command. Name the payload of each event and the condition of each error.
-   Output: `## Interface`, and a `contract` block with a baseline.
+6. **Complete the interface**. Step 2 put the commands and the events in `## Interface`. Give each command, event and error one stable name. Name the input and the result of each command. Name the payload of each event and the condition of each error.
+   Output: `## Interface`, complete. A `contract` check compares it with a baseline: a blueprint version that holds it. A draft has no such version yet. Put the check in `## Open`, and add the block once a version exists.
 
 7. **Hand on the stored state**. The aggregate's stored state feeds the logical data model. The size and the lifetime feed the physical data model. Load `references/data-model.md` for that work.
    Output: the nouns and the attributes that the data model takes up, listed in `## Open` until it does.
@@ -59,7 +59,7 @@ Show the human one step's output at a time. Go on only after the human confirms 
 
 A component design draws two kinds of view. Read `references/diagrams.md` for the spec fields and the editorial rules. Preview each view with `bp diagram --spec-file <f> --out <path> --json` before you write it.
 
-- **Lifecycle: `state`**. Draw one view per aggregate that owns a lifecycle. Take the states and the transitions from the canvas of step 4. Label each transition with the command or the event that moves it. Give the entry the role `start`, each exit the role `end` and each branch the role `choice`. `bp` places the states from their order, with the main path along one row. Make the state that the aggregate exists to reach the focus.
+- **Lifecycle: `state`**. Draw one view per aggregate that owns a lifecycle. Take the states and the transitions from the canvas of step 4. Label each transition with the command or the event that moves it. Give the entry the node role `start`, each exit the node role `end` and each branch the node role `choice`. `bp` places the states from their order, with the main path along one row. Make the state that the aggregate exists to reach the focus.
 - **Parts: `architecture` at level `component`**. Draw this view only when it adds value (Brown, *The C4 model*). One case is a component whose internals split into parts that the container's view does not show. Make this component the focus. Most component designs need no such view, because the parent container already draws it.
 
 A class diagram is not one of the five types. Put the attributes of an aggregate in a table instead.
