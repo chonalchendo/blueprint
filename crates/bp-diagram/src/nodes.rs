@@ -166,7 +166,13 @@ pub(crate) fn ordered(n: &Node, ty: Type) -> SNode {
                 .into_iter()
                 .zip(1..)
                 .map(|(l, i)| Run::new(Font::Body, 12, 0, "note", l).centred(w / 2, first + last + 16 * i));
-            base(n, if ty == Type::State { Shape::Pill } else { Shape::Box }, w, h, names.chain(notes).collect())
+            // A noted state is too tall for a pill: its rounded ends would cut into the note's lines.
+            let shape = match (ty, k) {
+                (Type::State, 0) => Shape::Pill,
+                (Type::State, _) => Shape::Rounded,
+                _ => Shape::Box,
+            };
+            base(n, shape, w, h, names.chain(notes).collect())
         }
     }
 }

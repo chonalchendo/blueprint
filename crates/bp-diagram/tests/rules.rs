@@ -270,6 +270,10 @@ fn refuses_a_note_on_a_start_end_or_branch() {
         f.iter().any(|f| f.rule == "spec/schema" && f.id == "which" && f.detail.contains("draws no `note`")),
         "{f:?}"
     );
+    // A dot draws no text, so the fix names no `label`; the finding names the key the author wrote.
+    let f = refused(&MACHINE.replace("role: start}", "role: start, sub: Filed.}"));
+    let detail = &f.iter().find(|f| f.id == "in").expect("the start refuses").detail;
+    assert_eq!(detail, "a `start` node draws no `sub`; say it in the design");
 }
 
 #[test]
@@ -277,6 +281,8 @@ fn refuses_a_note_on_an_entity() {
     let spec = "type: er\nlevel: logical\ntitle: T\nlede: One entity.\nnodes:\n  - {id: a, noun: A, at: [0, 0], note: Dropped.}\n";
     let f = refused(spec);
     assert!(f.iter().any(|f| f.rule == "spec/schema" && f.id == "a" && f.detail.contains("draws no `note`")), "{f:?}");
+    let f = refused(&spec.replace("note:", "sub:"));
+    assert!(f.iter().any(|f| f.detail == "an `er` node draws no `sub`; use its `label`"), "{f:?}");
 }
 
 #[test]
@@ -287,6 +293,9 @@ fn refuses_a_legend_item_without_a_label() {
         f.iter().any(|f| f.rule == "spec/schema" && f.id == "legend" && f.detail.contains("needs a `label`")),
         "{f:?}"
     );
+    let empty = format!("{ONE}legend:\n  - {{}}\nnodes:\n  - {{id: a, noun: A, at: [0, 0]}}\n");
+    let f = refused(&empty);
+    assert!(f.iter().any(|f| f.detail.starts_with("legend item 1 needs a `role` or a `style`")), "{f:?}");
 }
 
 #[test]

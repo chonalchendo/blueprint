@@ -154,3 +154,35 @@ fn the_bytes_are_the_same_on_every_platform() {
         ["f91d94207fd3f9ec", "f117ac4b16d01f14", "12bdf6dc9aecf17e", "a704b3b602d4d9c6", "9331afa85300ad81"]
     );
 }
+
+/// A noted state draws as a rounded box, not a tall pill or an ellipse, so no rounded corner cuts a note line
+/// (review of PR 48). Every line is centred and at most `w - 40` wide, so its ends keep 20 px from the straight sides;
+/// at its top and bottom edges the corner may take less than that.
+#[test]
+fn a_long_note_stays_inside_its_state() {
+    let words = "Waits for a worker to claim it from the ready list. A claim names its owner, and a release puts the \
+                work back where any worker may claim it again on the same day.";
+    let spec = format!(
+        "type: state\ntitle: Work\nlede: Work moves.\nnodes:\n  - {{id: in, role: start}}\n  - {{id: open, noun: open, \
+         note: \"{words}\"}}\n  - {{id: out, role: end}}\nedges:\n  - {{from: in, to: open}}\n  - {{from: open, to: out}}\n"
+    );
+    let page = html(&spec, None);
+    let node = &page[page.find("data-id=\"open\"").unwrap()..];
+    let node = &node[..node.find("</g>").unwrap()];
+    let num = |s: &str, attr: &str| -> i32 {
+        let v = &s[s.find(&format!(" {attr}=\"")).unwrap() + attr.len() + 3..];
+        v[..v.find('"').unwrap()].parse().unwrap()
+    };
+    let rect = &node[node.find("<rect").unwrap()..];
+    let (x, y, w, h, rx) = (num(rect, "x"), num(rect, "y"), num(rect, "width"), num(rect, "height"), num(rect, "rx"));
+    assert_eq!(rx, 22, "the one-line pill's radius, not half the height {h}");
+    let notes: Vec<&str> = node.split("<text class=\"t-body note\"").skip(1).collect();
+    assert!(notes.len() >= 6, "{} note lines", notes.len());
+    let inset = |d: i32| f64::from(rx) - f64::from(rx * rx - d.clamp(0, rx).pow(2)).sqrt();
+    for line in notes {
+        let (tx, ty) = (num(line, "x"), num(line, "y"));
+        assert_eq!(tx, x + w / 2, "centred");
+        let corner = inset(rx - (ty - 12 - y)).max(inset(rx - (y + h - ty - 4)));
+        assert!(corner < 20.0, "the corner takes {corner} px at the line at {ty} in {y}..{}", y + h);
+    }
+}

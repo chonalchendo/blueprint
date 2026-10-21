@@ -45,6 +45,8 @@ impl Run {
 pub(crate) enum Shape {
     Box,
     Pill,
+    /// A box with the one-line pill's corner radius, for a state too tall to be a pill.
+    Rounded,
     Dot,
     Ring,
     Diamond,

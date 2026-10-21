@@ -136,6 +136,7 @@ fn node(out: &mut String, n: &SNode, diff: &[&str]) {
     match n.shape {
         Shape::Box => rect(out, "box", &r, 8),
         Shape::Pill => rect(out, "box", &r, r.h / 2),
+        Shape::Rounded => rect(out, "box", &r, 22),
         Shape::Dot => {
             let _ = write!(out, "<circle class=\"box solid\" cx=\"{cx}\" cy=\"{cy}\" r=\"{}\"/>", r.w / 2 - 2);
         }
