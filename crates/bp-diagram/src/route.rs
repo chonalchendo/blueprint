@@ -128,7 +128,7 @@ pub(crate) fn lines(bands: &[(i32, i32)], borders: &[i32], end: i32) -> Vec<i32>
 
 /// Routes every wanted edge in `order`. Returns per edge its points, port to port. `sides` holds each edge's sides:
 /// empty, they are picked and kept, so a later round, which only widens gutters, reuses them and skips the dearest
-/// pass.
+/// pass. Also returns the search's work, in states popped, which a layout bounds.
 pub(crate) fn route(
     boxes: &[Rect],
     marks: &[Rect],
@@ -137,11 +137,12 @@ pub(crate) fn route(
     wants: &[Want],
     order: &[usize],
     sides: &mut Vec<(Side, Side)>,
-) -> Vec<Vec<Point>> {
+) -> (Vec<Vec<Point>>, usize) {
     // Group labels block a route as a box does, but take no ends.
     let walls: Vec<Rect> = boxes.iter().chain(marks).copied().collect();
+    let mut work = 0;
     if sides.is_empty() {
-        *sides = pick_sides(boxes, &walls, xs, ys, wants, order);
+        (*sides, work) = pick_sides(boxes, &walls, xs, ys, wants, order);
     }
     let sides: &[(Side, Side)] = sides;
     let ends = spread(boxes, wants, sides);
@@ -184,7 +185,7 @@ pub(crate) fn route(
         }
         out[edge] = pts;
     }
-    out
+    (out, work + search.pops)
 }
 
 /// The first pass: each edge's sides, from its cheapest route with every end where it would sit alone.
@@ -195,7 +196,7 @@ fn pick_sides(
     ys: &[i32],
     wants: &[Want],
     order: &[usize],
-) -> Vec<(Side, Side)> {
+) -> (Vec<(Side, Side)>, usize) {
     let mut px = xs.to_vec();
     let mut py = ys.to_vec();
     for want in wants {
@@ -231,7 +232,7 @@ fn pick_sides(
             }
         }
     }
-    sides
+    (sides, search.pops)
 }
 
 /// Each end's port and stub. Ends on one side sit in the order of where they want to be, at least [`EDGE`] apart and

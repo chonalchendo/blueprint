@@ -142,12 +142,15 @@ fn the_bytes_are_the_same_on_every_platform() {
     let fnv =
         |s: &str| s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
     let diff = html(&example("bp-containers-changed"), Some(&example("bp-containers")));
-    let got: Vec<String> = ["bp-containers", "bp-lm-design", "bp-seq-issue-to-landed"]
+    let got: Vec<String> = ["bp-containers", "bp-lm-design", "bp-seq-issue-to-landed", "bp-lm-whole"]
         .iter()
         .map(|n| html(&example(n), None))
         .chain([diff])
         .map(|page| format!("{:016x}", fnv(&page)))
         .collect();
     // A deliberate change to the renderer, the style or the viewer changes these; update them in the same commit.
-    assert_eq!(got, ["f91d94207fd3f9ec", "f117ac4b16d01f14", "12bdf6dc9aecf17e", "9331afa85300ad81"]);
+    assert_eq!(
+        got,
+        ["f91d94207fd3f9ec", "f117ac4b16d01f14", "12bdf6dc9aecf17e", "a704b3b602d4d9c6", "9331afa85300ad81"]
+    );
 }

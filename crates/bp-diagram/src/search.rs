@@ -160,6 +160,8 @@ pub(crate) struct Search<'g> {
     /// generation.
     costs: Vec<(u32, i64)>,
     generation: (u32, usize, usize),
+    /// The states popped over every search: the work a layout bounds.
+    pub(crate) pops: usize,
 }
 
 impl<'g> Search<'g> {
@@ -172,6 +174,7 @@ impl<'g> Search<'g> {
             touched: Vec::new(),
             costs: vec![(0, 0); states],
             generation: (0, usize::MAX, usize::MAX),
+            pops: 0,
         }
     }
 
@@ -211,6 +214,7 @@ impl<'g> Search<'g> {
         self.touched.push(first);
         heap.push(Reverse((guess(start, out), 0_i64, first)));
         while let Some(Reverse((f, cost, state))) = heap.pop() {
+            self.pops += 1;
             if f >= limit {
                 return None;
             }

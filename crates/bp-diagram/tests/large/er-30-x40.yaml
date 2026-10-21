@@ -1,0 +1,305 @@
+type: er
+level: logical
+title: "Stress: 30 entities"
+lede: A synthetic model to test size.
+nodes:
+  - id: e0
+    noun: Entity0
+    role: node
+    at: [0, 0]
+    label: Entity0
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e1
+    noun: Entity1
+    role: record
+    at: [1, 0]
+    label: Entity1
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e2
+    noun: Entity2
+    role: row
+    at: [2, 0]
+    label: Entity2
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e3
+    noun: Entity3
+    role: node
+    at: [3, 0]
+    label: Entity3
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e4
+    noun: Entity4
+    role: record
+    at: [4, 0]
+    label: Entity4
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e5
+    noun: Entity5
+    role: row
+    at: [5, 0]
+    label: Entity5
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e6
+    noun: Entity6
+    role: node
+    at: [0, 1]
+    label: Entity6
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e7
+    noun: Entity7
+    role: record
+    at: [1, 1]
+    label: Entity7
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e8
+    noun: Entity8
+    role: row
+    at: [2, 1]
+    label: Entity8
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e9
+    noun: Entity9
+    role: node
+    at: [3, 1]
+    label: Entity9
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e10
+    noun: Entity10
+    role: record
+    at: [4, 1]
+    label: Entity10
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e11
+    noun: Entity11
+    role: row
+    at: [5, 1]
+    label: Entity11
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e12
+    noun: Entity12
+    role: node
+    at: [0, 2]
+    label: Entity12
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e13
+    noun: Entity13
+    role: record
+    at: [1, 2]
+    label: Entity13
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e14
+    noun: Entity14
+    role: row
+    at: [2, 2]
+    label: Entity14
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e15
+    noun: Entity15
+    role: node
+    at: [3, 2]
+    label: Entity15
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e16
+    noun: Entity16
+    role: record
+    at: [4, 2]
+    label: Entity16
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e17
+    noun: Entity17
+    role: row
+    at: [5, 2]
+    label: Entity17
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e18
+    noun: Entity18
+    role: node
+    at: [0, 3]
+    label: Entity18
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e19
+    noun: Entity19
+    role: record
+    at: [1, 3]
+    label: Entity19
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e20
+    noun: Entity20
+    role: row
+    at: [2, 3]
+    label: Entity20
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e21
+    noun: Entity21
+    role: node
+    at: [3, 3]
+    label: Entity21
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e22
+    noun: Entity22
+    role: record
+    at: [4, 3]
+    label: Entity22
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e23
+    noun: Entity23
+    role: row
+    at: [5, 3]
+    label: Entity23
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e24
+    noun: Entity24
+    role: node
+    at: [0, 4]
+    label: Entity24
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e25
+    noun: Entity25
+    role: record
+    at: [1, 4]
+    label: Entity25
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e26
+    noun: Entity26
+    role: row
+    at: [2, 4]
+    label: Entity26
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e27
+    noun: Entity27
+    role: node
+    at: [3, 4]
+    label: Entity27
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e28
+    noun: Entity28
+    role: record
+    at: [4, 4]
+    label: Entity28
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+  - id: e29
+    noun: Entity29
+    role: row
+    at: [5, 4]
+    label: Entity29
+    fields: ["# id", "→ parent", name, status]
+    time: processing
+edges:
+  - {from: e0, to: e1, label: rel0, card: ["1", "0..N"]}
+  - {from: e0, to: e6, label: rel1, card: ["1", "0..N"]}
+  - {from: e1, to: e2, label: rel2, card: ["1", "0..N"]}
+  - {from: e1, to: e7, label: rel3, card: ["1", "0..N"]}
+  - {from: e1, to: e17, label: rel4, card: ["1", "0..N"]}
+  - {from: e1, to: e26, label: rel5, card: ["1", "0..N"]}
+  - {from: e2, to: e3, label: rel6, card: ["1", "0..N"]}
+  - {from: e2, to: e8, label: rel7, card: ["1", "0..N"]}
+  - {from: e2, to: e13, label: rel8, card: ["1", "0..N"]}
+  - {from: e2, to: e18, label: rel9, card: ["1", "0..N"]}
+  - {from: e3, to: e4, label: rel10, card: ["1", "0..N"]}
+  - {from: e3, to: e9, label: rel11, card: ["1", "0..N"]}
+  - {from: e3, to: e11, label: rel12, card: ["1", "0..N"]}
+  - {from: e3, to: e16, label: rel13, card: ["1", "0..N"]}
+  - {from: e3, to: e17, label: rel14, card: ["1", "0..N"]}
+  - {from: e4, to: e5, label: rel15, card: ["1", "0..N"]}
+  - {from: e4, to: e10, label: rel16, card: ["1", "0..N"]}
+  - {from: e4, to: e17, label: rel17, card: ["1", "0..N"]}
+  - {from: e4, to: e29, label: rel18, card: ["1", "0..N"]}
+  - {from: e5, to: e3, label: rel19, card: ["1", "0..N"]}
+  - {from: e5, to: e11, label: rel20, card: ["1", "0..N"]}
+  - {from: e5, to: e22, label: rel21, card: ["1", "0..N"]}
+  - {from: e6, to: e1, label: rel22, card: ["1", "0..N"]}
+  - {from: e6, to: e7, label: rel23, card: ["1", "0..N"]}
+  - {from: e6, to: e11, label: rel24, card: ["1", "0..N"]}
+  - {from: e6, to: e12, label: rel25, card: ["1", "0..N"]}
+  - {from: e7, to: e2, label: rel26, card: ["1", "0..N"]}
+  - {from: e7, to: e8, label: rel27, card: ["1", "0..N"]}
+  - {from: e7, to: e13, label: rel28, card: ["1", "0..N"]}
+  - {from: e7, to: e20, label: rel29, card: ["1", "0..N"]}
+  - {from: e7, to: e25, label: rel30, card: ["1", "0..N"]}
+  - {from: e8, to: e9, label: rel31, card: ["1", "0..N"]}
+  - {from: e8, to: e14, label: rel32, card: ["1", "0..N"]}
+  - {from: e9, to: e10, label: rel33, card: ["1", "0..N"]}
+  - {from: e9, to: e13, label: rel34, card: ["1", "0..N"]}
+  - {from: e9, to: e15, label: rel35, card: ["1", "0..N"]}
+  - {from: e9, to: e16, label: rel36, card: ["1", "0..N"]}
+  - {from: e9, to: e17, label: rel37, card: ["1", "0..N"]}
+  - {from: e10, to: e11, label: rel38, card: ["1", "0..N"]}
+  - {from: e10, to: e16, label: rel39, card: ["1", "0..N"]}
+  - {from: e10, to: e23, label: rel40, card: ["1", "0..N"]}
+  - {from: e11, to: e9, label: rel41, card: ["1", "0..N"]}
+  - {from: e11, to: e17, label: rel42, card: ["1", "0..N"]}
+  - {from: e12, to: e13, label: rel43, card: ["1", "0..N"]}
+  - {from: e12, to: e18, label: rel44, card: ["1", "0..N"]}
+  - {from: e12, to: e20, label: rel45, card: ["1", "0..N"]}
+  - {from: e13, to: e5, label: rel46, card: ["1", "0..N"]}
+  - {from: e13, to: e14, label: rel47, card: ["1", "0..N"]}
+  - {from: e13, to: e19, label: rel48, card: ["1", "0..N"]}
+  - {from: e14, to: e9, label: rel49, card: ["1", "0..N"]}
+  - {from: e14, to: e15, label: rel50, card: ["1", "0..N"]}
+  - {from: e14, to: e18, label: rel51, card: ["1", "0..N"]}
+  - {from: e14, to: e20, label: rel52, card: ["1", "0..N"]}
+  - {from: e15, to: e16, label: rel53, card: ["1", "0..N"]}
+  - {from: e15, to: e21, label: rel54, card: ["1", "0..N"]}
+  - {from: e15, to: e28, label: rel55, card: ["1", "0..N"]}
+  - {from: e16, to: e17, label: rel56, card: ["1", "0..N"]}
+  - {from: e16, to: e22, label: rel57, card: ["1", "0..N"]}
+  - {from: e17, to: e13, label: rel58, card: ["1", "0..N"]}
+  - {from: e17, to: e23, label: rel59, card: ["1", "0..N"]}
+  - {from: e18, to: e1, label: rel60, card: ["1", "0..N"]}
+  - {from: e18, to: e3, label: rel61, card: ["1", "0..N"]}
+  - {from: e18, to: e19, label: rel62, card: ["1", "0..N"]}
+  - {from: e18, to: e24, label: rel63, card: ["1", "0..N"]}
+  - {from: e19, to: e2, label: rel64, card: ["1", "0..N"]}
+  - {from: e19, to: e6, label: rel65, card: ["1", "0..N"]}
+  - {from: e19, to: e20, label: rel66, card: ["1", "0..N"]}
+  - {from: e19, to: e25, label: rel67, card: ["1", "0..N"]}
+  - {from: e20, to: e18, label: rel68, card: ["1", "0..N"]}
+  - {from: e20, to: e21, label: rel69, card: ["1", "0..N"]}
+  - {from: e20, to: e26, label: rel70, card: ["1", "0..N"]}
+  - {from: e21, to: e22, label: rel71, card: ["1", "0..N"]}
+  - {from: e21, to: e27, label: rel72, card: ["1", "0..N"]}
+  - {from: e22, to: e2, label: rel73, card: ["1", "0..N"]}
+  - {from: e22, to: e23, label: rel74, card: ["1", "0..N"]}
+  - {from: e22, to: e28, label: rel75, card: ["1", "0..N"]}
+  - {from: e23, to: e29, label: rel76, card: ["1", "0..N"]}
+  - {from: e24, to: e7, label: rel77, card: ["1", "0..N"]}
+  - {from: e24, to: e10, label: rel78, card: ["1", "0..N"]}
+  - {from: e24, to: e25, label: rel79, card: ["1", "0..N"]}
+  - {from: e25, to: e26, label: rel80, card: ["1", "0..N"]}
+  - {from: e26, to: e17, label: rel81, card: ["1", "0..N"]}
+  - {from: e26, to: e21, label: rel82, card: ["1", "0..N"]}
+  - {from: e26, to: e27, label: rel83, card: ["1", "0..N"]}
+  - {from: e27, to: e4, label: rel84, card: ["1", "0..N"]}
+  - {from: e27, to: e28, label: rel85, card: ["1", "0..N"]}
+  - {from: e28, to: e29, label: rel86, card: ["1", "0..N"]}
+  - {from: e29, to: e14, label: rel87, card: ["1", "0..N"]}
+  - {from: e29, to: e16, label: rel88, card: ["1", "0..N"]}

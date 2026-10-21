@@ -1,7 +1,8 @@
 //! Large data models (28, issue 5): the budget of 8 entities warns and does not cap, so a model of 30 or 48
 //! entities with links across the grid renders, and a refusal comes fast. The fixtures come from a generator at
 //! master `fc5178f`: a grid of entities with neighbour links and seeded random cross-links, which then refused
-//! `label/collision` (30 entities) or `route/touches` after 29 s (48 entities).
+//! `label/collision` (30 entities) or `route/touches` after 29 s (48 entities). `er-30-x40` has 40 cross-links: a
+//! round leaves as many failing as the round before, so the layout stops there and refuses.
 
 use std::time::{Duration, Instant};
 
@@ -26,9 +27,16 @@ fn thirty_entities_with_cross_links_render() {
 }
 
 #[test]
-fn forty_eight_entities_with_random_links_answer_within_two_seconds() {
+fn forty_eight_entities_with_random_links_render_within_two_seconds() {
     let start = Instant::now();
-    let _ = render(&spec("tests/large/er-48.yaml"), None, None);
+    assert_eq!(errors("tests/large/er-48.yaml"), Vec::<String>::new());
+    assert!(start.elapsed() < Duration::from_secs(2), "took {:?}", start.elapsed());
+}
+
+#[test]
+fn a_hopeless_model_refuses_within_two_seconds() {
+    let start = Instant::now();
+    assert!(!errors("tests/large/er-30-x40.yaml").is_empty());
     assert!(start.elapsed() < Duration::from_secs(2), "took {:?}", start.elapsed());
 }
 

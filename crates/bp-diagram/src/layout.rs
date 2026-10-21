@@ -16,8 +16,13 @@ use crate::rules;
 use crate::scene::{Run, SEdge, SGroup, SLabel, SNode, Scene};
 use crate::spec::{Side, Spec, Type};
 
-/// The most rounds one layout takes. A round after the first reuses its sides, so it costs a fraction of the first.
+/// The most rounds one layout takes. A round after the first reuses its sides but routes and labels every edge again,
+/// so a large model pays for each round. The loop also stops at the first round that leaves no fewer routes, cards and
+/// labels failing than the round before.
 const ROUNDS: usize = 8;
+/// The most search work, in states popped, a layout spends before it refuses. A count, not a clock, keeps the bytes the
+/// same on every machine. The 23-entity model takes under 1 M; 120 entities and 370 edges take 14 M in their first round.
+const WORK: usize = 24_000_000;
 
 /// The most a gutter grows over all rounds. Past it, a label that still finds no spot is crowded by what widening
 /// cannot move (its own route's box, a self loop), and the rules name it.
@@ -90,23 +95,31 @@ pub(crate) fn lay_out(spec: &Spec, ghosts: &BTreeSet<String>) -> Result<Scene, V
     let mut order: Vec<usize> = (0..spec.edges.len()).collect();
     order.sort_by_key(|&i| (apart(&wants[i]), !focal(&spec.edges[i]), i));
     let plan = Plan { spec, built, cells, spans, wants, order, gaps };
-    let (mut wide, mut sides) = (BTreeMap::new(), Vec::new());
-    for round in 0..ROUNDS {
-        if let Some(scene) = attempt(&plan, &mut wide, &mut sides, round + 1 < ROUNDS) {
+    let (mut wide, mut sides, mut last, mut spent) = (BTreeMap::new(), Vec::new(), usize::MAX, 0);
+    for round in 1.. {
+        let (scene, failed, grow, work) = attempt(&plan, &wide, &mut sides);
+        spent += work;
+        // A round that fixes no more than the one before will not be helped by the next, and a round that would cost
+        // as much as this one must fit the work left: else the rules name what is left.
+        if failed == 0 || failed >= last || round == ROUNDS || spent + work > WORK {
             return Ok(scene);
         }
+        last = failed;
+        for (key, more) in grow {
+            let at = wide.entry(key).or_insert(0);
+            *at = (*at + more).min(GROW_MAX);
+        }
     }
-    unreachable!("the last round places every label")
+    unreachable!("the loop returns by round {ROUNDS}")
 }
 
-/// One round: place, route, label. With `retry`, a label with no clear spot widens its gutter and the round gives
-/// up; without, the label stays where the rules will name it.
+/// One round: place, route, label. Returns the scene, how many routes, cards and labels failed (a failed label stays
+/// where the rules will name it), and how much each short gutter asks to grow for the next round.
 fn attempt(
     plan: &Plan<'_>,
-    wide: &mut BTreeMap<(bool, i32), i32>,
+    wide: &BTreeMap<(bool, i32), i32>,
     sides: &mut Vec<(Side, Side)>,
-    retry: bool,
-) -> Option<Scene> {
+) -> (Scene, usize, BTreeMap<(bool, i32), i32>, usize) {
     let spec = plan.spec;
     let items: Vec<Item> = plan.cells.iter().map(|(_, i)| *i).collect();
     let mut grid = grid::place(&items, &plan.spans, plan.gaps.0, plan.gaps.1, wide);
@@ -137,22 +150,18 @@ fn attempt(
     let xs = route::lines(&grid.xbands(), &border_x, grid.w);
     let ys = route::lines(&grid.ybands(), &border_y, grid.h);
     let marks: Vec<Rect> = groups.iter().map(SGroup::label_box).collect();
-    let pts: Vec<Vec<Point>> = route::route(&rects, &marks, &xs, &ys, &plan.wants, &plan.order, sides);
+    let (pts, work) = route::route(&rects, &marks, &xs, &ys, &plan.wants, &plan.order, sides);
     // Each gutter a round finds short grows once, by the most any one route or label asked of it.
     let mut grow = BTreeMap::new();
-    let crowded = retry && crowd(&grid, &pts, &mut grow);
+    let crowded = crowd(&grid, &pts, &mut grow);
     let walls: Vec<Rect> = rects.iter().chain(&marks).copied().collect();
-    let edges = label_edges(plan, &grid, &walls, &pts, &mut grow, retry).filter(|_| !crowded);
-    for (key, more) in grow {
-        let at = wide.entry(key).or_insert(0);
-        *at = (*at + more).min(GROW_MAX);
-    }
-    let edges = edges?;
-    Some(Scene { w: grid.w, h: grid.h, groups, edges, nodes: placed, legend_y: grid.h, ..Scene::default() })
+    let (edges, short) = label_edges(plan, &grid, &walls, &pts, &mut grow);
+    let scene = Scene { w: grid.w, h: grid.h, groups, edges, nodes: placed, legend_y: grid.h, ..Scene::default() };
+    (scene, crowded + short, grow, work)
 }
 
-/// Labels every edge in routing order, then bridges each crossing on the later route. None when a label found no
-/// spot and `retry` asked for another round. Every cardinality goes first, as it is fixed at its port and a name may
+/// Labels every edge in routing order, then bridges each crossing on the later route. Returns the edges and how many
+/// cards and labels found no spot; each asks its gutter to grow. Every cardinality goes first, as it is fixed at its port and a name may
 /// slide along its route; and a card that its own route leaves one side for goes before the cards that may take either.
 fn label_edges(
     plan: &Plan<'_>,
@@ -160,12 +169,11 @@ fn label_edges(
     rects: &[Rect],
     pts: &[Vec<Point>],
     grow: &mut BTreeMap<(bool, i32), i32>,
-    retry: bool,
-) -> Option<Vec<SEdge>> {
+) -> (Vec<SEdge>, usize) {
     let frame = Rect::new(0, 0, grid.w, grid.h);
     let mut clear = Clear { frame, boxes: rects, routes: pts, labels: Vec::new() };
     let mut edges: Vec<Option<SEdge>> = vec![None; pts.len()];
-    let mut short = false;
+    let mut short = 0;
     let mut cards: Vec<(usize, usize, bool)> = Vec::new();
     for (k, &e) in plan.order.iter().enumerate() {
         for start in [true, false].into_iter().filter(|_| plan.spec.edges[e].card.is_some()) {
@@ -181,9 +189,9 @@ fn label_edges(
         let (text, end) = if start { (from, "from") } else { (to, "to") };
         let run = Run::new(Font::Mono, 10, 0, "card", text.as_str());
         let (rect, free) = label::card(&pts[e], start, e, plan.wants[e].cards[usize::from(!start)], &clear);
-        if free == 0 && retry {
+        if free == 0 {
             // The card's end sits in a crowded gutter: it grows, so the routes beside the end move off it.
-            short = true;
+            short += 1;
             let pts = &pts[e];
             let (end, next) = if start { (pts[0], pts[1]) } else { (pts[pts.len() - 1], pts[pts.len() - 2]) };
             let key = if end.1 == next.1 {
@@ -209,16 +217,13 @@ fn label_edges(
         let mut cut = None;
         if !edge.label.is_empty() {
             let (mut pill, width) = label::pill(&edge.id, &edge.label);
-            match label::place(&pts[e], e, width, label::PILL_H, &clear) {
-                Some(spot) => {
-                    pill.rect = spot.rect;
-                    cut = spot.cut;
-                }
-                None if retry => {
-                    short = true;
-                    widen(grid, &pts[e], width, grow);
-                }
-                None => pill.rect = Rect::new(pts[e][0].0, pts[e][0].1, width, label::PILL_H),
+            if let Some(spot) = label::place(&pts[e], e, width, label::PILL_H, &clear) {
+                pill.rect = spot.rect;
+                cut = spot.cut;
+            } else {
+                short += 1;
+                widen(grid, &pts[e], width, grow);
+                pill.rect = Rect::new(pts[e][0].0, pts[e][0].1, width, label::PILL_H);
             }
             center(&mut pill);
             clear.labels.push(pill.rect);
@@ -237,28 +242,28 @@ fn label_edges(
             step: None,
         });
     }
-    if short {
-        return None;
-    }
     let mut edges: Vec<SEdge> = edges.into_iter().map(|e| e.expect("every edge is routed")).collect();
     for (i, &a) in plan.order.iter().enumerate() {
         for &b in &plan.order[i + 1..] {
             edges[b].bridges.extend(route::crossings(&pts[a], &pts[b]));
         }
     }
-    Some(edges)
+    (edges, short)
 }
 
 /// Grows each gutter that ran out of tracks, by two tracks: where two routes share a stretch or a point (the rules
-/// would refuse either), the gutter the first one runs in widens. True when any did.
-fn crowd(grid: &grid::Grid, pts: &[Vec<Point>], grow: &mut BTreeMap<(bool, i32), i32>) -> bool {
+/// would refuse either), the gutter the first one runs in widens. Returns how many pairs of routes met.
+fn crowd(grid: &grid::Grid, pts: &[Vec<Point>], grow: &mut BTreeMap<(bool, i32), i32>) -> usize {
     let mut full = BTreeSet::new();
+    let mut met = 0;
     for (i, a) in pts.iter().enumerate() {
         for b in &pts[i + 1..] {
+            let mut hit = false;
             for p in a.windows(2) {
                 for q in b.windows(2) {
                     let (p, q) = ((p[0], p[1]), (q[0], q[1]));
                     if rules::parallel_overlap(p, q) || rules::meet(p, q).is_some() {
+                        hit = true;
                         full.insert(if p.0.0 == p.1.0 {
                             (true, gutter(&grid.colx, &grid.colw, p.0.0))
                         } else {
@@ -267,12 +272,13 @@ fn crowd(grid: &grid::Grid, pts: &[Vec<Point>], grow: &mut BTreeMap<(bool, i32),
                     }
                 }
             }
+            met += usize::from(hit);
         }
     }
     for key in &full {
         ask(grow, *key, 2 * 12);
     }
-    !full.is_empty()
+    met
 }
 
 /// Grows a gutter for a label that found no spot on its route's longest run. A run between two boxes, or too short
