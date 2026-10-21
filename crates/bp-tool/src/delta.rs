@@ -116,10 +116,8 @@ pub(crate) fn close(
     result: &mut Value,
 ) -> Result<Moves, Refusal> {
     if let Some(old) = stale {
-        let held = vault.text(old)?;
-        let gap = if held.ends_with('\n') { "\n" } else { "\n\n" };
         let instant = crate::clock::instant(now);
-        changes.insert(old.clone(), format!("{held}{gap}## Rejected\n\nrejected_at: {instant}\n"));
+        changes.insert(old.clone(), append(&vault.text(old)?, &format!("## Rejected\n\nrejected_at: {instant}\n")));
         result["rejected"] = old.as_str().into();
     }
     let design = Kind::Delta.parent(delta).expect("a delta sits under its design");
@@ -137,17 +135,25 @@ pub(crate) fn close(
     Ok(Moves { writes, ..Moves::default() })
 }
 
+/// A delta's text with its one closing append, `## Accepted` or `## Rejected`, after one blank line.
+pub(crate) fn append(held: &str, close: &str) -> String {
+    let gap = if held.ends_with('\n') { "\n" } else { "\n\n" };
+    format!("{held}{gap}{close}")
+}
+
 /// The glossary text a delta's diagrams resolve against: the body of the glossary's proposed delta under the same
-/// milestone, which the stamp writes with them, else the glossary as committed.
+/// milestone, which the stamp writes with them, else the glossary as committed. An editorial delta (no milestone)
+/// is stamped alone, so it reads the glossary as committed.
 pub(crate) fn glossary(
     vault: &Vault,
     index: &Index,
     project: &str,
-    milestone: &str,
+    milestone: Option<&str>,
 ) -> Result<Option<String>, Refusal> {
     let id = glossary_id(project);
     let proposed = index.records(id.as_str(), Kind::Delta)?.into_iter().find(|d| {
-        d.header.get("milestone").and_then(Value::as_str) == Some(milestone)
+        milestone.is_some()
+            && d.header.get("milestone").and_then(Value::as_str) == milestone
             && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed
     });
     Ok(match proposed {
@@ -160,14 +166,21 @@ pub(crate) fn glossary_id(project: &str) -> Id {
     Id::parse(&format!("projects/{project}/designs/glossary")).expect("a project and a slug make an id")
 }
 
+/// The flag of `record delta` that names what carries a delta: its milestone, or none for an editorial delta (28,
+/// design change 9).
+pub(crate) fn carrier(milestone: Option<&str>) -> String {
+    milestone.map_or_else(|| "--editorial".into(), |m| format!("--field milestone={m}"))
+}
+
 /// What `record delta` adds to the record (28, design changes 7 and 8): its `base`, its `diagrams` and
 /// `remove_diagrams`, and the `nodes` check of its body and specs together. It reads each spec it checks as
 /// committed. Returns the pending delta with the same cause whose base moved, which the new one closes as rejected.
+/// An editorial delta has no `milestone`: at most one is pending per design, as one is per milestone.
 pub(crate) fn propose(
     vault: &Vault,
     index: &Index,
     design: &Id,
-    milestone: &str,
+    milestone: Option<&str>,
     body: &str,
     diagrams: &Diagrams,
     fields: &mut BTreeMap<String, Value>,
@@ -175,7 +188,8 @@ pub(crate) fn propose(
     let project = design.project().expect("a design sits in a project");
     let is_glossary = *design == glossary_id(project);
     let designs = if is_glossary { all(index, project)? } else { vec![design.clone()] };
-    clean_specs(vault, &designs, &[])?;
+    // The design too: an editorial delta is judged against the design as committed.
+    clean_specs(vault, &designs, &[format!("{design}.md")])?;
     let cause = fields.get("cause").and_then(Value::as_str);
     let stale = pending(vault, index, design, milestone, cause)?;
     for name in diagrams.iter().filter(|(_, s)| s.is_none()).map(|(n, _)| n) {
@@ -197,6 +211,10 @@ pub(crate) fn propose(
         let body_of = |d: &Id| if d == design { Ok(body.to_string()) } else { vault.read(d).map(|f| f.body.text) };
         terms_hold(&designs, body, &specs_of, &body_of, &format!("bp record delta {design}"))?;
     }
+    if milestone.is_none() {
+        crate::editorial::refuse(vault, design, body, diagrams)?;
+        fields.insert("editorial".into(), true.into());
+    }
     fields.insert("base".into(), base(vault, design)?.into());
     for (field, puts) in [("diagrams", true), ("remove_diagrams", false)] {
         let listed: Vec<Value> =
@@ -209,7 +227,7 @@ pub(crate) fn propose(
 }
 
 /// Every design of `project`.
-fn all(index: &Index, project: &str) -> Result<Vec<Id>, Refusal> {
+pub(crate) fn all(index: &Index, project: &str) -> Result<Vec<Id>, Refusal> {
     let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: crate::ALL };
     Ok(index.list(&all)?.0.iter().filter_map(|r| Id::parse(&r.id).ok()).collect())
 }
@@ -296,17 +314,18 @@ pub(crate) fn terms_hold(
     Err(in_vault(first, &findings, &fix))
 }
 
-/// The proposed delta of `design` under `milestone`, if any. One whose base moved can never be accepted: when it has
-/// the new delta's `cause`, the new delta closes it as rejected; any other refuses `delta_pending` (13, Delta).
+/// The proposed delta of `design` under `milestone`, or its editorial one, if any. One whose base moved can never be
+/// accepted: when it has the new delta's `cause`, the new delta closes it as rejected; any other refuses
+/// `delta_pending` (13, Delta).
 fn pending(
     vault: &Vault,
     index: &Index,
     design: &Id,
-    milestone: &str,
+    milestone: Option<&str>,
     cause: Option<&str>,
 ) -> Result<Option<Id>, Refusal> {
     let Some(d) = index.records(design.as_str(), Kind::Delta)?.into_iter().find(|d| {
-        d.header.get("milestone").and_then(Value::as_str) == Some(milestone)
+        d.header.get("milestone").and_then(Value::as_str) == milestone
             && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed
     }) else {
         return Ok(None);
@@ -314,6 +333,9 @@ fn pending(
     let delta = Id::parse(&d.id).expect("the index holds ids");
     let theirs = d.header.get("cause").and_then(Value::as_str);
     let fix = match moved(vault, design, &delta, &d.header, milestone) {
+        Ok(()) if milestone.is_none() => {
+            format!("the human accepts the pending editorial delta first: bp stamp {delta}; then propose this one")
+        }
         Ok(()) => format!(
             "the pending delta carries the change until the milestone is stamped: bp list delta --under {design}"
         ),
@@ -327,26 +349,26 @@ fn pending(
     };
     Err(Refusal::new(
         Code::DeltaPending,
-        format!("{design} {milestone}"),
-        "a design carries at most one proposed delta per milestone (13, Delta)",
+        format!("{design} {}", milestone.unwrap_or("editorial")),
+        "a design carries at most one proposed delta per milestone, and one editorial delta (13, Delta)",
         fix,
     ))
 }
 
 /// Refuses `base_moved` when `design` changed since `delta`, whose header is `header`, was proposed on its `base`
 /// (28, design change 8). A header with no `base` reads as moved. The fix proposes the same change again: the same
-/// cause, specs and removals.
+/// carrier, cause, specs and removals.
 pub(crate) fn moved(
     vault: &Vault,
     design: &Id,
     delta: &Id,
     header: &Map<String, Value>,
-    milestone: &str,
+    milestone: Option<&str>,
 ) -> Result<(), Refusal> {
     if header.get("base").and_then(Value::as_str) == Some(base(vault, design)?.as_str()) {
         return Ok(());
     }
-    let mut again = vec![format!("bp record delta {design} --field milestone={milestone}")];
+    let mut again = vec![format!("bp record delta {design} {}", carrier(milestone))];
     again.extend(header.get("cause").and_then(Value::as_str).map(|c| format!("--field cause={c}")));
     again.push("--body-file <f>".into());
     for (name, spec) in carried(vault, delta, header)? {
@@ -362,8 +384,9 @@ pub(crate) fn moved(
          not see (28, design change 8)",
         format!(
             "{design} or a spec under its diagrams/ changed since {delta} was proposed; read it (bp show {design}), \
-             then propose the change on it: {}, which rejects {delta}; then rerun bp stamp {milestone}",
-            again.join(" ")
+             then propose the change on it: {}, which rejects {delta}; then bp stamp {}",
+            again.join(" "),
+            milestone.unwrap_or("<the new delta>")
         ),
     ))
 }

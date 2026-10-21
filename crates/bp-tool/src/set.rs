@@ -113,7 +113,9 @@ fn with_body(id: &Id, header: &Header, text: &str, body: &str) -> Result<Option<
             id.as_str(),
             "a design past draft changes only through a delta record; its file is rewritten when the delta is \
              accepted (13, Design history)",
-            format!("bp record delta {id} --field milestone=<milestone> --body-file <f>"),
+            format!(
+                "bp record delta {id} --field milestone=<milestone> --body-file <f>; or --editorial when only wording and layout change"
+            ),
         ));
     }
     Ok(rebody(text, body))

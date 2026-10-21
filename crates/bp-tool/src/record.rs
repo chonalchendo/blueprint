@@ -35,6 +35,9 @@ pub struct Record {
     /// A diagram the delta removes from its design, with its page. Repeat for each.
     #[arg(long = "remove-diagram", value_name = "NAME")]
     pub remove_diagrams: Vec<String>,
+    /// A delta that changes only wording and layout: no milestone; the human accepts it with `bp stamp <delta>`.
+    #[arg(long)]
+    pub editorial: bool,
     /// A forge URI the record names, such as its pull request.
     #[arg(long)]
     pub external: Option<String>,
@@ -92,7 +95,8 @@ fn spec(kind: Kind) -> Option<Spec> {
             Key::Stamp,
             Some("stamp"),
             vec![
-                ("milestone", Type::Link(&[Kind::Milestone]), true),
+                // Required unless the delta is editorial (`editorial::usage`).
+                ("milestone", Type::Link(&[Kind::Milestone]), false),
                 ("change", Type::Text, false),
                 ("cause", Type::Link(&[Kind::Thread, Kind::Issue, Kind::Run]), false),
                 ("pull_request", Type::Int, false),
@@ -172,6 +176,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
     let kind = r.kind.parse::<Kind>().map_err(|_| not_recorded(&r.kind))?;
     let spec = spec(kind).ok_or_else(|| not_recorded(&r.kind))?;
     let given = given(kind, &spec, &r.fields)?;
+    crate::editorial::usage(kind, r.editorial, given.contains_key("milestone"))?;
     if r.external.as_deref().is_some_and(|e| e.trim().is_empty()) {
         return Err(Refusal::usage("--external", "give the forge URI the record names, or leave the flag out").into());
     }
@@ -193,9 +198,11 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
         let Some(text) = given.get(name) else { continue };
         fields.insert((*name).to_string(), value(index, kind, name, ty, text)?);
     }
-    let milestone = fields.get("milestone").and_then(Value::as_str).filter(|_| kind == Kind::Delta).map(str::to_string);
-    let stale = match (&parent, milestone) {
-        (Some(design), Some(m)) => crate::delta::propose(&vault, index, design, &m, &body, &diagrams, &mut fields)?,
+    let milestone = fields.get("milestone").and_then(Value::as_str).map(str::to_string);
+    let stale = match &parent {
+        Some(design) if kind == Kind::Delta => {
+            crate::delta::propose(&vault, index, design, milestone.as_deref(), &body, &diagrams, &mut fields)?
+        }
         _ => None,
     };
     // A handoff's seed is the node of the session's latest vault commit, which the next session start walks (13).

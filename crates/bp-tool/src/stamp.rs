@@ -5,7 +5,7 @@
 //! and the milestone at `done`, with `Bp-Version` and one `Bp-Delta` per delta. A delta whose design changed since it
 //! was proposed refuses `base_moved` (28, design change 8). A local tag `blueprint/<project>/<n>` names the commit;
 //! the human pushes it (07, Deployment). After the finish line it runs the block of each open waiver of the project,
-//! which a pass closes (27, design change 10).
+//! which a pass closes (27, design change 10). `bp stamp <delta>` accepts an editorial delta alone (`editorial`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -19,11 +19,12 @@ use serde_json::{Value, json};
 use crate::waiver::{self, Reask};
 use crate::{Wrote, finish, subject};
 
-/// `bp stamp <milestone> [--waive <name> --reason <why>]...`.
+/// `bp stamp <milestone> [--waive <name> --reason <why>]...`, or `bp stamp <delta>`.
 #[derive(Args)]
 pub struct Stamp {
-    /// The milestone: `approved`, and every issue under it resolved or abandoned.
-    pub milestone: String,
+    /// The milestone: `approved`, and every issue under it resolved or abandoned. Or an editorial delta, which needs
+    /// no finish line.
+    pub milestone_or_delta: String,
     /// A finish-line block not to run, recorded as a waiver; or `<milestone>/<name>`, an open waiver of the project,
     /// waived again. Give each its own `--reason`, in the same order.
     #[arg(long, value_name = "NAME")]
@@ -40,10 +41,15 @@ enum Stamped {
 }
 
 pub(crate) fn run(cwd: &Path, s: &Stamp, json: bool, out: &mut impl std::io::Write) -> ExitCode {
-    match stamp(cwd, s) {
+    // A record has no alias, so the id as given tells a delta from a milestone.
+    let stamped = match crate::node_id(&s.milestone_or_delta) {
+        Ok(delta) if Kind::Delta.fits(&delta) => crate::editorial::stamp(cwd, &delta, s).map(Stamped::Wrote),
+        _ => stamp(cwd, s),
+    };
+    match stamped {
         Ok(Stamped::Wrote(w)) => crate::wrote(Ok(w), json, out),
         Ok(Stamped::Failed { at, commit, runs, waive }) => {
-            let m = &s.milestone;
+            let m = &s.milestone_or_delta;
             let then = format!("rerun bp stamp {m}, or waive it: bp stamp {m} --waive {waive} --reason <why>");
             crate::check::failed(&runs[at], &then, &commit, crate::check::rows(&runs), None, json, out)
         }
@@ -52,12 +58,12 @@ pub(crate) fn run(cwd: &Path, s: &Stamp, json: bool, out: &mut impl std::io::Wri
 }
 
 fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
-    let role = crate::set::human(format!("stamp {}", s.milestone))?;
+    let role = crate::set::human(format!("stamp {}", s.milestone_or_delta))?;
     waiver::usage(s)?;
     let vault = Vault::discover(cwd)?;
     let now = crate::clock::now()?;
     let index = Index::open(&vault)?;
-    let id = subject(&index, &s.milestone)?;
+    let id = subject(&index, &s.milestone_or_delta)?;
     let project = id.project().expect("a milestone sits under a project");
     // Every refusal comes before the blocks run, which may take minutes: a human's uncommitted edit to a path the
     // stamp writes, and a tag already taken. Each holds under the lock too.
@@ -197,9 +203,7 @@ fn accept(
         if let Some(text) = crate::set::rebody(&vault.text(&c.design)?, &c.body) {
             changes.insert(c.design.clone(), text);
         }
-        let held = vault.text(&c.delta)?;
-        let gap = if held.ends_with('\n') { "\n" } else { "\n\n" };
-        changes.insert(c.delta.clone(), format!("{held}{gap}{close}"));
+        changes.insert(c.delta.clone(), crate::delta::append(&vault.text(&c.delta)?, close));
         deltas.push(c.delta.clone());
     }
     Ok(deltas)
@@ -266,8 +270,11 @@ struct Carried {
 fn early(vault: &Vault, id: &Id, gate: &Gate) -> Result<(), Refusal> {
     // The milestone keeps the paths non-empty: a clean of no path reads the whole tree, ignored files too.
     vault.clean(std::iter::once(id).chain(gate.deltas.iter().flat_map(|c| [&c.design, &c.delta])))?;
+    // Before `moved` hashes the working specs: a dirty spec is `path_dirty`, not a moved base.
+    let designs: Vec<Id> = gate.deltas.iter().map(|c| c.design.clone()).collect();
+    crate::delta::clean_specs(vault, &designs, &[])?;
     let mut deltas = gate.deltas.iter();
-    deltas.try_for_each(|c| crate::delta::moved(vault, &c.design, &c.delta, &c.header, id.as_str()))?;
+    deltas.try_for_each(|c| crate::delta::moved(vault, &c.design, &c.delta, &c.header, Some(id.as_str())))?;
     crate::redraw::ready(vault, id, &gate.designs, &carried(gate))
 }
 

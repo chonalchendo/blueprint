@@ -9,6 +9,7 @@ mod create;
 mod delta;
 mod diagram;
 mod done;
+mod editorial;
 mod install;
 mod intent;
 mod land;
@@ -97,7 +98,8 @@ pub enum Verb {
     /// Run the owner's check blocks; one run record per block, one commit.
     Check(check::Check),
     /// Accept an approved milestone: its finish line, its deltas written into their designs, a blueprint version and
-    /// the milestone at `done` in one commit, and a local tag.
+    /// the milestone at `done` in one commit, and a local tag. Or accept an editorial delta alone: no finish line,
+    /// no version.
     Stamp(stamp::Stamp),
     /// The bundle into a harness, at the clone's top, with its manifest; local, so it calls no forge.
     Install(install::Install),

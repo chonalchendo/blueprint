@@ -7,29 +7,31 @@ use std::collections::BTreeMap;
 
 use bp_check::nodes::{Names, specs};
 use bp_diagram::Link;
-use bp_vault::{Id, Index, Refusal, SLUG_MAX, Vault};
+use bp_vault::{Id, Index, Kind, Refusal, SLUG_MAX, Vault};
 
-use crate::delta::{Diagrams, Writes, clean_specs, glossary, glossary_id, in_vault, terms_hold};
+use crate::delta::{Diagrams, Writes, carrier, clean_specs, glossary, glossary_id, in_vault, terms_hold};
 use crate::diagram::{level_of, page};
 
-/// What a stamp refuses before it writes, before the blocks run and again under the lock: `path_dirty` on any spec
-/// of the project or a carried spec, and, when it carries a glossary delta, a term it drops that a spec still uses.
+/// What a stamp of `subject`, a milestone or an editorial delta, refuses before it writes, before the blocks run and
+/// again under the lock: `path_dirty` on any spec of the project or a carried spec, and, when it carries a glossary
+/// delta, a term it drops that a spec still uses.
 pub(crate) fn ready(
     vault: &Vault,
-    milestone: &Id,
+    subject: &Id,
     designs: &[Id],
     carried: &[(&Id, &str, &Diagrams)],
 ) -> Result<(), Refusal> {
     let files: Vec<String> =
         carried.iter().flat_map(|(_, _, d)| d.values().flatten().map(|s| s.file.display().to_string())).collect();
     clean_specs(vault, designs, &files)?;
-    let project = milestone.project().expect("a milestone sits under a project");
+    let project = subject.project().expect("a stamp's subject sits under a project");
     let Some((glossary, body, _)) = carried.iter().find(|(d, ..)| **d == glossary_id(project)) else { return Ok(()) };
     let body_of = |d: &Id| match carried.iter().find(|(c, ..)| *c == d) {
         Some((_, b, _)) => Ok((*b).to_string()),
         None => vault.read(d).map(|f| f.body.text),
     };
-    let record = format!("bp record delta {glossary} --field milestone={milestone}");
+    let milestone = Kind::Milestone.fits(subject).then_some(subject.as_str());
+    let record = format!("bp record delta {glossary} {}", carrier(milestone));
     terms_hold(designs, body, &|d| after(vault, d, carried), &body_of, &record).map_err(|r| r.0)
 }
 
@@ -75,16 +77,20 @@ fn drills_to(spec: &str, project: &str, designs: &[Id]) -> bool {
 /// project as the stamp leaves it, by path, for the manifest. Each spec a delta puts is written and rendered against
 /// its proposed body; each it removes goes with its page. Each container-level page with a node that drills to a
 /// design whose component views change is rendered again, so its badge counts them (13, Diagram). A page that does
-/// not render refuses; the stamp never keeps a stale one.
+/// not render refuses; the stamp never keeps a stale one. `subject` is what the stamp names: a milestone, or an
+/// editorial delta. A carried glossary delta is the glossary the stamp leaves.
 pub(crate) fn stamped(
     vault: &Vault,
     index: &Index,
-    milestone: &Id,
+    subject: &Id,
     designs: &[Id],
     carried: &[(&Id, &str, &Diagrams)],
 ) -> Result<(Writes, BTreeMap<String, String>), Refusal> {
-    let project = milestone.project().expect("a milestone sits under a project");
-    let glossary = glossary(vault, index, project, milestone.as_str())?;
+    let project = subject.project().expect("a stamp's subject sits under a project");
+    let glossary = match carried.iter().find(|(d, ..)| **d == glossary_id(project)) {
+        Some((_, body, _)) => Some((*body).to_string()),
+        None => glossary(vault, index, project, None)?,
+    };
     let drilled = drilled(vault, carried);
     let specs_of = |c: &Id| after(vault, c, carried).into_values().collect();
     let (mut writes, mut hashes) = (Vec::new(), BTreeMap::new());
@@ -128,7 +134,7 @@ pub(crate) fn stamped(
                             format!("replace it through a delta: bp record delta {design} --diagram {name}=<f>"),
                         ),
                     };
-                    in_vault(&path, &findings, &format!("{fix}; then rerun bp stamp {milestone}")).0
+                    in_vault(&path, &findings, &format!("{fix}; then rerun bp stamp {subject}")).0
                 })?;
                 put(spec, Some(text.clone()));
                 put(html, Some(render.html));
