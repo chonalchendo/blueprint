@@ -131,12 +131,13 @@ fn a_delta_carries_its_diagrams_through_record_and_stamp() {
     assert_eq!(std::fs::read_to_string(root.join(&delta).join("new.yaml")).unwrap(), NEW, "the spec in the delta");
     let shown = bp(root, &["show", &delta]).1;
     assert_eq!((&shown["diagrams"], &shown["remove_diagrams"]), (&json!(["keep", "new"]), &json!(["old"])), "{shown}");
+    // The base: the body after the header, then each spec's name and text, each part after its length.
+    let text = std::fs::read_to_string(root.join(format!("{FRONT}.md"))).unwrap();
     let mut base = blake3::Hasher::new();
-    base.update(std::fs::read(root.join(format!("{FRONT}.md"))).unwrap().as_slice());
-    for (name, text) in [("keep", KEEP), ("old", OLD)] {
-        base.update(b"\0").update(name.as_bytes()).update(b"\0").update(text.as_bytes());
+    for part in [&text[text.find("\n---\n").unwrap() + 5..], "keep", KEEP, "old", OLD] {
+        base.update(&(part.len() as u64).to_le_bytes()).update(part.as_bytes());
     }
-    assert_eq!(shown["base"], base.finalize().to_hex().to_string(), "the base covers the design and its specs");
+    assert_eq!(shown["base"], base.finalize().to_hex().to_string(), "the base covers the body and the specs");
     let diff = std::fs::read_to_string(root.join(&delta).join("keep.diff.html")).unwrap();
     assert!(diff.contains("<script>"), "the replaced view's diff page");
     assert!(!root.join(&delta).join("new.diff.html").exists(), "an added view has no diff page");
@@ -245,4 +246,68 @@ fn a_term_the_milestone_adds_to_the_glossary_resolves() {
     assert_eq!(bp(root, &g).0, Some(0));
     let (exit, v) = record(root, body, &["--diagram", &flag]);
     assert_eq!(exit, Some(0), "the glossary's delta under the same milestone names it: {v}");
+}
+
+#[test]
+fn a_dirty_spec_or_an_unknown_removal_refuses() {
+    let v = vault(&[]);
+    let code = common::vault(&[("marker.txt", "here\n")]);
+    let (root, code) = (v.path(), code.path());
+    let tmp = tempfile::tempdir().unwrap();
+    let [body] = &files(tmp.path(), &[("body.md", BODY)])[..] else { unreachable!() };
+    let (exit, v) = record(root, body, &["--remove-diagram", "nosuch"]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("unknown_value")), "{v}");
+    // A spec read from the working tree would reach the base and the check without git holding it.
+    let keep = root.join(FRONT).join("diagrams/keep.yaml");
+    std::fs::write(&keep, KEEP.replace("Two boxes.", "Dirty.")).unwrap();
+    assert_eq!(record(root, body, &[]).1["code"], "path_dirty");
+    git(root, &["checkout", "--", "."]);
+    assert_eq!(record(root, body, &[]).0, Some(0));
+    assert_eq!(bp(root, &["transition", ISSUE, "abandoned"]).0, Some(0));
+    assert_eq!(bp(root, &["transition", M, "approved"]).0, Some(0));
+    // The stamp reads every spec of the project, so a dirty one anywhere refuses before the blocks run.
+    std::fs::write(root.join(SYSTEM).join("diagrams/containers.yaml"), SYS.replace("One box.", "Dirty box.")).unwrap();
+    let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", M]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{v}");
+    assert!(!root.join(format!("{M}/runs")).exists(), "no block ran");
+}
+
+#[test]
+fn a_glossary_delta_keeps_every_term_a_spec_uses() {
+    const DRAFT: &str = "projects/bp/designs/containers/draft";
+    let draft = "---\nkind: design\ntitle: Draft\nstatus: draft\nunder: projects/bp/designs/system\n---\n\nDraft.\n";
+    let v = vault(&[(&format!("{DRAFT}.md"), draft)]);
+    let code = common::vault(&[("marker.txt", "here\n")]);
+    let (root, code) = (v.path(), code.path());
+    let both = "- `harness` — runs the agents.\n- `spare` — unused.\n";
+    std::fs::write(root.join("projects/bp/designs/glossary.md"), design("G", SYSTEM, both)).unwrap();
+    git(root, &["commit", "-qam", "spare"]);
+    let tmp = tempfile::tempdir().unwrap();
+    let spare = OLD.replace("term: harness", "term: spare");
+    let [dropped, kept, spec] = &files(
+        tmp.path(),
+        &[("dropped.md", "- `spare` — unused.\n"), ("kept.md", "- `harness` — runs the agents.\n"), ("s.yaml", &spare)],
+    )[..] else {
+        unreachable!()
+    };
+    let glossary = |body: &str| {
+        let ms = format!("milestone={M}");
+        bp(root, &["record", "delta", "projects/bp/designs/glossary", "--field", &ms, "--body-file", body])
+    };
+    // Dropping `harness` orphans both views of the front: the refusal names each.
+    let (exit, v) = glossary(dropped);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("diagram_invalid")), "{v}");
+    assert_eq!(v["subject"], format!("{FRONT}/diagrams/keep.yaml#h"), "{v}");
+    for spec in ["keep", "old"] {
+        assert!(v["fix"].as_str().unwrap().contains(&format!("{FRONT}/diagrams/{spec}.yaml")), "{v}");
+    }
+    assert!(!v["fix"].as_str().unwrap().contains("edit "), "only bp writes a vault file: {v}");
+    // `spare` is in no spec when the delta drops it; a draft's view takes it up before the stamp.
+    assert_eq!(glossary(kept).0, Some(0));
+    assert_eq!(bp(root, &["diagram", DRAFT, "spare", "--spec-file", spec]).0, Some(0));
+    assert_eq!(bp(root, &["transition", ISSUE, "abandoned"]).0, Some(0));
+    assert_eq!(bp(root, &["transition", M, "approved"]).0, Some(0));
+    let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", M]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("diagram_invalid")), "{v}");
+    assert_eq!(v["subject"], format!("{DRAFT}/diagrams/spare.yaml#h"), "{v}");
 }

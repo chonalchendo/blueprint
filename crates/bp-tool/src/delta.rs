@@ -10,10 +10,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bp_check::nodes::{Names, is_name, specs};
-use bp_vault::{Body, Code, DeltaState, Id, Index, Kind, Moves, Refusal, Vault};
+use bp_diagram::Finding;
+use bp_vault::{Body, Code, DeltaState, Filter, Id, Index, Kind, Moves, Refusal, Vault};
 use serde_json::{Map, Value};
 
-use crate::diagram::{Refused, invalid, level_of, page};
+use crate::diagram::{Refused, invalid, page, rows};
 
 /// One spec a delta puts: the file it was read from, which a refusal names, and its text.
 #[derive(Clone, PartialEq)]
@@ -84,13 +85,20 @@ pub(crate) fn carried(vault: &Vault, delta: &Id, header: &Map<String, Value>) ->
     Ok(diagrams)
 }
 
-/// The content hash `base` holds (28, design change 8): blake3 of the design file, then, for each spec under its
-/// `diagrams/` by name, a NUL, the name, a NUL and the spec, so a diagram-only change moves it too.
+/// The content hash `base` holds (28, design change 8; 13, Delta): blake3 over the design's body, the part `stamp`
+/// rewrites, then each spec under its `diagrams/` as its name and its text, by name. Each part goes with its length
+/// first, so two sets of parts never hash alike. A header-only change moves nothing.
 pub(crate) fn base(vault: &Vault, design: &Id) -> Result<String, Refusal> {
+    let text = vault.text(design)?;
+    let body = &text[bp_vault::header_end(&text).expect("a design has a header")..];
     let mut hasher = blake3::Hasher::new();
-    hasher.update(vault.text(design)?.as_bytes());
-    for (name, text) in specs(vault, design).0 {
-        hasher.update(b"\0").update(name.as_bytes()).update(b"\0").update(text.as_bytes());
+    let mut part = |bytes: &[u8]| {
+        hasher.update(&(bytes.len() as u64).to_le_bytes()).update(bytes);
+    };
+    part(body.as_bytes());
+    for (name, spec) in specs(vault, design).0 {
+        part(name.as_bytes());
+        part(spec.as_bytes());
     }
     Ok(hasher.finalize().to_hex().to_string())
 }
@@ -137,8 +145,8 @@ pub(crate) fn glossary(
     project: &str,
     milestone: &str,
 ) -> Result<Option<String>, Refusal> {
-    let id = format!("projects/{project}/designs/glossary");
-    let proposed = index.records(&id, Kind::Delta)?.into_iter().find(|d| {
+    let id = glossary_id(project);
+    let proposed = index.records(id.as_str(), Kind::Delta)?.into_iter().find(|d| {
         d.header.get("milestone").and_then(Value::as_str) == Some(milestone)
             && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed
     });
@@ -148,9 +156,13 @@ pub(crate) fn glossary(
     })
 }
 
-/// What `record delta` adds to the record (28, design changes 7 and 8): its `base`, its `remove_diagrams`, and the
-/// `nodes` check of its body and specs together. Returns the pending delta whose base moved, which the new one
-/// closes as rejected.
+pub(crate) fn glossary_id(project: &str) -> Id {
+    Id::parse(&format!("projects/{project}/designs/glossary")).expect("a project and a slug make an id")
+}
+
+/// What `record delta` adds to the record (28, design changes 7 and 8): its `base`, its `diagrams` and
+/// `remove_diagrams`, and the `nodes` check of its body and specs together. It reads each spec it checks as
+/// committed. Returns the pending delta with the same cause whose base moved, which the new one closes as rejected.
 pub(crate) fn propose(
     vault: &Vault,
     index: &Index,
@@ -160,15 +172,31 @@ pub(crate) fn propose(
     diagrams: &Diagrams,
     fields: &mut BTreeMap<String, Value>,
 ) -> Result<Option<Id>, Refused> {
-    let stale = pending(vault, index, design, milestone)?;
     let project = design.project().expect("a design sits in a project");
-    let glossary = if design.as_str() == format!("projects/{project}/designs/glossary") {
-        Some(body.to_string())
-    } else {
-        glossary(vault, index, project, milestone)?
-    };
+    let is_glossary = *design == glossary_id(project);
+    let designs = if is_glossary { all(index, project)? } else { vec![design.clone()] };
+    clean_specs(vault, &designs, &[])?;
+    let cause = fields.get("cause").and_then(Value::as_str);
+    let stale = pending(vault, index, design, milestone, cause)?;
+    for name in diagrams.iter().filter(|(_, s)| s.is_none()).map(|(n, _)| n) {
+        if !vault.root.join(format!("{design}/diagrams/{name}.yaml")).exists() {
+            return Err(Refusal::new(
+                Code::UnknownValue,
+                format!("--remove-diagram {name}"),
+                "a delta removes a diagram its design has (28, design change 7)",
+                format!("name a spec of {design}: ls {design}/diagrams/ in the vault, or bp show {design}"),
+            )
+            .into());
+        }
+    }
+    let glossary = if is_glossary { Some(body.to_string()) } else { glossary(vault, index, project, milestone)? };
     let names = Names::with(glossary.as_deref(), design, body);
     check(vault, design, &names, diagrams, &format!("rerun bp record delta {design}"))?;
+    if is_glossary {
+        let specs_of = |d: &Id| specs(vault, d).0.into_iter().collect();
+        let body_of = |d: &Id| if d == design { Ok(body.to_string()) } else { vault.read(d).map(|f| f.body.text) };
+        terms_hold(&designs, body, &specs_of, &body_of, &format!("bp record delta {design}"))?;
+    }
     fields.insert("base".into(), base(vault, design)?.into());
     for (field, puts) in [("diagrams", true), ("remove_diagrams", false)] {
         let listed: Vec<Value> =
@@ -178,6 +206,37 @@ pub(crate) fn propose(
         }
     }
     Ok(stale)
+}
+
+/// Every design of `project`.
+fn all(index: &Index, project: &str) -> Result<Vec<Id>, Refusal> {
+    let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: crate::ALL };
+    Ok(index.list(&all)?.0.iter().filter_map(|r| Id::parse(&r.id).ok()).collect())
+}
+
+/// Refuses `path_dirty` on each spec of `designs` and its page, and on `more`: a spec read from the working tree
+/// would reach the record or the version without git holding it.
+pub(crate) fn clean_specs(vault: &Vault, designs: &[Id], more: &[String]) -> Result<(), Refusal> {
+    let mut paths: Vec<String> = more.to_vec();
+    for d in designs {
+        for (name, _) in specs(vault, d).0 {
+            paths.extend([format!("{d}/diagrams/{name}.yaml"), format!("{d}/diagrams/{name}.html")]);
+        }
+    }
+    if paths.is_empty() { Ok(()) } else { vault.clean_paths(&paths) }
+}
+
+/// A `diagram_invalid` refusal on specs in the vault: their subject is the first, and the fix names `bp` calls only,
+/// as only `bp` writes a vault file.
+pub(crate) fn in_vault(path: &str, findings: &[Finding], fix: &str) -> Refused {
+    let first = &findings[0];
+    let refusal = Refusal::new(
+        Code::DiagramInvalid,
+        format!("{path}#{}", first.id),
+        "a diagram spec breaks no hard rule (28, design change 4)",
+        format!("{}: {}; {fix}", first.rule, first.detail),
+    );
+    Refused(refusal, Some(rows(findings)))
 }
 
 /// The `nodes` check on the proposed body and the proposed specs together (28, design change 7): each spec the delta
@@ -193,17 +252,59 @@ fn check(vault: &Vault, design: &Id, names: &Names, diagrams: &Diagrams, then: &
         let mut findings = bp_diagram::outline(text, &|l| names.resolves(l)).map_or_else(|f| f, |(_, f)| f);
         if !findings.is_empty() {
             names.explain(&mut findings);
-            let then =
-                format!("keep the name in the body, or pass --diagram {name}=<f> with a spec that drops it; {then}");
-            return Err(invalid(Path::new(&format!("{design}/diagrams/{name}.yaml")), &findings, &then));
+            let fix = format!(
+                "keep the name in the proposed body, or add --diagram {name}=<f> with a spec that drops it (bp diagram \
+                 --spec-file <f> --out /tmp/{name}.html previews it), or --remove-diagram {name}; then {then}"
+            );
+            return Err(in_vault(&format!("{design}/diagrams/{name}.yaml"), &findings, &fix));
         }
     }
     Ok(())
 }
 
-/// The proposed delta of `design` under `milestone`, if any: one whose base moved can never be accepted, so the new
-/// delta closes it as rejected; any other refuses `delta_pending` (13, Delta).
-fn pending(vault: &Vault, index: &Index, design: &Id, milestone: &str) -> Result<Option<Id>, Refusal> {
+/// A glossary delta's check (28, design change 7): every spec of `designs`, as `specs_of` gives them, still resolves
+/// against the proposed glossary, with each design's body as `body_of` gives it. A term it drops refuses while a
+/// spec uses it; the refusal names every such spec. `record` is the glossary delta's record call.
+pub(crate) fn terms_hold(
+    designs: &[Id],
+    glossary: &str,
+    specs_of: &dyn Fn(&Id) -> BTreeMap<String, String>,
+    body_of: &dyn Fn(&Id) -> Result<String, Refusal>,
+    record: &str,
+) -> Result<(), Refused> {
+    let mut found: Vec<(String, Finding)> = Vec::new();
+    for d in designs {
+        let specs = specs_of(d);
+        if specs.is_empty() {
+            continue;
+        }
+        let names = Names::with(Some(glossary), d, &body_of(d)?);
+        for (name, text) in &specs {
+            let findings = bp_diagram::outline(text, &|l| names.resolves(l)).map_or_else(|f| f, |(_, f)| f);
+            found.extend(findings.into_iter().map(|f| (format!("{d}/diagrams/{name}.yaml"), f)));
+        }
+    }
+    let Some((first, _)) = found.first() else { return Ok(()) };
+    let paths: Vec<&str> = found.iter().map(|(p, _)| p.as_str()).collect();
+    let fix = format!(
+        "keep each term these specs use: rerun {record} with a body that defines it; or first replace each spec \
+         through a delta on its design (bp record delta <design> --diagram <name>=<f>): {}",
+        paths.join(", ")
+    );
+    let findings: Vec<Finding> =
+        found.iter().map(|(p, f)| Finding { detail: format!("{p}: {}", f.detail), ..f.clone() }).collect();
+    Err(in_vault(first, &findings, &fix))
+}
+
+/// The proposed delta of `design` under `milestone`, if any. One whose base moved can never be accepted: when it has
+/// the new delta's `cause`, the new delta closes it as rejected; any other refuses `delta_pending` (13, Delta).
+fn pending(
+    vault: &Vault,
+    index: &Index,
+    design: &Id,
+    milestone: &str,
+    cause: Option<&str>,
+) -> Result<Option<Id>, Refusal> {
     let Some(d) = index.records(design.as_str(), Kind::Delta)?.into_iter().find(|d| {
         d.header.get("milestone").and_then(Value::as_str) == Some(milestone)
             && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed
@@ -211,31 +312,48 @@ fn pending(vault: &Vault, index: &Index, design: &Id, milestone: &str) -> Result
         return Ok(None);
     };
     let delta = Id::parse(&d.id).expect("the index holds ids");
-    match moved(vault, design, &delta, d.header.get("base").and_then(Value::as_str), milestone) {
-        Err(r) if r.code == Code::BaseMoved => return Ok(Some(delta)),
+    let theirs = d.header.get("cause").and_then(Value::as_str);
+    let fix = match moved(vault, design, &delta, &d.header, milestone) {
+        Ok(()) => format!(
+            "the pending delta carries the change until the milestone is stamped: bp list delta --under {design}"
+        ),
+        Err(r) if r.code == Code::BaseMoved && theirs == cause => return Ok(Some(delta)),
+        Err(r) if r.code == Code::BaseMoved => format!(
+            "{delta} can never be stamped, and its cause is {}, not this one; its owner proposes it again: {}",
+            theirs.unwrap_or("design work"),
+            r.fix
+        ),
         Err(r) => return Err(r),
-        Ok(()) => {}
-    }
+    };
     Err(Refusal::new(
         Code::DeltaPending,
         format!("{design} {milestone}"),
         "a design carries at most one proposed delta per milestone (13, Delta)",
-        format!("the pending delta carries the change until the milestone is stamped: bp list delta --under {design}"),
+        fix,
     ))
 }
 
-/// Refuses `base_moved` when `design` changed since `delta` was proposed on its `base` (28, design change 8).
+/// Refuses `base_moved` when `design` changed since `delta`, whose header is `header`, was proposed on its `base`
+/// (28, design change 8). A header with no `base` reads as moved. The fix proposes the same change again: the same
+/// cause, specs and removals.
 pub(crate) fn moved(
     vault: &Vault,
     design: &Id,
     delta: &Id,
-    base: Option<&str>,
+    header: &Map<String, Value>,
     milestone: &str,
 ) -> Result<(), Refusal> {
-    // A delta recorded before deltas held a base has nothing to compare.
-    let Some(base) = base else { return Ok(()) };
-    if self::base(vault, design)? == base {
+    if header.get("base").and_then(Value::as_str) == Some(base(vault, design)?.as_str()) {
         return Ok(());
+    }
+    let mut again = vec![format!("bp record delta {design} --field milestone={milestone}")];
+    again.extend(header.get("cause").and_then(Value::as_str).map(|c| format!("--field cause={c}")));
+    again.push("--body-file <f>".into());
+    for (name, spec) in carried(vault, delta, header)? {
+        again.push(match spec {
+            Some(s) => format!("--diagram {name}={}", vault.root.join(s.file).display()),
+            None => format!("--remove-diagram {name}"),
+        });
     }
     Err(Refusal::new(
         Code::BaseMoved,
@@ -243,85 +361,9 @@ pub(crate) fn moved(
         "a delta is accepted only onto the design it was proposed on, so a stamp never reverts a change the delta did \
          not see (28, design change 8)",
         format!(
-            "{design} or a spec under its diagrams/ changed since {delta} was proposed; read it (bp show {design}), then propose the change on it: \
-             bp record delta {design} --field milestone={milestone} --body-file <f>, which closes {delta} as \
-             rejected; then rerun the stamp"
+            "{design} or a spec under its diagrams/ changed since {delta} was proposed; read it (bp show {design}), \
+             then propose the change on it: {}, which rejects {delta}; then rerun bp stamp {milestone}",
+            again.join(" ")
         ),
     ))
-}
-
-/// What a stamp writes for its carried deltas' diagrams (28, design change 7), and the hash of each spec of the
-/// project as the stamp leaves it, by path, for the manifest. Each spec a delta puts is written and rendered against
-/// its proposed body; each it removes goes with its page. Every other container-level page is rendered again, so its
-/// drill badges count the component diagrams the stamp leaves (13, Diagram); one that no longer renders keeps its
-/// page, and the `nodes` check names why.
-pub(crate) fn stamped(
-    vault: &Vault,
-    index: &Index,
-    milestone: &Id,
-    designs: &[Id],
-    carried: &[(&Id, &str, &Diagrams)],
-) -> Result<(Writes, BTreeMap<String, String>), Refusal> {
-    let project = milestone.project().expect("a milestone sits under a project");
-    let glossary = glossary(vault, index, project, milestone.as_str())?;
-    let after = |design: &Id| {
-        let mut specs: BTreeMap<String, String> = specs(vault, design).0.into_iter().collect();
-        for (_, _, diagrams) in carried.iter().filter(|(d, ..)| *d == design) {
-            for (name, spec) in *diagrams {
-                match spec {
-                    Some(s) => specs.insert(name.clone(), s.text.clone()),
-                    None => specs.remove(name),
-                };
-            }
-        }
-        specs
-    };
-    let specs_of = |c: &Id| after(c).into_values().collect();
-    let (mut writes, mut hashes) = (Vec::new(), BTreeMap::new());
-    let mut put = |path: String, text: Option<String>| {
-        if std::fs::read_to_string(vault.root.join(&path)).ok() != text {
-            writes.push((path, text));
-        }
-    };
-    for design in designs {
-        let ours = carried.iter().find(|(d, ..)| *d == design);
-        let changed = |name: &str| ours.is_some_and(|(_, _, diagrams)| diagrams.contains_key(name));
-        for (name, _) in ours.iter().flat_map(|(_, _, diagrams)| diagrams.iter()).filter(|(_, s)| s.is_none()) {
-            put(format!("{design}/diagrams/{name}.yaml"), None);
-            put(format!("{design}/diagrams/{name}.html"), None);
-        }
-        let specs = after(design);
-        let redraw: Vec<(&String, &String)> =
-            specs.iter().filter(|(n, t)| changed(n) || level_of(t).as_deref() == Some("container")).collect();
-        if !redraw.is_empty() {
-            let body = match ours {
-                Some((_, body, _)) => (*body).to_string(),
-                None => vault.read(design)?.body.text,
-            };
-            let names = Names::with(glossary.as_deref(), design, &body);
-            for (name, text) in redraw {
-                let (spec, html) = (format!("{design}/diagrams/{name}.yaml"), format!("{design}/diagrams/{name}.html"));
-                match page(text, project, &names, &specs_of) {
-                    Ok(render) => {
-                        put(spec, Some(text.clone()));
-                        put(html, Some(render.html));
-                    }
-                    Err(findings) if changed(name) => {
-                        let file = ours.and_then(|(_, _, d)| d[name.as_str()].as_ref()).map(|s| s.file.clone());
-                        let file = file.expect("a changed spec the stamp leaves is one a delta puts");
-                        // It rendered against the same proposed body when the delta was recorded, so the
-                        // glossary changed since.
-                        let then = format!("restore what it names in the glossary; then bp stamp {milestone}");
-                        let Refused(refusal, _) = invalid(&file, &findings, &then);
-                        return Err(refusal);
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-        for (name, text) in &specs {
-            hashes.insert(format!("{design}/diagrams/{name}.yaml"), blake3::hash(text.as_bytes()).to_hex().to_string());
-        }
-    }
-    Ok((writes, hashes))
 }

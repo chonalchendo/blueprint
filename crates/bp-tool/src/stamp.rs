@@ -3,9 +3,9 @@
 //! `check_failed`. Otherwise one commit holds the runs, a waiver per waived block, each carried delta's body in its
 //! design with the delta's `## Accepted`, its diagrams written and rendered (28, design change 7), the version record
 //! and the milestone at `done`, with `Bp-Version` and one `Bp-Delta` per delta. A delta whose design changed since it
-//! was proposed refuses `base_moved` (28, design change 8). A local tag `blueprint/<project>/<n>` names the commit; the human pushes it (07, Deployment).
-//! After the finish line it runs the block of each open waiver of the project, which a pass closes (27, design change
-//! 10).
+//! was proposed refuses `base_moved` (28, design change 8). A local tag `blueprint/<project>/<n>` names the commit;
+//! the human pushes it (07, Deployment). After the finish line it runs the block of each open waiver of the project,
+//! which a pass closes (27, design change 10).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -66,10 +66,7 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
         Gated::Open(g) => g,
         Gated::Done(done) => return retag(&vault, &index, &id, done),
     };
-    // The milestone keeps the paths non-empty: a clean of no path reads the whole tree, ignored files too. A spec that
-    // does not render refuses here too, and so does a dirty diagram path or a carried spec.
-    vault.clean(std::iter::once(&id).chain(read.deltas.iter().flat_map(|c| [&c.design, &c.delta])))?;
-    early(&vault, &index, &id, &read)?;
+    early(&vault, &id, &read)?;
     tag_free(&vault.root, &next(&index, project)?.1)?;
     // A block may rebuild the index; this connection is not needed again.
     drop(index);
@@ -118,8 +115,7 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
             ),
         ));
     }
-    writer.clean(std::iter::once(&id).chain(held.deltas.iter().flat_map(|c| [&c.design, &c.delta])))?;
-    based(&vault, &id, &held)?;
+    early(&vault, &id, &held)?;
     let index = writer.index();
     let (n, tag) = next(index, project)?;
     tag_free(&vault.root, &tag)?;
@@ -156,7 +152,10 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
         "commit": written.commit,
         "runs": crate::check::rows(&runs),
         "waivers": waivers,
-        "reasked": reasked.iter().map(|(r, i)| json!({ "waiver": r.waiver, "verdict": runs[*i].verdict })).collect::<Vec<_>>(),
+        "reasked": reasked
+            .iter()
+            .map(|(r, i)| json!({ "waiver": r.waiver, "verdict": runs[*i].verdict }))
+            .collect::<Vec<_>>(),
         "deltas": deltas,
         "diagrams": moves.writes.iter().map(|(p, _)| p).collect::<Vec<_>>(),
         "findings": written.findings,
@@ -258,32 +257,29 @@ struct Carried {
     design: Id,
     delta: Id,
     body: String,
-    base: Option<String>,
+    header: serde_json::Map<String, Value>,
     diagrams: crate::delta::Diagrams,
 }
 
-/// Refuses before the blocks run what the diagram writes would: a carried spec that does not render, and a dirty
-/// diagram path or carried spec.
-fn early(vault: &Vault, index: &Index, id: &Id, gate: &Gate) -> Result<(), Refusal> {
-    based(vault, id, gate)?;
-    let (drawn, _) = diagrams(vault, index, id, gate)?;
-    let specs = gate.deltas.iter().flat_map(|c| c.diagrams.values().flatten().map(|s| s.file.display().to_string()));
-    let paths: Vec<String> = drawn.into_iter().map(|(p, _)| p).chain(specs).collect();
-    if paths.is_empty() { Ok(()) } else { vault.clean_paths(&paths) }
+/// What the stamp refuses about its deltas and diagrams, before the blocks run and again under the lock: a dirty
+/// milestone, design, delta or spec, `base_moved`, and a glossary delta that drops a term in use.
+fn early(vault: &Vault, id: &Id, gate: &Gate) -> Result<(), Refusal> {
+    // The milestone keeps the paths non-empty: a clean of no path reads the whole tree, ignored files too.
+    vault.clean(std::iter::once(id).chain(gate.deltas.iter().flat_map(|c| [&c.design, &c.delta])))?;
+    let mut deltas = gate.deltas.iter();
+    deltas.try_for_each(|c| crate::delta::moved(vault, &c.design, &c.delta, &c.header, id.as_str()))?;
+    crate::redraw::ready(vault, id, &gate.designs, &carried(gate))
 }
 
-/// Refuses `base_moved` for a carried delta whose design changed since it was proposed. It reads each design as
-/// committed, so it runs once they are clean.
-fn based(vault: &Vault, id: &Id, gate: &Gate) -> Result<(), Refusal> {
-    let mut deltas = gate.deltas.iter();
-    deltas.try_for_each(|c| crate::delta::moved(vault, &c.design, &c.delta, c.base.as_deref(), id.as_str()))
+/// The carried deltas as `delta` reads them: the design, the proposed body and the diagrams.
+fn carried(gate: &Gate) -> Vec<(&Id, &str, &crate::delta::Diagrams)> {
+    gate.deltas.iter().map(|c| (&c.design, c.body.as_str(), &c.diagrams)).collect()
 }
 
 /// The diagram writes of the deltas `gate` read, and each spec's hash for the manifest (`delta::stamped`).
 type Drawn = (crate::delta::Writes, BTreeMap<String, String>);
 fn diagrams(vault: &Vault, index: &Index, id: &Id, gate: &Gate) -> Result<Drawn, Refusal> {
-    let carried: Vec<_> = gate.deltas.iter().map(|c| (&c.design, c.body.as_str(), &c.diagrams)).collect();
-    crate::delta::stamped(vault, index, id, &gate.designs, &carried)
+    crate::redraw::stamped(vault, index, id, &gate.designs, &carried(gate))
 }
 
 /// The gate's answer: the stamp goes on, or the milestone is already `done`, a repeat.
@@ -359,8 +355,7 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Re
             if carried && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed {
                 let delta = Id::parse(&d.id).expect("the index holds ids");
                 let diagrams = crate::delta::carried(vault, &delta, &d.header)?;
-                let base = d.header.get("base").and_then(Value::as_str).map(str::to_string);
-                deltas.push(Carried { design: design.clone(), delta, body: d.body, base, diagrams });
+                deltas.push(Carried { design: design.clone(), delta, body: d.body, header: d.header, diagrams });
             }
         }
     }
@@ -416,7 +411,8 @@ fn tag_free(root: &Path, tag: &str) -> Result<(), Refusal> {
         tag,
         "a blueprint version's tag names one commit and is never moved (12, Blueprint version)",
         format!(
-            "the tag has no version record under it; git -C {} show {tag} --no-patch, then delete the tag or add the record",
+            "the tag has no version record under it; git -C {} show {tag} --no-patch, then delete the tag or add the \
+             record",
             root.display()
         ),
     ))

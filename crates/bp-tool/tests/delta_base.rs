@@ -37,7 +37,8 @@ fn vault(extra: &[(&str, &str)]) -> tempfile::TempDir {
         (s.as_str(), "---\nkind: design\ntitle: S\nstatus: active\n---\n\n## One\n\nOld.\n"),
         (a.as_str(), &milestone("A")),
         (b.as_str(), &milestone("B")),
-        ("shared/.keep", ""),
+        ("shared/threads/t.md", "---\nkind: thread\ntitle: T\nstatus: open\n---\n"),
+        ("shared/threads/u.md", "---\nkind: thread\ntitle: U\nstatus: open\n---\n"),
     ];
     common::vault(&[&files[..], extra].concat())
 }
@@ -51,12 +52,9 @@ fn refuses_base_moved() {
     for m in [A, B] {
         assert_eq!(bp(root, &["transition", m, "approved"]).0, Some(0));
     }
-    // With no spec, the base is the design file's hash.
-    let base = bp(root, &["show", S]).1["hash"].clone();
     let (exit, b) = record(root, B, "## One\n\nB's.\n");
     assert_eq!((exit, &b["code"]), (Some(0), &serde_json::Value::Null), "{b}");
     let stale = b["id"].as_str().unwrap().to_string();
-    assert_eq!(bp(root, &["show", &stale]).1["base"], base);
     let (exit, v) = record(root, B, "## One\n\nAgain.\n");
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("delta_pending")), "the base holds: {v}");
     assert_eq!(record(root, A, "## One\n\nA's.\n").0, Some(0));
@@ -112,4 +110,39 @@ fn refuses_base_moved_after_a_spec_change() {
         (Some(2), Some("base_moved"), b["id"].as_str()),
         "{v}"
     );
+}
+
+#[test]
+fn a_stale_delta_of_another_cause_still_refuses_delta_pending() {
+    let v = vault(&[]);
+    let code = common::vault(&[("marker.txt", "here\n")]);
+    let (root, code) = (v.path(), code.path());
+    for m in [A, B] {
+        assert_eq!(bp(root, &["transition", m, "approved"]).0, Some(0));
+    }
+    let (t, u) = ("cause=shared/threads/t", "cause=shared/threads/u");
+    let (_, stale) = record_with(root, B, "## One\n\nT's.\n", &["--field", t]);
+    let stale = stale["id"].as_str().unwrap().to_string();
+    assert_eq!(record(root, A, "## One\n\nA's.\n").0, Some(0));
+    assert_eq!(bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", A]).0, Some(0));
+    // Another cause cannot take the stale delta's place: its change would be lost without a word.
+    let (exit, v) = record_with(root, B, "## One\n\nU's.\n", &["--field", u]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("delta_pending")), "{v}");
+    let fix = v["fix"].as_str().unwrap();
+    assert!(fix.starts_with(&format!("{stale} can never be stamped")) && fix.contains(t), "{fix}");
+    assert_eq!(bp(root, &["show", &stale]).1["state"], "proposed");
+    let (exit, v) = record_with(root, B, "## One\n\nA's, then T's.\n", &["--field", t]);
+    assert_eq!((exit, v["rejected"].as_str()), (Some(0), Some(stale.as_str())), "the same cause: {v}");
+}
+
+#[test]
+fn a_header_change_leaves_the_base() {
+    let v = vault(&[]);
+    let code = common::vault(&[("marker.txt", "here\n")]);
+    let (root, code) = (v.path(), code.path());
+    assert_eq!(bp(root, &["transition", B, "approved"]).0, Some(0));
+    assert_eq!(record(root, B, "## One\n\nB's.\n").0, Some(0));
+    assert_eq!(bp(root, &["set", S, "title", "S two"]).0, Some(0));
+    let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", B]);
+    assert_eq!(exit, Some(0), "the stamp rewrites the body only, so a title changes nothing it reverts: {v}");
 }

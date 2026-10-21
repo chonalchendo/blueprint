@@ -14,6 +14,7 @@ mod intent;
 mod land;
 mod link;
 mod record;
+mod redraw;
 mod rename;
 mod schema;
 mod set;

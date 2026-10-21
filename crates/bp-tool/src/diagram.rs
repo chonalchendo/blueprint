@@ -60,7 +60,7 @@ impl From<Refusal> for Refused {
     }
 }
 
-fn rows(findings: &[Finding]) -> Vec<Value> {
+pub(crate) fn rows(findings: &[Finding]) -> Vec<Value> {
     findings
         .iter()
         .map(|f| json!({ "rule": f.rule, "id": f.id, "severity": f.severity.as_str(), "detail": f.detail }))
