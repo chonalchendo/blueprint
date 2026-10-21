@@ -1,20 +1,15 @@
 //! The router (`m5-diagram-tools.md` §5.3, steps 3 and 4). Ends are ports spread along a side; routes are A* over
-//! the gutter tracks and port lines, with cost order: never through a box, then not along another route, then fewest
-//! crossings, then fewest bends, then length. Tracks sit 12 px apart, so two routes in one gutter never stack.
-
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+//! the gutter tracks and port lines (`search`). Tracks sit 12 px apart, so two routes in one gutter never stack.
 
 use crate::geom::{Point, Rect};
+use crate::label;
+use crate::search::{Graph, Search, Taken};
 use crate::spec::Side;
 
 const STUB: i32 = 16;
 /// An end keeps this far from its side's corners, and from the next end on the side.
 const EDGE: i32 = 16;
 const TRACK: i32 = 12;
-const BEND: i64 = 40;
-const CROSS: i64 = 160;
-const STACK: i64 = 4000;
 
 /// One edge to route: the boxes it joins and the author's side hints.
 #[derive(Clone, Copy, Debug)]
@@ -23,11 +18,13 @@ pub(crate) struct Want {
     pub(crate) to: usize,
     pub(crate) exit: Option<Side>,
     pub(crate) enter: Option<Side>,
+    /// The width of the cardinality at each end; 0 for none.
+    pub(crate) cards: [i32; 2],
 }
 
-const DIRS: [Side; 4] = [Side::Top, Side::Right, Side::Bottom, Side::Left];
+pub(crate) const DIRS: [Side; 4] = [Side::Top, Side::Right, Side::Bottom, Side::Left];
 
-const fn unit(s: Side) -> Point {
+pub(crate) const fn unit(s: Side) -> Point {
     match s {
         Side::Top => (0, -1),
         Side::Right => (1, 0),
@@ -36,7 +33,7 @@ const fn unit(s: Side) -> Point {
     }
 }
 
-const fn opposite(s: Side) -> Side {
+pub(crate) const fn opposite(s: Side) -> Side {
     match s {
         Side::Top => Side::Bottom,
         Side::Right => Side::Left,
@@ -98,161 +95,6 @@ fn options(a: &Rect, b: &Rect, want: &Want) -> Vec<(Side, Side)> {
     out
 }
 
-/// The search space: candidate x and y lines, and which moves a box blocks.
-struct Graph {
-    xs: Vec<i32>,
-    ys: Vec<i32>,
-    hblock: Vec<bool>,
-    vblock: Vec<bool>,
-}
-
-impl Graph {
-    fn new(boxes: &[Rect], mut xs: Vec<i32>, mut ys: Vec<i32>) -> Self {
-        xs.sort_unstable();
-        xs.dedup();
-        ys.sort_unstable();
-        ys.dedup();
-        let walls: Vec<Rect> = boxes.iter().map(|b| b.inflate(8)).collect();
-        let blocked = |a: Point, b: Point| walls.iter().any(|w| Rect::of_segment(a, b).meets(w));
-        let (nx, ny) = (xs.len(), ys.len());
-        let mut hblock = vec![true; nx * ny];
-        let mut vblock = vec![true; nx * ny];
-        for j in 0..ny {
-            for i in 0..nx {
-                if i + 1 < nx {
-                    hblock[j * nx + i] = blocked((xs[i], ys[j]), (xs[i + 1], ys[j]));
-                }
-                if j + 1 < ny {
-                    vblock[j * nx + i] = blocked((xs[i], ys[j]), (xs[i], ys[j + 1]));
-                }
-            }
-        }
-        Self { xs, ys, hblock, vblock }
-    }
-
-    fn vertex(&self, p: Point) -> usize {
-        let i = self.xs.binary_search(&p.0).expect("every stub lies on a candidate line");
-        let j = self.ys.binary_search(&p.1).expect("every stub lies on a candidate line");
-        j * self.xs.len() + i
-    }
-
-    fn point(&self, v: usize) -> Point {
-        (self.xs[v % self.xs.len()], self.ys[v / self.xs.len()])
-    }
-
-    /// The vertex one step in `d` from `v`, unless a box blocks the move.
-    fn step(&self, v: usize, d: Side) -> Option<usize> {
-        let nx = self.xs.len();
-        let (i, j) = (v % nx, v / nx);
-        match d {
-            Side::Right if i + 1 < nx && !self.hblock[v] => Some(v + 1),
-            Side::Left if i > 0 && !self.hblock[v - 1] => Some(v - 1),
-            Side::Bottom if j + 1 < self.ys.len() && !self.vblock[v] => Some(v + nx),
-            Side::Top if j > 0 && !self.vblock[v - nx] => Some(v - nx),
-            _ => None,
-        }
-    }
-}
-
-/// Segments already taken, each with its owner, so a later route pays to cross or run along them.
-#[derive(Default)]
-struct Taken {
-    segs: Vec<(Point, Point, usize)>,
-}
-
-impl Taken {
-    fn cost(&self, a: Point, b: Point, me: usize) -> i64 {
-        let mut c = 0;
-        for &(p, q, owner) in &self.segs {
-            if owner == me {
-                continue;
-            }
-            // The shared length along the axis: above 0 overlaps, 0 meets end to end.
-            let overlap = |a1: i32, a2: i32, b1: i32, b2: i32| a1.max(a2).min(b1.max(b2)) - a1.min(a2).max(b1.min(b2));
-            let horizontal = a.1 == b.1;
-            // Landing on another route's corner or end shares a point that is no crossing: it reads as one line.
-            if b == p || b == q {
-                c += STACK;
-                continue;
-            }
-            if horizontal == (p.1 == q.1) {
-                let (apart, shared) = if horizontal {
-                    ((a.1 - p.1).abs(), overlap(a.0, b.0, p.0, q.0))
-                } else {
-                    ((a.0 - p.0).abs(), overlap(a.1, b.1, p.1, q.1))
-                };
-                c += if (apart < TRACK && shared > 0) || (apart == 0 && shared >= 0) { STACK } else { 0 };
-            } else {
-                // A crossing counts at the vertex where this move ends inside the other segment.
-                let inside = |v: i32, s: i32, t: i32| v > s.min(t) && v < s.max(t);
-                let crosses =
-                    if horizontal { b.0 == p.0 && inside(b.1, p.1, q.1) } else { b.1 == p.1 && inside(b.0, p.0, q.0) };
-                c += if crosses { CROSS } else { 0 };
-            }
-        }
-        c
-    }
-}
-
-/// A* from the stub `from` (leaving in `out`) to the stub `to` (arriving to enter in `inward`). Returns the cost and
-/// the stub-to-stub points, or none when boxes wall the target off.
-fn search(
-    g: &Graph,
-    taken: &Taken,
-    me: usize,
-    from: Point,
-    out: Side,
-    to: Point,
-    inward: Side,
-) -> Option<(i64, Vec<Point>)> {
-    let (start, goal) = (g.vertex(from), g.vertex(to));
-    let states = g.xs.len() * g.ys.len() * 4;
-    let dir_index = |d: Side| DIRS.iter().position(|x| *x == d).expect("a side is a direction");
-    let mut best = vec![i64::MAX; states];
-    let mut came = vec![usize::MAX; states];
-    let guess = |vertex: usize| {
-        let at = g.point(vertex);
-        i64::from((at.0 - to.0).abs() + (at.1 - to.1).abs())
-    };
-    let mut heap = BinaryHeap::new();
-    let first = start * 4 + dir_index(out);
-    best[first] = 0;
-    heap.push(Reverse((guess(start), 0_i64, first)));
-    while let Some(Reverse((_, cost, state))) = heap.pop() {
-        if cost > best[state] {
-            continue;
-        }
-        let (vertex, dir) = (state / 4, DIRS[state % 4]);
-        if vertex == goal {
-            let end = cost + if dir == inward { 0 } else { BEND };
-            let mut path = vec![g.point(vertex)];
-            let mut back = state;
-            while back != first {
-                back = came[back];
-                path.push(g.point(back / 4));
-            }
-            path.reverse();
-            return Some((end, path));
-        }
-        for turn in DIRS {
-            if turn == opposite(dir) {
-                continue;
-            }
-            let Some(next_vertex) = g.step(vertex, turn) else { continue };
-            let (here, there) = (g.point(vertex), g.point(next_vertex));
-            let len = i64::from((here.0 - there.0).abs() + (here.1 - there.1).abs());
-            let next = cost + len + if turn == dir { 0 } else { BEND } + taken.cost(here, there, me);
-            let next_state = next_vertex * 4 + dir_index(turn);
-            if next < best[next_state] {
-                best[next_state] = next;
-                came[next_state] = state;
-                heap.push(Reverse((next + guess(next_vertex), next, next_state)));
-            }
-        }
-    }
-    None
-}
-
 /// Free tracks in a band: its centre and every 12 px out from it, clear of the band's walls by `lo` and `hi`.
 fn tracks(left: i32, right: i32, lo: i32, hi: i32, out: &mut Vec<i32>) {
     let (first, last) = (left + lo, right - hi);
@@ -284,7 +126,9 @@ pub(crate) fn lines(bands: &[(i32, i32)], borders: &[i32], end: i32) -> Vec<i32>
     out
 }
 
-/// Routes every wanted edge in `order`. Returns per edge its points, port to port, and the sides it uses.
+/// Routes every wanted edge in `order`. Returns per edge its points, port to port. `sides` holds each edge's sides:
+/// empty, they are picked and kept, so a later round, which only widens gutters, reuses them and skips the dearest
+/// pass.
 pub(crate) fn route(
     boxes: &[Rect],
     marks: &[Rect],
@@ -292,11 +136,15 @@ pub(crate) fn route(
     ys: &[i32],
     wants: &[Want],
     order: &[usize],
-) -> Vec<(Vec<Point>, Side, Side)> {
+    sides: &mut Vec<(Side, Side)>,
+) -> Vec<Vec<Point>> {
     // Group labels block a route as a box does, but take no ends.
     let walls: Vec<Rect> = boxes.iter().chain(marks).copied().collect();
-    let sides = pick_sides(boxes, &walls, xs, ys, wants, order);
-    let ends = spread(boxes, wants, &sides);
+    if sides.is_empty() {
+        *sides = pick_sides(boxes, &walls, xs, ys, wants, order);
+    }
+    let sides: &[(Side, Side)] = sides;
+    let ends = spread(boxes, wants, sides);
     let mut px = xs.to_vec();
     let mut py = ys.to_vec();
     // Every stub is taken from the start, so no route runs over an end that routes later.
@@ -304,22 +152,37 @@ pub(crate) fn route(
     for (edge, &((port_a, stub_a), (port_b, stub_b))) in ends.iter().enumerate() {
         px.extend([port_a.0, stub_a.0, port_b.0, stub_b.0]);
         py.extend([port_a.1, stub_a.1, port_b.1, stub_b.1]);
-        taken.segs.extend([(port_a, stub_a, edge), (stub_b, port_b, edge)]);
+        taken.add(port_a, stub_a, edge);
+        taken.add(stub_b, port_b, edge);
     }
-    let graph = Graph::new(&walls, px, py);
-    let mut out = vec![(Vec::new(), Side::Right, Side::Left); wants.len()];
+    // A cardinality takes one of two spots beside its port: a route through either, its mask included, pays as a
+    // stack, so the card always finds one clear.
+    let mut cards = Vec::new();
+    for (edge, ((want, &(a, b)), &((port_a, _), (port_b, _)))) in wants.iter().zip(sides).zip(&ends).enumerate() {
+        for (port, side, w) in [(port_a, a, want.cards[0]), (port_b, b, want.cards[1])] {
+            if w > 0 {
+                cards.extend(label::beside(port, unit(side), w).map(|r| (r.inflate(4), edge)));
+            }
+        }
+    }
+    let graph = Graph::new(&walls, &cards, px, py);
+    let mut search = Search::new(&graph);
+    let mut out = vec![Vec::new(); wants.len()];
     for &edge in order {
         let ((port_a, stub_a), (port_b, stub_b)) = ends[edge];
         let (side_a, side_b) = sides[edge];
         // With no clear path the route goes straight, and the rules name it.
-        let mid = search(&graph, &taken, edge, stub_a, side_a, stub_b, opposite(side_b))
+        let mid = search
+            .run(&taken, edge, (stub_a, side_a), (stub_b, opposite(side_b)), i64::MAX)
             .map_or_else(|| vec![stub_a, (stub_b.0, stub_a.1), stub_b], |(_, path)| path);
         let mut pts = vec![port_a];
         pts.extend(mid);
         pts.push(port_b);
         let pts = simplify(pts);
-        taken.segs.extend(pts.windows(2).map(|w| (w[0], w[1], edge)));
-        out[edge] = (pts, side_a, side_b);
+        for w in pts.windows(2) {
+            taken.add(w[0], w[1], edge);
+        }
+        out[edge] = pts;
     }
     out
 }
@@ -344,7 +207,8 @@ fn pick_sides(
             }
         }
     }
-    let graph = Graph::new(walls, px, py);
+    let graph = Graph::new(walls, &[], px, py);
+    let mut search = Search::new(&graph);
     let mut taken = Taken::default();
     let mut sides = vec![(Side::Right, Side::Left); wants.len()];
     for &edge in order {
@@ -353,15 +217,18 @@ fn pick_sides(
         let mut best: Option<(i64, (Side, Side), Vec<Point>)> = None;
         for (side_a, side_b) in options(a, b, want) {
             let (from, to) = (port(a, side_a, preferred(a, side_a, b)).1, port(b, side_b, preferred(b, side_b, a)).1);
-            if let Some((cost, path)) = search(&graph, &taken, edge, from, side_a, to, opposite(side_b))
-                && best.as_ref().is_none_or(|known| cost < known.0)
+            let limit = best.as_ref().map_or(i64::MAX, |known| known.0);
+            if let Some((cost, path)) = search.run(&taken, edge, (from, side_a), (to, opposite(side_b)), limit)
+                && cost < limit
             {
                 best = Some((cost, (side_a, side_b), path));
             }
         }
         if let Some((_, pair, path)) = best {
             sides[edge] = pair;
-            taken.segs.extend(path.windows(2).map(|w| (w[0], w[1], edge)));
+            for w in path.windows(2) {
+                taken.add(w[0], w[1], edge);
+            }
         }
     }
     sides
@@ -385,14 +252,30 @@ fn spread(boxes: &[Rect], wants: &[Want], sides: &[(Side, Side)]) -> Vec<((Point
     for run in on.chunk_by(|x, y| x.0 == y.0 && x.1 == y.1) {
         let (bx, side) = (&boxes[run[0].0], DIRS[run[0].1]);
         let (lo, hi) = if matches!(side, Side::Left | Side::Right) { (bx.y, bx.bottom()) } else { (bx.x, bx.right()) };
+        // Two ends sit far enough apart for both their cardinalities between their lines, each with its gap, and a
+        // mask between the two: a card's height across a line that leaves sideways, its width across one that
+        // leaves up or down. Either card may need that stretch when its own route turns away from the other side.
+        let need = |end: &(usize, usize, i32, usize, usize)| match wants[end.3].cards[end.4] {
+            0 => 0,
+            _ if matches!(side, Side::Left | Side::Right) => label::GAP + 12,
+            w => label::GAP + w,
+        };
+        let mut apart: Vec<i32> = run.windows(2).map(|w| (need(&w[0]) + need(&w[1]) + 4).max(EDGE)).collect();
+        // A crowded side shrinks the room evenly, never below [`EDGE`], so no end is pushed onto a corner.
+        let (want, have) = (apart.iter().sum::<i32>(), hi - lo - 2 * EDGE);
+        if want > have {
+            for a in &mut apart {
+                *a = (*a * have / want / 4 * 4).max(EDGE);
+            }
+        }
         let mut at: Vec<i32> = Vec::with_capacity(run.len());
-        for end in run {
-            at.push(at.last().map_or(end.2, |prev| end.2.max(prev + EDGE)));
+        for (k, end) in run.iter().enumerate() {
+            at.push(at.last().map_or(end.2, |prev| end.2.max(prev + apart[k - 1])));
         }
         let mut limit = (hi - EDGE) / 4 * 4;
-        for spot in at.iter_mut().rev() {
+        for (k, spot) in at.iter_mut().enumerate().rev() {
             *spot = (*spot).min(limit).max((lo + EDGE).min(limit));
-            limit = *spot - EDGE;
+            limit = *spot - if k > 0 { apart[k - 1] } else { 0 };
         }
         for (end, spot) in run.iter().zip(at) {
             spots[end.3 * 2 + end.4] = (spot, (lo + EDGE, hi - EDGE), run.len() == 1);

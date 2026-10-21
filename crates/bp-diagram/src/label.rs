@@ -14,6 +14,8 @@ const CLEAR: i32 = 12;
 
 /// What a label must keep clear of.
 pub(crate) struct Clear<'a> {
+    /// The drawing above the legend: a label beside a route in the outer channel stays inside it.
+    pub(crate) frame: Rect,
     pub(crate) boxes: &'a [Rect],
     pub(crate) routes: &'a [Vec<Point>],
     pub(crate) labels: Vec<Rect>,
@@ -25,14 +27,23 @@ impl Clear<'_> {
     fn ok(&self, rect: &Rect, own: usize, skip: Option<usize>) -> bool {
         let mask = rect.inflate(4);
         let seg = |a: &Point, b: &Point| Rect::of_segment(*a, *b);
-        !self.boxes.iter().any(|b| mask.meets(b))
+        self.frame.holds(rect)
+            && !self.boxes.iter().any(|b| mask.meets(b))
             && !self.labels.iter().any(|l| mask.meets(l))
-            && self.routes.iter().enumerate().all(|(i, r)| {
-                r.windows(2).enumerate().all(|(k, w)| {
-                    let d2 = seg(&w[0], &w[1]).gap2(rect);
-                    if i == own { Some(k) == skip || d2 >= i64::from(GAP * GAP) } else { d2 >= 16 }
-                })
-            })
+            && self.routes[own]
+                .windows(2)
+                .enumerate()
+                .all(|(k, w)| Some(k) == skip || seg(&w[0], &w[1]).gap2(rect) >= i64::from(GAP * GAP))
+            && self.apart(rect, own, 16)
+    }
+
+    /// Whether every route but `own` keeps a squared distance of at least `d2` from `rect`.
+    fn apart(&self, rect: &Rect, own: usize, d2: i64) -> bool {
+        self.routes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != own)
+            .all(|(_, r)| r.windows(2).all(|w| Rect::of_segment(w[0], w[1]).gap2(rect) >= d2))
     }
 }
 
@@ -74,8 +85,11 @@ pub(crate) fn place(pts: &[Point], own: usize, w: i32, h: i32, clear: &Clear<'_>
             } else {
                 Rect::new(a.0 - w / 2, c - h / 2, w, h)
             };
-            if clear.ok(&rect, own, Some(k)) {
-                return Some(Spot { rect, cut: Some((k, c - along / 2 - GAP, c + along / 2 + GAP)) });
+            let (lo, hi) = (c - along / 2 - GAP, c + along / 2 + GAP);
+            // The cut's ends keep a hop's width from any other route, so a route never seems to end at a gap.
+            let gap = if horizontal { Rect::new(lo, a.1, hi - lo, 0) } else { Rect::new(a.0, lo, 0, hi - lo) };
+            if clear.ok(&rect, own, Some(k)) && clear.apart(&gap, own, i64::from(GAP * GAP)) {
+                return Some(Spot { rect, cut: Some((k, lo, hi)) });
             }
         }
     }
@@ -96,19 +110,43 @@ pub(crate) fn place(pts: &[Point], own: usize, w: i32, h: i32, clear: &Clear<'_>
 }
 
 /// A cardinality beside the end of a route: 12 px out from the port, 8 px off the line, on the first clear side,
-/// and whether that side was clear. `w` is a multiple of 4.
-pub(crate) fn card(pts: &[Point], at_start: bool, own: usize, w: i32, clear: &Clear<'_>) -> (Rect, bool) {
+/// and how many of the two sides were clear. A side that faces another end on the same side of the box comes last:
+/// the narrow stretch between two ends holds one card, so a neighbour's card may need it. `w` is a multiple of 4.
+pub(crate) fn card(pts: &[Point], at_start: bool, own: usize, w: i32, clear: &Clear<'_>) -> (Rect, usize) {
     let (end, next) = if at_start { (pts[0], pts[1]) } else { (pts[pts.len() - 1], pts[pts.len() - 2]) };
-    let tall = 12;
     let out = ((next.0 - end.0).signum(), (next.1 - end.1).signum());
-    let tries = if out.1 == 0 {
+    let tries = beside(end, out, w);
+    let ends: Vec<Point> =
+        clear.routes.iter().enumerate().filter(|(i, _)| *i != own).flat_map(|(_, r)| [r[0], r[r.len() - 1]]).collect();
+    // The offset of a neighbour's end across the line: positive toward the first try's side.
+    let toward =
+        |p: &Point| if out.1 == 0 { (p.0 == end.0).then(|| end.1 - p.1) } else { (p.1 == end.1).then(|| p.0 - end.0) };
+    let faces = |first: bool| {
+        // Two cards between the lines need their gaps, their extents across the line, and a mask between them.
+        let reach = 2 * (GAP + if out.1 == 0 { 12 } else { w }) + 4;
+        ends.iter().filter_map(toward).any(|d| if first { d > 0 && d < reach } else { d < 0 && -d < reach })
+    };
+    let mut free: Vec<(bool, usize, Rect)> = tries
+        .into_iter()
+        .enumerate()
+        .filter(|(_, r)| clear.ok(r, own, None))
+        .map(|(k, r)| (faces(k == 0), k, r))
+        .collect();
+    free.sort_unstable_by_key(|x| (x.0, x.1));
+    (free.first().map_or(tries[0], |x| x.2), free.len())
+}
+
+/// The two spots a `w` wide cardinality may take at the port `end`, whose route leaves in direction `out`. The
+/// router makes other routes pay to cross either, so a card mostly finds one clear.
+pub(crate) fn beside(end: Point, out: Point, w: i32) -> [Rect; 2] {
+    let tall = 12;
+    if out.1 == 0 {
         let left = if out.0 > 0 { end.0 + 12 } else { end.0 - 12 - w };
         [Rect::new(left, end.1 - GAP - tall, w, tall), Rect::new(left, end.1 + GAP, w, tall)]
     } else {
         let top = if out.1 > 0 { end.1 + 12 } else { end.1 - 12 - tall };
         [Rect::new(end.0 + GAP, top, w, tall), Rect::new(end.0 - GAP - w, top, w, tall)]
-    };
-    tries.into_iter().find(|r| clear.ok(r, own, None)).map_or((tries[0], false), |r| (r, true))
+    }
 }
 
 /// The route's drawn pieces: whole, or in two with the cut left out.

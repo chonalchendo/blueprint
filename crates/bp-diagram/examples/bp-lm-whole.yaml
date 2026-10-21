@@ -1,0 +1,235 @@
+# The logical data model of the vault, whole: all 23 entities of 13-data-model-logical-vault.md, each in its domain,
+# and every relationship, inside a domain and across domains. Laid out by hand: one group per domain; Design and
+# Issue sit where the domains meet, so the links between domains stay short. Source: 13-data-model-logical-vault.md
+# (the entity tables and their `→` fields; a redundant reference such as a run's `→ opens` stays a field).
+type: er
+level: logical
+title: "The vault, whole: four domains and every link between them"
+lede: A design changes through deltas and versions. Issues, checks and claims move it. Threads, decisions and learnings explain it.
+focus: [design, issue]
+groups:
+  - id: design-domain
+    label: Design domain
+    members: [project, design, diagram, glossary-term, concern-answer, delta, version]
+  - id: reasoning-domain
+    label: Reasoning domain
+    members: [convention, inbox-entry, decision, thread, learning, evidence-row]
+  - id: change-domain
+    label: Change domain
+    members: [check, milestone, issue, claim, run, review, pull-request]
+  - id: operation-domain
+    label: Operation domain
+    members: [handoff, waiver, disposition]
+nodes:
+  - id: project
+    term: project
+    role: node
+    at: [0, 0]
+    label: Project
+    fields: ["# id", class, repository, forge, reviewer, status]
+    time: processing
+  - id: design
+    term: design
+    role: node
+    at: [3, 0]
+    span: [1, 2]
+    label: Design
+    fields: ["# id", "design_kind, scope", "→ under: Design | Project", "→ cites: Design, Decision, Convention, Term", aliases, status]
+    time: processing · as-of by version
+  - id: diagram
+    term: diagram
+    role: record
+    at: [2, 0]
+    label: Diagram
+    fields: ["#→ design", "# name", type, "nodes: Term | noun"]
+    time: processing
+  - id: glossary-term
+    noun: GlossaryTerm
+    role: row
+    at: [1, 0]
+    label: GlossaryTerm
+    fields: ["#→ project", "# slug", definition, status]
+    time: processing
+  - id: concern-answer
+    term: answer
+    role: record
+    at: [0, 1]
+    label: ConcernAnswer
+    fields: ["#→ project", "# concern", state, "→ design", "reason, valid_until"]
+    time: valid · decision
+  - id: delta
+    term: delta
+    role: record
+    at: [2, 1]
+    label: Delta
+    fields: ["#→ design", "# stamp", change, "→ cause: Thread | Issue | Run", "→ milestone, → authorized_by", "pull_request, → version"]
+    time: processing · decision
+  - id: version
+    term: blueprint-version
+    role: record
+    at: [1, 1]
+    label: BlueprintVersion
+    fields: ["#→ project", "# n", "tag, manifest", "→ milestone", accepted_at]
+    time: valid · decision
+  - id: convention
+    term: convention
+    role: node
+    at: [4, 0]
+    label: Convention
+    fields: ["# id", status, applies]
+    time: processing
+  - id: inbox-entry
+    term: inbox-entry
+    role: node
+    at: [5, 1]
+    label: InboxEntry
+    fields: ["# id", status, "→ targets: Thread | Issue | Learning"]
+    time: processing
+  - id: decision
+    term: decision
+    role: node
+    at: [5, 0]
+    label: Decision
+    fields: ["# id", status, decided_at, "→ answers: Thread", "→ supersedes: Decision", "→ authorizes: Delta"]
+    time: decision · processing
+  - id: thread
+    term: thread
+    role: node
+    at: [4, 1]
+    label: Thread
+    fields: ["# id", status, "→ cites: Design, Decision, Learning"]
+    time: processing
+  - id: learning
+    term: learning
+    role: node
+    at: [4, 2]
+    label: Learning
+    fields: ["# id", status, cue, confidence, "→ cites: Design, Issue"]
+    time: processing
+  - id: evidence-row
+    noun: EvidenceRow
+    role: record
+    at: [5, 2]
+    label: EvidenceRow
+    fields: ["#→ learning", "# at", outcome, "→ issue", note]
+    time: event · processing
+  - id: check
+    term: check
+    role: row
+    at: [1, 2]
+    label: Check
+    span: [1, 2]
+    fields: ["#→ owner: Design | Issue | Milestone", "# name", kind, predicate]
+  - id: milestone
+    term: milestone
+    role: node
+    at: [2, 2]
+    label: Milestone
+    fields: ["# id", status, "→ under: Design", "approved_by (derived)"]
+    time: decision · processing
+  - id: issue
+    term: issue
+    role: node
+    at: [3, 2]
+    label: Issue
+    fields: ["# id", status, "→ under: Milestone", "→ depends: Issue", "→ cites: Design, Convention, Learning", "severity, tags, walkthrough"]
+    time: processing
+  - id: claim
+    term: claim
+    role: record
+    at: [3, 3]
+    label: Claim
+    fields: ["#→ issue", "# from", "to, reason", "owner, session", "worktree, pull_request", "base, base_branch"]
+    time: valid · processing
+  - id: run
+    term: run
+    role: record
+    at: [0, 2]
+    label: Run
+    fields: ["#→ check", "# commit, attempt", "at, verdict", "severity, check_kind", evidence]
+    time: event · processing
+  - id: review
+    term: review
+    role: record
+    at: [2, 3]
+    label: Review
+    fields: ["#→ issue", "# head", patch_id, "pull_request, role, at", findings]
+    time: event · processing
+  - id: pull-request
+    noun: PullRequest
+    role: elsewhere
+    owner: The forge
+    at: [0, 3]
+    label: PullRequest
+  - id: handoff
+    noun: Handoff
+    role: record
+    at: [0, 4]
+    label: Handoff
+    fields: ["# id", session, "started_at, ended_at", "→ resumes: Handoff", "→ seed: node"]
+    time: valid · processing
+  - id: waiver
+    term: waiver
+    role: record
+    at: [1, 4]
+    label: Waiver
+    fields: ["#→ milestone", "# key", check, reason, "decided_at, valid_until"]
+    time: decision · valid
+  - id: disposition
+    term: disposition
+    role: record
+    at: [2, 4]
+    label: Disposition
+    fields: ["#→ review", "# finding", as, "reason, head"]
+    time: event
+edges:
+  - {from: design, to: project, label: under, card: ["1..N", "1"]}
+  - {from: design, to: design, label: under, card: ["N", "0..1"]}
+  - {from: design, to: diagram, label: carries, card: ["1", "0..N"]}
+  - {from: diagram, to: glossary-term, label: names, card: ["N", "N"]}
+  - {from: design, to: glossary-term, label: cites, card: ["N", "N"]}
+  - {from: glossary-term, to: project, label: in, card: ["N", "1"]}
+  - {from: concern-answer, to: project, label: for, card: ["N", "1"]}
+  - {from: concern-answer, to: design, label: answered by, card: ["0..N", "0..1"]}
+  - {from: delta, to: design, label: targets, card: ["N", "1"]}
+  - {from: delta, to: version, label: accepted in, card: ["N", "0..1"]}
+  - {from: version, to: project, label: of, card: ["N", "1"]}
+  - {from: design, to: decision, label: cites, card: ["N", "N"]}
+  - {from: design, to: convention, label: cites, card: ["N", "N"]}
+  - {from: decision, to: delta, label: authorizes, card: ["0..1", "N"]}
+  - {from: delta, to: thread, label: caused by, card: ["N", "0..1"]}
+  - {from: delta, to: issue, label: caused by, card: ["N", "0..1"]}
+  - {from: delta, to: run, label: caused by, card: ["N", "0..1"]}
+  - {from: delta, to: milestone, label: carried by, card: ["N", "1"]}
+  - {from: delta, to: pull-request, label: proposed in, card: ["N", "0..1"], style: dashed}
+  - {from: version, to: milestone, label: stamped by, card: ["1", "1"]}
+  - {from: milestone, to: design, label: under, card: ["N", "1"]}
+  - {from: issue, to: milestone, label: under, card: ["N", "1"]}
+  - {from: issue, to: issue, label: depends on, card: ["N", "N"]}
+  - {from: issue, to: design, label: cites, card: ["N", "N"]}
+  - {from: issue, to: convention, label: cites, card: ["N", "N"]}
+  - {from: issue, to: learning, label: cites, card: ["N", "N"]}
+  - {from: check, to: design, label: owned by, card: ["N", "0..1"]}
+  - {from: check, to: issue, label: owned by, card: ["N", "0..1"]}
+  - {from: check, to: milestone, label: owned by, card: ["N", "0..1"]}
+  - {from: run, to: check, label: runs, card: ["N", "1"]}
+  - {from: claim, to: issue, label: holds, card: ["N", "1"]}
+  - {from: claim, to: pull-request, label: lands, card: ["N", "0..1"], style: dashed}
+  - {from: review, to: issue, label: reads, card: ["N", "1"]}
+  - {from: review, to: pull-request, label: at head of, card: ["N", "1"], style: dashed}
+  - {from: thread, to: design, label: cites, card: ["N", "N"]}
+  - {from: thread, to: decision, label: cites, card: ["N", "N"]}
+  - {from: thread, to: learning, label: cites, card: ["N", "N"]}
+  - {from: decision, to: thread, label: answers, card: ["0..1", "0..1"]}
+  - {from: decision, to: decision, label: supersedes, card: ["0..1", "0..1"], exit: right, enter: top}
+  - {from: learning, to: design, label: cites, card: ["N", "N"]}
+  - {from: learning, to: issue, label: cites, card: ["N", "N"]}
+  - {from: evidence-row, to: learning, label: of, card: ["N", "1"]}
+  - {from: evidence-row, to: issue, label: applied in, card: ["N", "1"]}
+  - {from: inbox-entry, to: thread, label: targets, card: ["N", "0..1"]}
+  - {from: inbox-entry, to: issue, label: targets, card: ["N", "0..1"]}
+  - {from: inbox-entry, to: learning, label: targets, card: ["N", "0..1"]}
+  - {from: disposition, to: review, label: answers, card: ["N", "1"]}
+  - {from: waiver, to: milestone, label: of, card: ["N", "1"]}
+  - {from: waiver, to: check, label: waives, card: ["N", "1"]}
+  - {from: handoff, to: handoff, label: resumes, card: ["0..1", "0..1"]}

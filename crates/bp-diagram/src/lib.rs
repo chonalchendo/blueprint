@@ -16,6 +16,7 @@ mod nodes;
 mod route;
 mod rules;
 mod scene;
+mod search;
 mod seq;
 mod spec;
 mod svg;

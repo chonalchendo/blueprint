@@ -44,6 +44,10 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 
+# The renderer's router searches thousands of states per edge; unoptimised, a large model's test takes seconds.
+[profile.dev.package.bp-diagram]
+opt-level = 2
+
 [profile.release]
 lto = true
 codegen-units = 1
