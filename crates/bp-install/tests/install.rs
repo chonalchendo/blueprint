@@ -275,7 +275,81 @@ fn the_claude_target_imports_agents_md_into_the_first_claude_file() {
     install(t, Target::Claude).unwrap();
     write(t, "CLAUDE.md", "# Late\n");
     assert_eq!(checked(t), "CLAUDE.md#bp");
+    assert!(check(t).unwrap_err().fix.contains("CLAUDE.md now hides AGENTS.md"), "the reason names the cause");
     assert!(install(t, Target::Claude).unwrap().0);
     assert_eq!(read(t, "CLAUDE.md"), format!("# Late\n\n{IMPORT}"));
     assert_eq!(checked(t), "ok");
+}
+
+/// A Claude file that is `AGENTS.md` through a link, in either direction, already holds the section: one section, one
+/// entry, no self-import.
+#[test]
+fn a_claude_file_linked_to_agents_md_takes_the_section_once() {
+    for (real, link) in [("AGENTS.md", "CLAUDE.md"), ("CLAUDE.md", "AGENTS.md")] {
+        let dir = top();
+        let t = dir.path();
+        write(t, real, "# Mine\n");
+        std::os::unix::fs::symlink(real, t.join(link)).unwrap();
+        let (wrote, v) = install(t, Target::Claude).unwrap();
+        assert!(wrote);
+        let sections: Vec<&String> = v["files"].as_object().unwrap().keys().filter(|k| k.ends_with("#bp")).collect();
+        assert_eq!(sections, ["AGENTS.md#bp"], "{real}");
+        let text = read(t, real);
+        assert!(text.starts_with("# Mine\n\n<!-- bp:begin -->\n## ") && !text.contains("@AGENTS.md"), "{text}");
+        assert_eq!(text.matches("<!-- bp:begin -->").count(), 1);
+        assert_eq!(checked(t), "ok");
+        assert!(!install(t, Target::Claude).unwrap().0, "a repeat exits 3: {real}");
+    }
+}
+
+/// An import counts only outside a code block, and in any of the Claude files.
+#[test]
+fn an_import_counts_outside_code_blocks_in_any_claude_file() {
+    let dir = top();
+    let t = dir.path();
+    write(t, "CLAUDE.md", "```\n@AGENTS.md\n```\n");
+    let (_, v) = install(t, Target::Claude).unwrap();
+    assert!(v["files"]["CLAUDE.md#bp"].is_string(), "a fenced line imports nothing: {v}");
+    let dir = top();
+    let t = dir.path();
+    write(t, "CLAUDE.md", "# Mine\n");
+    write(t, "CLAUDE.local.md", "@./AGENTS.md\n");
+    let (_, v) = install(t, Target::Claude).unwrap();
+    assert!(v["files"]["CLAUDE.md#bp"].is_null() && v["files"]["CLAUDE.local.md#bp"].is_null(), "{v}");
+    assert_eq!(read(t, "CLAUDE.md"), "# Mine\n");
+    assert_eq!(checked(t), "ok");
+}
+
+/// When the import moves, or the user imports `AGENTS.md` themselves, the old section goes with the old entry.
+#[test]
+fn a_moved_import_leaves_no_stale_section() {
+    let dir = top();
+    let t = dir.path();
+    std::fs::create_dir_all(t.join(".claude")).unwrap();
+    write(t, ".claude/CLAUDE.md", "Mine.\n");
+    install(t, Target::Claude).unwrap();
+    write(t, "CLAUDE.md", "# Late\n");
+    let (_, v) = install(t, Target::Claude).unwrap();
+    assert!(v["files"][".claude/CLAUDE.md#bp"].is_null() && v["files"]["CLAUDE.md#bp"].is_string(), "{v}");
+    assert_eq!(read(t, ".claude/CLAUDE.md"), "Mine.\n");
+    assert_eq!(read(t, "CLAUDE.md"), format!("# Late\n\n{IMPORT}"));
+    write(t, "CLAUDE.md", &read(t, "CLAUDE.md").replace("# Late\n", "# Late\n@AGENTS.md\n"));
+    let (_, v) = install(t, Target::Claude).unwrap();
+    assert!(v["files"]["CLAUDE.md#bp"].is_null(), "{v}");
+    assert_eq!(read(t, "CLAUDE.md"), "# Late\n@AGENTS.md\n");
+    assert_eq!(checked(t), "ok");
+}
+
+#[test]
+fn codex_then_claude_share_one_section() {
+    let dir = top();
+    let t = dir.path();
+    write(t, "CLAUDE.md", "# Mine\n");
+    install(t, Target::Codex).unwrap();
+    install(t, Target::Claude).unwrap();
+    assert_eq!(read(t, "AGENTS.md").matches("<!-- bp:begin -->").count(), 1);
+    assert_eq!(read(t, ".git/info/exclude").lines().filter(|l| *l == "/AGENTS.md").count(), 1);
+    assert_eq!(read(t, "CLAUDE.md"), format!("# Mine\n\n{IMPORT}"));
+    assert_eq!(checked(t), "ok");
+    assert!(!install(t, Target::Codex).unwrap().0 && !install(t, Target::Claude).unwrap().0, "each repeat exits 3");
 }

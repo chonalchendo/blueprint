@@ -9,9 +9,9 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
 
 1. Choose the seed: a design of the project, or `projects/<p>/project`. A shared design has no project, so its stop never holds.
 2. Read the slice: `bp walk <seed> --for shape --json`. It holds the product and system designs, and the learnings that touch them.
-3. Read the concerns: `bp show projects/<p>/project --section Concerns --json`. A `no_section` refusal means that no concern is open.
-4. List the concern answers: `bp list concern-answer --project <p> --limit 1000 --json`. Each id ends in its stamp.
-5. Read the latest answer of each concern with `bp show <answer> --json`. A concern is open when its `state` is `open`.
+3. Read the concerns: `bp show projects/<p>/project --section Concerns --json`. A `no_section` refusal means that the project lists no concern.
+4. List the concern answers: `bp list concern-answer --under projects/<p>/project --limit 1000 --json`. Each id ends in its stamp.
+5. Read the latest answer of each concern with `bp show <answer> --json`. A concern is open when its `state` is `open`. With no section and no answer, no concern is open.
 6. List the deltas: `bp list delta --project <p> --limit 1000 --json`.
 7. Read each delta with `bp show <delta> --no-body --json`. It gives `milestone` and `state`.
 8. Read the status of each `proposed` delta's milestone with `bp show <milestone> --no-body --json`. A delta whose milestone is `abandoned` needs a new carrier.

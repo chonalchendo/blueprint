@@ -14,7 +14,7 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
    - Slug `components/<name>`: the parent is a container design or the system design.
 2. Read the slice: `bp walk <parent> --for design --json`. It holds the level above and the sibling designs.
 3. Read the concerns: `bp show <project> --section Concerns --json`. A `no_section` refusal means that the project lists no concern.
-4. List the concern answers: `bp list concern-answer --project <p> --limit 1000 --json`. Each id ends in its stamp.
+4. List the concern answers: `bp list concern-answer --under <project> --limit 1000 --json`. Each id ends in its stamp.
 5. Read the latest answer of each concern with `bp show <answer> --json`. Its `state` is the state of the concern.
 6. Read the glossary: `bp show projects/<p>/designs/glossary --json`. A `no_node` refusal means that the project has none. Use its terms in each section.
 7. Get the body template: `bp create design --template --json`. Each `TODO(bp): ` line in `template` is one slot.
@@ -25,7 +25,5 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
 12. Link each decision and convention that the design obeys: `bp link <design> cites <node> --json`.
 13. Record each concern that the design answers: `bp record concern-answer <project> --field concern=<concern> --field state=designed --field design=<design> --json`.
 14. Tell the human that the draft exists. Activation is the human's later act.
-
-A convention is a design at shared scope, with no project and no parent. For a convention, use the kind `convention` in steps 7 and 10. Drop `--project`, `--slug` and `--under` from the calls.
 
 Stop: the stop is call-shaped. Step 11 returns a `commit`, and `bp walk <design> --for design --done --json` returns `done` true.
