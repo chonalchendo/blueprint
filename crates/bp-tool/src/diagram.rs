@@ -52,7 +52,7 @@ struct Invalid {
 }
 
 /// A refusal, and for `diagram_invalid` every finding.
-struct Refused(Refusal, Option<Vec<Value>>);
+pub(crate) struct Refused(pub(crate) Refusal, pub(crate) Option<Vec<Value>>);
 
 impl From<Refusal> for Refused {
     fn from(r: Refusal) -> Self {
@@ -68,7 +68,7 @@ fn rows(findings: &[Finding]) -> Vec<Value> {
 }
 
 /// `diagram_invalid` for the first error of `findings`; `then` is the command that tries again.
-fn invalid(spec: &Path, findings: &[Finding], then: &str) -> Refused {
+pub(crate) fn invalid(spec: &Path, findings: &[Finding], then: &str) -> Refused {
     let first = findings.iter().find(|f| f.severity == Severity::Error).unwrap_or(&findings[0]);
     let refusal = Refusal::new(
         Code::DiagramInvalid,
@@ -79,7 +79,7 @@ fn invalid(spec: &Path, findings: &[Finding], then: &str) -> Refused {
     Refused(refusal, Some(rows(findings)))
 }
 
-fn read(cwd: &Path, path: &Path) -> Result<String, Refusal> {
+pub(crate) fn read(cwd: &Path, path: &Path) -> Result<String, Refusal> {
     std::fs::read_to_string(cwd.join(path))
         .map_err(|e| Refusal::failed(path.display().to_string(), format!("{e}; name a readable spec file")))
 }
@@ -89,6 +89,11 @@ pub(crate) fn run(cwd: &Path, d: &Diagram, json: bool, out: &mut impl std::io::W
         (Some(design), Some(name)) => write(cwd, d, design, name),
         _ => preview(cwd, d).map(Wrote::Changed),
     };
+    answer(done, json, out)
+}
+
+/// The exit of a write that may refuse `diagram_invalid`, with every finding: `diagram` and `record delta`.
+pub(crate) fn answer(done: Result<Wrote, Refused>, json: bool, out: &mut impl std::io::Write) -> ExitCode {
     match done {
         Ok(wrote) => crate::wrote(Ok(wrote), json, out),
         Err(Refused(refusal, None)) => finish::<Value>(Err(refusal), json, out),
@@ -142,7 +147,10 @@ fn write(cwd: &Path, d: &Diagram, design: &str, name: &str) -> Result<Wrote, Ref
             Code::DesignNotDelta,
             id.as_str(),
             "a design past draft changes only through a delta record; its diagrams change with it (13, Design history)",
-            format!("bp record delta {id} --field milestone=<milestone> --body-file <f>; {preview} renders it first"),
+            format!(
+                "bp record delta {id} --field milestone=<milestone> --body-file <f> --diagram {name}=<f>; {preview} \
+                 renders it first"
+            ),
         )
         .into());
     }
@@ -157,14 +165,9 @@ fn write(cwd: &Path, d: &Diagram, design: &str, name: &str) -> Result<Wrote, Ref
         None => (paths.iter().filter(|p| on_disk(p).is_some()).map(|p| (p.clone(), None)).collect::<Vec<_>>(), vec![]),
         Some((file, spec)) => {
             let names = Names::of(&vault, &id, &vault.read(&id)?.body.text);
-            let level = bp_diagram::outline(&spec, &|_| true).ok().and_then(|(level, _)| level);
-            let children = |link: Link<'_>| children(&vault, project, level.as_deref(), link);
             let then = format!("bp diagram {id} {name} --spec-file {} --json", file.display());
-            let render =
-                bp_diagram::render_with(&spec, None, Some(&|l| names.resolves(l)), &children).map_err(|mut f| {
-                    names.explain(&mut f);
-                    invalid(file, &f, &then)
-                })?;
+            let specs_of = |c: &Id| specs(&vault, c).0.into_iter().map(|(_, t)| t).collect();
+            let render = page(&spec, project, &names, &specs_of).map_err(|f| invalid(file, &f, &then))?;
             let texts = [spec, render.html];
             let files = paths
                 .iter()
@@ -190,20 +193,36 @@ fn write(cwd: &Path, d: &Diagram, design: &str, name: &str) -> Result<Wrote, Ref
     Ok(Wrote::Changed(result))
 }
 
-/// The drill badge's count (28, design change 12): a node of a container-level diagram drills to the component-level
-/// diagrams of the container design its link names (`m5-interactive-architecture.md` §3.3). The page keeps the count
-/// it was rendered with.
-fn children(vault: &Vault, project: &str, level: Option<&str>, link: Link<'_>) -> usize {
-    let (Link::Term(text) | Link::Noun(text)) = link;
-    let container = Id::parse(&format!("projects/{project}/designs/containers/{}", bp_vault::slug(text, SLUG_MAX)));
-    match (level, container) {
-        (Some("container"), Ok(c)) => specs(vault, &c)
-            .0
-            .iter()
-            .filter(|(_, t)| bp_diagram::outline(t, &|_| true).is_ok_and(|(l, _)| l.as_deref() == Some("component")))
-            .count(),
-        _ => 0,
-    }
+/// The page of `spec`, a diagram of a design in `project` whose links `names` resolves, or every finding. The drill
+/// badge's count (28, design change 12): a node of a container-level diagram drills to the component-level diagrams
+/// of the container design its link names (`m5-interactive-architecture.md` §3.3), whose spec texts `specs_of` gives.
+/// The page keeps the count it was rendered with.
+pub(crate) fn page(
+    spec: &str,
+    project: &str,
+    names: &Names,
+    specs_of: &dyn Fn(&Id) -> Vec<String>,
+) -> Result<bp_diagram::Render, Vec<Finding>> {
+    let level = level_of(spec);
+    let children = |link: Link<'_>| {
+        let (Link::Term(text) | Link::Noun(text)) = link;
+        let container = Id::parse(&format!("projects/{project}/designs/containers/{}", bp_vault::slug(text, SLUG_MAX)));
+        match (level.as_deref(), container) {
+            (Some("container"), Ok(c)) => {
+                specs_of(&c).iter().filter(|t| level_of(t).as_deref() == Some("component")).count()
+            }
+            _ => 0,
+        }
+    };
+    bp_diagram::render_with(spec, None, Some(&|l| names.resolves(l)), &children).map_err(|mut f| {
+        names.explain(&mut f);
+        f
+    })
+}
+
+/// A spec's level, read without resolving its links; none when it has none or does not parse.
+pub(crate) fn level_of(spec: &str) -> Option<String> {
+    bp_diagram::outline(spec, &|_| true).ok().and_then(|(level, _)| level)
 }
 
 /// The slugs the vault's glossaries define, over every project: the preview names no design. None when no project

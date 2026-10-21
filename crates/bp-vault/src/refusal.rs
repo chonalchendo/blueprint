@@ -46,6 +46,7 @@ crate::closed_enum! {
         ChecksChanged = "checks_changed",
         RoleForbidden = "role_forbidden",
         DiagramInvalid = "diagram_invalid",
+        BaseMoved = "base_moved",
     }
 }
 

@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bp_change::DispositionAs;
-use bp_design::{ConcernState, DeltaState};
+use bp_design::ConcernState;
 use bp_operation::Role;
 use bp_reasoning::Outcome;
 use bp_vault::{Code, Header, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
+use crate::diagram::Refused;
 use crate::{Wrote, subject};
 
 /// `bp record <kind> <parent> [--field <name=value>]... [--body-file <f>] [--external <uri>] [--dry-run]`.
@@ -28,6 +29,12 @@ pub struct Record {
     /// The record's body, from a file: a delta's proposed design body, a review's findings, a handoff's text.
     #[arg(long)]
     pub body_file: Option<PathBuf>,
+    /// A delta's diagram as `<name>=<spec file>`: added, or replaced when its design has it. Repeat for each.
+    #[arg(long = "diagram", value_name = "NAME=FILE")]
+    pub diagrams: Vec<String>,
+    /// A diagram the delta removes from its design, with its page. Repeat for each.
+    #[arg(long = "remove-diagram", value_name = "NAME")]
+    pub remove_diagrams: Vec<String>,
     /// A forge URI the record names, such as its pull request.
     #[arg(long)]
     pub external: Option<String>,
@@ -161,23 +168,15 @@ fn not_recorded(text: &str) -> Refusal {
     Refusal::usage(format!("record {text}"), fix)
 }
 
-pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
+pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
     let kind = r.kind.parse::<Kind>().map_err(|_| not_recorded(&r.kind))?;
     let spec = spec(kind).ok_or_else(|| not_recorded(&r.kind))?;
     let given = given(kind, &spec, &r.fields)?;
     if r.external.as_deref().is_some_and(|e| e.trim().is_empty()) {
-        return Err(Refusal::usage("--external", "give the forge URI the record names, or leave the flag out"));
+        return Err(Refusal::usage("--external", "give the forge URI the record names, or leave the flag out").into());
     }
-    let body = match &r.body_file {
-        Some(p) => crate::create::body_file(p)?,
-        None => String::new(),
-    };
-    if kind == Kind::Delta && body.trim().is_empty() {
-        return Err(schema(
-            format!("{kind} body"),
-            "a delta's body is the proposed design body: pass --body-file <f>".into(),
-        ));
-    }
+    let diagrams = crate::delta::given(cwd, kind, &r.diagrams, &r.remove_diagrams)?;
+    let body = body(kind, r.body_file.as_deref())?;
     let vault = Vault::discover(cwd)?;
     let role = crate::set::role()?;
     let now = crate::clock::now()?;
@@ -194,9 +193,11 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
         let Some(text) = given.get(name) else { continue };
         fields.insert((*name).to_string(), value(index, kind, name, ty, text)?);
     }
-    if let (Some(design), Some(milestone)) = (&parent, fields.get("milestone").filter(|_| kind == Kind::Delta)) {
-        none_pending(index, design, milestone)?;
-    }
+    let milestone = fields.get("milestone").and_then(Value::as_str).filter(|_| kind == Kind::Delta).map(str::to_string);
+    let stale = match (&parent, milestone) {
+        (Some(design), Some(m)) => crate::delta::propose(&vault, index, design, &m, &body, &diagrams, &mut fields)?,
+        _ => None,
+    };
     // A handoff's seed is the node of the session's latest vault commit, which the next session start walks (13).
     if kind == Kind::Handoff
         && !fields.contains_key("seed")
@@ -245,6 +246,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
         .filter_map(|(name, _, _)| Id::parse(header.fields.get(*name)?.as_str()?).ok())
         .chain(parent.clone())
         .chain([id.clone()])
+        .chain(stale.clone())
         .collect();
     match &writer {
         Some(w) => w.clean(&targets)?,
@@ -253,18 +255,29 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refusal> {
     if identity && let Some(already) = taken(&vault.root, &id, &text)? {
         return Ok(already);
     }
-    let changes = BTreeMap::from([(id.clone(), text)]);
+    let mut changes = BTreeMap::from([(id.clone(), text)]);
     let mut result = serde_json::json!({ "id": id, "kind": kind, "under": parent });
+    let moves = crate::delta::close(&vault, &id, stale.as_ref(), &diagrams, now, &mut changes, &mut result)?;
     let Some(writer) = writer else {
         let (_, findings) = index.propose(&vault, &changes)?;
         result["findings"] = serde_json::to_value(findings).expect("a plain struct serialises");
         result["dry_run"] = true.into();
         return Ok(Wrote::Changed(result));
     };
-    let written = writer.commit("record", role.as_str(), &format!("record {kind} {id}"), &changes)?;
+    let written = writer.commit_moving("record", role.as_str(), &format!("record {kind} {id}"), &changes, &moves)?;
     result["commit"] = written.commit.into();
     result["findings"] = serde_json::to_value(written.findings).expect("a plain struct serialises");
     Ok(Wrote::Changed(result))
+}
+
+/// The `--body-file` text; a delta's is the proposed design body, so it is required.
+fn body(kind: Kind, file: Option<&Path>) -> Result<String, Refusal> {
+    let body = file.map_or_else(|| Ok(String::new()), crate::create::body_file)?;
+    if kind == Kind::Delta && body.trim().is_empty() {
+        let fix = "a delta's body is the proposed design body: pass --body-file <f>";
+        return Err(schema(format!("{kind} body"), fix.into()));
+    }
+    Ok(body)
 }
 
 /// The record's key within its kind's directory.
@@ -376,23 +389,6 @@ fn parent_fits(vault: &Vault, index: &Index, kind: Kind, parent: &Id) -> Result<
         }
         Some(_) => Ok(()),
     }
-}
-
-/// Refuses `delta_pending` when the design already carries a proposed delta under the milestone.
-fn none_pending(index: &Index, design: &Id, milestone: &Value) -> Result<(), Refusal> {
-    let pending = index.records(design.as_str(), Kind::Delta)?.into_iter().any(|d| {
-        d.header.get("milestone") == Some(milestone)
-            && DeltaState::of(&bp_vault::Body::parse(&d.body)) == DeltaState::Proposed
-    });
-    if !pending {
-        return Ok(());
-    }
-    Err(Refusal::new(
-        Code::DeltaPending,
-        format!("{design} {}", milestone.as_str().unwrap_or_default()),
-        "a design carries at most one proposed delta per milestone (13, Delta)",
-        format!("the pending delta carries the change until the milestone is stamped: bp list delta --under {design}"),
-    ))
 }
 
 /// The id `stem` names, or the first free `-2`, `-3`: a second record with one key under one parent (25, design
