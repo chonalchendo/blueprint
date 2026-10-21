@@ -19,6 +19,9 @@ pub struct Body {
     pub lead: String,
     /// The `## ` sections, in order.
     pub sections: Vec<Section>,
+    /// Every heading at any level and depth, as written and trimmed, in order: an editorial delta keeps them all
+    /// (28, design change 9).
+    pub headings: Vec<String>,
     /// Every wikilink outside code that is a path id, first occurrence only, in order.
     pub links: Vec<Id>,
     /// Every wikilink target outside code that is not a path id.
@@ -102,6 +105,9 @@ impl Body {
         // Block quotes and lists nest; a heading inside one is part of it, not a section.
         let mut depth = 0_usize;
         for (event, range) in Parser::new(text).into_offset_iter() {
+            if let Event::Start(Tag::Heading { .. }) = event {
+                body.headings.push(text[range.clone()].trim().to_string());
+            }
             match event {
                 Event::Start(Tag::BlockQuote(_) | Tag::List(_)) => depth += 1,
                 Event::End(TagEnd::BlockQuote(_) | TagEnd::List(_)) => depth -= 1,
@@ -185,10 +191,7 @@ impl Body {
             body.findings.push(Finding { kind: FindingKind::Placeholder, line: line(at), detail });
         }
         body.findings.sort_by_key(|f| f.line);
-        for (target, at) in wikilinks(text) {
-            if code.iter().any(|c| c.contains(&at)) {
-                continue;
-            }
+        for (target, _) in wikilinks(text).filter(|(_, at)| !code.iter().any(|c| c.contains(at))) {
             match Id::parse(target) {
                 Ok(id) if !body.links.contains(&id) => body.links.push(id),
                 Ok(_) => {}

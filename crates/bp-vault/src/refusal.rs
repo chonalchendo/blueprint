@@ -47,6 +47,7 @@ crate::closed_enum! {
         RoleForbidden = "role_forbidden",
         DiagramInvalid = "diagram_invalid",
         BaseMoved = "base_moved",
+        NotEditorial = "not_editorial",
     }
 }
 

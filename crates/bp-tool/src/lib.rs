@@ -9,6 +9,7 @@ mod create;
 mod delta;
 mod diagram;
 mod done;
+mod editorial;
 mod install;
 mod intent;
 mod land;
