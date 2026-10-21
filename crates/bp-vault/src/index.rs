@@ -33,6 +33,8 @@ pub(crate) fn schema() -> String {
 const TABLES: &str = "
 create table meta (key text primary key, value text not null);
 create table files (id text primary key, hash text not null, class text not null);
+-- An id resolves up to case (13, rule 1); without these, each walk and show scans every file and alias.
+create index files_nocase on files (id collate nocase);
 create table nodes (rowid integer primary key, id text unique not null, kind text not null, title text,
   status text, project text, under text, header text not null, tokens integer not null, design_kind text, scope text);
 create index nodes_kind on nodes (kind, project, status);
@@ -48,6 +50,7 @@ create index markdown_src on markdown (src);
 create table aliases (alias text not null, id text not null);
 create index aliases_alias on aliases (alias);
 create index aliases_id on aliases (id);
+create index aliases_nocase on aliases (alias collate nocase);
 create table checks (src text not null);
 create index checks_src on checks (src);
 create table findings (src text not null, kind text not null, detail text not null);

@@ -1,7 +1,7 @@
 //! Composes the `Intents` function's inputs from the index and the forge snapshot. The function itself is pure
 //! and lives in `bp-change`; this is the IO around it (23, rule 2).
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -78,6 +78,9 @@ pub struct Intents<'a> {
     integrity: RefCell<BTreeMap<String, Option<IntegrityRun>>>,
     /// Each design's latest acceptance, read once per call for `stale`.
     accepted: RefCell<BTreeMap<String, Option<String>>>,
+    /// Each learning's creation, read once per call for `stale` with no evidence row. Every learning lives in
+    /// `shared/learnings` (13), so one read serves them all.
+    created: OnceCell<BTreeMap<String, String>>,
 }
 
 impl<'a> Intents<'a> {
@@ -85,7 +88,14 @@ impl<'a> Intents<'a> {
     /// needs neither the clock nor the forge.
     pub fn new(vault: &'a Vault, index: &'a Index, projects: Option<&BTreeSet<&str>>) -> Result<Self, Refusal> {
         let world = projects.map(|p| World::read(&vault.root, p)).transpose()?;
-        Ok(Self { vault, index, world, integrity: RefCell::default(), accepted: RefCell::default() })
+        Ok(Self {
+            vault,
+            index,
+            world,
+            integrity: RefCell::default(),
+            accepted: RefCell::default(),
+            created: OnceCell::new(),
+        })
     }
 
     /// The intent of one issue, milestone or design; no other kind has one.
@@ -125,10 +135,11 @@ impl<'a> Intents<'a> {
             return Ok(false);
         }
         // With no evidence row, the last verification is the learning's creation (13, Learning).
-        let last = match self.index.records(id, Kind::Evidence)?.pop() {
-            Some(r) => text(&r.header, "at"),
-            None => Id::parse(id).ok().and_then(|i| self.vault.created(&i)),
+        let created = || {
+            let dir = format!("shared/{}", Kind::Learning.dir());
+            self.created.get_or_init(|| self.vault.created(&dir)).get(id).cloned()
         };
+        let last = self.index.records(id, Kind::Evidence)?.pop().map_or_else(created, |r| text(&r.header, "at"));
         Ok(LearningStatus::stale(&text(header, "status").unwrap_or_default(), last.as_deref(), &changed))
     }
 

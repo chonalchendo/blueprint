@@ -32,6 +32,26 @@ fn vault() -> tempfile::TempDir {
     d
 }
 
+/// Runs git in `root` with both dates at `at`.
+fn git(root: &Path, args: &[&str], at: &str) {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args(args)
+        .env("GIT_AUTHOR_DATE", at)
+        .env("GIT_COMMITTER_DATE", at)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// A design change the learnings below were created before.
+const ACCEPTED: &str = "---\nkind: delta\nunder: projects/bp/designs/system\nstamp: \"2026-10-02T00:00:00Z\"\nmilestone: projects/bp/milestones/m\n---\n\nThe system.\n\n## Accepted\n\naccepted_at: 2026-10-10T00:00:00Z\nversion: [[projects/bp/versions/1]]\n";
+
+fn learning(title: &str) -> String {
+    format!("---\nkind: learning\ntitle: {title}\nstatus: draft\ncites: [projects/bp/designs/system]\n---\n\nNap.\n")
+}
+
 fn walk(root: &Path, args: &[&str]) -> (Option<i32>, Value) {
     walk_at(root, None, args)
 }
@@ -364,20 +384,9 @@ fn distil_needs_a_citing_learning_that_search_finds_by_its_cue() {
 #[test]
 fn with_no_evidence_a_learning_ages_from_its_creation_and_a_recheck_renews_it() {
     let d = vault();
-    let git = |args: &[&str], at: &str| {
-        let out = std::process::Command::new("git")
-            .current_dir(d.path())
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-            .args(args)
-            .env("GIT_AUTHOR_DATE", at)
-            .env("GIT_COMMITTER_DATE", at)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    };
+    let git = |args: &[&str], at: &str| git(d.path(), args, at);
     let l = "shared/learnings/naps";
-    let text = "---\nkind: learning\ntitle: Naps\nstatus: draft\ncites: [projects/bp/designs/system]\n---\n\nNap.\n";
-    write(d.path(), &format!("{l}.md"), text);
+    write(d.path(), &format!("{l}.md"), &learning("Naps"));
     git(&["init", "-q"], "2026-10-05T00:00:00Z");
     // `bp record` commits through the vault's own config; a CI runner has no global identity.
     git(&["config", "user.name", "t"], "2026-10-05T00:00:00Z");
@@ -398,8 +407,7 @@ fn with_no_evidence_a_learning_ages_from_its_creation_and_a_recheck_renews_it() 
         serde_json::from_slice::<Value>(&out.stdout).unwrap()
     };
     assert_eq!(bp(&["show", l])["stale"], false, "no design changed");
-    let delta = "---\nkind: delta\nunder: projects/bp/designs/system\nstamp: \"2026-10-02T00:00:00Z\"\nmilestone: projects/bp/milestones/m\n---\n\nThe system.\n\n## Accepted\n\naccepted_at: 2026-10-10T00:00:00Z\nversion: [[projects/bp/versions/1]]\n";
-    write(d.path(), "projects/bp/designs/system/deltas/2026-10-02T00-00-00Z.md", delta);
+    write(d.path(), "projects/bp/designs/system/deltas/2026-10-02T00-00-00Z.md", ACCEPTED);
     git(&["add", "-A"], "2026-10-10T00:00:00Z");
     git(&["commit", "-qm", "accept"], "2026-10-10T00:00:00Z");
     let before = bp(&["show", l]);
@@ -459,4 +467,55 @@ fn the_review_slice_carries_the_pull_request_head_that_its_stop_compares() {
     );
     write(d.path(), &format!("{SEED}/reviews/r.md"), &review);
     assert_eq!(done(d.path(), Some(forge.path()), SEED, "review"), true, "a review at the slice's head ends the stop");
+}
+
+#[test]
+fn learnings_read_their_creation_through_a_rename_in_one_git_call_however_many() {
+    let d = vault();
+    let r = d.path();
+    write(r, "shared/learnings/naps.md", &learning("Naps"));
+    git(r, &["init", "-q"], "2026-10-05T00:00:00Z");
+    git(r, &["add", "-A"], "2026-10-05T00:00:00Z");
+    git(r, &["commit", "-qm", "init"], "2026-10-05T00:00:00Z");
+    write(r, "projects/bp/designs/system/deltas/2026-10-02T00-00-00Z.md", ACCEPTED);
+    git(r, &["add", "-A"], "2026-10-10T00:00:00Z");
+    git(r, &["commit", "-qm", "accept"], "2026-10-10T00:00:00Z");
+    // Renamed after the change: the learning still dates from its first add.
+    git(r, &["mv", "shared/learnings/naps.md", "shared/learnings/long-naps.md"], "2026-10-12T00:00:00Z");
+    git(r, &["commit", "-qm", "rename"], "2026-10-12T00:00:00Z");
+    // A git that logs each call, so the count shows the creation times cost one process, not one per learning.
+    let bin = tempfile::tempdir().unwrap();
+    let real = std::process::Command::new("sh").args(["-c", "command -v git"]).output().unwrap();
+    let real = String::from_utf8(real.stdout).unwrap();
+    let calls = bin.path().join("calls");
+    let script = format!("#!/bin/sh\necho \"$*\" >> {}\nexec {} \"$@\"\n", calls.display(), real.trim());
+    write(bin.path(), "git", &script);
+    std::fs::set_permissions(bin.path().join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let list = || {
+        let _ = std::fs::remove_file(&calls);
+        let out = Command::cargo_bin("bp")
+            .unwrap()
+            .current_dir(r)
+            .env_remove("BP_VAULT")
+            .env("BP_NOW", "2026-10-20T00:00:00Z")
+            .env("PATH", &path)
+            .args(["list", "learning", "--json"])
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let rows = v["rows"].as_array().unwrap().clone();
+        assert!(rows.iter().all(|row| row["stale"] == true), "each was created before the change: {v}");
+        (rows.len(), std::fs::read_to_string(&calls).unwrap_or_default().lines().count())
+    };
+    let (one, calls_for_one) = list();
+    for slug in ["dozes", "snoozes", "siestas"] {
+        write(r, &format!("shared/learnings/{slug}.md"), &learning(slug));
+    }
+    git(r, &["add", "-A"], "2026-10-06T00:00:00Z");
+    git(r, &["commit", "-qm", "more"], "2026-10-06T00:00:00Z");
+    let (four, calls_for_four) = list();
+    assert_eq!((one, four), (1, 4));
+    assert!(calls_for_one > 0, "the logging git ran");
+    assert_eq!(calls_for_four, calls_for_one, "the git calls do not grow with the learnings");
 }
