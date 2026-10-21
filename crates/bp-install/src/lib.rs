@@ -3,17 +3,18 @@
 //! manifest of content hashes. `check` holds the installed files to that manifest before a walk reads the vault (17;
 //! 27, design changes 1 and 2). The install is local: it calls no forge and writes nothing outside the clone.
 
+mod section;
 mod spec;
 mod validate;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Range;
 use std::path::{Component, Path};
 
 use bp_operation::{READ_VERBS, Role};
 use bp_vault::{Code, Kind, Refusal};
 use serde_json::{Map, Value, json};
 
+use crate::section::{importer, sectioned, with_section};
 use crate::spec::Spec;
 
 /// Every file under `bundle/`, by its path from there, in path order (23).
@@ -41,25 +42,17 @@ bp_vault::closed_enum! {
     }
 }
 
-const BEGIN: &str = "<!-- bp:begin -->";
-const END: &str = "<!-- bp:end -->";
-
 /// Installs the bundle for `target` at `top`: `(true, result)` for a write, `(false, result)` when the clone already
 /// holds this bundle, so the verb exits 3.
 pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     let spec = Spec::of(target);
     validate::validate(BUNDLE, spec)?;
     let (files, skipped) = plan(spec);
-    let entries = entries(spec, &files);
+    let import = importer(top, spec);
+    let entries = entries(spec, &files, import);
     let always_on = top.join(spec.always_on);
-    let held = read(&always_on)?;
-    if let Some(text) = held.as_deref()
-        && (text.matches(BEGIN).count(), text.matches(END).count())
-            != if span(text).is_some() { (1, 1) } else { (0, 0) }
-    {
-        let fix = format!("{} holds an unpaired {BEGIN} or {END}; leave one pair or none, then rerun", spec.always_on);
-        return Err(Refusal::failed(spec.always_on, fix));
-    }
+    let held = sectioned(top, spec.always_on)?;
+    let imported = import.map(|rel| sectioned(top, rel).map(|t| (rel, t.unwrap_or_default()))).transpose()?;
     let settings_path = top.join(spec.settings);
     let settings = match read(&settings_path)? {
         Some(t) => serde_json::from_str(&t).ok().filter(Value::is_object),
@@ -93,7 +86,20 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
         .flat_map(Map::keys)
         .filter(|p| !p.contains('#') && !entries.contains_key(*p))
         .collect();
-    let mut writes = files.keys().map(String::as_str).chain([spec.always_on, spec.settings, manifest_rel.as_str()]);
+    // A section in a file that no longer takes the import goes, so one file imports the always-on file. The old
+    // manifest names it, and only the files of `spec.imports` qualify.
+    let stale: Vec<&str> = spec
+        .imports
+        .iter()
+        .copied()
+        .filter(|r| Some(*r) != import && !old["files"][format!("{r}#bp")].is_null())
+        .collect();
+    let mut writes = files
+        .keys()
+        .map(String::as_str)
+        .chain([spec.always_on, spec.settings, &manifest_rel])
+        .chain(import)
+        .chain(stale.iter().copied());
     let dirs = [spec.skills, spec.agents, spec.dispatch, spec.hooks];
     let removable = |p: &str| dirs.iter().any(|d| p.starts_with(&format!("{d}/"))) && inside(top, p);
     if let Some(out) =
@@ -118,16 +124,26 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
             let _ = std::fs::remove_dir(top.join(dir));
         }
     }
+    for rel in stale {
+        // Before the always-on write: through a link, the stale file can be the always-on file.
+        if let Some(text) = read(&top.join(rel))?.as_deref().and_then(section::without_section) {
+            put(&top.join(rel), text.as_bytes())?;
+        }
+    }
     for (rel, bytes) in &files {
         put(&top.join(rel), bytes)?;
     }
     put(&always_on, with_section(held.as_deref(), &section()).as_bytes())?;
+    if let Some((rel, text)) = &imported {
+        put(&top.join(rel), with_section(Some(text), &section::import(spec)).as_bytes())?;
+    }
     // `serde_json` holds no key order, so the rewrite sorts the user's keys; their values stay.
     put(&settings_path, pretty(&settings).as_bytes())?;
     put(&manifest_path, manifest.as_bytes())?;
     let mut local: Vec<&str> = files.keys().map(String::as_str).collect();
     local.extend([spec.settings, &manifest_rel]);
-    // The one tracked edit is the section; an always-on file the install created is the install's own.
+    // The tracked edits are the sections; an always-on file the install created is the install's own. An import goes
+    // only into a file that exists, so it is never the install's own.
     if held.is_none() {
         local.push(spec.always_on);
     }
@@ -150,12 +166,15 @@ fn inside(top: &Path, rel: &str) -> bool {
         .all(|a| a.canonicalize().is_ok_and(|a| a.starts_with(&root)))
 }
 
-/// The manifest entries for `spec`: each installed file's hash, then the section's and Blueprint's hook entries'.
+/// The manifest entries for `spec`: each installed file's hash, then the sections' and Blueprint's hook entries'.
 /// `install` writes them, and `check` holds a manifest to them, so a bundle the binary no longer ships refuses even
-/// under the same tool version (17, check 7).
-fn entries(spec: &Spec, files: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, String> {
+/// under the same tool version (17, check 7). The import's entry is keyed by the file that holds it.
+fn entries(spec: &Spec, files: &BTreeMap<String, Vec<u8>>, import: Option<&str>) -> BTreeMap<String, String> {
     let mut entries: BTreeMap<String, String> = files.iter().map(|(p, b)| (p.clone(), hash(b))).collect();
     entries.insert(spec.section_entry(), hash(section().as_bytes()));
+    if let Some(rel) = import {
+        entries.insert(format!("{rel}#bp"), hash(section::import(spec).as_bytes()));
+    }
     // `ours` keeps Blueprint's groups alone, so the user's settings do not change the entry.
     let hooks = merged(json!({}), spec).expect("an empty object merges");
     entries.insert(spec.hooks_entry(), hash(&ours(&hooks, spec)));
@@ -164,7 +183,7 @@ fn entries(spec: &Spec, files: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, S
 
 /// Blueprint's section of the always-on file, the markers included.
 fn section() -> String {
-    format!("{BEGIN}\n{}{END}\n", text_of("always-on.md"))
+    section::wrap(&text_of("always-on.md"))
 }
 
 /// Refuses `bundle_mismatch` when an installed bundle at `top` drifted: another tool version, a manifest that is not
@@ -198,12 +217,18 @@ fn check_target(top: &Path, spec: &Spec) -> Result<(), Refusal> {
     // The version alone cannot see a bundle that changed under one version, so the manifest is held to the bundle the
     // binary embeds, entry by entry.
     let held = manifest["files"].as_object().cloned().unwrap_or_default();
-    let ships = entries(spec, &plan(spec).0);
+    let ships = entries(spec, &plan(spec).0, importer(top, spec));
     let names: BTreeSet<&String> = held.keys().chain(ships.keys()).collect();
     if let Some(entry) =
         names.into_iter().find(|e| held.get(*e).and_then(Value::as_str) != ships.get(*e).map(String::as_str))
     {
-        return Err(refuse(entry.clone(), format!("{entry} is not the tool's bundle")));
+        let why = match entry.strip_suffix("#bp") {
+            Some(file) if file != spec.always_on && !held.contains_key(entry.as_str()) => {
+                format!("{file} now hides {}; reinstall to import it", spec.always_on)
+            }
+            _ => format!("{entry} is not the tool's bundle"),
+        };
+        return Err(refuse(entry.clone(), why));
     }
     for (entry, want) in &ships {
         if current(top, spec, entry).as_ref() != Some(want) {
@@ -215,9 +240,9 @@ fn check_target(top: &Path, spec: &Spec) -> Result<(), Refusal> {
 
 /// The hash of one manifest entry as the clone holds it now.
 fn current(top: &Path, spec: &Spec, entry: &str) -> Option<String> {
-    if entry == spec.section_entry() {
-        let text = std::fs::read_to_string(top.join(spec.always_on)).ok()?;
-        return Some(hash(text[span(&text)?].as_bytes()));
+    if let Some(rel) = entry.strip_suffix("#bp") {
+        let text = std::fs::read_to_string(top.join(rel)).ok()?;
+        return Some(hash(text[section::span(&text)?].as_bytes()));
     }
     if entry == spec.hooks_entry() {
         let settings = serde_json::from_slice(&std::fs::read(top.join(spec.settings)).ok()?).ok()?;
@@ -290,26 +315,6 @@ fn text_of(path: &str) -> String {
     let bytes = BUNDLE.iter().find(|(p, _)| *p == path).map_or(&b""[..], |(_, b)| b);
     let text = String::from_utf8_lossy(bytes).into_owned();
     if text.ends_with('\n') { text } else { text + "\n" }
-}
-
-/// The section's bytes in an always-on file: the begin line through the end line and its line end.
-fn span(text: &str) -> Option<Range<usize>> {
-    let begin = format!("{BEGIN}\n");
-    let start = if text.starts_with(&begin) { 0 } else { text.find(&format!("\n{begin}"))? + 1 };
-    let end = start + text[start..].find(&format!("\n{END}"))? + 1 + END.len();
-    Some(start..if text[end..].starts_with('\n') { end + 1 } else { end })
-}
-
-/// The always-on file with `section` in place of the old one, or appended after a blank line.
-fn with_section(held: Option<&str>, section: &str) -> String {
-    match held {
-        None => section.to_string(),
-        Some(text) => match span(text) {
-            Some(r) => format!("{}{section}{}", &text[..r.start], &text[r.end..]),
-            None if text.is_empty() => section.to_string(),
-            None => format!("{}\n{section}", if text.ends_with('\n') { text.to_string() } else { format!("{text}\n") }),
-        },
-    }
 }
 
 /// A matcher group is Blueprint's when one of its commands runs a `bp-` script from the target's hook directory.

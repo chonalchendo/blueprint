@@ -45,11 +45,15 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
     let (wrote, v) = install(t, Target::Claude).unwrap();
     assert!(wrote);
     assert_eq!(v["target"], "claude");
-    assert!(v["files"]["CLAUDE.md#bp"].is_string() && v["files"]["settings.local.json#hooks"].is_string(), "{v}");
-    let text = read(t, "CLAUDE.md");
-    assert!(
-        text.starts_with("# Mine\n\nKeep this line.\n\n<!-- bp:begin -->\n") && text.ends_with("<!-- bp:end -->\n")
+    for entry in ["AGENTS.md#bp", "CLAUDE.md#bp", "settings.local.json#hooks"] {
+        assert!(v["files"][entry].is_string(), "{entry}: {v}");
+    }
+    assert_eq!(
+        read(t, "CLAUDE.md"),
+        format!("# Mine\n\nKeep this line.\n\n{IMPORT}"),
+        "the user's lines, then the import"
     );
+    assert!(read(t, "AGENTS.md").starts_with("<!-- bp:begin -->\n## "), "the section lives in AGENTS.md");
     let settings: serde_json::Value = serde_json::from_str(&read(t, ".claude/settings.local.json")).unwrap();
     assert_eq!(settings["model"], "x");
     let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
@@ -68,6 +72,7 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
     let exclude = read(t, ".git/info/exclude");
     assert!(exclude.lines().any(|l| l == "/.claude/settings.local.json"), "{exclude}");
     assert!(!exclude.lines().any(|l| l == "/CLAUDE.md"), "the user's file stays tracked");
+    assert!(exclude.lines().any(|l| l == "/AGENTS.md"), "an AGENTS.md the install created is its own");
     let guard = std::fs::metadata(t.join(".claude/hooks/bp-guard.sh")).unwrap();
     assert_eq!(std::os::unix::fs::PermissionsExt::mode(&guard.permissions()) & 0o111, 0o111, "run by path");
     assert_eq!(checked(t), "ok");
@@ -77,6 +82,9 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
     assert_eq!(read(t, ".git/info/exclude"), exclude, "a repeat adds no exclude line");
 }
 
+/// The section the claude target adds to a Claude Code file, so the harness reads `AGENTS.md` (27, design change 1).
+const IMPORT: &str = "<!-- bp:begin -->\n@AGENTS.md\n<!-- bp:end -->\n";
+
 /// One edit to an installed clone.
 type Edit<'a> = &'a dyn Fn(&Path);
 
@@ -84,15 +92,18 @@ type Edit<'a> = &'a dyn Fn(&Path);
 fn check_catches_each_drift_and_install_repairs_it() {
     let dir = top();
     let t = dir.path();
+    write(t, "CLAUDE.md", "# Mine\n");
     install(t, Target::Claude).unwrap();
     let (skill, settings, manifest) =
         (".claude/skills/bp-complete/SKILL.md", ".claude/settings.local.json", ".claude/skills/bundle.json");
-    let edits: [(Edit, &str); 7] = [
+    let tamper = |rel: &'static str| {
+        move |t: &Path| write(t, rel, &read(t, rel).replace("<!-- bp:end -->", "x\n<!-- bp:end -->"))
+    };
+    let (agents, claude) = (tamper("AGENTS.md"), tamper("CLAUDE.md"));
+    let edits: [(Edit, &str); 8] = [
         (&|t| write(t, skill, &(read(t, skill) + "\n")), skill),
-        (
-            &|t| write(t, "CLAUDE.md", &read(t, "CLAUDE.md").replace("<!-- bp:end -->", "x\n<!-- bp:end -->")),
-            "CLAUDE.md#bp",
-        ),
+        (&agents, "AGENTS.md#bp"),
+        (&claude, "CLAUDE.md#bp"),
         (&|t| write(t, settings, &read(t, settings).replace("SessionEnd", "Gone")), "settings.local.json#hooks"),
         (&|t| write(t, settings, &read(t, settings).replace("BP_ROLE=*", "BP_ROLE=x")), "settings.local.json#hooks"),
         (&|t| write(t, manifest, &read(t, manifest).replace(bp_install::VERSION, "0.0.0-quokka")), manifest),
@@ -209,4 +220,136 @@ fn codex_writes_its_own_paths_and_creates_an_excluded_agents_file() {
     assert!(read(t, "AGENTS.md").starts_with("<!-- bp:begin -->\n"));
     assert!(read(t, ".git/info/exclude").lines().any(|l| l == "/AGENTS.md"), "a file the install creates is its own");
     assert_eq!(checked(t), "ok");
+}
+
+/// The files a clone holds before the install, path and text.
+type Files<'a> = &'a [(&'a str, &'a str)];
+
+/// Claude Code skips `AGENTS.md` when one of its own files exists, so the first of them imports it; with none, the
+/// install creates no `CLAUDE.md` (27, design change 1).
+#[test]
+fn the_claude_target_imports_agents_md_into_the_first_claude_file() {
+    let cases: [(Files, Option<&str>); 4] = [
+        (&[], None),
+        (&[(".claude/CLAUDE.md", "Mine.\n"), ("CLAUDE.local.md", "Mine.\n")], Some(".claude/CLAUDE.md")),
+        (&[("CLAUDE.local.md", "Mine.")], Some("CLAUDE.local.md")),
+        (&[("CLAUDE.md", "# Mine\n\n@AGENTS.md\n")], None),
+    ];
+    for (held, want) in cases {
+        let dir = top();
+        let t = dir.path();
+        std::fs::create_dir_all(t.join(".claude")).unwrap();
+        for (rel, text) in held {
+            write(t, rel, text);
+        }
+        let (wrote, v) = install(t, Target::Claude).unwrap();
+        assert!(wrote);
+        let imports: Vec<String> = v["files"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|k| k.ends_with("#bp") && *k != "AGENTS.md#bp")
+            .cloned()
+            .collect();
+        assert_eq!(imports, want.map(|w| format!("{w}#bp")).into_iter().collect::<Vec<_>>(), "{held:?}");
+        for (rel, text) in held {
+            let now = read(t, rel);
+            if Some(*rel) == want {
+                let sep = if text.ends_with('\n') { "\n" } else { "\n\n" };
+                assert_eq!(now, format!("{text}{sep}{IMPORT}"), "{rel}");
+            } else {
+                assert_eq!(&now, text, "{rel} is not touched");
+            }
+        }
+        assert_eq!(
+            t.join("CLAUDE.md").exists(),
+            held.iter().any(|(r, _)| *r == "CLAUDE.md"),
+            "no CLAUDE.md is created"
+        );
+        assert_eq!(checked(t), "ok");
+        assert!(!install(t, Target::Claude).unwrap().0, "a repeat exits 3: {held:?}");
+    }
+    // A Claude Code file added after the install hides the section, so the walk refuses until a reinstall imports it.
+    let dir = top();
+    let t = dir.path();
+    install(t, Target::Claude).unwrap();
+    write(t, "CLAUDE.md", "# Late\n");
+    assert_eq!(checked(t), "CLAUDE.md#bp");
+    assert!(check(t).unwrap_err().fix.contains("CLAUDE.md now hides AGENTS.md"), "the reason names the cause");
+    assert!(install(t, Target::Claude).unwrap().0);
+    assert_eq!(read(t, "CLAUDE.md"), format!("# Late\n\n{IMPORT}"));
+    assert_eq!(checked(t), "ok");
+}
+
+/// A Claude file that is `AGENTS.md` through a link, in either direction, already holds the section: one section, one
+/// entry, no self-import.
+#[test]
+fn a_claude_file_linked_to_agents_md_takes_the_section_once() {
+    for (real, link) in [("AGENTS.md", "CLAUDE.md"), ("CLAUDE.md", "AGENTS.md")] {
+        let dir = top();
+        let t = dir.path();
+        write(t, real, "# Mine\n");
+        std::os::unix::fs::symlink(real, t.join(link)).unwrap();
+        let (wrote, v) = install(t, Target::Claude).unwrap();
+        assert!(wrote);
+        let sections: Vec<&String> = v["files"].as_object().unwrap().keys().filter(|k| k.ends_with("#bp")).collect();
+        assert_eq!(sections, ["AGENTS.md#bp"], "{real}");
+        let text = read(t, real);
+        assert!(text.starts_with("# Mine\n\n<!-- bp:begin -->\n## ") && !text.contains("@AGENTS.md"), "{text}");
+        assert_eq!(text.matches("<!-- bp:begin -->").count(), 1);
+        assert_eq!(checked(t), "ok");
+        assert!(!install(t, Target::Claude).unwrap().0, "a repeat exits 3: {real}");
+    }
+}
+
+/// An import counts only outside a code block, and in any of the Claude files.
+#[test]
+fn an_import_counts_outside_code_blocks_in_any_claude_file() {
+    let dir = top();
+    let t = dir.path();
+    write(t, "CLAUDE.md", "```\n@AGENTS.md\n```\n");
+    let (_, v) = install(t, Target::Claude).unwrap();
+    assert!(v["files"]["CLAUDE.md#bp"].is_string(), "a fenced line imports nothing: {v}");
+    let dir = top();
+    let t = dir.path();
+    write(t, "CLAUDE.md", "# Mine\n");
+    write(t, "CLAUDE.local.md", "@./AGENTS.md\n");
+    let (_, v) = install(t, Target::Claude).unwrap();
+    assert!(v["files"]["CLAUDE.md#bp"].is_null() && v["files"]["CLAUDE.local.md#bp"].is_null(), "{v}");
+    assert_eq!(read(t, "CLAUDE.md"), "# Mine\n");
+    assert_eq!(checked(t), "ok");
+}
+
+/// When the import moves, or the user imports `AGENTS.md` themselves, the old section goes with the old entry.
+#[test]
+fn a_moved_import_leaves_no_stale_section() {
+    let dir = top();
+    let t = dir.path();
+    std::fs::create_dir_all(t.join(".claude")).unwrap();
+    write(t, ".claude/CLAUDE.md", "Mine.\n");
+    install(t, Target::Claude).unwrap();
+    write(t, "CLAUDE.md", "# Late\n");
+    let (_, v) = install(t, Target::Claude).unwrap();
+    assert!(v["files"][".claude/CLAUDE.md#bp"].is_null() && v["files"]["CLAUDE.md#bp"].is_string(), "{v}");
+    assert_eq!(read(t, ".claude/CLAUDE.md"), "Mine.\n");
+    assert_eq!(read(t, "CLAUDE.md"), format!("# Late\n\n{IMPORT}"));
+    write(t, "CLAUDE.md", &read(t, "CLAUDE.md").replace("# Late\n", "# Late\n@AGENTS.md\n"));
+    let (_, v) = install(t, Target::Claude).unwrap();
+    assert!(v["files"]["CLAUDE.md#bp"].is_null(), "{v}");
+    assert_eq!(read(t, "CLAUDE.md"), "# Late\n@AGENTS.md\n");
+    assert_eq!(checked(t), "ok");
+}
+
+#[test]
+fn codex_then_claude_share_one_section() {
+    let dir = top();
+    let t = dir.path();
+    write(t, "CLAUDE.md", "# Mine\n");
+    install(t, Target::Codex).unwrap();
+    install(t, Target::Claude).unwrap();
+    assert_eq!(read(t, "AGENTS.md").matches("<!-- bp:begin -->").count(), 1);
+    assert_eq!(read(t, ".git/info/exclude").lines().filter(|l| *l == "/AGENTS.md").count(), 1);
+    assert_eq!(read(t, "CLAUDE.md"), format!("# Mine\n\n{IMPORT}"));
+    assert_eq!(checked(t), "ok");
+    assert!(!install(t, Target::Codex).unwrap().0 && !install(t, Target::Claude).unwrap().0, "each repeat exits 3");
 }
