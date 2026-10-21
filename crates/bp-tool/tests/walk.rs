@@ -379,6 +379,9 @@ fn with_no_evidence_a_learning_ages_from_its_creation_and_a_recheck_renews_it() 
     let text = "---\nkind: learning\ntitle: Naps\nstatus: draft\ncites: [projects/bp/designs/system]\n---\n\nNap.\n";
     write(d.path(), &format!("{l}.md"), text);
     git(&["init", "-q"], "2026-10-05T00:00:00Z");
+    // `bp record` commits through the vault's own config; a CI runner has no global identity.
+    git(&["config", "user.name", "t"], "2026-10-05T00:00:00Z");
+    git(&["config", "user.email", "t@t"], "2026-10-05T00:00:00Z");
     git(&["add", "-A"], "2026-10-05T00:00:00Z");
     git(&["commit", "-qm", "init"], "2026-10-05T00:00:00Z");
     let bp = |args: &[&str]| {
