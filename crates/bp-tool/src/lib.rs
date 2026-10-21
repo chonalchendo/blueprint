@@ -99,7 +99,8 @@ pub enum Verb {
     Stamp(stamp::Stamp),
     /// The bundle into a harness, at the clone's top, with its manifest; local, so it calls no forge.
     Install(install::Install),
-    /// Check and render a diagram spec, or the diff of two, to a file outside the vault.
+    /// Check, render and write a diagram spec and its page into a draft design; or preview a spec, or the diff of
+    /// two, in a file outside the vault.
     Diagram(diagram::Diagram),
 }
 

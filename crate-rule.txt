@@ -3,7 +3,7 @@
 # Dev-dependencies are exempt. `cargo xtask deps` refuses any other edge with exit 2.
 bp-tool      -> bp-diagram bp-vault bp-design bp-change bp-reasoning bp-operation bp-check bp-forge[write] bp-install
 bp-view      -> bp-vault bp-design bp-change bp-reasoning bp-operation bp-forge
-bp-check     -> bp-vault bp-change
+bp-check     -> bp-vault bp-change bp-diagram
 bp-install   -> bp-vault bp-operation bp-forge
 bp-forge     -> bp-vault
 bp-design    -> bp-vault

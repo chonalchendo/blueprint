@@ -69,6 +69,9 @@ pub struct Moves {
     pub ids: BTreeMap<Id, Id>,
     /// Each file that is not markdown, as its old and new paths under the root.
     pub files: Vec<(String, String)>,
+    /// Each file that is not markdown that the write puts, as its path under the root and its text, or removes, with
+    /// no text: a design's diagram spec and page (28, design change 5).
+    pub writes: Vec<(String, Option<String>)>,
 }
 
 impl Moves {
@@ -196,7 +199,8 @@ impl Writer<'_> {
     }
 
     /// [`Writer::commit`] for a write that also moves files (12, A rename): each old id of `moves` goes, and each
-    /// file that is not markdown is copied to its new path and removed from its old one, in the same commit.
+    /// file that is not markdown is copied to its new path and removed from its old one, or put or removed as
+    /// `writes` says, in the same commit.
     pub fn commit_moving(
         mut self,
         verb: &str,
@@ -210,6 +214,7 @@ impl Writer<'_> {
         let mut paths: Vec<String> = changes.keys().map(|id| format!("{id}.md")).collect();
         paths.extend(gone.iter().cloned());
         paths.extend(moves.files.iter().flat_map(|(from, to)| [from.clone(), to.clone()]));
+        paths.extend(moves.writes.iter().map(|(p, _)| p.clone()));
         let checked = moves.pathspecs(&paths, false);
         let head = match self.clean.take() {
             Some((head, clean)) if checked.iter().all(|p| clean.contains(p)) => head,
@@ -235,6 +240,7 @@ impl Writer<'_> {
         let mut new: Vec<&str> =
             paths.iter().zip(changes.keys()).filter(|(_, id)| !id.path(root).exists()).map(|(p, _)| *p).collect();
         new.extend(moves.files.iter().map(|(_, to)| to.as_str()));
+        new.extend(moves.writes.iter().filter(|(p, t)| t.is_some() && !root.join(p).exists()).map(|(p, _)| p.as_str()));
         let new = moves.pathspecs(&new, true);
         let new: Vec<&str> = new.iter().map(String::as_str).collect();
         let done = changes
@@ -247,8 +253,16 @@ impl Writer<'_> {
                 })
             })
             .and_then(|()| {
+                moves
+                    .writes
+                    .iter()
+                    .filter_map(|(p, t)| Some((p, t.as_ref()?)))
+                    .try_for_each(|(p, t)| put(&root.join(p), t.as_bytes(), false))
+            })
+            .and_then(|()| {
                 gone.iter()
                     .chain(moves.files.iter().map(|(from, _)| from))
+                    .chain(moves.writes.iter().filter(|(_, t)| t.is_none()).map(|(p, _)| p))
                     .try_for_each(|p| std::fs::remove_file(root.join(p)).map_err(|e| failed(&root.join(p), &e)))
             })
             .and_then(
@@ -268,7 +282,8 @@ impl Writer<'_> {
             Refusal::failed(root.display().to_string(), "git committed but its head cannot be read; rerun bp where")
         })?;
         // git keeps no directory, so the emptied ones go too, before the fingerprint reads their parents' times.
-        for p in gone.iter().chain(moves.files.iter().map(|(from, _)| from)) {
+        let removed = moves.writes.iter().filter(|(_, t)| t.is_none()).map(|(p, _)| p);
+        for p in gone.iter().chain(moves.files.iter().map(|(from, _)| from)).chain(removed) {
             prune(root, p);
         }
         // The head moved, so an update that fails here costs the next read one refresh and loses nothing.

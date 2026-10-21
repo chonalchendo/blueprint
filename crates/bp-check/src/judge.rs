@@ -14,7 +14,7 @@ use crate::process::End;
 const TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The runners not built yet: each records `skipped`, so the census still shows the block (25, design change 4).
-const LATER: [&str; 4] = ["deps", "contract", "pin", "nodes"];
+const LATER: [&str; 3] = ["deps", "contract", "pin"];
 
 /// What the attributes ask of one block.
 #[derive(Debug, PartialEq)]
@@ -27,6 +27,8 @@ pub(crate) enum Plan {
     Broken(String),
     /// Run the project's integrity rules in process, over the index (25, issue 11).
     Integrity,
+    /// Resolve the nodes of the owner design's diagram specs in process (28, design change 6).
+    Nodes,
 }
 
 /// How to run one block and what passes.
@@ -69,18 +71,19 @@ pub(crate) fn plan(check: &Check, today: &str) -> Plan {
     let own: &[&str] = match check.runner.as_str() {
         "shell" => &["expect", "until"],
         "scenario" => &["measure", "max"],
-        // It runs in process over the vault, so `cwd`, `timeout` and `when` would ask nothing of it; a `when` that
+        // Each runs in process over the vault, so `cwd`, `timeout` and `when` would ask nothing of it; a `when` that
         // skipped it would read as no run at all (15, the integrity row).
-        "integrity" => &[],
+        "integrity" | "nodes" => &[],
         r if LATER.contains(&r) => return Plan::Skip(format!("check {r}: this runner is not built yet")),
         r => {
             return Plan::Broken(format!(
-                "check {r}: the runners are shell, scenario, integrity, {}",
+                "check {r}: the runners are shell, scenario, integrity, nodes, {}",
                 LATER.join(", ")
             ));
         }
     };
-    let common: &[&str] = if check.runner == "integrity" { &COMMON[..2] } else { &COMMON };
+    let in_process = matches!(check.runner.as_str(), "integrity" | "nodes");
+    let common: &[&str] = if in_process { &COMMON[..2] } else { &COMMON };
     // A typo must not run: `expct=1` would otherwise pass on exit 0.
     if let Some((k, v)) = check.attrs.iter().find(|(k, _)| !common.contains(&k.as_str()) && !own.contains(&k.as_str()))
     {
@@ -96,8 +99,10 @@ pub(crate) fn plan(check: &Check, today: &str) -> Plan {
         Some("post-land") => return Plan::Skip("when=post-land: it holds only after the merge".into()),
         Some(w) => return Plan::Broken(format!("when={w}: pr or post-land")),
     }
-    if check.runner == "integrity" {
-        return Plan::Integrity;
+    match check.runner.as_str() {
+        "integrity" => return Plan::Integrity,
+        "nodes" => return Plan::Nodes,
+        _ => {}
     }
     let test = if check.runner == "shell" {
         shell(attr("expect"), attr("until"), today)
@@ -288,8 +293,12 @@ mod tests {
             assert!(matches!(plan(&block(runner, attrs), TODAY), Plan::Broken(_)), "{runner} {attrs}");
         }
         assert_eq!(plan(&block("integrity", "name=i severity=warn"), TODAY), Plan::Integrity);
-        for attr in ["when=post-land", "when=pr", "cwd=x", "timeout=5", "expect=0"] {
-            let broken = plan(&block("integrity", &format!("name=i {attr}")), TODAY);
+        assert_eq!(plan(&block("nodes", "name=diagram"), TODAY), Plan::Nodes, "the nodes runner runs");
+        for (runner, attr) in ["integrity", "nodes"]
+            .into_iter()
+            .flat_map(|r| ["when=post-land", "when=pr", "cwd=x", "timeout=5", "expect=0"].map(|a| (r, a)))
+        {
+            let broken = plan(&block(runner, &format!("name=i {attr}")), TODAY);
             assert!(matches!(&broken, Plan::Broken(w) if w.ends_with("it takes name, severity")), "{attr}: {broken:?}");
         }
         let Plan::Run(spec) = plan(&block("shell", "name=a timeout=5 cwd=crates/bp-vault"), TODAY) else { panic!() };

@@ -10,7 +10,7 @@ use bp_vault::{Code, Fault, Id, Index, Refusal, Vault};
 use crate::Verdict;
 use crate::process::Tail;
 
-/// One integrity run, before its record has a key.
+/// One in-process run, integrity or nodes, before its record has a key.
 pub(crate) struct Ran {
     pub(crate) verdict: Verdict,
     pub(crate) note: String,
@@ -43,7 +43,7 @@ pub(crate) fn clean(vault: &Vault, owner: &Id) -> Result<(), Refusal> {
             Err(Refusal::new(
                 Code::PathDirty,
                 dir.clone(),
-                "an integrity run names the vault's head, so the project's files are committed (15, the check grammar)",
+                "an in-process run names the vault's head, so the project's files are committed (15, the check grammar)",
                 format!("commit or restore the changes under {dir} (first: {first}), then rerun bp check {owner}"),
             ))
         }
@@ -65,37 +65,40 @@ pub(crate) fn run(vault: &Vault, owner: &Id) -> Result<Ran, String> {
 
 fn judge(project: &str, commit: String, faults: &[Fault]) -> Ran {
     let names: BTreeSet<Id> = faults.iter().filter(|f| f.node).filter_map(|f| Id::parse(&f.id).ok()).collect();
+    let lines: Vec<String> = faults.iter().map(|f| format!("{}: {}: {}", f.rule, f.id, f.detail)).collect();
+    let (tail, dropped, evidence) = evidence(&lines);
+    let (verdict, note) = if faults.is_empty() {
+        (Verdict::Pass, format!("no file of projects/{project} breaks a vault rule"))
+    } else {
+        let nodes = faults.iter().map(|f| f.id.as_str()).collect::<BTreeSet<_>>().len();
+        (
+            Verdict::Fail,
+            format!("{} on {} of projects/{project}", plural(faults.len(), "finding"), plural(nodes, "file")),
+        )
+    };
+    Ran { verdict, note, commit, tail, dropped, evidence, names: names.into_iter().collect() }
+}
+
+/// `n` of `one`, with its plural.
+pub(crate) fn plural(n: usize, one: &str) -> String {
+    if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") }
+}
+
+/// An in-process run's output, one line per finding, as a run record keeps it: the tail, the count of lines before
+/// it, and the evidence digest, blake3 of every line, then the NUL byte that separates an empty stderr (13, Run).
+pub(crate) fn evidence(lines: &[String]) -> (Vec<String>, usize, String) {
     let mut hasher = blake3::Hasher::new();
     let mut tail = Tail::default();
-    for f in faults {
+    for line in lines {
         // A parse error may span lines; the output keeps one line per finding.
-        let detail: String = f.detail.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-        let line = format!("{}: {}: {detail}", f.rule, f.id);
+        let line: String = line.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
         hasher.update(line.as_bytes());
         hasher.update(b"\n");
         tail.push(line);
     }
     hasher.update(&[0]);
     let (tail, dropped) = tail.drain();
-    let (verdict, note) = if faults.is_empty() {
-        (Verdict::Pass, format!("no file of projects/{project} breaks a vault rule"))
-    } else {
-        let nodes = faults.iter().map(|f| f.id.as_str()).collect::<BTreeSet<_>>().len();
-        let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
-        (
-            Verdict::Fail,
-            format!("{} on {} of projects/{project}", plural(faults.len(), "finding"), plural(nodes, "file")),
-        )
-    };
-    Ran {
-        verdict,
-        note,
-        commit,
-        tail,
-        dropped,
-        evidence: hasher.finalize().to_hex().to_string(),
-        names: names.into_iter().collect(),
-    }
+    (tail, dropped, hasher.finalize().to_hex().to_string())
 }
 
 #[cfg(test)]

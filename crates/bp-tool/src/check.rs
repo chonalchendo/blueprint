@@ -1,7 +1,8 @@
 //! `bp check <id> [--name <n>]`: runs the owner's check blocks from the code repository and writes one run record per
 //! block in one commit (15, check; 25, design changes 4 and 5). It exits 0 when no `error` block fails or times out,
 //! else 2 with `check_failed` naming the first failed run. That is the one refusal that follows a commit, so its
-//! envelope adds the commit and every run. An owner with no named block exits 3: nothing ran, nothing was written.
+//! envelope adds the commit and every run. An owner with no named block exits 3 with no run: nothing ran, nothing
+//! was written.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -41,7 +42,7 @@ pub(crate) fn run(cwd: &Path, c: &Check, json: bool, out: &mut impl std::io::Wri
         Err(refusal) => return finish::<Value>(Err(refusal), json, out),
     };
     let Some(checked) = checked else {
-        emit(out, &Envelope { result: json!({ "id": owner }), contract_version: CONTRACT }, json);
+        emit(out, &Envelope { result: json!({ "id": owner, "runs": [] }), contract_version: CONTRACT }, json);
         return ExitCode::from(3);
     };
     let runs = rows(&checked.runs);
@@ -55,7 +56,9 @@ pub(crate) fn run(cwd: &Path, c: &Check, json: bool, out: &mut impl std::io::Wri
 
 /// Each run as a result lists it.
 pub(crate) fn rows(runs: &[bp_check::Run]) -> Vec<Value> {
-    runs.iter().map(|r| json!({ "name": r.name, "verdict": r.verdict, "id": r.id, "note": r.note })).collect()
+    runs.iter()
+        .map(|r| json!({ "name": r.name, "kind": r.kind, "verdict": r.verdict, "id": r.id, "note": r.note }))
+        .collect()
 }
 
 /// `check_failed` for the first failed run, after the commit that holds the runs: the one refusal that follows a
