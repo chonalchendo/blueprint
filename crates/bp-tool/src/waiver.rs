@@ -2,10 +2,10 @@
 //! writes. `stamp` calls it; 21's re-asked intent reads [`open`] too, so the record reduction and the passing-run test
 //! live here, not in the verb.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bp_change::intents;
-use bp_vault::{Check, Code, Filter, Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Check, Code, Filter, Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::Value;
 
 use crate::stamp::Stamp;
@@ -42,35 +42,15 @@ pub(crate) fn usage(s: &Stamp) -> Result<(), Refusal> {
 }
 
 /// The project's open waivers, by 21's re-asked predicate: a passing run of the block follows the waiver when git
-/// last touched the run, not the waiver.
+/// last touched the run, not the waiver. One query finds the milestones that hold a waiver, so a project with none
+/// costs one read, which the intents of its `done` milestones pay.
 pub(crate) fn open(vault: &Vault, index: &Index, project: &str, now: i64) -> Result<Vec<Reask>, Refusal> {
-    let all =
-        Filter { kind: Kind::Milestone, status: None, project: Some(project), under: None, limit: usize::MAX >> 1 };
+    let all = Filter { kind: Kind::Waiver, status: None, project: Some(project), under: None, limit: crate::ALL };
+    let holders: BTreeSet<String> = index.list(&all)?.0.into_iter().filter_map(|w| w.under).collect();
     let (mut waivers, mut runs) = (Vec::new(), BTreeMap::new());
-    for m in index.list(&all)?.0 {
-        let records = index.records(&m.id, Kind::Waiver)?;
-        if records.is_empty() {
-            continue;
-        }
-        for r in records {
-            let key = r.id.rsplit('/').next().unwrap_or(&r.id);
-            let field = |k: &str| r.header.get(k).and_then(Value::as_str).filter(|t| !t.is_empty());
-            // A block name may end in `-<n>`, so only `check` splits the key `<check>-<n>`; 13's rule 1 on the bare
-            // key would misread `walk-8` as the eighth waiver of `walk`. A waiver written by hand without it keys
-            // its own block.
-            let block = field("check").unwrap_or(key);
-            let seq = key.strip_prefix(block).and_then(|n| n.strip_prefix('-')).and_then(|n| n.parse().ok());
-            // A `valid_until` that is not an instant reads as past, so the stamp asks again.
-            let valid_until = field("valid_until").map(|t| intents::timestamp(t).unwrap_or(i64::MIN));
-            waivers.push(intents::Waiver {
-                id: r.id.clone(),
-                milestone: m.id.clone(),
-                block: block.into(),
-                seq: seq.unwrap_or(1),
-                valid_until,
-            });
-        }
-        runs.insert(m.id.clone(), index.records(&m.id, Kind::Run)?);
+    for m in holders {
+        waivers.extend(index.records(&m, Kind::Waiver)?.iter().map(|r| reduce(&m, r)));
+        runs.insert(m.clone(), index.records(&m, Kind::Run)?);
     }
     let passed_after = |w: &intents::Waiver| {
         let waiver = Id::parse(&w.id).expect("the index holds ids");
@@ -90,6 +70,25 @@ pub(crate) fn open(vault: &Vault, index: &Index, project: &str, now: i64) -> Res
         open.push(Reask { waiver, milestone, name: w.block.clone(), check });
     }
     Ok(open)
+}
+
+/// A waiver record of `milestone`, reduced.
+pub(crate) fn reduce(milestone: &str, r: &Record) -> intents::Waiver {
+    let key = r.id.rsplit('/').next().unwrap_or(&r.id);
+    let field = |k: &str| r.header.get(k).and_then(Value::as_str).filter(|t| !t.is_empty());
+    // A block name may end in `-<n>`, so only `check` splits the key `<check>-<n>`; 13's rule 1 on the bare key
+    // would misread `walk-8` as the eighth waiver of `walk`. A waiver written by hand without it keys its own block.
+    let block = field("check").unwrap_or(key);
+    let seq = key.strip_prefix(block).and_then(|n| n.strip_prefix('-')).and_then(|n| n.parse().ok());
+    // A `valid_until` that is not an instant reads as past, so the stamp asks again.
+    let valid_until = field("valid_until").map(|t| intents::timestamp(t).unwrap_or(i64::MIN));
+    intents::Waiver {
+        id: r.id.clone(),
+        milestone: milestone.into(),
+        block: block.into(),
+        seq: seq.unwrap_or(1),
+        valid_until,
+    }
 }
 
 /// The refusals of a stamp of `id` over its waivers. Each `--waive` names a block of `finish`, the milestone's finish

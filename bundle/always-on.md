@@ -12,16 +12,19 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - A design is missing: run the skill `bp-design`.
 - `needs-shaping`: an active design has an open concern, and no milestone is `planned` or `approved`. Run the skill `bp-shape`.
 - `needs-derivation`: an approved milestone has fewer than three live issues, and a finish-line block that no issue covers. Run the skill `bp-derive`.
-- An issue is `ready`: dispatch `bp-worker` with its `complete` template.
-- An issue is `needs-review`: dispatch `bp-reviewer` with its `review` template. Then record the review.
+- `ready`: an issue is open and unclaimed. Dispatch `bp-worker` with its `complete` template.
+- `needs-review`: dispatch `bp-reviewer` with its `review` template. Then record the review.
 - `needs-response`: a review has a finding with no disposition. Dispatch `bp-worker` with its `respond` template.
-- A drift run failed, and nothing cites it: run the skill `bp-triage-drift`.
+- `drifted`: a drift run failed, and nothing cites it. Run the skill `bp-triage-drift`.
 - The context cannot answer a question: run the skill `bp-deliberate`.
 - You need facts from outside the vault: dispatch `bp-researcher` with its `research` template.
 - An issue landed, a thread closed, or a run holds evidence: run the skill `bp-distil`.
 - The human parks a thought: run the skill `bp-capture`.
-- An intent is `blocked`: do what its note names.
-- An issue is `working` with the note `stale`: run `bp release <issue> --reason lost --json`. Then dispatch again.
+- `blocked`: do what its note names.
+- `working` with the note `stale`: run `bp release <issue> --reason lost --json`. Then dispatch again.
+- `working` without `stale`: do nothing; the worker or the cause in its note moves it.
+- `waiting`: do nothing until the cause in its note clears.
+- `needs-approval`, `needs-landing`, `needs-milestone-approval`, `needs-acceptance` or `re-asked`: the human acts. Give the human the line below that names the intent.
 
 ### Dispatch
 
@@ -33,9 +36,11 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 
 ### The human's acts
 
-The human approves each change on the forge. The human also approves a milestone, activates a design, lands a change and stamps a milestone. Give the human these commands:
+Give the human these commands:
 
-- `bp transition <milestone> approved --json`.
-- `bp transition <design> active --json`.
-- `bp land <issue> --json`.
-- `bp stamp <milestone> --json`.
+- `needs-approval`: approve the pull request on the forge.
+- `needs-milestone-approval`: `bp transition <milestone> approved --json`.
+- To activate a design draft: `bp transition <design> active --json`.
+- `needs-landing`: `bp land <issue> --json`.
+- `needs-acceptance`: `bp stamp <milestone> --json`.
+- `re-asked`: a waived block is open again. Its note names the `--waive` for the next stamp.

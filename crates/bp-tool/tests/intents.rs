@@ -199,3 +199,50 @@ fn a_bad_clock_is_usage_and_a_bad_snapshot_names_its_file() {
     let (code, _) = bp(d.path(), &[("BP_FORGE_SNAPSHOT", &none)], &["list", "milestone"]);
     assert_eq!(code, Some(0), "a milestone list never reads the forge");
 }
+
+#[test]
+fn a_walk_reads_needs_derivation_inside_its_one_read() {
+    // Needs derivation lists the milestone's issues inside the walk's read, so the list opens no second transaction.
+    let d = vault();
+    let r = d.path();
+    let block = "## Finish line\n\n```check shell {name=open expect=0}\ntrue\n```\n";
+    write(
+        r,
+        "projects/bp/milestones/a.md",
+        &format!("---\nkind: milestone\ntitle: A\nstatus: approved\n---\n\n{block}"),
+    );
+    write(r, "projects/bp/designs/system.md", "---\nkind: design\ntitle: S\nstatus: active\n---\n\nBody.\n");
+    let under = "---\nkind: issue\ntitle: U\nstatus: open\nunder: projects/bp/milestones/a\ncites: [projects/bp/designs/system]\n---\n\nBody.\n";
+    write(r, "projects/bp/issues/0011.under.md", under);
+    let forge = r.join("forge");
+    let (code, v) =
+        bp(r, &[("BP_FORGE_SNAPSHOT", &forge)], &["walk", "projects/bp/issues/0011.under", "--for", "complete"]);
+    assert_eq!(code, Some(0), "{v}");
+    let a = v["intents"].as_array().unwrap().iter().find(|i| i["id"] == "projects/bp/milestones/a").unwrap();
+    assert_eq!(a["intent"], "needs-derivation", "{v}");
+}
+
+#[test]
+fn needs_shaping_is_one_row_per_project_on_its_root_design() {
+    let d = vault();
+    let r = d.path();
+    let design = |status: &str| format!("---\nkind: design\ntitle: D\nstatus: {status}\n---\n\nBody.\n");
+    write(r, "projects/q/project.md", "---\nkind: project\ntitle: Q\nstatus: active\n---\n");
+    write(r, "projects/q/designs/product.md", &design("active"));
+    write(r, "projects/q/designs/components/x.md", &design("active"));
+    let answer = "---\nkind: concern-answer\nunder: projects/q/project\nconcern: c\nstate: open\ndecided_at: 2026-10-19T10:00:00Z\n---\n";
+    write(r, "projects/q/concerns/c/2026-10-19T10-00-00Z.md", answer);
+    let v = list(r, &["design", "--project", "q"], false);
+    assert_eq!(
+        intent(&v, "projects/q/designs/product"),
+        ("needs-shaping", "c open; bp walk projects/q/designs/product --for shape")
+    );
+    assert_eq!(intent(&v, "projects/q/designs/components/x"), ("-", "-"), "one node per project");
+    // A system design is the root once it exists, and an inactive root reads nothing.
+    write(r, "projects/q/designs/system.md", &design("draft"));
+    let v = list(r, &["design", "--project", "q"], false);
+    assert_eq!(intent(&v, "projects/q/designs/product"), ("-", "-"));
+    assert_eq!(intent(&v, "projects/q/designs/system"), ("-", "-"));
+    let v = list(r, &["concern-answer", "--status", "open"], false);
+    assert_eq!(v["rows"][0]["status"], "open", "{v}");
+}
