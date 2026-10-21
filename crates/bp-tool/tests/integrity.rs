@@ -1,6 +1,7 @@
 //! The `integrity` check through the binary (25, issue 11): a clean project passes; each rule fails a node of the
 //! owner's project and none outside it; the run names the vault's head and the failing nodes; `blocked` holds for a
-//! named open issue and milestone; a dirty project refuses; and rule 3 agrees with the walk.
+//! named open issue and milestone, each by its own project's run; a dirty project refuses; and rule 3 agrees with the
+//! walk.
 
 use std::path::Path;
 
@@ -141,6 +142,54 @@ fn each_rule_fails_its_node_and_a_named_open_issue_is_blocked() {
 }
 
 #[test]
+fn each_project_is_blocked_only_by_its_own_run() {
+    let (vault, code) = setup();
+    let (vault, code) = (vault.path(), code.path());
+    let put = |rel: &str, text: &str| {
+        let path = vault.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let ms = std::fs::read_to_string(vault.join(format!("{M}.md"))).unwrap();
+    for (rel, text) in [
+        ("project.md", "---\nkind: project\ntitle: q\nstatus: active\n---\n".to_string()),
+        (
+            "designs/product.md",
+            "---\nkind: design\ntitle: P\nstatus: active\nunder: projects/q/project\n---\n\nThe product.\n".into(),
+        ),
+        (
+            "designs/system.md",
+            "---\nkind: design\ntitle: S\nstatus: active\nunder: projects/q/designs/product\n---\n\nThe system.\n"
+                .into(),
+        ),
+        ("milestones/m.md", ms.replace("projects/bp/", "projects/q/")),
+    ] {
+        put(&format!("projects/q/{rel}"), &text);
+    }
+    // Each project's run names its own bare issue only.
+    for p in ["bp", "q"] {
+        put(&format!("projects/{p}/issues/bare.md"), &issue("", "No context."));
+    }
+    git(vault, &["add", "-A"]);
+    git(vault, &["commit", "-qm", "two projects"]);
+    let mut notes = Vec::new();
+    for owner in [M, "projects/q/milestones/m"] {
+        let (exit, v) = bp_env(code, &[("BP_VAULT", vault.to_str().unwrap())], &["check", owner]);
+        assert_eq!(exit, Some(2), "{v}");
+        let run = v["runs"][0]["id"].as_str().unwrap();
+        notes.push(format!("integrity: {run}; rerun bp check {owner} --name integrity"));
+    }
+    let (_, v) = bp(vault, &["list", "issue"]);
+    let intent = |id: &str| {
+        let row = v["rows"].as_array().unwrap().iter().find(|r| r["id"] == id).unwrap();
+        (row["intent"].as_str().unwrap_or("-").to_string(), row["note"].as_str().unwrap_or("-").to_string())
+    };
+    for (p, note) in ["bp", "q"].iter().zip(notes) {
+        assert_eq!(intent(&format!("projects/{p}/issues/bare")), ("blocked".into(), note), "{p}: its own run");
+    }
+}
+
+#[test]
 fn a_dirty_project_refuses_before_it_runs() {
     let (vault, code) = setup();
     let (vault, code) = (vault.path(), code.path());
@@ -222,6 +271,11 @@ fn only_a_passing_or_failing_error_run_counts_and_a_named_milestone_is_blocked()
         row["intent"].as_str().map(str::to_string)
     };
     assert_eq!(blocked("projects/bp/milestones/n").as_deref(), Some("blocked"));
+    // An approved milestone reads the run in its own arm, after its derivation records.
+    let planned = std::fs::read_to_string(vault.join("projects/bp/milestones/n.md")).unwrap();
+    put("projects/bp/milestones/n.md", &planned.replace("status: planned", "status: approved"));
+    git(vault, &["commit", "-qam", "approved"]);
+    assert_eq!(blocked("projects/bp/milestones/n").as_deref(), Some("blocked"), "approved and named");
     put(
         "projects/bp/milestones/n.md",
         "---\nkind: milestone\ntitle: N\nstatus: planned\nunder: projects/bp/designs/system\n---\n\nFixed.\n",

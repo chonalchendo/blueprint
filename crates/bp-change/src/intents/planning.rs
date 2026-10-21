@@ -10,10 +10,10 @@ use crate::{IssueStatus, MilestoneStatus};
 /// The batch size for derive, until it is a project setting (21, open questions: three live issues).
 pub const BATCH: usize = 3;
 
-/// What the milestone predicates read. A field past `integrity` matters only for the status that reads it, so the
-/// caller reads it only then: the issues, and while fewer than [`BATCH`] are live the finish line and the coverage,
-/// for `approved`; the runs and `broken` once no issue is live; `reasked` for `done`. A field left empty reads as no
-/// record.
+/// What the milestone predicates read. Each field past `status` matters only for the status that reads it, so the
+/// caller reads it only then: `integrity` for `planned` and `approved`; the issues, and while fewer than [`BATCH`]
+/// are live the finish line and the coverage, for `approved`; the runs and `broken` once no issue is live; `reasked`
+/// for `done`. A field left empty reads as no record.
 #[derive(Debug, Clone, Default)]
 pub struct Milestone {
     /// The header status.
