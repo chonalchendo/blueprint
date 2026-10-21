@@ -130,6 +130,26 @@ fn check_catches_each_drift_and_install_repairs_it() {
 }
 
 #[test]
+fn a_cached_hash_never_hides_an_edit() {
+    let dir = top();
+    let t = dir.path();
+    install(t, Target::Claude).unwrap();
+    let skill = ".claude/skills/bp-complete/SKILL.md";
+    let held = std::fs::metadata(t.join(skill)).unwrap().modified().unwrap();
+    // The cache takes only a file changed before the check's second, so the check waits for the next one.
+    let secs = |at: std::time::SystemTime| at.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    while secs(std::time::SystemTime::now()) <= secs(held) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(checked(t), "ok");
+    assert!(read(t, ".git/bp-bundle-hashes").contains(skill), "the check cached the skill's hash");
+    // The same size and modification time: only the change time tells the edit.
+    write(t, skill, &read(t, skill).replacen("name:", "nAme:", 1));
+    std::fs::File::options().write(true).open(t.join(skill)).unwrap().set_modified(held).unwrap();
+    assert_eq!(checked(t), skill);
+}
+
+#[test]
 fn a_reinstall_removes_what_the_bundle_no_longer_holds() {
     let dir = top();
     let t = dir.path();

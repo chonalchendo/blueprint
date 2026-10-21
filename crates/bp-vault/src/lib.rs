@@ -178,26 +178,52 @@ impl Vault {
         })
     }
 
-    /// When the node's file entered the vault: the commit that added it, through any rename, as a UTC instant with
-    /// `Z`, the form every vault instant takes. `None` outside git or before the first commit.
-    pub fn created(&self, id: &Id) -> Option<String> {
-        let out = std::process::Command::new("git")
+    /// When each node file directly under `dir` entered the vault, by id: the commit that added it, through any
+    /// rename, as a UTC instant with `Z`, the form every vault instant takes. Empty outside git or before the first
+    /// commit. One `git log` over the directory serves every node in it, as a list of 50 learnings paid 50 (27, issue
+    /// 13). A rename keeps a node's kind, so its directory too, and the log follows each rename inside `dir`.
+    pub fn created(&self, dir: &str) -> BTreeMap<String, String> {
+        let Ok(out) = std::process::Command::new("git")
             .arg("-C")
             .arg(&self.root)
             .env("LC_ALL", "C")
             .env("TZ", "UTC")
             .args([
+                "-c",
+                "core.quotepath=off",
                 "log",
-                "--follow",
-                "--diff-filter=A",
-                "--format=%cd",
-                "--date=format-local:%Y-%m-%dT%H:%M:%SZ",
-                "--",
+                "--relative",
+                "--reverse",
+                "-M",
+                "--diff-filter=AR",
+                "--name-status",
             ])
-            .arg(format!("./{id}.md"))
+            .args(["--format=@%cd", "--date=format-local:%Y-%m-%dT%H:%M:%SZ", "--"])
+            .arg(format!("./{dir}"))
             .output()
-            .ok()?;
-        String::from_utf8_lossy(&out.stdout).lines().last().map(str::to_string)
+        else {
+            return BTreeMap::new();
+        };
+        // Oldest first: the first add of a path is its creation, and a rename carries it to the new path.
+        let (mut born, mut at) = (BTreeMap::new(), String::new());
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let mut f = line.split('\t');
+            match (f.next(), f.next(), f.next()) {
+                (Some(l), None, None) if l.starts_with('@') => at = l[1..].to_string(),
+                (Some("A"), Some(path), None) => drop(born.entry(path.to_string()).or_insert_with(|| at.clone())),
+                (Some(r), Some(old), Some(new)) if r.starts_with('R') => {
+                    if let Some(t) = born.remove(old) {
+                        born.insert(new.to_string(), t);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let prefix = format!("{dir}/");
+        born.into_iter()
+            .filter(|(p, _)| p.strip_prefix(&prefix).is_some_and(|f| !f.contains('/')))
+            .filter_map(|(p, t)| Some((p.strip_suffix(".md")?.to_string(), t)))
+            .collect()
     }
 
     /// Every markdown file under `projects/` and `shared/`: the ids, sorted, and the paths that are not ids, without

@@ -3,6 +3,7 @@
 //! manifest of content hashes. `check` holds the installed files to that manifest before a walk reads the vault (17;
 //! 27, design changes 1 and 2). The install is local: it calls no forge and writes nothing outside the clone.
 
+mod hashes;
 mod section;
 mod spec;
 mod validate;
@@ -14,6 +15,7 @@ use bp_operation::{READ_VERBS, Role};
 use bp_vault::{Code, Kind, Refusal};
 use serde_json::{Map, Value, json};
 
+use crate::hashes::Hashes;
 use crate::section::{importer, sectioned, with_section};
 use crate::spec::Spec;
 
@@ -73,7 +75,10 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     let manifest = pretty(&manifest);
     let result = json!({ "target": target, "manifest": manifest_rel, "files": entries, "skipped": skipped });
     let old = read(&manifest_path)?;
-    if old.as_deref() == Some(manifest.as_str()) && check_target(top, spec).is_ok() {
+    let mut hashes = Hashes::load(top);
+    let repeat = old.as_deref() == Some(manifest.as_str()) && check_target(top, spec, &mut hashes).is_ok();
+    hashes.save();
+    if repeat {
         return Ok((false, result));
     }
     // A file an older bundle held and this one does not goes, so no stale `bp-` entry stays behind. The old manifest
@@ -190,11 +195,14 @@ fn section() -> String {
 /// the bundle this binary ships, an entry absent or with another hash, or a `bp-` entry with no manifest. A clone with
 /// no `bp-` entry is not checked.
 pub fn check(top: &Path) -> Result<(), Refusal> {
-    check_target(top, &spec::CLAUDE)?;
-    check_target(top, &spec::CODEX)
+    let mut hashes = Hashes::load(top);
+    let checked =
+        check_target(top, &spec::CLAUDE, &mut hashes).and_then(|()| check_target(top, &spec::CODEX, &mut hashes));
+    hashes.save();
+    checked
 }
 
-fn check_target(top: &Path, spec: &Spec) -> Result<(), Refusal> {
+fn check_target(top: &Path, spec: &Spec, hashes: &mut Hashes) -> Result<(), Refusal> {
     let refuse = |subject: String, why: String| {
         Refusal::new(
             Code::BundleMismatch,
@@ -231,7 +239,7 @@ fn check_target(top: &Path, spec: &Spec) -> Result<(), Refusal> {
         return Err(refuse(entry.clone(), why));
     }
     for (entry, want) in &ships {
-        if current(top, spec, entry).as_ref() != Some(want) {
+        if current(top, spec, entry, hashes).as_ref() != Some(want) {
             return Err(refuse(entry.clone(), format!("{entry} is absent or does not hash to the manifest")));
         }
     }
@@ -239,16 +247,18 @@ fn check_target(top: &Path, spec: &Spec) -> Result<(), Refusal> {
 }
 
 /// The hash of one manifest entry as the clone holds it now.
-fn current(top: &Path, spec: &Spec, entry: &str) -> Option<String> {
+fn current(top: &Path, spec: &Spec, entry: &str, hashes: &mut Hashes) -> Option<String> {
     if let Some(rel) = entry.strip_suffix("#bp") {
-        let text = std::fs::read_to_string(top.join(rel)).ok()?;
-        return Some(hash(text[section::span(&text)?].as_bytes()));
+        return hashes.of(entry, &top.join(rel), |b| {
+            let text = std::str::from_utf8(b).ok()?;
+            Some(hash(text[section::span(text)?].as_bytes()))
+        });
     }
     if entry == spec.hooks_entry() {
-        let settings = serde_json::from_slice(&std::fs::read(top.join(spec.settings)).ok()?).ok()?;
-        return Some(hash(&ours(&settings, spec)));
+        return hashes
+            .of(entry, &top.join(spec.settings), |b| Some(hash(&ours(&serde_json::from_slice(b).ok()?, spec))));
     }
-    std::fs::read(top.join(entry)).ok().map(|b| hash(&b))
+    hashes.of(entry, &top.join(entry), |b| Some(hash(b)))
 }
 
 /// The installed files of `spec`'s target, path to bytes, and the bundle entries the target does not install: the
