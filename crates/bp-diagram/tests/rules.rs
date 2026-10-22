@@ -303,6 +303,22 @@ fn a_crowded_side_gives_way_to_another_for_the_cards() {
 }
 
 #[test]
+fn a_side_without_cards_keeps_its_straight_route() {
+    // A state box is too short to hold two ends 16 px apart, but without cards nothing needs that room: the line from
+    // `a` to `b` keeps the route it had at master, from `a`'s right side to `b`'s left, whatever else ends at `a`'s right.
+    let spec = "type: state\ntitle: T\nlede: One line.\nnodes:\n  - {id: a, noun: a}\n  - {id: b, noun: b}\nedges:\n  - {from: a, to: b, label: go}\n  - {from: a, to: a, label: again}\n";
+    let page = render(spec, None, Some(&|_: Link<'_>| true)).expect("a self loop and a line render").html;
+    let at = page.find("data-id=\"a--b\"").unwrap();
+    let path = &page[at..];
+    let path = &path[path.find(" d=\"").unwrap() + 4..];
+    let path = &path[..path.find('"').unwrap()];
+    assert!(
+        path.starts_with("M152,60") && path.ends_with("L224,68"),
+        "a--b leaves a's right side and enters b's left: {path}"
+    );
+}
+
+#[test]
 fn refuses_a_note_on_an_entity() {
     let spec = "type: er\nlevel: logical\ntitle: T\nlede: One entity.\nnodes:\n  - {id: a, noun: A, at: [0, 0], note: Dropped.}\n";
     let f = refused(spec);

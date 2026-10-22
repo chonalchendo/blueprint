@@ -234,7 +234,8 @@ fn pick_sides(
         let mut needs: Vec<i32> = used.iter().filter(|u| u.0 == at && u.1 == side).map(|u| u.2).collect();
         needs.push(mine);
         let len = if matches!(side, Side::Left | Side::Right) { boxes[at].h } else { boxes[at].w };
-        gaps(&needs).iter().sum::<i32>() > len - 2 * EDGE
+        // `gaps` floors each gap at EDGE, so a side with no card at all would count as crowded: only a card needs room.
+        needs.iter().any(|n| *n > 0) && gaps(&needs).iter().sum::<i32>() > len - 2 * EDGE
     };
     for &edge in order {
         let want = &wants[edge];

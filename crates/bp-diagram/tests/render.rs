@@ -204,7 +204,7 @@ fn the_bytes_are_the_same_on_every_platform() {
     // A deliberate change to the renderer, the style or the viewer changes these; update them in the same commit.
     assert_eq!(
         got,
-        ["5a7e431942054bdb", "a0b8cc2485a7b77b", "3cd82485cada82ba", "32e4642bfb0ed146", "0060bf2b93aa3fdc"]
+        ["5a7e431942054bdb", "a0b8cc2485a7b77b", "3cd82485cada82ba", "6617dd2d8e0792af", "8a2a38415d89127c"]
     );
 }
 
