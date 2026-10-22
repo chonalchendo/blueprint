@@ -34,6 +34,7 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
 18. Fix each item of `findings` in the file. Then run the same call without `--dry-run`.
 19. Record each design change that the milestone carries. Write the whole proposed design body to a file outside the vault.
    - Then run `bp record delta <design> --field milestone=<milestone> --field change="<what changes>" --body-file <file> --json`.
+   - When an accepted decision permits the change, add `--field authorized_by=<decision>` to that call.
 20. Tell the human that the milestone is `planned`. Approval is the human's act.
 
 Stop: `bp walk <seed> --for shape --done --json` returns `done` true.

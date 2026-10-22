@@ -12,7 +12,7 @@ On exit 1, 2 or 4, read `code` and run `fix` at most once. Exit 3 means the call
 3. Read the slice: `bp walk <thread> --for deliberate --json`. It holds the thread and the decisions and threads near it.
 4. Find the options. For sources outside the vault, dispatch the `bp-researcher` role with a brief. Put what you read, tried and compared into the thread: `bp set <thread> --body-file <file> --json`.
 5. Give the human each option in a few lines. Recommend one option. Do not choose for the human. The human can need time. Then pause the thread: `bp transition <thread> paused --json`.
-6. When the answer is a choice, record it as a decision. Get the body from `bp create decision --template --json`. Run `bp create decision --title "<the choice>" --project <project> --body-file <file> --json`. Run `bp link <decision> answers <thread> --json`. Run `bp transition <decision> accepted --json`.
+6. When the human has said the choice, record it as a decision. Get the body from `bp create decision --template --json`. Run `bp create decision --title "<the choice>" --project <project> --body-file <file> --json`. Run `bp link <decision> answers <thread> --json`. Run `bp transition <decision> accepted --json`.
 7. Close the thread with the human's words: `bp transition <thread> closed --reason "<the human's words>" --json`.
 8. When the answer is a lesson, run the `bp-distil` skill after step 7. Its source is the closed thread.
 

@@ -327,6 +327,46 @@ fn errors(files: &Files, names: &BTreeSet<String>) -> Vec<String> {
     errors
 }
 
+/// The write verbs a skill's body names in a `bp` call (21, rule 6): a read verb is open to every role, so a body may
+/// omit it. A reference is out of scope, because it may hand the human a command, such as `bp stamp`.
+fn named_writes(dir: &str, files: &Files) -> BTreeSet<String> {
+    let mut named = BTreeSet::new();
+    if let Some(text) = files.get(&format!("skills/{dir}/SKILL.md")) {
+        let mut fenced = false;
+        for line in text.lines() {
+            if ["```", "~~~"].iter().any(|f| line.trim_start().starts_with(f)) {
+                fenced = !fenced;
+            }
+            named.extend(spans(line, fenced).into_iter().filter_map(call).map(|w| w[1].clone()));
+        }
+    }
+    named.retain(|v| !READ_VERBS.contains(&v.as_str()));
+    named
+}
+
+/// Check 12 of 17: the write verbs of each skill equal its action's row, so a body cannot name a verb its role lacks,
+/// and a row cannot name a verb that no body names. It counts a named verb, not a run: a body may quote the session's
+/// call, as `bp-review` does. It reads `SKILL.md` only, because a reference hands the human `stamp` or `transition`.
+#[test]
+fn write_verbs_equal_action_row() {
+    let files = read(&root());
+    let mut errors = Vec::new();
+    for dir in
+        files.keys().filter_map(|p| p.strip_prefix("skills/")?.split_once('/').map(|(d, _)| d)).collect::<BTreeSet<_>>()
+    {
+        let Ok(action) = dir.trim_start_matches("bp-").parse::<Action>() else {
+            errors.push(format!("skills/{dir}: bp-<action>, and the action names its row"));
+            continue;
+        };
+        let row: BTreeSet<String> = action.verbs().iter().map(|v| (*v).to_string()).collect();
+        let named = named_writes(dir, &files);
+        if named != row {
+            errors.push(format!("skills/{dir}: names {named:?}, and the {action} row is {row:?}"));
+        }
+    }
+    assert!(errors.is_empty(), "{} skill(s) differ from their row:\n{}", errors.len(), errors.join("\n"));
+}
+
 #[test]
 fn resolves() {
     let errors = errors(&read(&root()), &lexicon());

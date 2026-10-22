@@ -1,6 +1,8 @@
 //! Operation domain: role, skill, dispatch template, handoff; the bundle's metadata. This milestone holds the
 //! actions an agent runs, what each one's walk returns (21, the action rows), and the roles a commit names.
 
+use std::collections::BTreeSet;
+
 use bp_vault::Kind;
 /// The required links moved to the vault, so the integrity check reads the same ones (21, rule 3).
 pub use bp_vault::Requires;
@@ -107,17 +109,54 @@ impl Action {
 /// (27, design change 3), so a denied read would cost a turn and protect nothing.
 pub const READ_VERBS: [&str; 5] = ["where", "show", "list", "search", "walk"];
 
+impl Action {
+    /// The role whose label the row's write verbs run under. A reviewer returns its review and the session records
+    /// it (21, the review row), so review belongs to the session and no action belongs to the reviewer.
+    pub fn role(self) -> Role {
+        match self {
+            Self::Complete | Self::Respond => Role::Worker,
+            Self::Research => Role::Researcher,
+            Self::Design
+            | Self::Shape
+            | Self::Derive
+            | Self::Review
+            | Self::TriageDrift
+            | Self::Deliberate
+            | Self::Distil
+            | Self::Capture => Role::Session,
+        }
+    }
+
+    /// The write verbs of the action's row in 21: the source of the role's verbs and of the bundle test that holds a
+    /// skill body to its row. The read verbs are left out, because every role may run them.
+    pub fn verbs(self) -> &'static [&'static str] {
+        match self {
+            Self::Design => &["create", "set", "link", "diagram", "check", "record"],
+            Self::Derive => &["create", "link"],
+            Self::Complete => &["cut", "check", "record", "pr", "release"],
+            Self::Review => &["record"],
+            Self::Respond => &["check", "record", "pr", "release"],
+            Self::Shape | Self::TriageDrift => &["create", "record"],
+            Self::Deliberate => &["create", "set", "link", "transition"],
+            Self::Distil => &["create", "set", "link", "record", "transition"],
+            Self::Capture => &["create"],
+            Self::Research => &[],
+        }
+    }
+}
+
 impl Role {
-    /// The write verbs the role runs: the union of its rows' verbs in 21 (rule 6), less the read verbs. The role hook
-    /// denies any verb outside these and `READ_VERBS`; a dispatch template's forbidden list is the complement of both.
-    /// `None` for the human, whom no list bounds: the forge is the gate.
-    pub fn verbs(self) -> Option<&'static [&'static str]> {
-        Some(match self {
-            Self::Session => &["create", "set", "link", "diagram", "check", "record", "transition", "release"],
-            Self::Worker => &["cut", "check", "record", "pr", "release"],
-            Self::Reviewer | Self::Researcher => &[],
-            Self::Human => return None,
-        })
+    /// The write verbs the role runs: the union of its actions' rows, plus `release` for the session, which 21 gives
+    /// its own row because a resuming session runs it with no walk. The role hook denies any verb outside these and
+    /// `READ_VERBS`; a dispatch template's forbidden list is the complement of both. `None` for the human, whom no
+    /// list bounds: the forge is the gate.
+    pub fn verbs(self) -> Option<Vec<&'static str>> {
+        if self == Self::Human {
+            return None;
+        }
+        let rows = Action::ALL.iter().filter(|a| a.role() == self).flat_map(|a| a.verbs());
+        let release = (self == Self::Session).then_some(&"release");
+        Some(rows.chain(release).copied().collect::<BTreeSet<_>>().into_iter().collect())
     }
 }
 
@@ -144,5 +183,23 @@ mod tests {
         }
         assert!(Role::Reviewer.verbs().unwrap().is_empty(), "the session records the review (21)");
         assert!(Role::Session.verbs().unwrap().contains(&"check"), "the design action runs check (21)");
+    }
+
+    #[test]
+    fn role_verbs_are_the_union_of_action_rows() {
+        // The expected lists are 21's text: the worker's tool list, and the session's rows with the release row.
+        let want: [(Role, &[&str]); 4] = [
+            (Role::Session, &["check", "create", "diagram", "link", "record", "release", "set", "transition"]),
+            (Role::Worker, &["check", "cut", "pr", "record", "release"]),
+            (Role::Reviewer, &[]),
+            (Role::Researcher, &[]),
+        ];
+        for (role, verbs) in want {
+            assert_eq!(role.verbs().unwrap(), verbs, "{role}");
+        }
+        for a in Action::ALL {
+            assert!(a.verbs().iter().all(|v| !READ_VERBS.contains(v)), "{a}: a row holds write verbs only");
+        }
+        assert_eq!(Action::Review.verbs(), ["record"], "the session records the review; the reviewer writes nothing");
     }
 }
