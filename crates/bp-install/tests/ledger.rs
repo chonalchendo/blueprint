@@ -9,12 +9,16 @@ use std::path::{Path, PathBuf};
 
 type Files = BTreeMap<String, String>;
 
-/// Choices from 29: today's worst dispatched action is about 1,110 tokens, and today's worst route about 8,060.
+/// Choices from 29. The role cap sits above today's worst dispatched action. The route cap guards growth with about
+/// 7 % headroom over the worst route, `revise-container`; a cap with none would trip on every edit.
 const ROLE_CAP: usize = 1_500;
-const ROUTE_CAP: usize = 8_500;
+const ROUTE_CAP: usize = 10_500;
 
-/// Each route of `bp-design`'s `## Route` (question 1) with the references it names, `gates` last every time. The
-/// route is free text in `SKILL.md`, so the tool cannot derive it and this table is the ledger's copy.
+/// The nominal routes of `bp-design`'s question 1, `gates` last every time, plus the editorial delta and the
+/// `diagram` add-on, whose row is its own cost and not a load any session has alone. `route_loads` adds a
+/// `revise-<kind>` row to each kind: question 2 loads `revision` with it. Every conditional of questions 4 to 6 is
+/// out, except question 5 and 6 for system and container. The route is free text in `SKILL.md`, so the tool cannot
+/// derive it and this table is the ledger's copy.
 const ROUTES: [(&str, &[&str]); 10] = [
     ("product", &["product", "gates"]),
     ("glossary", &["system", "gates"]),
@@ -84,14 +88,21 @@ fn reference(name: &str) -> String {
     format!("skills/bp-design/references/{name}.md")
 }
 
-/// One row per route: the `bp-design` body and the references the route names.
+/// One row per route and one `revise-<kind>` row per kind: the `bp-design` body and the references the row names.
 fn route_loads(files: &Files) -> Vec<(String, usize)> {
+    let row = |name: String, names: &[&str]| {
+        let mut paths = vec!["skills/bp-design/SKILL.md".to_string()];
+        paths.extend(names.iter().map(|n| reference(n)));
+        (name, tokens(files, &paths))
+    };
     ROUTES
         .iter()
-        .map(|(route, names)| {
-            let mut paths = vec!["skills/bp-design/SKILL.md".to_string()];
-            paths.extend(names.iter().map(|n| reference(n)));
-            ((*route).to_string(), tokens(files, &paths))
+        .flat_map(|(route, names)| {
+            let mut rows = vec![row((*route).to_string(), names)];
+            if !matches!(*route, "diagram" | "editorial-delta") {
+                rows.push(row(format!("revise-{route}"), &[names, &["revision"][..]].concat()));
+            }
+            rows
         })
         .collect()
 }
@@ -146,14 +157,29 @@ fn over_cap_preload_counts_against_the_role() {
 fn over_cap_route_names_the_route() {
     let files = with(&read(), &reference("gates"), ROUTE_CAP * 4);
     let bad = failures(&files);
-    assert_eq!(bad.len(), ROUTES.len(), "every route ends in `gates`: {bad:#?}");
+    assert_eq!(bad.len(), route_loads(&files).len(), "every row ends in `gates`: {bad:#?}");
     assert!(bad.iter().all(|m| m.starts_with("route ")));
 }
 
 #[test]
 fn over_cap_body_counts_in_every_route() {
     let files = with(&read(), "skills/bp-design/SKILL.md", ROUTE_CAP * 4);
-    assert_eq!(failures(&files).len(), ROUTES.len());
+    assert_eq!(failures(&files).len(), route_loads(&files).len());
+}
+
+/// Catches a reference added to or dropped from the route text. It does not catch one moved between routes.
+#[test]
+fn the_table_names_the_references_of_the_route_text() {
+    let text = &read()["skills/bp-design/SKILL.md"];
+    let named: Vec<&str> =
+        text.split("references/").skip(1).filter_map(|t| t.split_once(".md").map(|(n, _)| n)).collect();
+    let table: Vec<&str> = ROUTES.iter().flat_map(|(_, names)| names.iter().copied()).collect();
+    for n in &named {
+        assert!(table.contains(n), "SKILL.md names references/{n}.md, which no row holds");
+    }
+    for n in &table {
+        assert!(named.contains(n), "a row holds {n}, which SKILL.md does not name");
+    }
 }
 
 #[test]
