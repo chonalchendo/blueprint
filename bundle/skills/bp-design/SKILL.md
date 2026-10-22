@@ -63,8 +63,10 @@ For a convention, get the template with `bp create convention --template --json`
 
 ## Revise a design past draft
 
-1. Run the procedure of `references/revision.md`. It finds the impact by walk and sets the class of the change. It names the gates to run again.
+1. Run the procedure of `references/revision.md`. It finds the impact by walk and sets the class of the change. It names the gates to run again. A breaking change also runs `bp check <design> --json` on the design and on each child.
 2. The procedure ends with one `record delta` call on the design. An editorial delta needs no milestone.
 3. Tell the human that the delta exists, with its class. Acceptance is the human's act.
 
-Stop: the stop is call-shaped. Step 12 or the delta call returns a `commit`. Then `bp walk <design> --for design --done --json` returns `done` true.
+## Stop
+
+Stop: the stop is call-shaped. The create call (Draft, step 12) or the delta call (Revise, step 2) returns a `commit`. Then `bp walk <design> --for design --done --json` returns `done` true.
