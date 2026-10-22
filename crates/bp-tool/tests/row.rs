@@ -11,7 +11,7 @@ fn vault() -> tempfile::TempDir {
 }
 
 /// Every write verb with arguments that parse, so only the role check can refuse it first.
-const WRITES: [&[&str]; 11] = [
+const WRITES: [&[&str]; 12] = [
     &["set", "projects/bp/issues/none", "severity", "low"],
     &["create", "inbox", "--title", "Q"],
     &["link", "projects/bp/issues/none", "depends_on", "projects/bp/issues/other"],
@@ -23,6 +23,7 @@ const WRITES: [&[&str]; 11] = [
     &["pr", "projects/bp/issues/none"],
     &["check", "projects/bp/issues/none"],
     &["install", "--target", "claude"],
+    &["diagram", "projects/bp/designs/none", "flow", "--spec-file", "x"],
 ];
 
 #[test]
@@ -64,6 +65,10 @@ fn a_read_verb_a_row_verb_and_the_human_pass_the_check() {
 #[test]
 fn the_humans_acts_keep_role_forbidden() {
     let dir = vault();
-    let (_, v) = bp_env(dir.path(), &[("BP_ROLE", "worker")], &["stamp", "projects/bp/milestones/none"]);
-    assert_eq!(v["code"], "role_forbidden", "a code keeps its meaning (15): {v}");
+    for act in
+        [&["stamp", "projects/bp/milestones/none"][..], &["transition", "projects/bp/milestones/none", "approved"]]
+    {
+        let (_, v) = bp_env(dir.path(), &[("BP_ROLE", "worker")], act);
+        assert_eq!(v["code"], "role_forbidden", "a code keeps its meaning (15): {act:?} {v}");
+    }
 }

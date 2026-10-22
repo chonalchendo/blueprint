@@ -23,12 +23,7 @@ const KEEP: usize = 16;
 /// with its agent id, so `cut` records it the same way.
 const AGENT: &str = "a-q";
 
-pub fn run(args: &[String]) -> Result<String> {
-    let claim = match args {
-        [] => false,
-        [one] if one == "claim" => true,
-        _ => bail!("usage: cargo xtask sandbox [claim]"),
-    };
+pub fn run(claim: bool) -> Result<String> {
     let release = std::env::current_dir()?.join("target/release");
     if !release.join("bp").exists() {
         bail!("{} holds no bp; run cargo build --release -p bp-tool first", release.display());

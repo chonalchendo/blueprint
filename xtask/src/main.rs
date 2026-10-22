@@ -53,7 +53,15 @@ fn main() -> ExitCode {
             };
         }
         Some("sandbox") => {
-            return match sandbox::run(&args[1..]) {
+            let claim = match &args[1..] {
+                [] => false,
+                [one] if one == "claim" => true,
+                _ => {
+                    eprintln!("usage: cargo xtask sandbox [claim]");
+                    return ExitCode::from(4);
+                }
+            };
+            return match sandbox::run(claim) {
                 Ok(lines) => {
                     print!("{lines}");
                     ExitCode::SUCCESS
@@ -79,7 +87,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project> | cargo xtask eval <skill> --trials N | cargo xtask eval --grade [--check]  <skill> | cargo xtask sandbox [claim]"
+                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project> | cargo xtask eval <skill> --trials N | cargo xtask eval --grade [--check] <skill> | cargo xtask sandbox [claim]"
             );
             return ExitCode::from(4);
         }

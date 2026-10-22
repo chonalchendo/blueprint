@@ -4,7 +4,7 @@
 # Exit 2 blocks the call. A guard fails closed (17, Hooks): when it cannot read its input or find the vault (no jq,
 # no bp on the hook's PATH, `bp where` refuses), it denies, and the message names the cause.
 deny() {
-    echo "bp-guard: $1" >&2
+    echo "bp-guard: $*" >&2
     exit 2
 }
 command -v jq > /dev/null || deny "jq is not installed, so every Edit and Write is denied; install jq"
@@ -23,7 +23,9 @@ IFS=/ read -ra parts <<< "$path"
 for p in "${parts[@]}"; do
     case $p in '' | .) ;; ..) norm=${norm%/*} ;; *) norm=$norm/$p ;; esac
 done
-# Whether $1 sits under the directory $2, as the file or the nearest existing ancestor resolves.
+# Whether $1 sits under the directory $2, or is it. The file, or its nearest existing ancestor, resolves through
+# symlinks first. Each ancestor is then compared with `-ef`, which is right on a case-insensitive volume and for a
+# hard-linked directory, where a string prefix is not.
 inside() {
     local p=$1 dir n=0 t
     # A file that is a symlink is tested where it points, as a Write follows it.
@@ -32,11 +34,14 @@ inside() {
         case $t in /*) p=$t ;; *) p=${p%/*}/$t ;; esac
         n=$((n + 1))
     done
-    # A new file has no directory yet: its nearest existing ancestor decides, through symlinks, as the root is.
+    # A new file has no directory yet: its nearest existing ancestor decides, as the root is.
     dir=${p%/*}
     while [ -n "$dir" ] && [ ! -d "$dir" ]; do dir=${dir%/*}; done
     dir=$(cd "${dir:-/}" && pwd -P)
-    case $dir/ in "$2"/*) return 0 ;; esac
+    while [ -n "$dir" ]; do
+        [ "$dir" -ef "$2" ] && return 0
+        dir=${dir%/*}
+    done
     return 1
 }
 # The main checkout is two levels above this script, where `install` puts the hooks. The claim's worktree and the
@@ -46,7 +51,8 @@ inside() {
 if [ "$(jq -r 'select(.agent_id) | .agent_type // empty' <<< "$input")" = bp-worker ]; then
     top=$(cd "$(dirname "$0")/../.." && pwd -P)
     for p in "$path" "${norm:-/}"; do
-        inside "$p" "$top" && deny "$path is in the main checkout; a worker edits only its claim's worktree ($top-worktrees/<issue>, the worktree field of bp cut's result), so write the same file there"
+        inside "$p" "$top" && deny "$path is in the main checkout, which a worker never edits;" \
+            "write the same file in your claim's worktree ($top-worktrees/<issue>, the worktree field of bp cut)"
     done
 fi
 for p in "$path" "${norm:-/}"; do
