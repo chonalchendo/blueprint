@@ -155,7 +155,8 @@ fn attempt(
     let mut grow = BTreeMap::new();
     let crowded = crowd(&grid, &pts, &mut grow);
     let walls: Vec<Rect> = rects.iter().chain(&marks).copied().collect();
-    let (edges, short) = label_edges(plan, &grid, &walls, &pts, &mut grow);
+    let frames: Vec<Rect> = groups.iter().filter(|s| !s.lane).map(|s| s.rect).collect();
+    let (edges, short) = label_edges(plan, &grid, (&walls, &frames), &pts, &mut grow);
     let scene = Scene { w: grid.w, h: grid.h, groups, edges, nodes: placed, legend_y: grid.h, ..Scene::default() };
     (scene, crowded + short, grow, work)
 }
@@ -166,12 +167,12 @@ fn attempt(
 fn label_edges(
     plan: &Plan<'_>,
     grid: &grid::Grid,
-    rects: &[Rect],
+    (rects, frames): (&[Rect], &[Rect]),
     pts: &[Vec<Point>],
     grow: &mut BTreeMap<(bool, i32), i32>,
 ) -> (Vec<SEdge>, usize) {
     let frame = Rect::new(0, 0, grid.w, grid.h);
-    let mut clear = Clear { frame, boxes: rects, routes: pts, labels: Vec::new() };
+    let mut clear = Clear { frame, boxes: rects, frames, routes: pts, labels: Vec::new() };
     let mut edges: Vec<Option<SEdge>> = vec![None; pts.len()];
     let mut short = 0;
     let mut cards: Vec<(usize, usize, bool)> = Vec::new();

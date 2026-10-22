@@ -28,7 +28,7 @@ edges:
 legend:
   - {role: focus, label: "Focus: the only writer"}
   - {role: application, label: Application}
-  - {role: library, label: Library}
+  - {role: library, label: Code library}
   - {role: store, label: Data store}
   - {role: deployable, label: Deployable unit}
   - {role: external, label: Outside Blueprint}

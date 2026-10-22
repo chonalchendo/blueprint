@@ -23,7 +23,12 @@ pub(super) fn nodes(r: &mut Reader, root: &Yaml, ty: Type) -> Vec<Node> {
             );
         }
         let (term, noun) = (r.text(n, "term", &id), r.text(n, "noun", &id));
-        let label = r.text(n, "label", &id).or_else(|| noun.clone()).or_else(|| term.clone()).unwrap_or_default();
+        let said = r.text(n, "label", &id);
+        // A dot or ring draws no text, so a label would be stored and never seen.
+        if said.is_some() && matches!(role.as_str(), "start" | "end") {
+            r.bad(&id, format!("a `{role}` node draws no `label`; say it in the design"));
+        }
+        let label = said.or_else(|| noun.clone()).or_else(|| term.clone()).unwrap_or_default();
         let (note, sub) = (r.text(n, "note", &id), r.text(n, "sub", &id));
         if note.is_some() && sub.is_some() {
             r.bad(&id, "give `note` (a box's line) or `sub` (a party's line), not both".into());

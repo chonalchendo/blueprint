@@ -3,7 +3,7 @@
 
 use crate::geom::{Point, Rect};
 use crate::label;
-use crate::search::{Graph, Search, Taken};
+use crate::search::{Graph, STACK, Search, Taken};
 use crate::spec::Side;
 
 const STUB: i32 = 16;
@@ -188,6 +188,22 @@ pub(crate) fn route(
     (out, work + search.pops)
 }
 
+/// The stretch a cardinality `card` wide needs along `side`, from its end's line: a card's height across a line that
+/// leaves sideways, its width across one that leaves up or down, and its gap from the line.
+fn need(side: Side, card: i32) -> i32 {
+    match card {
+        0 => 0,
+        _ if matches!(side, Side::Left | Side::Right) => label::GAP + 12,
+        w => label::GAP + w,
+    }
+}
+
+/// How far apart each two neighbouring ends of one side sit: both their cardinalities between the lines, each with
+/// its gap, and a mask between the two, but never closer than [`EDGE`].
+fn gaps(needs: &[i32]) -> Vec<i32> {
+    needs.windows(2).map(|w| (w[0] + w[1] + 4).max(EDGE)).collect()
+}
+
 /// The first pass: each edge's sides, from its cheapest route with every end where it would sit alone.
 fn pick_sides(
     boxes: &[Rect],
@@ -212,21 +228,36 @@ fn pick_sides(
     let mut search = Search::new(&graph);
     let mut taken = Taken::default();
     let mut sides = vec![(Side::Right, Side::Left); wants.len()];
+    // The needs of the ends picked so far, by box and side: a side the cards no longer fit on costs as a stack.
+    let mut used: Vec<(usize, Side, i32)> = Vec::new();
+    let crowded = |used: &[(usize, Side, i32)], at: usize, side: Side, mine: i32| {
+        let mut needs: Vec<i32> = used.iter().filter(|u| u.0 == at && u.1 == side).map(|u| u.2).collect();
+        needs.push(mine);
+        let len = if matches!(side, Side::Left | Side::Right) { boxes[at].h } else { boxes[at].w };
+        gaps(&needs).iter().sum::<i32>() > len - 2 * EDGE
+    };
     for &edge in order {
         let want = &wants[edge];
         let (a, b) = (&boxes[want.from], &boxes[want.to]);
         let mut best: Option<(i64, (Side, Side), Vec<Point>)> = None;
         for (side_a, side_b) in options(a, b, want) {
             let (from, to) = (port(a, side_a, preferred(a, side_a, b)).1, port(b, side_b, preferred(b, side_b, a)).1);
+            // A side too crowded for its cards costs as much as a stack of routes.
+            let toll = STACK
+                * (i64::from(crowded(&used, want.from, side_a, need(side_a, want.cards[0])))
+                    + i64::from(crowded(&used, want.to, side_b, need(side_b, want.cards[1]))));
             let limit = best.as_ref().map_or(i64::MAX, |known| known.0);
-            if let Some((cost, path)) = search.run(&taken, edge, (from, side_a), (to, opposite(side_b)), limit)
-                && cost < limit
+            if let Some((cost, path)) =
+                search.run(&taken, edge, (from, side_a), (to, opposite(side_b)), limit.saturating_sub(toll))
+                && cost + toll < limit
             {
-                best = Some((cost, (side_a, side_b), path));
+                best = Some((cost + toll, (side_a, side_b), path));
             }
         }
         if let Some((_, pair, path)) = best {
             sides[edge] = pair;
+            used.push((want.from, pair.0, need(pair.0, want.cards[0])));
+            used.push((want.to, pair.1, need(pair.1, want.cards[1])));
             for w in path.windows(2) {
                 taken.add(w[0], w[1], edge);
             }
@@ -253,15 +284,9 @@ fn spread(boxes: &[Rect], wants: &[Want], sides: &[(Side, Side)]) -> Vec<((Point
     for run in on.chunk_by(|x, y| x.0 == y.0 && x.1 == y.1) {
         let (bx, side) = (&boxes[run[0].0], DIRS[run[0].1]);
         let (lo, hi) = if matches!(side, Side::Left | Side::Right) { (bx.y, bx.bottom()) } else { (bx.x, bx.right()) };
-        // Two ends sit far enough apart for both their cardinalities between their lines, each with its gap, and a
-        // mask between the two: a card's height across a line that leaves sideways, its width across one that
-        // leaves up or down. Either card may need that stretch when its own route turns away from the other side.
-        let need = |end: &(usize, usize, i32, usize, usize)| match wants[end.3].cards[end.4] {
-            0 => 0,
-            _ if matches!(side, Side::Left | Side::Right) => label::GAP + 12,
-            w => label::GAP + w,
-        };
-        let mut apart: Vec<i32> = run.windows(2).map(|w| (need(&w[0]) + need(&w[1]) + 4).max(EDGE)).collect();
+        // Either card may need its stretch when its own route turns away from the other side.
+        let needs: Vec<i32> = run.iter().map(|end| need(side, wants[end.3].cards[end.4])).collect();
+        let mut apart = gaps(&needs);
         // A crowded side shrinks the room evenly, never below [`EDGE`], so no end is pushed onto a corner.
         let (want, have) = (apart.iter().sum::<i32>(), hi - lo - 2 * EDGE);
         if want > have {

@@ -13,7 +13,7 @@ use crate::spec::Side;
 const TRACK: i32 = 12;
 const BEND: i64 = 40;
 const CROSS: i64 = 160;
-const STACK: i64 = 4000;
+pub(crate) const STACK: i64 = 4000;
 const NONE: usize = usize::MAX;
 const MANY: usize = usize::MAX - 1;
 
