@@ -53,17 +53,31 @@ impl Trace {
         models.filter(|m| !m.starts_with('<')).map(str::to_string).collect()
     }
 
-    /// Whether `needle` sits in any string of the record, decoded: a skill body loaded as a preload shows here.
+    /// Whether `needle` sits in any string of the record, decoded.
     pub fn mentions(&self, needle: &str) -> bool {
-        fn in_value(v: &Value, needle: &str) -> bool {
-            match v {
-                Value::String(s) => s.contains(needle),
-                Value::Array(a) => a.iter().any(|v| in_value(v, needle)),
-                Value::Object(o) => o.values().any(|v| in_value(v, needle)),
-                _ => false,
-            }
-        }
         self.0.iter().any(|v| in_value(v, needle))
+    }
+
+    /// Whether `needle` sits in a skill preload: a `user` record the harness marks `isMeta` that holds
+    /// `<skill-format>`, as in the owner's replay transcript. A skill the agent read from disk does not count, so a
+    /// preload that failed cannot pass as one that worked (RA 5.5, 6).
+    pub fn preloaded(&self, needle: &str) -> bool {
+        let preload = |v: &&Value| v["type"] == "user" && v["isMeta"] == true && in_value(v, "<skill-format>");
+        self.0.iter().filter(preload).any(|v| in_value(v, needle))
+    }
+
+    /// Why the runner stored this trial as failed: the agent ran past its limit or left no transcript.
+    pub fn failure(&self) -> Option<&str> {
+        self.0.iter().find(|v| v["subtype"] == "eval_failed").and_then(|v| v["reason"].as_str())
+    }
+}
+
+fn in_value(v: &Value, needle: &str) -> bool {
+    match v {
+        Value::String(s) => s.contains(needle),
+        Value::Array(a) => a.iter().any(|v| in_value(v, needle)),
+        Value::Object(o) => o.values().any(|v| in_value(v, needle)),
+        _ => false,
     }
 }
 
@@ -129,8 +143,10 @@ mod tests {
             line(
                 r#"{"type":"tool_use","name":"Bash","input":{"command":"bp show x"}},{"type":"text","text":"working"}"#,
             ),
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"preload body here"}]}}"#
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"read body here"}]}}"#.to_string(),
+            r#"{"type":"user","isMeta":true,"message":{"content":"<skill-format>true</skill-format>\npreload body here"}}"#
                 .to_string(),
+            r#"{"type":"system","subtype":"eval_failed","reason":"ran past"}"#.to_string(),
             "not json".to_string(),
             line(r#"{"type":"text","text":"head: abc"},{"type":"tool_use","name":"Read","input":{}}"#),
             line(r#"{"type":"tool_use","name":"Read","input":{}}"#),
@@ -140,6 +156,8 @@ mod tests {
         assert_eq!(t.commands(), ["bp show x"]);
         assert_eq!(t.final_text(), "head: abc");
         assert_eq!(t.models().into_iter().collect::<Vec<_>>(), ["m1"]);
-        assert!(t.mentions("preload body") && !t.mentions("absent"));
+        assert!(t.mentions("read body") && t.mentions("preload body") && !t.mentions("absent"));
+        assert!(t.preloaded("preload body") && !t.preloaded("read body"), "a read is no preload");
+        assert_eq!(t.failure(), Some("ran past"));
     }
 }

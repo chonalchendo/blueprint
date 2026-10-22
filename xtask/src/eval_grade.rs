@@ -1,7 +1,8 @@
 //! Grades the stored trials of a skill (29, design change 2). Code only: it reads each trial's transcript and vault
 //! log from the store, the fixture and the bundle, and it recomputes every number of the result file. `--grade`
 //! writes the file and the report. `--grade --check` compares the file with the recomputation, so a number typed by
-//! hand, a swapped transcript or an edited skill shows. The owner's two lines, `walkthrough:` and `status:`, are kept.
+//! hand, a swapped transcript or log, a dropped trial or an edited skill shows. The owner's two lines, `walkthrough:`
+//! and `status:`, are kept.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -10,14 +11,14 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 
 use crate::eval::Skill;
-use crate::eval_fixture::{Fixture, Review};
-use crate::eval_sandbox::{FILLER, body_of};
+use crate::eval_arms::{FILLER, body_of};
+use crate::eval_fixture::{Fixture, NEAR, Review};
 use crate::eval_trace::{BpCall, Trace, sha256};
 
 /// A run passes when its review is recorded (`walk --done`) and finds at least this share of the ground truth.
 const RECALL: f64 = 0.5;
 
-const STATUSES: [&str; 3] = ["capability", "regression", "fold"];
+const STATUSES: [&str; 4] = ["pending", "capability", "regression", "fold"];
 
 /// The load-bearing steps of `bp-review` that a transcript shows (21, the review row; the skill's steps 1 to 5).
 const STEPS: [&str; 5] = ["walk", "claim", "diff", "deltas", "review"];
@@ -25,20 +26,28 @@ const STEPS: [&str; 5] = ["walk", "claim", "diff", "deltas", "review"];
 #[derive(Default)]
 pub struct Graded {
     pub arm: String,
+    pub fixture: String,
+    pub number: usize,
     pub trial: String,
     pub sha: String,
+    pub log_sha: String,
+    /// The hash of the role file and skill body this trial ran on, from `<trial>.hash`.
+    pub hash: Option<String>,
     pub models: BTreeSet<String>,
-    /// The skill is where the arm puts it: present in `with`, absent in `without`, filler in `filler`.
+    /// The skill is where the arm puts it: preloaded in `with`, absent in `without`, filler in `filler`.
     pub loaded: bool,
     /// The run made at least one `bp` call: only such a run is scored on adherence.
     pub reached: bool,
     pub steps: [bool; 5],
     pub out_of_row: usize,
     pub done: bool,
+    /// Ground-truth items some finding of the table matches, and items the final text names in any form.
     pub hits: usize,
+    pub prose_hits: usize,
     pub truth: usize,
-    /// Each finding's location, its text and whether it matches the ground truth.
-    pub findings: Vec<(String, String, bool)>,
+    /// Each finding's location, its text and the ground-truth item it matches (a position), if any.
+    pub findings: Vec<(String, String, Option<usize>)>,
+    pub failure: Option<String>,
 }
 
 impl Graded {
@@ -55,8 +64,18 @@ pub struct Grade {
     skill: Skill,
     pub trials: Vec<Graded>,
     holdout: usize,
-    hash: String,
+    /// The hash of the role file and skill body as the files hold them now.
+    current: String,
     fixtures: Vec<Fixture>,
+}
+
+/// The hash of the role file and the skill body together, `git hash-object --stdin`: the key of check 10. A run
+/// writes it beside its transcript, and a grade compares the traces' hash with the files'.
+pub fn bundle_hash(root: &Path, skill: &Skill) -> Result<String> {
+    let body = std::fs::read_to_string(root.join("bundle/skills").join(&skill.name).join("SKILL.md"))
+        .with_context(|| format!("read the body of {}", skill.name))?;
+    let role = std::fs::read_to_string(root.join(format!("bundle/roles/{}.md", skill.role_file())))?;
+    hash_object(&format!("{role}{body}"))
 }
 
 impl Grade {
@@ -76,35 +95,85 @@ impl Grade {
         for name in names {
             let trial = name.trim_end_matches(".jsonl").to_string();
             let (arm, rest) = trial.split_once('-').context("a trial is <arm>-<fixture>-<n>")?;
-            let fixture = rest.rsplit_once('-').context("a trial is <arm>-<fixture>-<n>")?.0;
+            let (fixture, number) = rest.rsplit_once('-').context("a trial is <arm>-<fixture>-<n>")?;
             let fx = fixtures_all
                 .iter()
                 .find(|f| f.id == fixture)
                 .with_context(|| format!("{trial}: no fixture {fixture} in {}", fixtures.display()))?;
             let path = store.join(&name);
             let trace = Trace::parse(&std::fs::read_to_string(&path)?);
-            let log = std::fs::read_to_string(store.join(format!("{trial}.vault.log"))).unwrap_or_default();
+            let log_path = store.join(format!("{trial}.vault.log"));
+            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             let loaded = match arm {
-                "with" => trace.mentions(&marker),
+                "with" => trace.preloaded(&marker),
                 "without" => !trace.mentions(&marker) && !trace.mentions(FILLER),
-                "filler" => trace.mentions(FILLER) && !trace.mentions(&marker),
+                "filler" => trace.preloaded(FILLER) && !trace.mentions(&marker),
                 _ => bail!("{trial}: arm {arm} is none of with, without, filler"),
             };
             let mut graded = Graded {
                 arm: arm.into(),
+                fixture: fixture.into(),
+                number: number.parse().with_context(|| format!("{trial}: the trial number is a count"))?,
                 trial: trial.clone(),
                 sha: sha256(&path)?,
+                log_sha: if log_path.is_file() { sha256(&log_path)? } else { String::new() },
+                hash: std::fs::read_to_string(store.join(format!("{trial}.hash"))).ok().map(|h| h.trim().to_string()),
                 models: trace.models(),
                 loaded,
+                failure: trace.failure().map(str::to_string),
                 ..Graded::default()
             };
             score(&mut graded, skill, fx, &trace, &log);
             trials.push(graded);
         }
-        let role = std::fs::read_to_string(root.join(format!("bundle/roles/{}.md", skill.role_file())))?;
-        let hash = hash_object(&format!("{role}{body}"))?;
         let holdout = crate::eval_fixture::holdout(fixtures).len();
-        Ok(Self { skill: skill.clone(), trials, holdout, hash, fixtures: fixtures_all })
+        Ok(Self { skill: skill.clone(), trials, holdout, current: bundle_hash(root, skill)?, fixtures: fixtures_all })
+    }
+
+    /// What makes the store ungradable, one line each: a trial without its hash or vault log, trials run on two
+    /// bundles or on one that is not the files', and trial numbers with a gap (a dropped trial).
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for t in &self.trials {
+            if t.hash.is_none() {
+                out.push(format!("{}: no {}.hash; rerun the trial", t.trial, t.trial));
+            }
+            if t.log_sha.is_empty() {
+                out.push(format!("{}: no {}.vault.log", t.trial, t.trial));
+            }
+        }
+        let hashes: BTreeSet<&String> = self.trials.iter().filter_map(|t| t.hash.as_ref()).collect();
+        if hashes.len() > 1 {
+            out.push(format!("the store holds trials of {} bundles: {hashes:?}; rerun them on one", hashes.len()));
+        } else if let Some(h) = hashes.first().filter(|h| ***h != self.current) {
+            out.push(format!(
+                "the trials ran on {h}, the role and skill files hash to {}; rerun the evals",
+                self.current
+            ));
+        }
+        let groups: BTreeSet<(&String, &String)> = self.trials.iter().map(|t| (&t.arm, &t.fixture)).collect();
+        for (arm, fixture) in groups {
+            let mut numbers: Vec<usize> =
+                self.trials.iter().filter(|t| &t.arm == arm && &t.fixture == fixture).map(|t| t.number).collect();
+            numbers.sort_unstable();
+            if numbers != (1..=numbers.len()).collect::<Vec<_>>() {
+                out.push(format!("{arm}-{fixture}: trial numbers {numbers:?} are not 1 to {}", numbers.len()));
+            }
+        }
+        out
+    }
+
+    /// The lower bound of `uplift_ci`, when both arms ran.
+    pub fn uplift_low(&self) -> Option<f64> {
+        let (with, without) = (Stats::of(&self.arm("with")), Stats::of(&self.arm("without")));
+        (with.runs > 0 && without.runs > 0)
+            .then(|| newcombe((with.passes, with.runs), (without.passes, without.runs)).1)
+    }
+
+    /// The bundle the trials ran on: their one hash, else the files' (and `problems` says why they differ).
+    fn hash(&self) -> &str {
+        let ran: BTreeSet<&String> = self.trials.iter().filter_map(|t| t.hash.as_ref()).collect();
+        if ran.len() == 1 { ran.first().map_or(&self.current, |h| h) } else { &self.current }
     }
 
     fn arm(&self, arm: &str) -> Vec<&Graded> {
@@ -130,7 +199,7 @@ impl Grade {
             } else {
                 format!("skill_loaded: {loaded} of {}", self.trials.len())
             },
-            format!("hash: {}", self.hash),
+            format!("hash: {}", self.hash()),
             format!(
                 "model: {}",
                 if models.is_empty() {
@@ -150,9 +219,9 @@ impl Grade {
             format!("walkthrough: {}", keep.walkthrough),
             format!("status: {}", keep.status),
             "\n## Trials\n".to_string(),
-            "| trial | sha256 |\n|---|---|".to_string(),
+            "| trial | sha256 | vault log sha256 |\n|---|---|---|".to_string(),
         ];
-        lines.extend(self.trials.iter().map(|t| format!("| {} | {} |", t.trial, t.sha)));
+        lines.extend(self.trials.iter().map(|t| format!("| {} | {} | {} |", t.trial, t.sha, t.log_sha)));
         lines.join("\n") + "\n"
     }
 
@@ -163,42 +232,46 @@ impl Grade {
         lines.push("## Ground truth\n".into());
         for f in &self.fixtures {
             lines.push(format!("Fixture {} (base `{}`, head `{}`):\n", f.id, short(&f.base), short(&f.head)));
-            lines.extend(f.truth.iter().map(|t| format!("- `{}`: {}", t.location(), t.what)));
+            lines.extend(f.truth.iter().enumerate().map(|(i, t)| format!("{}. `{}`: {}", i + 1, t.location(), t.what)));
             lines.push(String::new());
         }
         lines.push("## Arms\n".into());
-        lines.push("| arm | runs | outcome | reached the tool | adherence there | out of row | findings | false | skill loaded |".into());
-        lines.push("|---|---|---|---|---|---|---|---|---|".into());
+        lines.push("| arm | runs | outcome | prose recall | reached the tool | adherence there | out of row | findings | false | runs with no finding | skill loaded |".into());
+        lines.push("|---|---|---|---|---|---|---|---|---|---|---|".into());
         for arm in ["with", "without", "filler"] {
             let runs = self.arm(arm);
             let s = Stats::of(&runs);
             if s.runs > 0 {
                 lines.push(format!(
-                    "| {arm} | {} | {} of {} | {} | {} | {} | {} | {} | {} |",
+                    "| {arm} | {} | {} of {} | {} of {} | {} | {} | {} | {} | {} | {} | {} |",
                     s.runs,
                     s.passes,
                     s.runs,
+                    s.prose,
+                    s.truth,
                     s.reached,
                     s.adherence.map_or("n/a".into(), f2),
                     s.out_of_row,
                     s.found,
                     s.wrong,
+                    s.silent,
                     s.loaded
                 ));
             }
         }
-        lines.push(format!("\nA run passes when `bp walk --for review --done` holds after the review is recorded and it finds at least {RECALL} of the ground truth. Uplift is the `with` rate less the `without` rate; the result file gives its Newcombe 95% interval.\n"));
+        lines.push(format!("\n- **Outcome:** a run passes when `bp walk --for review --done` holds after the review is recorded and the findings table matches at least {RECALL} of the ground truth. That needs the shape only `bp-review` defines (a `head:` line, one table).\n- **Prose recall:** items of the ground truth that the final text names in any form (its file and a line within {NEAR} lines). It does not depend on the shape, so a gap in outcome with none in prose recall means the arm cannot write the shape.\n- **Uplift:** the `with` rate less the `without` rate; the result file gives its Newcombe 95% interval.\n- **Role body:** the `without` arm's copy drops the sentences about the `Skill:` line; the `filler` arm keeps them.\n"));
         lines.push("## Trials".into());
         for t in &self.trials {
             let steps: Vec<String> =
                 STEPS.iter().zip(t.steps).map(|(n, ok)| format!("{n} {}", if ok { "yes" } else { "no" })).collect();
             let yes = |b: bool| if b { "yes" } else { "no" };
             lines.push(format!(
-                "\n### {t}\n\n- outcome: {}; recorded: {}; ground truth found: {} of {}\n- reached the tool: {}; steps: {}\n- out of row: {}; skill loaded as designed: {}\n- trace: `{dir}/{t}.jsonl`, vault log: `{dir}/{t}.vault.log`",
+                "\n### {t}\n\n- outcome: {}; recorded: {}; ground truth matched by a table row: {} of {}; named in the text: {}\n- reached the tool: {}; steps: {}\n- out of row: {}; skill loaded as designed: {}\n- trace: `{dir}/{t}.jsonl`, vault log: `{dir}/{t}.vault.log`",
                 if t.passed() { "pass" } else { "fail" },
                 yes(t.done),
                 t.hits,
                 t.truth,
+                t.prose_hits,
                 yes(t.reached),
                 steps.join(", "),
                 t.out_of_row,
@@ -206,9 +279,13 @@ impl Grade {
                 t = t.trial,
                 dir = store.display(),
             ));
-            for (at, what, ok) in &t.findings {
+            if let Some(why) = &t.failure {
+                lines.push(format!("- FAILED: {why}"));
+            }
+            for (at, what, item) in &t.findings {
                 let what: String = what.chars().take(160).collect();
-                lines.push(format!("  - {} `{at}`: {what}", if *ok { "match" } else { "FALSE" }));
+                let verdict = item.map_or("FALSE".to_string(), |i| format!("match, truth item {}", i + 1));
+                lines.push(format!("  - {verdict} `{at}`: {what}"));
             }
         }
         lines.join("\n") + "\n"
@@ -219,38 +296,50 @@ impl Grade {
 struct Stats {
     runs: usize,
     passes: usize,
+    /// Ground-truth items named in the final texts, over all runs, and the items the runs could have named.
+    prose: usize,
+    truth: usize,
     reached: usize,
     /// The mean share of steps done, over the runs that reached the tool; `None` when none did.
     adherence: Option<f64>,
     out_of_row: usize,
     found: usize,
     wrong: usize,
+    /// Runs whose table held no finding: a reviewer that returns nothing is not precise.
+    silent: usize,
     loaded: usize,
 }
 
 impl Stats {
     fn of(runs: &[&Graded]) -> Self {
         let reached: Vec<&&Graded> = runs.iter().filter(|r| r.reached).collect();
-        let found: Vec<&(String, String, bool)> = runs.iter().flat_map(|r| &r.findings).collect();
+        let found: Vec<&(String, String, Option<usize>)> = runs.iter().flat_map(|r| &r.findings).collect();
         Self {
             runs: runs.len(),
             passes: runs.iter().filter(|r| r.passed()).count(),
+            prose: runs.iter().map(|r| r.prose_hits).sum(),
+            truth: runs.iter().map(|r| r.truth).sum(),
             reached: reached.len(),
-            adherence: (!reached.is_empty()).then(|| {
-                reached.iter().map(|r| r.adherence()).sum::<f64>()
-                    / f64::from(u32::try_from(reached.len()).unwrap_or(u32::MAX))
-            }),
+            adherence: (!reached.is_empty())
+                .then(|| reached.iter().map(|r| r.adherence()).sum::<f64>() / float(reached.len())),
             out_of_row: runs.iter().map(|r| r.out_of_row).sum(),
             found: found.len(),
-            wrong: found.iter().filter(|f| !f.2).count(),
+            wrong: found.iter().filter(|f| f.2.is_none()).count(),
+            silent: runs.iter().filter(|r| r.findings.is_empty()).count(),
             loaded: runs.iter().filter(|r| r.loaded).count(),
         }
     }
 }
 
-/// `k` over `n` for counts of trials, which are far below the range where a float is inexact.
+/// A count as a float. Counts of trials and findings are far below 2^52.
+#[allow(clippy::cast_precision_loss)]
+fn float(n: usize) -> f64 {
+    n as f64
+}
+
+/// `k` over `n`, for `n` above 0.
 fn share(k: usize, n: usize) -> f64 {
-    f64::from(u32::try_from(k).unwrap_or(u32::MAX)) / f64::from(u32::try_from(n).unwrap_or(u32::MAX))
+    float(k) / float(n)
 }
 
 /// Fills the scores of a `bp-review` trial: the steps its transcript shows, the calls outside the role's row, the
@@ -272,9 +361,11 @@ fn score(g: &mut Graded, skill: &Skill, fx: &Fixture, trace: &Trace, log: &str) 
     g.out_of_row = calls.iter().filter(|c| !allowed.contains(&c.verb.as_str())).count();
     g.done = log.lines().any(|l| l.starts_with("record review "));
     let findings = review.map(|r| r.findings).unwrap_or_default();
-    g.hits = fx.hits(&findings);
+    let assigned = fx.assign(&findings);
+    g.hits = fx.hits(&assigned);
+    g.prose_hits = fx.named_in(&trace.final_text());
     g.truth = fx.truth.len();
-    g.findings = findings.iter().map(|f| (f.location.clone(), f.text.clone(), fx.matches(f))).collect();
+    g.findings = findings.iter().zip(assigned).map(|(f, item)| (f.location.clone(), f.text.clone(), item)).collect();
 }
 
 /// The owner's lines of a result file: kept across a regrade.
@@ -284,10 +375,10 @@ pub struct Owner {
 }
 
 impl Owner {
-    /// The values in `existing`, or the starting ones: `pending` and `capability`. `Err` names a line the owner broke.
+    /// The values in `existing`, or `pending` for both. `Err` names a line the owner broke.
     pub fn of(existing: Option<&str>) -> Result<Self> {
         let get = |key: &str| existing.and_then(|t| t.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(": ")));
-        let (walkthrough, status) = (get("walkthrough").unwrap_or("pending"), get("status").unwrap_or("capability"));
+        let (walkthrough, status) = (get("walkthrough").unwrap_or("pending"), get("status").unwrap_or("pending"));
         if !STATUSES.contains(&status) {
             bail!("status: {status} is none of {}", STATUSES.join(", "));
         }
@@ -295,6 +386,13 @@ impl Owner {
             bail!("walkthrough: holds nothing; the owner writes `approved` or the friction");
         }
         Ok(Self { walkthrough: walkthrough.into(), status: status.into() })
+    }
+
+    /// `capability` says the skill adds something; an interval that does not clear 0 says otherwise (29, decision 7).
+    pub fn contradicts(&self, uplift_low: Option<f64>) -> Option<String> {
+        let clear = uplift_low.is_some_and(|lo| lo >= 0.005);
+        (self.status == "capability" && !clear)
+            .then(|| "status: capability, but the lower bound of uplift_ci does not clear 0; the owner decides regression or fold".into())
     }
 }
 
@@ -308,7 +406,7 @@ fn newcombe((k1, n1): (usize, usize), (k0, n0): (usize, usize)) -> (f64, f64, f6
 }
 
 fn wilson(k: usize, n: usize) -> (f64, f64, f64) {
-    let (p, n, z2) = (share(k, n), f64::from(u32::try_from(n).unwrap_or(u32::MAX)), 1.96_f64 * 1.96);
+    let (p, n, z2) = (share(k, n), float(n), 1.96_f64 * 1.96);
     let (centre, spread, scale) =
         (p + z2 / (2.0 * n), 1.96 * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt(), 1.0 + z2 / n);
     (p, (centre - spread) / scale, (centre + spread) / scale)
@@ -372,8 +470,11 @@ mod tests {
         let o = Owner::of(Some("n: 5\nwalkthrough: approved\nstatus: fold\n")).unwrap();
         assert_eq!((o.walkthrough.as_str(), o.status.as_str()), ("approved", "fold"));
         let o = Owner::of(None).unwrap();
-        assert_eq!((o.walkthrough.as_str(), o.status.as_str()), ("pending", "capability"));
+        assert_eq!((o.walkthrough.as_str(), o.status.as_str()), ("pending", "pending"));
         assert!(Owner::of(Some("status: keep\n")).is_err());
+        let capability = Owner::of(Some("status: capability\n")).unwrap();
+        assert!(capability.contradicts(Some(-0.1)).is_some() && capability.contradicts(None).is_some());
+        assert!(capability.contradicts(Some(0.39)).is_none() && o.contradicts(None).is_none());
     }
 
     #[test]

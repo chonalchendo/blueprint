@@ -50,7 +50,7 @@ pub struct Review {
 
 /// A finding at most this many lines from a ground-truth range still matches it: reviewers cite the line of the
 /// symptom or of its cause.
-const NEAR: u32 = 3;
+pub const NEAR: u32 = 3;
 
 impl Fixture {
     pub fn parse(id: &str, text: &str) -> Result<Self> {
@@ -106,14 +106,25 @@ impl Fixture {
         Ok(all)
     }
 
-    /// Whether the finding names a ground-truth item.
-    pub fn matches(&self, f: &Finding) -> bool {
-        self.truth.iter().any(|t| t.covers(&f.location))
+    /// The ground-truth item each finding matches, if any. A finding matches at most one item: the nearest by lines,
+    /// the narrower range on a tie, then the first.
+    pub fn assign(&self, findings: &[Finding]) -> Vec<Option<usize>> {
+        let nearest = |f: &Finding| {
+            let near = self.truth.iter().enumerate().filter_map(|(i, t)| Some((t.gap(&f.location)?, i)));
+            near.min().map(|(_, i)| i)
+        };
+        findings.iter().map(nearest).collect()
     }
 
     /// How many ground-truth items some finding matches.
-    pub fn hits(&self, findings: &[Finding]) -> usize {
-        self.truth.iter().filter(|t| findings.iter().any(|f| t.covers(&f.location))).count()
+    pub fn hits(&self, assigned: &[Option<usize>]) -> usize {
+        (0..self.truth.len()).filter(|i| assigned.contains(&Some(*i))).count()
+    }
+
+    /// How many ground-truth items a text names, in any form: its file and a line within `NEAR` of the item's.
+    /// A reply with no findings table still counts, so recall does not hang on the shape only `bp-review` defines.
+    pub fn named_in(&self, text: &str) -> usize {
+        self.truth.iter().filter(|t| t.named_in(text)).count()
     }
 }
 
@@ -135,16 +146,37 @@ impl Truth {
         if lines.is_empty() { self.path.clone() } else { format!("{}:{}", self.path, lines.join(", ")) }
     }
 
-    /// Whether a finding's location names this file and, when both name lines, lines within `NEAR` of each other.
-    fn covers(&self, location: &str) -> bool {
-        let Some((path, lines)) = locate(location) else { return false };
-        let same_file =
-            self.path == path || self.path.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{}", self.path));
-        let near = |(a, b): (u32, u32), (c, d): (u32, u32)| a <= d + NEAR && c <= b + NEAR;
-        same_file
-            && (self.lines.is_empty()
-                || lines.is_empty()
-                || self.lines.iter().any(|&t| lines.iter().any(|&l| near(t, l))))
+    fn in_file(&self, path: &str) -> bool {
+        self.path == path || self.path.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{}", self.path))
+    }
+
+    /// How far a finding's location is from this item, or `None` when it names another file or lines more than
+    /// `NEAR` away. The pair orders by lines apart, then by the item's width, so a narrow item beats a wide one that
+    /// holds the same line. A location with no lines, or an item with none, is as far as can be.
+    fn gap(&self, location: &str) -> Option<(u32, u32)> {
+        let (path, lines) = locate(location)?;
+        if !self.in_file(&path) {
+            return None;
+        }
+        let width = self.lines.iter().map(|&(a, b)| b - a).min().unwrap_or(u32::MAX);
+        if self.lines.is_empty() || lines.is_empty() {
+            return Some((u32::MAX, width));
+        }
+        let apart = |(a, b): (u32, u32), (c, d): (u32, u32)| c.saturating_sub(b).max(a.saturating_sub(d));
+        let gap = self.lines.iter().flat_map(|&t| lines.iter().map(move |&l| apart(t, l))).min()?;
+        (gap <= NEAR).then_some((gap, width))
+    }
+
+    /// Whether the text writes this item's file name followed, within 40 characters, by a number inside the item's
+    /// lines widened by `NEAR`. With no lines on the item, the file name is enough.
+    fn named_in(&self, text: &str) -> bool {
+        let name = self.path.rsplit('/').next().unwrap_or(&self.path);
+        text.match_indices(name).any(|(at, _)| {
+            let after: String = text[at + name.len()..].chars().take(40).collect();
+            let numbers = after.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse::<u32>().ok());
+            self.lines.is_empty()
+                || numbers.into_iter().any(|n| self.lines.iter().any(|&(a, b)| n + NEAR >= a && n <= b + NEAR))
+        })
     }
 }
 
@@ -195,21 +227,19 @@ impl Review {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = "base: b1\nhead: h1\ntitle: T\ntruth:\n- a/x.rs:20 | one\n- a/x.rs:15, 26 | two\n- justfile:18-21 | three\n---\n## Problem\n\nbody\n";
+    const FIXTURE: &str = "base: b1\nhead: h1\ntitle: T\ntruth:\n- a/x.rs:20 | one\n- a/x.rs:11-27 | two\n- justfile:18-21 | three\n---\n## Problem\n\nbody\n";
 
     #[test]
     fn parses_a_fixture_and_matches_by_file_and_nearby_lines() {
         let f = Fixture::parse("pr-1", FIXTURE).unwrap();
         assert_eq!((f.base.as_str(), f.head.as_str(), f.issue.as_str()), ("b1", "h1", "## Problem\n\nbody"));
-        assert_eq!(f.truth[1].location(), "a/x.rs:15, 26");
+        assert_eq!(f.truth[1].location(), "a/x.rs:11-27");
         let at = |l: &str| Finding { location: l.into(), text: String::new() };
-        assert_eq!(
-            f.hits(&[at("x.rs:22"), at("justfile:21"), at("`a/x.rs`")]),
-            3,
-            "a basename, a near line, a bare file"
-        );
-        assert_eq!(f.hits(&[at("a/x.rs:60"), at("other.rs:20"), at("projects/bp/designs/x")]), 0);
-        assert!(f.matches(&at("a/x.rs:20")) && !f.matches(&at("a/x.rs:60")));
+        let hits = |l: &[&str]| f.hits(&f.assign(&l.iter().map(|x| at(x)).collect::<Vec<_>>()));
+        assert_eq!(hits(&["x.rs:22", "justfile:21", "`a/x.rs`"]), 3, "a basename, a near line, a bare file");
+        assert_eq!(hits(&["a/x.rs:60", "other.rs:20", "projects/bp/designs/x"]), 0);
+        assert_eq!(f.assign(&[at("a/x.rs:20")]), vec![Some(0)], "the nearest item takes the finding");
+        assert_eq!(f.assign(&[at("a/x.rs:60")]), vec![None]);
     }
 
     #[test]

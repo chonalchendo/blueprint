@@ -6,6 +6,8 @@
 
 mod bench;
 mod eval;
+mod eval_agent;
+mod eval_arms;
 mod eval_fixture;
 mod eval_grade;
 mod eval_sandbox;
@@ -39,7 +41,15 @@ fn main() -> ExitCode {
             };
         }
         Some("gh") => return gh::run(&args[1..]),
-        Some("eval") => return report(eval::run(&args[1..])),
+        Some("eval") => {
+            return match eval::run(&args[1..]) {
+                Err(e) if e.is::<eval::Usage>() => {
+                    eprintln!("xtask: {e:#}");
+                    ExitCode::from(4)
+                }
+                done => report(done),
+            };
+        }
         Some(verb @ ("scratch" | "forge")) => {
             let made = if verb == "scratch" { scratch::run() } else { forge::run(&args[1..]) };
             return match made {

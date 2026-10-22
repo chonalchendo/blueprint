@@ -40,7 +40,7 @@ with) LINE=$(awk 'f >= 2 && NF { print; exit } /^---$/ { f++ }' "$FAKE_SKILL" | 
 filler) LINE='This line holds no instruction.' ;;
 *) LINE= ;;
 esac
-[ -z "$LINE" ] || printf '{"type":"user","message":{"content":"%s"}}\n' "$LINE" >> "$T"
+[ -z "$LINE" ] || printf '{"type":"user","isMeta":true,"message":{"content":"<skill-format>true</skill-format>\\n%s"}}\n' "$LINE" >> "$T"
 call "bp walk $ID --for review --json"
 if [ "$BP_EVAL_ARM" = without ]; then
   printf '{"type":"assistant","message":{"model":"fake-model","content":[{"type":"text","text":"I could not review it."}]}}\n' >> "$T"
@@ -158,6 +158,14 @@ impl Ran {
         Some(Self { s, fixtures, results })
     }
 
+    fn repo(&self) -> String {
+        self.s.dir.path().join("repo").display().to_string()
+    }
+
+    fn with(&self) -> String {
+        format!("with={}", self.s.bp.display())
+    }
+
     fn file(&self) -> PathBuf {
         self.results.join("bp-review.md")
     }
@@ -199,7 +207,7 @@ fn a_fake_agent_runs_the_whole_pipeline_and_stores_what_the_grader_reads() {
         "out_of_row: 0",
         "false_findings: 0.50",
         "walkthrough: pending",
-        "status: capability",
+        "status: pending",
     ] {
         assert!(text.lines().any(|l| l == line), "{line} in\n{text}");
     }
@@ -212,8 +220,11 @@ fn a_fake_agent_runs_the_whole_pipeline_and_stores_what_the_grader_reads() {
 
     let store = r.results.join("bp-review");
     for name in ["with-pr-1-1", "with-pr-1-2", "without-pr-1-1", "filler-pr-1-1"] {
-        assert!(store.join(format!("{name}.jsonl")).is_file(), "{name}");
+        for ext in ["jsonl", "vault.log", "hash"] {
+            assert!(store.join(format!("{name}.{ext}")).is_file(), "{name}.{ext}");
+        }
     }
+    assert_eq!(std::fs::read_to_string(store.join("with-pr-1-1.hash")).unwrap().trim(), hash);
     let log = std::fs::read_to_string(store.join("with-pr-1-1.vault.log")).unwrap();
     assert!(log.lines().any(|l| l.starts_with("record review ")), "{log}");
     assert!(!std::fs::read_to_string(store.join("without-pr-1-1.vault.log")).unwrap().contains("record review"));
@@ -224,7 +235,40 @@ fn a_fake_agent_runs_the_whole_pipeline_and_stores_what_the_grader_reads() {
             && report.contains("with-pr-1-1.jsonl"),
         "{report}"
     );
-    assert!(report.contains("FALSE `other.rs:9`") && report.contains("match `src/a.rs:1`"), "{report}");
+    assert!(report.contains("FALSE `other.rs:9`") && report.contains("match, truth item 1 `src/a.rs:1`"), "{report}");
+    assert!(report.contains("prose recall"), "{report}");
+
+    // `--trials N` fills to N: a rerun at 2 runs nothing, a run at 3 adds one trial per arm and fixture.
+    let again = |n: &str| {
+        xtask(
+            &r.s,
+            &[
+                "bp-review",
+                "--trials",
+                n,
+                "--arms",
+                "with",
+                "--fixtures",
+                &r.fixtures,
+                "--repo",
+                &r.repo(),
+                "--bin",
+                &r.with(),
+            ],
+        )
+    };
+    let (code, out) = again("2");
+    assert_eq!((code, out.contains("eval: trial")), (Some(0), false), "{out}");
+    let (code, out) = again("3");
+    assert!(code == Some(0) && out.contains("eval: trial with-pr-1-3"), "{out}");
+
+    // A hole in the numbering and a bundle that changed since the run are refused, not graded.
+    std::fs::remove_file(store.join("with-pr-1-2.jsonl")).unwrap();
+    let (code, out) = r.grade(&[]);
+    assert!(code == Some(2) && out.contains("with-pr-1: trial numbers [1, 3]"), "{out}");
+    std::fs::write(store.join("with-pr-1-1.hash"), "0000000000000000000000000000000000000000\n").unwrap();
+    let (code, out) = r.grade(&[]);
+    assert!(code == Some(2) && out.contains("bundles"), "{out}");
 }
 
 #[test]
@@ -246,6 +290,16 @@ fn a_held_out_fixture_a_forged_file_and_a_swapped_trace_fail() {
     std::fs::write(&trace, format!("{original}{{\"type\":\"user\",\"message\":{{\"content\":\"edited\"}}}}\n"))
         .unwrap();
     assert_eq!(r.grade(&["--check"]).0, Some(2), "a swapped transcript changes its sha256");
+    std::fs::write(&trace, original).unwrap();
+    assert_eq!(r.grade(&["--check"]).0, Some(0));
+
+    let hash = r.results.join("bp-review/with-pr-1-1.hash");
+    std::fs::remove_file(&hash).unwrap();
+    let (code, out) = r.grade(&[]);
+    assert!(code == Some(2) && out.contains("no with-pr-1-1.hash"), "{out}");
+
+    let (code, out) = xtask(&r.s, &["bp-review", "--fixtures", &r.fixtures]);
+    assert_eq!(code, Some(4), "a usage error exits 4: {out}");
 }
 
 #[test]
@@ -254,8 +308,7 @@ fn a_regrade_keeps_the_owner_lines() {
     let text = std::fs::read_to_string(r.file()).unwrap();
     std::fs::write(
         r.file(),
-        text.replace("walkthrough: pending", "walkthrough: approved")
-            .replace("status: capability", "status: regression"),
+        text.replace("walkthrough: pending", "walkthrough: approved").replace("status: pending", "status: regression"),
     )
     .unwrap();
     assert_eq!(r.grade(&[]).0, Some(0));
@@ -264,4 +317,8 @@ fn a_regrade_keeps_the_owner_lines() {
     assert_eq!(r.grade(&["--check"]).0, Some(0));
     std::fs::write(r.file(), kept.replace("status: regression", "status: keep")).unwrap();
     assert_eq!(r.grade(&["--check"]).0, Some(1), "a status outside the set cannot be graded");
+    // One trial per arm leaves the interval over 0, so `capability` contradicts it.
+    std::fs::write(r.file(), kept.replace("status: regression", "status: capability")).unwrap();
+    let (code, out) = r.grade(&["--check"]);
+    assert!(code == Some(2) && out.contains("does not clear 0"), "{out}");
 }
