@@ -17,7 +17,7 @@ svg.bp{display:block;box-sizing:content-box;max-width:calc(100% - 2px);height:au
 .bp .zone{fill:var(--recess);stroke:var(--line)}.bp .lane .zone{fill:var(--soft);stroke:none}
 .bp .glabel,.bp .note,.bp .card,.bp .key,.bp .field,.bp .tag{fill:var(--muted)}.bp .name,.bp .field.key{fill:var(--ink)}.bp .elabel{fill:var(--muted)}
 .bp .time,.bp .mark{fill:var(--muted)}.bp .chip{fill:var(--muted)}
-.bp .box{fill:var(--node);stroke:var(--line);stroke-width:1}.bp .solid{fill:var(--ink)}.bp .tagbox{fill:var(--tag)}
+.bp .box{fill:var(--node);stroke:var(--line);stroke-width:1}.bp .solid,.bp .node .box.solid{fill:var(--ink)}.bp .tagbox{fill:var(--tag)}
 .bp .role-library{--k-fill:var(--violet-fill);--k-tag:var(--violet-tag);--k-text:var(--violet-text);--k-bar:var(--violet-bar)}
 .bp .role-node{--k-fill:var(--indigo-fill);--k-tag:var(--indigo-tag);--k-text:var(--indigo-text);--k-bar:var(--indigo-bar)}
 .bp .role-store,.bp .role-record{--k-fill:var(--teal-fill);--k-tag:var(--teal-tag);--k-text:var(--teal-text);--k-bar:var(--teal-bar)}

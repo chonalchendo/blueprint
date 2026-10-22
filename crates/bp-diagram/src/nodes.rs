@@ -21,29 +21,20 @@ pub(crate) fn pseudo(role: &str) -> bool {
     matches!(role, "start" | "end" | "choice" | "decision")
 }
 
-/// A role's tag, drawn beside the name only where the kind tells the reader something, and its legend words when the
-/// author names none. The default kinds (an application, a component, an entity, a step) carry no tag.
-pub(crate) fn role_words(role: &str) -> (Option<&'static str>, &'static str) {
+/// A role's tag, drawn beside the name only where the kind tells the reader something. The default kinds (an
+/// application, a component, an entity, a step) carry no tag.
+pub(crate) fn role_tag(role: &str) -> Option<&'static str> {
     match role {
-        "application" => (None, "Application"),
-        "library" => (Some("Library"), "Library, linked in"),
-        "store" => (Some("Store"), "Data store"),
-        "deployable" => (Some("Deployable"), "Deployable unit"),
-        "component" => (None, "Component"),
-        "system" => (Some("System"), "Software system"),
-        "person" => (Some("Person"), "Person"),
-        "external" => (Some("External"), "Outside the system"),
-        "node" => (Some("Node"), "Vault node"),
-        "record" => (Some("Record"), "Record"),
-        "row" => (Some("Row"), "Row of a node"),
-        "elsewhere" => (None, "Owned by another domain"),
-        "start" => (None, "Start"),
-        "end" => (None, "End"),
-        "choice" => (None, "Choice"),
-        "decision" => (None, "Decision"),
-        "step" => (None, "Step"),
-        "state" => (None, "State"),
-        _ => (None, "Entity"),
+        "library" => Some("Library"),
+        "store" => Some("Store"),
+        "deployable" => Some("Deployable"),
+        "system" => Some("System"),
+        "person" => Some("Person"),
+        "external" => Some("External"),
+        "node" => Some("Node"),
+        "record" => Some("Record"),
+        "row" => Some("Row"),
+        _ => None,
     }
 }
 
@@ -96,7 +87,7 @@ fn base(n: &Node, shape: Shape, w: i32, h: i32, runs: Vec<Run>) -> SNode {
 
 /// An architecture box: the name and its tag, then the description in muted text.
 pub(crate) fn architecture(n: &Node) -> SNode {
-    let (mut runs, right, dot) = title(n, role_words(&n.role).0);
+    let (mut runs, right, dot) = title(n, role_tag(&n.role));
     let mut y = 50;
     for line in n.note.as_deref().map(|t| Font::Body.wrap(t, 13, MEASURE)).unwrap_or_default() {
         runs.push(Run::new(Font::Body, 13, 0, "note", line).at(PAD, y));
@@ -108,8 +99,7 @@ pub(crate) fn architecture(n: &Node) -> SNode {
 
 /// An entity: the name and its tag, a rule, then one mono line per field and the muted time line.
 pub(crate) fn entity(n: &Node, level: Option<&str>) -> SNode {
-    let tag =
-        if n.role == "elsewhere" { Some(n.owner.as_deref().unwrap_or("Elsewhere")) } else { role_words(&n.role).0 };
+    let tag = if n.role == "elsewhere" { Some(n.owner.as_deref().unwrap_or("Elsewhere")) } else { role_tag(&n.role) };
     let (mut runs, right, dot) = title(n, tag);
     let mut rules = Vec::new();
     let mut y = 52;

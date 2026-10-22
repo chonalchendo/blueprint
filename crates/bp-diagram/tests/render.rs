@@ -136,6 +136,59 @@ fn routes_keep_apart_and_off_a_group_label() {
     assert!(points("x--m2").is_disjoint(&points("y--m1")), "no corner or end is shared");
 }
 
+/// A legend drawn from use puts one gloss beside each role pill; the author's own label replaces it (28, issue 12).
+#[test]
+fn a_legend_gloss_follows_each_role_pill() {
+    let spec = "type: architecture\nlevel: container\ntitle: T\nlede: One line.\nnodes:\n  - {id: p, noun: P, role: person, at: [0, 0]}\n  - \
+                {id: l, noun: L, role: library, at: [1, 0]}\n  - {id: s, noun: S, role: store, at: [2, 0]}\n";
+    let page = html(spec, None);
+    for words in ["A person", "Code library", "Data store"] {
+        assert!(page.contains(&format!(">{words}</text>")), "{words}");
+    }
+    let named = format!(
+        "{spec}legend:\n  - {{role: person, label: A user}}\n  - {{role: library, label: Library}}\n  - {{role: store, label: Store}}\n"
+    );
+    let page = html(&named, None);
+    assert!(page.contains(">A user</text>") && !page.contains(">A person</text>"), "the author's label wins");
+    assert!(page.contains(">Library</text>"), "a label that repeats its pill still draws");
+}
+
+/// Start and End legend swatches are a dot and a ring, as the nodes draw them.
+#[test]
+fn the_start_and_end_swatches_are_a_dot_and_a_ring() {
+    let spec = "type: state\ntitle: A\nlede: One line.\nnodes:\n  - {id: in, role: start}\n  - {id: open, noun: open}\n  - {id: out, role: end}\nedges:\n  - {from: in, to: open}\n  - {from: open, to: out}\n";
+    let page = html(spec, None);
+    let swatch = |role: &str| {
+        let g = &page[page.find(&format!("<g class=\"swatch role-{role}\">")).unwrap()..];
+        g[..g.find("</g>").unwrap()].matches("<circle").count()
+    };
+    assert_eq!((swatch("start"), swatch("end")), (1, 2), "a dot is one circle, a ring two");
+}
+
+/// A pill keeps off a group frame: wholly inside it or wholly outside, with its mask (28, issue 12). The `runs checks
+/// on` pill once sat across the System frame's right edge.
+#[test]
+fn a_pill_keeps_off_a_group_frame() {
+    let num = |s: &str, attr: &str| -> i32 {
+        let v = &s[s.find(&format!(" {attr}=\"")).unwrap() + attr.len() + 3..];
+        v[..v.find('"').unwrap()].parse().unwrap()
+    };
+    for name in ["bp-containers", "bp-containers-changed"] {
+        let page = html(&example(name), None);
+        let zone = &page[page.find("class=\"zone\"").unwrap()..];
+        let (fx, fy, fw, fh) = (num(zone, "x"), num(zone, "y"), num(zone, "width"), num(zone, "height"));
+        let pills: Vec<&str> = page.split("<rect class=\"pill\"").skip(1).collect();
+        assert_eq!(pills.len(), 9, "{name}");
+        for pill in pills {
+            let (x, y, w, h) =
+                (num(pill, "x") - 4, num(pill, "y") - 4, num(pill, "width") + 8, num(pill, "height") + 8);
+            let touches = x <= fx + fw && x + w >= fx && y <= fy + fh && y + h >= fy;
+            let inside = x > fx && x + w < fx + fw && y > fy && y + h < fy + fh;
+            assert!(!touches || inside, "{name}: the pill at ({x}, {y}) sits on the frame");
+        }
+    }
+}
+
 /// FNV-1a: a fixed hash of the bytes, so a platform that renders other bytes fails here (28, design change 3).
 #[test]
 fn the_bytes_are_the_same_on_every_platform() {
@@ -151,7 +204,7 @@ fn the_bytes_are_the_same_on_every_platform() {
     // A deliberate change to the renderer, the style or the viewer changes these; update them in the same commit.
     assert_eq!(
         got,
-        ["f91d94207fd3f9ec", "f117ac4b16d01f14", "12bdf6dc9aecf17e", "a704b3b602d4d9c6", "9331afa85300ad81"]
+        ["5a7e431942054bdb", "a0b8cc2485a7b77b", "3cd82485cada82ba", "6617dd2d8e0792af", "8a2a38415d89127c"]
     );
 }
 

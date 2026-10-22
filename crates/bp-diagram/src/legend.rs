@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use crate::Finding;
 use crate::font::Font;
-use crate::nodes::{role_words, up4};
+use crate::nodes::{role_tag, up4};
 use crate::scene::{Key, Scene};
 use crate::spec::{Spec, Type};
 use crate::svg::esc;
@@ -13,6 +13,31 @@ use crate::svg::esc;
 /// The diff's states and their words.
 const DIFF: &[(&str, &str)] =
     &[("added", "Added"), ("removed", "Removed"), ("changed", "Changed"), ("moved", "Moved: ghost at the old cell")];
+
+/// One gloss per role, the words a legend drawn from use puts beside the swatch. The pill already says the tag
+/// (`Person`), so the gloss says what the kind is. Library, store and deployable use the words
+/// `examples/bp-containers.yaml` gives them; an author's own legend label replaces any of these.
+const GLOSS: &[(&str, &str)] = &[
+    ("application", "Application"),
+    ("library", "Code library"),
+    ("store", "Data store"),
+    ("deployable", "Deployable unit"),
+    ("component", "Component"),
+    ("system", "Software system"),
+    ("person", "A person"),
+    ("external", "Outside the system"),
+    ("entity", "Entity"),
+    ("node", "Vault node"),
+    ("record", "Stored record"),
+    ("row", "Row of a node"),
+    ("elsewhere", "Owned by another domain"),
+    ("state", "State"),
+    ("start", "Start"),
+    ("end", "End"),
+    ("choice", "Choice"),
+    ("step", "Step"),
+    ("decision", "Decision"),
+];
 
 /// The keys in use, in order of first use.
 fn in_use(spec: &Spec) -> Vec<String> {
@@ -77,13 +102,11 @@ pub(crate) fn lay_out(scene: &mut Scene, spec: &Spec, states: &[&str]) {
     // A tagged role's swatch is the tag itself, as its nodes draw it: the reader matches words, not fills.
     let tag = |k: &str| match k {
         "elsewhere" => spec.nodes.iter().find(|n| n.role == k).and_then(|n| n.owner.clone()),
-        _ => role_words(k).0.map(str::to_string),
+        _ => role_tag(k).map(str::to_string),
     };
     let (mut x, mut y) = (88, scene.legend_y + 20);
     for (key, label) in keys {
         let tag = tag(&key);
-        // A badge that already says the words needs no words after it.
-        let label = if tag.as_ref().is_some_and(|t| t.eq_ignore_ascii_case(&label)) { String::new() } else { label };
         let swatch = tag.as_ref().map_or(20, |t| Font::Body.width(t, 11, 0) + 12);
         let w = up4(swatch + 8 + Font::Body.width(&label, 11, 0) + 28);
         if x + w > scene.w - 24 && x > 88 {
@@ -112,7 +135,7 @@ fn default_words(spec: &Spec, key: &str) -> String {
             let mut c = text.chars();
             c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
         }
-        role => role_words(role).1.into(),
+        role => GLOSS.iter().find(|(r, _)| *r == role).map_or(role, |(_, words)| words).into(),
     }
 }
 
@@ -136,6 +159,17 @@ pub(crate) fn draw(scene: &Scene) -> String {
                 "<g class=\"swatch note\"><rect class=\"notebox\" x=\"{x}\" y=\"{y}\" width=\"20\" height=\"12\" rx=\"3\"/></g>"
             ),
             "marks" => String::new(),
+            // A flow's entry and exit are drawn as a dot and a ring, so the legend shows the same.
+            "start" => format!(
+                "<g class=\"swatch role-start\"><circle class=\"solid\" cx=\"{}\" cy=\"{}\" r=\"5\"/></g>",
+                x + 10,
+                y + 6
+            ),
+            "end" => format!(
+                "<g class=\"swatch role-end\"><circle class=\"box\" cx=\"{0}\" cy=\"{1}\" r=\"6\"/><circle class=\"solid\" cx=\"{0}\" cy=\"{1}\" r=\"3\"/></g>",
+                x + 10,
+                y + 6
+            ),
             "added" | "removed" | "changed" | "moved" => {
                 let dot = if k.kind == "changed" {
                     format!("<circle class=\"dot\" cx=\"{}\" cy=\"{}\" r=\"2\"/>", x + 15, y + 4)

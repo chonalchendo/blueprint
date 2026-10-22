@@ -277,6 +277,48 @@ fn refuses_a_note_on_a_start_end_or_branch() {
 }
 
 #[test]
+fn refuses_a_label_on_a_start_or_end() {
+    for (spec, id, role) in [
+        (MACHINE.replace("role: start}", "role: start, label: Filed}"), "in", "start"),
+        (MACHINE.replace("role: end}", "role: end, label: Done}"), "out", "end"),
+    ] {
+        let f = refused(&spec);
+        let detail = &f.iter().find(|f| f.id == id).expect("the node refuses").detail;
+        assert_eq!(detail, &format!("a `{role}` node draws no `label`; say it in the design"), "{f:?}");
+    }
+    // A choice draws its label.
+    render(MACHINE, None, Some(&|_: Link<'_>| true)).expect("a choice keeps its label");
+}
+
+#[test]
+fn a_crowded_side_gives_way_to_another_for_the_cards() {
+    // Two cards of different edges would end at the left of `b`, a side that holds one card, not two. The diagonal
+    // neighbour once took that side for its route and the second card found no spot.
+    let spec = "type: er\nlevel: logical\ntitle: T\nlede: One line.\nnodes:\n  - {id: b, noun: B, role: record, at: [1, 1]}\n  - \
+                {id: left, noun: Left, role: record, at: [0, 1]}\n  - {id: corner, noun: Corner, role: record, at: [0, 0]}\n  - {id: up, noun: Up, role: record, at: [1, 0]}\n\
+                edges:\n  - {from: left, to: b, label: l, card: [\"1\", \"N\"]}\n  - {from: corner, to: b, label: c, card: \
+                [\"1\", \"N\"]}\n";
+    let r = render(spec, None, None).unwrap_or_else(|f| panic!("refused: {f:#?}"));
+    assert!(r.findings.iter().all(|f| f.severity != Severity::Error), "{:?}", r.findings);
+}
+
+#[test]
+fn a_side_without_cards_keeps_its_straight_route() {
+    // A state box is too short to hold two ends 16 px apart, but without cards nothing needs that room: the line from
+    // `a` to `b` keeps the route it had at master, from `a`'s right side to `b`'s left, whatever else ends at `a`'s right.
+    let spec = "type: state\ntitle: T\nlede: One line.\nnodes:\n  - {id: a, noun: a}\n  - {id: b, noun: b}\nedges:\n  - {from: a, to: b, label: go}\n  - {from: a, to: a, label: again}\n";
+    let page = render(spec, None, Some(&|_: Link<'_>| true)).expect("a self loop and a line render").html;
+    let at = page.find("data-id=\"a--b\"").unwrap();
+    let path = &page[at..];
+    let path = &path[path.find(" d=\"").unwrap() + 4..];
+    let path = &path[..path.find('"').unwrap()];
+    assert!(
+        path.starts_with("M152,60") && path.ends_with("L224,68"),
+        "a--b leaves a's right side and enters b's left: {path}"
+    );
+}
+
+#[test]
 fn refuses_a_note_on_an_entity() {
     let spec = "type: er\nlevel: logical\ntitle: T\nlede: One entity.\nnodes:\n  - {id: a, noun: A, at: [0, 0], note: Dropped.}\n";
     let f = refused(spec);

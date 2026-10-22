@@ -17,6 +17,8 @@ pub(crate) struct Clear<'a> {
     /// The drawing above the legend: a label beside a route in the outer channel stays inside it.
     pub(crate) frame: Rect,
     pub(crate) boxes: &'a [Rect],
+    /// The group frames: a pill never sits on a frame's edge, as it would read as the frame's own label.
+    pub(crate) frames: &'a [Rect],
     pub(crate) routes: &'a [Vec<Point>],
     pub(crate) labels: Vec<Rect>,
 }
@@ -35,6 +37,28 @@ impl Clear<'_> {
                 .enumerate()
                 .all(|(k, w)| Some(k) == skip || seg(&w[0], &w[1]).gap2(rect) >= i64::from(GAP * GAP))
             && self.apart(rect, own, 16)
+    }
+
+    /// Whether `rect`, with its mask, lies wholly inside every frame it meets or wholly outside it.
+    fn off_frames(&self, rect: &Rect) -> bool {
+        !self.straddles(&rect.inflate(4))
+    }
+
+    /// Whether `r` lies across the edge of some frame.
+    fn straddles(&self, r: &Rect) -> bool {
+        self.frames.iter().any(|f| r.meets(&f.inflate(1)) && !f.inflate(-1).holds(r))
+    }
+
+    /// Whether the stretch `span` between a pill and its own line holds no other route, and, with `whole`, crosses no
+    /// frame edge, so the pill still reads as attached to that line.
+    fn attached(&self, span: &Rect, own: usize, whole: bool) -> bool {
+        !(whole && self.straddles(span))
+            && self
+                .routes
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != own)
+                .all(|(_, r)| r.windows(2).all(|w| !Rect::of_segment(w[0], w[1]).meets(&span.inflate(1))))
     }
 
     /// Whether every route but `own` keeps a squared distance of at least `d2` from `rect`.
@@ -88,21 +112,51 @@ pub(crate) fn place(pts: &[Point], own: usize, w: i32, h: i32, clear: &Clear<'_>
             let (lo, hi) = (c - along / 2 - GAP, c + along / 2 + GAP);
             // The cut's ends keep a hop's width from any other route, so a route never seems to end at a gap.
             let gap = if horizontal { Rect::new(lo, a.1, hi - lo, 0) } else { Rect::new(a.0, lo, 0, hi - lo) };
-            if clear.ok(&rect, own, Some(k)) && clear.apart(&gap, own, i64::from(GAP * GAP)) {
+            if clear.ok(&rect, own, Some(k)) && clear.off_frames(&rect) && clear.apart(&gap, own, i64::from(GAP * GAP))
+            {
                 return Some(Spot { rect, cut: Some((k, lo, hi)) });
             }
         }
     }
-    for &(_, a, b) in &segs {
-        for f in SLIDE {
-            let c = ((a.0 + (b.0 - a.0) * f / 100) / 4 * 4, (a.1 + (b.1 - a.1) * f / 100) / 4 * 4);
-            let beside = if a.1 == b.1 {
-                [Rect::new(c.0 - w / 2, c.1 - GAP - h, w, h), Rect::new(c.0 - w / 2, c.1 + GAP, w, h)]
-            } else {
-                [Rect::new(c.0 + GAP, c.1 - h / 2, w, h), Rect::new(c.0 - GAP - w, c.1 - h / 2, w, h)]
-            };
-            if let Some(rect) = beside.into_iter().find(|r| clear.ok(r, own, None)) {
-                return Some(Spot { rect, cut: None });
+    // A pill that must leave its line crosses no other route; it crosses a frame's edge only when no spot keeps to
+    // the line's side of every frame.
+    for whole in [true, false] {
+        for &(_, a, b) in &segs {
+            let flat = a.1 == b.1;
+            let line = if flat { a.1 } else { a.0 };
+            // A frame beside the line may leave no room inside it: the pill then clears the frame's edge by its mask, so
+            // those offsets come after the plain gap, which every slide position tries first.
+            let mut offs = vec![GAP];
+            for f in clear.frames {
+                let edges = if flat { [f.y, f.bottom()] } else { [f.x, f.right()] };
+                offs.extend(
+                    edges.map(|e| ((e - line).abs() + 8) / 4 * 4).into_iter().filter(|d| (GAP..=GAP + 12).contains(d)),
+                );
+            }
+            offs.sort_unstable();
+            offs.dedup();
+            for d in offs {
+                for f in SLIDE {
+                    let c = ((a.0 + (b.0 - a.0) * f / 100) / 4 * 4, (a.1 + (b.1 - a.1) * f / 100) / 4 * 4);
+                    // Each spot with the stretch between it and the line.
+                    let beside = if flat {
+                        [
+                            (Rect::new(c.0 - w / 2, c.1 - d - h, w, h), Rect::new(c.0 - w / 2, c.1 - d, w, d)),
+                            (Rect::new(c.0 - w / 2, c.1 + d, w, h), Rect::new(c.0 - w / 2, c.1, w, d)),
+                        ]
+                    } else {
+                        [
+                            (Rect::new(c.0 + d, c.1 - h / 2, w, h), Rect::new(c.0, c.1 - h / 2, d, h)),
+                            (Rect::new(c.0 - d - w, c.1 - h / 2, w, h), Rect::new(c.0 - d, c.1 - h / 2, d, h)),
+                        ]
+                    };
+                    let fits = |(r, span): &(Rect, Rect)| {
+                        clear.ok(r, own, None) && clear.off_frames(r) && (d == GAP || clear.attached(span, own, whole))
+                    };
+                    if let Some((rect, _)) = beside.into_iter().find(fits) {
+                        return Some(Spot { rect, cut: None });
+                    }
+                }
             }
         }
     }
