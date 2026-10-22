@@ -56,8 +56,10 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     node_id(&walk.id)?;
     // The bundle gates the walk: an installed bundle that drifted refuses before the vault is read (17, check 7).
     // The harness's own start hook names it in `BP_HARNESS`, so the other harness's drift does not stop its session.
+    // The value is read before the clone is found: an unparsed environment value refuses wherever the walk runs (15).
+    let harness = harness()?;
     if let Some(top) = bp_vault::git::Repo::find(cwd).and_then(|r| r.main_top()) {
-        bp_install::check(&top, harness()?)?;
+        bp_install::check(&top, harness)?;
     }
     let vault = Vault::discover(cwd)?;
     let index = Index::open(&vault)?;

@@ -49,6 +49,7 @@ impl World {
             .env("BP_NOW", "2026-10-19T08:00:00Z")
             .env_remove("BP_ROLE")
             .env_remove("BP_SESSION")
+            .env_remove("BP_HARNESS")
             .env("HOME", h)
             .env("XDG_CONFIG_HOME", h)
             .env("CLAUDE_CONFIG_DIR", h.join(".claude"))
@@ -63,6 +64,7 @@ impl World {
         let base = [
             ("BP_VAULT", vault.as_str()),
             ("BP_SESSION", ""),
+            ("BP_HARNESS", ""),
             ("HOME", h.as_str()),
             ("XDG_CONFIG_HOME", h.as_str()),
             ("CLAUDE_CONFIG_DIR", claude.as_str()),
@@ -145,6 +147,8 @@ fn walk_checks_only_the_bundle_of_the_harness_it_names() {
     assert!(fix.unwrap().ends_with("bp install --target codex"));
     assert_eq!(refused("").1.as_deref(), Some("bundle_mismatch"), "no harness named checks both");
     assert_eq!(refused("gemini").1.as_deref(), Some("usage"), "a name outside the set is an environment error");
+    let (code, v) = w.bp(w.t.path(), &[("BP_HARNESS", "gemini")], &walk);
+    assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "the value is read outside a clone too: {v}");
 }
 
 #[test]

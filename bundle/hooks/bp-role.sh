@@ -74,7 +74,8 @@ done
 [ -n "$role" ] || exit 0
 # The prefix also names the harness, as the start hook does, so a later `bp walk` checks only this harness's bundle
 # (17, check 7). It follows `BP_ROLE=`, as the allow rule `Bash(export BP_ROLE=*)` needs that start, and it stays a
-# literal, as the rule does not allow a substitution.
+# literal, as the rule does not allow a substitution. A script outside both directories, or run through a symlink,
+# names no harness, so the prefix omits it and the walk checks both bundles: the safe side.
 case $(cd "$(dirname "$0")/.." && pwd) in
 */.claude) harness=" BP_HARNESS=claude" ;;
 */.codex) harness=" BP_HARNESS=codex" ;;
