@@ -1,9 +1,17 @@
 //! `cargo xtask <check>`. `deps`, the crate rule: exit 0 when the rule holds, 2 with one line per violation.
 //! `bench`, the call budget: prints the largest ratio last. `scratch`, a writable copy of `$BP_VAULT`: prints its
 //! directory. `lines`, the file cap: exit 2 with one line per non-test file over 500 lines. `forge <project>`, a fake
-//! forge for a repo block: prints its directory. `gh`, the fake `gh` that directory's shim runs.
+//! forge for a repo block: prints its directory. `gh`, the fake `gh` that directory's shim runs. `eval`, the skill eval and its grader
+//! (`eval.rs`).
 
 mod bench;
+mod eval;
+mod eval_agent;
+mod eval_arms;
+mod eval_fixture;
+mod eval_grade;
+mod eval_sandbox;
+mod eval_trace;
 mod forge;
 mod gh;
 mod lines;
@@ -33,6 +41,15 @@ fn main() -> ExitCode {
             };
         }
         Some("gh") => return gh::run(&args[1..]),
+        Some("eval") => {
+            return match eval::run(&args[1..]) {
+                Err(e) if e.is::<eval::Usage>() => {
+                    eprintln!("xtask: {e:#}");
+                    ExitCode::from(4)
+                }
+                done => report(done),
+            };
+        }
         Some(verb @ ("scratch" | "forge")) => {
             let made = if verb == "scratch" { scratch::run() } else { forge::run(&args[1..]) };
             return match made {
@@ -48,7 +65,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project>"
+                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project> | cargo xtask eval <skill> --trials N | cargo xtask eval --grade [--check] <skill>"
             );
             return ExitCode::from(4);
         }
