@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use bp_install::Target;
 use bp_operation::Action;
 use bp_vault::{Code, Gap, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
@@ -34,6 +35,19 @@ pub struct Walk {
     pub done: bool,
 }
 
+/// The harness that runs this process: `BP_HARNESS`, none when unset or empty. A value outside the set is an
+/// environment value that does not parse: `usage`, as for `BP_ROLE`.
+fn harness() -> Result<Option<Target>, Refusal> {
+    let text = std::env::var_os("BP_HARNESS").unwrap_or_default();
+    let text = text.to_string_lossy();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse().map(Some).map_err(|_| {
+        Refusal::usage(format!("BP_HARNESS={text}"), "unset BP_HARNESS, or set it to one of: claude, codex")
+    })
+}
+
 pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     let action: Action = walk.action.parse().map_err(|_| {
         let actions: Vec<&str> = Action::ALL.iter().map(|a| a.as_str()).collect();
@@ -41,8 +55,9 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     })?;
     node_id(&walk.id)?;
     // The bundle gates the walk: an installed bundle that drifted refuses before the vault is read (17, check 7).
+    // The harness's own start hook names it in `BP_HARNESS`, so the other harness's drift does not stop its session.
     if let Some(top) = bp_vault::git::Repo::find(cwd).and_then(|r| r.main_top()) {
-        bp_install::check(&top)?;
+        bp_install::check(&top, harness()?)?;
     }
     let vault = Vault::discover(cwd)?;
     let index = Index::open(&vault)?;

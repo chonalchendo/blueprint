@@ -193,11 +193,14 @@ fn section() -> String {
 
 /// Refuses `bundle_mismatch` when an installed bundle at `top` drifted: another tool version, a manifest that is not
 /// the bundle this binary ships, an entry absent or with another hash, or a `bp-` entry with no manifest. A clone with
-/// no `bp-` entry is not checked.
-pub fn check(top: &Path) -> Result<(), Refusal> {
+/// no `bp-` entry is not checked. With `only` named, the other harness's bundle is not read: a stale Codex bundle never
+/// stops a Claude session. With none, both are checked.
+pub fn check(top: &Path, only: Option<Target>) -> Result<(), Refusal> {
     let mut hashes = Hashes::load(top);
-    let checked =
-        check_target(top, &spec::CLAUDE, &mut hashes).and_then(|()| check_target(top, &spec::CODEX, &mut hashes));
+    let checked = [&spec::CLAUDE, &spec::CODEX]
+        .into_iter()
+        .filter(|s| only.is_none_or(|t| s.target == t))
+        .try_for_each(|s| check_target(top, s, &mut hashes));
     hashes.save();
     checked
 }

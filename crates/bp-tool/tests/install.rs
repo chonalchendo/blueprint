@@ -128,6 +128,48 @@ fn walk_refuses_a_drifted_bundle_before_it_reads_the_vault() {
 }
 
 #[test]
+fn walk_checks_only_the_bundle_of_the_harness_it_names() {
+    let w = World::new();
+    let walk = ["walk", MILESTONE, "--for", "derive", "--ids"];
+    w.bp(&w.code(), &[], &["install", "--target", "codex"]);
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    let hook = w.code().join(".codex/hooks/bp-start.sh");
+    std::fs::write(&hook, "stale").unwrap();
+    let refused = |harness: &str| {
+        let (code, v) = w.bp(&w.code(), &[("BP_HARNESS", harness)], &walk);
+        (code, v["code"].as_str().map(str::to_owned), v["fix"].as_str().map(str::to_owned))
+    };
+    assert_eq!(refused("claude").0, Some(0), "a stale Codex bundle does not stop a Claude walk");
+    let (code, bundle, fix) = refused("codex");
+    assert_eq!((code, bundle.as_deref()), (Some(2), Some("bundle_mismatch")));
+    assert!(fix.unwrap().ends_with("bp install --target codex"));
+    assert_eq!(refused("").1.as_deref(), Some("bundle_mismatch"), "no harness named checks both");
+    assert_eq!(refused("gemini").1.as_deref(), Some("usage"), "a name outside the set is an environment error");
+}
+
+#[test]
+fn each_start_hook_names_its_harness_and_refuses_only_its_own_drift() {
+    let w = World::new();
+    w.bp(&w.code(), &[], &["install", "--target", "codex"]);
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    std::fs::write(w.code().join(".codex/hooks/bp-start.sh"), "stale").unwrap();
+    let path = bin(&w.t.path().join("bin"), &[("bp", assert_cmd::cargo::cargo_bin("bp"))], true);
+    let input = serde_json::json!({ "hook_event_name": "SessionStart", "session_id": "s" }).to_string();
+    let claude = w.hook("bp-start.sh", &input, &path, &[]);
+    let context = |out: &Output| -> Value {
+        let out: Value = serde_json::from_slice(&out.stdout).unwrap();
+        serde_json::from_str(out["hookSpecificOutput"]["additionalContext"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(context(&claude)["seed"], "projects/bp/project", "the stale Codex hook does not stop Claude");
+    // The shipped script with one line added still runs, and no longer hashes to the manifest.
+    let shipped = std::fs::read_to_string(w.code().join(".claude/hooks/bp-start.sh")).unwrap();
+    std::fs::write(w.code().join(".codex/hooks/bp-start.sh"), shipped + "# stale\n").unwrap();
+    let mut c = w.command(w.code().join(".codex/hooks/bp-start.sh"), &w.code());
+    let codex = c.env("PATH", &path).stdin(std::process::Stdio::null()).output().unwrap();
+    assert_eq!(context(&codex)["code"], "bundle_mismatch", "{}", String::from_utf8_lossy(&codex.stdout));
+}
+
+#[test]
 fn the_guard_denies_a_vault_path_and_fails_closed() {
     let w = World::new();
     w.bp(&w.code(), &[], &["install", "--target", "claude"]);
