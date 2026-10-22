@@ -3,6 +3,13 @@
 # The walk's map goes to the session's context as `additionalContext`: stdout that is one JSON object is read as the
 # hook's output, not as context. A refusal is context too. The line that names `jq` is plain text, which is context.
 command -v jq > /dev/null || { echo "bp-start: jq is not installed, so the last seed is not walked; install jq"; exit 0; }
+# One script serves both harnesses, so its install directory names the harness. The walk then checks only that
+# harness's bundle: the other's drift stops its own start hook, not this session (17, check 7). A script outside both
+# directories, or run through a symlink, names no harness, so the walk checks both: the safe side.
+case $(cd "$(dirname "$0")/.." && pwd) in
+*/.claude) export BP_HARNESS=claude ;;
+*/.codex) export BP_HARNESS=codex ;;
+esac
 here=$(bp where --json 2> /dev/null) || exit 0
 vault=$(jq -r '.vault' <<< "$here")
 project=$(jq -r '.project // empty' <<< "$here")

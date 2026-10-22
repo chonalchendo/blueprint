@@ -22,7 +22,7 @@ fn write(top: &Path, rel: &str, text: &str) {
 
 /// The subject `check` refuses, or `ok`.
 fn checked(top: &Path) -> String {
-    match check(top) {
+    match check(top, None) {
         Ok(()) => "ok".into(),
         Err(r) => {
             assert_eq!((r.code, r.exit), (Code::BundleMismatch, 2), "{r:?}");
@@ -127,6 +127,19 @@ fn check_catches_each_drift_and_install_repairs_it() {
         assert!(install(t, Target::Claude).unwrap().0, "{subject}");
         assert_eq!(checked(t), "ok", "{subject}");
     }
+}
+
+#[test]
+fn a_named_harness_checks_only_its_own_bundle() {
+    let dir = top();
+    let t = dir.path();
+    install(t, Target::Codex).unwrap();
+    install(t, Target::Claude).unwrap();
+    let hook = ".codex/hooks/bp-start.sh";
+    write(t, hook, &(read(t, hook) + "# stale\n"));
+    assert_eq!(check(t, Some(Target::Claude)).map_err(|r| r.subject), Ok(()), "the Claude session is not stopped");
+    assert_eq!(check(t, Some(Target::Codex)).unwrap_err().subject, hook);
+    assert_eq!(check(t, None).unwrap_err().subject, hook, "no harness named checks both");
 }
 
 #[test]
@@ -306,7 +319,7 @@ fn the_claude_target_imports_agents_md_into_the_first_claude_file() {
     install(t, Target::Claude).unwrap();
     write(t, "CLAUDE.md", "# Late\n");
     assert_eq!(checked(t), "CLAUDE.md#bp");
-    assert!(check(t).unwrap_err().fix.contains("CLAUDE.md now hides AGENTS.md"), "the reason names the cause");
+    assert!(check(t, None).unwrap_err().fix.contains("CLAUDE.md now hides AGENTS.md"), "the reason names the cause");
     assert!(install(t, Target::Claude).unwrap().0);
     assert_eq!(read(t, "CLAUDE.md"), format!("# Late\n\n{IMPORT}"));
     assert_eq!(checked(t), "ok");

@@ -49,6 +49,7 @@ impl World {
             .env("BP_NOW", "2026-10-19T08:00:00Z")
             .env_remove("BP_ROLE")
             .env_remove("BP_SESSION")
+            .env_remove("BP_HARNESS")
             .env("HOME", h)
             .env("XDG_CONFIG_HOME", h)
             .env("CLAUDE_CONFIG_DIR", h.join(".claude"))
@@ -63,6 +64,7 @@ impl World {
         let base = [
             ("BP_VAULT", vault.as_str()),
             ("BP_SESSION", ""),
+            ("BP_HARNESS", ""),
             ("HOME", h.as_str()),
             ("XDG_CONFIG_HOME", h.as_str()),
             ("CLAUDE_CONFIG_DIR", claude.as_str()),
@@ -125,6 +127,50 @@ fn walk_refuses_a_drifted_bundle_before_it_reads_the_vault() {
     let (code, v) = w.bp(&w.code(), &[("BP_VAULT", "/nonexistent")], &walk);
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("bundle_mismatch")), "{v}");
     assert!(v["fix"].as_str().unwrap().ends_with("bp install --target claude"), "{v}");
+}
+
+#[test]
+fn walk_checks_only_the_bundle_of_the_harness_it_names() {
+    let w = World::new();
+    let walk = ["walk", MILESTONE, "--for", "derive", "--ids"];
+    w.bp(&w.code(), &[], &["install", "--target", "codex"]);
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    let hook = w.code().join(".codex/hooks/bp-start.sh");
+    std::fs::write(&hook, "stale").unwrap();
+    let refused = |harness: &str| {
+        let (code, v) = w.bp(&w.code(), &[("BP_HARNESS", harness)], &walk);
+        (code, v["code"].as_str().map(str::to_owned), v["fix"].as_str().map(str::to_owned))
+    };
+    assert_eq!(refused("claude").0, Some(0), "a stale Codex bundle does not stop a Claude walk");
+    let (code, bundle, fix) = refused("codex");
+    assert_eq!((code, bundle.as_deref()), (Some(2), Some("bundle_mismatch")));
+    assert!(fix.unwrap().ends_with("bp install --target codex"));
+    assert_eq!(refused("").1.as_deref(), Some("bundle_mismatch"), "no harness named checks both");
+    assert_eq!(refused("gemini").1.as_deref(), Some("usage"), "a name outside the set is an environment error");
+    let (code, v) = w.bp(w.t.path(), &[("BP_HARNESS", "gemini")], &walk);
+    assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "the value is read outside a clone too: {v}");
+}
+
+#[test]
+fn each_start_hook_names_its_harness_and_refuses_only_its_own_drift() {
+    let w = World::new();
+    w.bp(&w.code(), &[], &["install", "--target", "codex"]);
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    std::fs::write(w.code().join(".codex/hooks/bp-start.sh"), "stale").unwrap();
+    let path = bin(&w.t.path().join("bin"), &[("bp", assert_cmd::cargo::cargo_bin("bp"))], true);
+    let input = serde_json::json!({ "hook_event_name": "SessionStart", "session_id": "s" }).to_string();
+    let claude = w.hook("bp-start.sh", &input, &path, &[]);
+    let context = |out: &Output| -> Value {
+        let out: Value = serde_json::from_slice(&out.stdout).unwrap();
+        serde_json::from_str(out["hookSpecificOutput"]["additionalContext"].as_str().unwrap()).unwrap()
+    };
+    assert_eq!(context(&claude)["seed"], "projects/bp/project", "the stale Codex hook does not stop Claude");
+    // The shipped script with one line added still runs, and no longer hashes to the manifest.
+    let shipped = std::fs::read_to_string(w.code().join(".claude/hooks/bp-start.sh")).unwrap();
+    std::fs::write(w.code().join(".codex/hooks/bp-start.sh"), shipped + "# stale\n").unwrap();
+    let mut c = w.command(w.code().join(".codex/hooks/bp-start.sh"), &w.code());
+    let codex = c.env("PATH", &path).stdin(std::process::Stdio::null()).output().unwrap();
+    assert_eq!(context(&codex)["code"], "bundle_mismatch", "{}", String::from_utf8_lossy(&codex.stdout));
 }
 
 #[test]
@@ -212,6 +258,27 @@ fn the_session_hooks_record_the_seed_and_walk_it() {
 }
 
 #[test]
+fn the_role_hook_prefix_names_the_harness_for_a_later_walk() {
+    let w = World::new();
+    w.bp(&w.code(), &[], &["install", "--target", "codex"]);
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    std::fs::write(w.code().join(".codex/hooks/bp-start.sh"), "stale").unwrap();
+    let path = bin(&w.t.path().join("bin"), &[("bp", assert_cmd::cargo::cargo_bin("bp"))], true);
+    let input = serde_json::json!({
+        "hook_event_name": "PreToolUse", "session_id": "s", "tool_name": "Bash",
+        "tool_input": { "command": format!("bp walk {MILESTONE} --for derive --ids --json") },
+    });
+    let out = w.hook("bp-role.sh", &input.to_string(), &path, &[]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let command = v["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
+    // The allow rule `Bash(export BP_ROLE=*)` needs this start, and a literal prefix.
+    assert!(command.starts_with("export BP_ROLE=session BP_HARNESS=claude BP_SESSION='s'; bp walk"), "{command}");
+    let run = w.command("bash", &w.code()).env("PATH", &path).args(["-c", command]).output().unwrap();
+    let walked: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert!(walked["code"].is_null(), "the stale Codex bundle does not stop the Claude walk: {walked}");
+}
+
+#[test]
 fn a_handoff_seed_follows_a_record_to_its_node() {
     let w = World::new();
     let head = "a".repeat(40);
@@ -257,7 +324,10 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
     let message = git(w.vault.path(), &["log", "-1", "--format=%B"]);
     assert!(message.contains("Bp-Role: session\nBp-Session: s-one"), "{message}");
     let out = call("bp walk x --for complete --json | jq .", Some("bp-worker"));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("export BP_ROLE=worker BP_SESSION='a-one'; bp walk"));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("export BP_ROLE=worker BP_HARNESS=claude BP_SESSION='a-one'; bp walk")
+    );
     // A read and a call with no verb pass for every role; an agent type with no role reads with no prefix.
     for (command, agent, prefix) in [
         ("bp list issue --json", Some("bp-reviewer"), "export BP_ROLE=reviewer"),
