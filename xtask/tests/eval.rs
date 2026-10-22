@@ -3,28 +3,12 @@
 //! the sandbox, the prompt, the transcript store, the vault log, the grade, the result file and `--grade --check`.
 //! Needs a built `bp` next to the xtask binary; the test says so and passes without one.
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::PathBuf;
 use std::process::Command;
 
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
-}
-
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(["-c", "user.name=t", "-c", "user.email=t@t.invalid"])
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-    String::from_utf8(out.stdout).unwrap().trim().to_string()
-}
-
-fn write(path: &Path, text: &str) {
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, text).unwrap();
-}
+use common::{git, root, write};
 
 /// The agent. `with` and `filler` preload a body into the transcript, as the harness does for a role's `skills:`
 /// line; `without` loads none and makes one call. It fails when the sandbox is not at `needs-review`.
@@ -60,11 +44,7 @@ struct Setup {
 }
 
 fn setup() -> Option<Setup> {
-    let bp = Path::new(env!("CARGO_BIN_EXE_xtask")).with_file_name("bp");
-    if !bp.is_file() {
-        eprintln!("skipped: {} is not built (cargo build -p bp-tool)", bp.display());
-        return None;
-    }
+    let bp = common::bp()?;
     let dir = tempfile::tempdir().unwrap();
     let t = dir.path();
     let repo = t.join("repo");
@@ -85,13 +65,7 @@ fn setup() -> Option<Setup> {
     write(&t.join("fixtures/pr-2.md"), &fixture);
     write(&t.join("fixtures/holdout.txt"), "pr-2\n");
 
-    let project = "---\nkind: project\ntitle: Bp\nstatus: active\nrepository: https://github.invalid/o/r\n---\n";
-    write(&t.join("vault/projects/bp/project.md"), project);
-    write(
-        &t.join("vault/projects/bp/designs/system.md"),
-        "---\nkind: design\ntitle: S\nstatus: active\n---\n\nBody.\n",
-    );
-    write(&t.join("vault/shared/.gitkeep"), "");
+    common::vault(&t.join("vault"));
     write(&t.join("agent.sh"), AGENT);
     Some(Setup { dir, bp, head, base })
 }

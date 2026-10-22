@@ -9,73 +9,37 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use bp_operation::Action;
 
 use crate::eval::Skill;
 use crate::eval_arms::{FILLER, body_of};
-use crate::eval_fixture::{Fixture, NEAR, Review};
-use crate::eval_trace::{BpCall, Trace, sha256};
-
-/// A run passes when its review is recorded (`walk --done`) and finds at least this share of the ground truth.
-const RECALL: f64 = 0.5;
+use crate::eval_fixture::Fixture;
+use crate::eval_score::{Graded, score};
+use crate::eval_trace::{Trace, sha256};
 
 const STATUSES: [&str; 4] = ["pending", "capability", "regression", "fold"];
 
-/// The load-bearing steps of `bp-review` that a transcript shows (21, the review row; the skill's steps 1 to 5).
-const STEPS: [&str; 5] = ["walk", "claim", "diff", "deltas", "review"];
-
-#[derive(Default)]
-pub struct Graded {
-    pub arm: String,
-    pub fixture: String,
-    pub number: usize,
-    pub trial: String,
-    pub sha: String,
-    pub log_sha: String,
-    /// The hash of the role file and skill body this trial ran on, from `<trial>.hash`.
-    pub hash: Option<String>,
-    pub models: BTreeSet<String>,
-    /// The skill is where the arm puts it: preloaded in `with`, absent in `without`, filler in `filler`.
-    pub loaded: bool,
-    /// The run made at least one `bp` call: only such a run is scored on adherence.
-    pub reached: bool,
-    pub steps: [bool; 5],
-    pub out_of_row: usize,
-    pub done: bool,
-    /// Ground-truth items some finding of the table matches, and items the final text names in any form.
-    pub hits: usize,
-    pub prose_hits: usize,
-    pub truth: usize,
-    /// Each finding's location, its text and the ground-truth item it matches (a position), if any.
-    pub findings: Vec<(String, String, Option<usize>)>,
-    pub failure: Option<String>,
-}
-
-impl Graded {
-    pub fn passed(&self) -> bool {
-        self.done && self.truth > 0 && share(self.hits, self.truth) >= RECALL
-    }
-
-    fn adherence(&self) -> f64 {
-        share(self.steps.iter().filter(|s| **s).count(), STEPS.len())
-    }
-}
-
 pub struct Grade {
-    skill: Skill,
+    pub skill: Skill,
     pub trials: Vec<Graded>,
     holdout: usize,
     /// The hash of the role file and skill body as the files hold them now.
     current: String,
-    fixtures: Vec<Fixture>,
+    pub fixtures: Vec<Fixture>,
 }
 
-/// The hash of the role file and the skill body together, `git hash-object --stdin`: the key of check 10. A run
-/// writes it beside its transcript, and a grade compares the traces' hash with the files'.
+/// The hash of the role file and the bodies of every skill that role preloads for the measured one,
+/// `git hash-object --stdin`: the key of check 10. For `bp-review` that is `bp-reviewer.md` and `bp-review`'s body;
+/// for both worker skills it is `bp-worker.md`, then `bp-complete`'s body, then `bp-respond`'s, because the `with`
+/// arm of each preloads both and a sibling edit changes what was measured. A run writes the hash beside its
+/// transcript, and a grade compares the traces' hash with the files'.
 pub fn bundle_hash(root: &Path, skill: &Skill) -> Result<String> {
-    let body = std::fs::read_to_string(root.join("bundle/skills").join(&skill.name).join("SKILL.md"))
-        .with_context(|| format!("read the body of {}", skill.name))?;
-    let role = std::fs::read_to_string(root.join(format!("bundle/roles/{}.md", skill.role_file())))?;
-    hash_object(&format!("{role}{body}"))
+    let mut text = std::fs::read_to_string(root.join(format!("bundle/roles/{}.md", skill.role_file())))?;
+    for name in skill.preloaded() {
+        text += &std::fs::read_to_string(root.join("bundle/skills").join(&name).join("SKILL.md"))
+            .with_context(|| format!("read the body of {name}"))?;
+    }
+    hash_object(&text)
 }
 
 impl Grade {
@@ -176,7 +140,11 @@ impl Grade {
         if ran.len() == 1 { ran.first().map_or(&self.current, |h| h) } else { &self.current }
     }
 
-    fn arm(&self, arm: &str) -> Vec<&Graded> {
+    pub fn fixture(&self, id: &str) -> &Fixture {
+        self.fixtures.iter().find(|f| f.id == id).expect("a graded trial names a loaded fixture")
+    }
+
+    pub fn arm(&self, arm: &str) -> Vec<&Graded> {
         self.trials.iter().filter(|t| t.arm == arm).collect()
     }
 
@@ -215,7 +183,10 @@ impl Grade {
             format!("uplift_ci: {}", ci.map_or("n/a".into(), |c| format!("[{}, {}]", f2(c.1), f2(c.2)))),
             format!("adherence: {}", with.adherence.map_or("n/a".into(), f2)),
             format!("out_of_row: {}", with.out_of_row),
-            format!("false_findings: {}", rate(with.wrong, with.found)),
+            format!(
+                "false_findings: {}",
+                if self.skill.action == Action::Review { rate(with.wrong, with.found) } else { "n/a".into() }
+            ),
             format!("walkthrough: {}", keep.walkthrough),
             format!("status: {}", keep.status),
             "\n## Trials\n".to_string(),
@@ -224,99 +195,33 @@ impl Grade {
         lines.extend(self.trials.iter().map(|t| format!("| {} | {} | {} |", t.trial, t.sha, t.log_sha)));
         lines.join("\n") + "\n"
     }
-
-    /// The report the owner reads at the walkthrough: per arm, then per trial with a pointer to the raw trace.
-    pub fn report(&self, store: &Path) -> String {
-        let mut lines =
-            vec![format!("# Eval report: {}\n", self.skill.name), format!("Traces: `{}`\n", store.display())];
-        lines.push("## Ground truth\n".into());
-        for f in &self.fixtures {
-            lines.push(format!("Fixture {} (base `{}`, head `{}`):\n", f.id, short(&f.base), short(&f.head)));
-            lines.extend(f.truth.iter().enumerate().map(|(i, t)| format!("{}. `{}`: {}", i + 1, t.location(), t.what)));
-            lines.push(String::new());
-        }
-        lines.push("## Arms\n".into());
-        lines.push("| arm | runs | outcome | prose recall | reached the tool | adherence there | out of row | findings | false | runs with no finding | skill loaded |".into());
-        lines.push("|---|---|---|---|---|---|---|---|---|---|---|".into());
-        for arm in ["with", "without", "filler"] {
-            let runs = self.arm(arm);
-            let s = Stats::of(&runs);
-            if s.runs > 0 {
-                lines.push(format!(
-                    "| {arm} | {} | {} of {} | {} of {} | {} | {} | {} | {} | {} | {} | {} |",
-                    s.runs,
-                    s.passes,
-                    s.runs,
-                    s.prose,
-                    s.truth,
-                    s.reached,
-                    s.adherence.map_or("n/a".into(), f2),
-                    s.out_of_row,
-                    s.found,
-                    s.wrong,
-                    s.silent,
-                    s.loaded
-                ));
-            }
-        }
-        lines.push(format!("\n- **Outcome:** a run passes when `bp walk --for review --done` holds after the review is recorded and the findings table matches at least {RECALL} of the ground truth. That needs the shape only `bp-review` defines (a `head:` line, one table).\n- **Prose recall:** items of the ground truth that the final text names in any form (its file and a line within {NEAR} lines). It does not depend on the shape, so a gap in outcome with none in prose recall means the arm cannot write the shape.\n- **Uplift:** the `with` rate less the `without` rate; the result file gives its Newcombe 95% interval.\n- **Role body:** the `without` arm's copy drops the sentences about the `Skill:` line; the `filler` arm keeps them.\n"));
-        lines.push("## Trials".into());
-        for t in &self.trials {
-            let steps: Vec<String> =
-                STEPS.iter().zip(t.steps).map(|(n, ok)| format!("{n} {}", if ok { "yes" } else { "no" })).collect();
-            let yes = |b: bool| if b { "yes" } else { "no" };
-            lines.push(format!(
-                "\n### {t}\n\n- outcome: {}; recorded: {}; ground truth matched by a table row: {} of {}; named in the text: {}\n- reached the tool: {}; steps: {}\n- out of row: {}; skill loaded as designed: {}\n- trace: `{dir}/{t}.jsonl`, vault log: `{dir}/{t}.vault.log`",
-                if t.passed() { "pass" } else { "fail" },
-                yes(t.done),
-                t.hits,
-                t.truth,
-                t.prose_hits,
-                yes(t.reached),
-                steps.join(", "),
-                t.out_of_row,
-                if t.loaded { "yes" } else { "NO" },
-                t = t.trial,
-                dir = store.display(),
-            ));
-            if let Some(why) = &t.failure {
-                lines.push(format!("- FAILED: {why}"));
-            }
-            for (at, what, item) in &t.findings {
-                let what: String = what.chars().take(160).collect();
-                let verdict = item.map_or("FALSE".to_string(), |i| format!("match, truth item {}", i + 1));
-                lines.push(format!("  - {verdict} `{at}`: {what}"));
-            }
-        }
-        lines.join("\n") + "\n"
-    }
 }
 
 /// One arm's trials, counted.
-struct Stats {
-    runs: usize,
-    passes: usize,
+pub(crate) struct Stats {
+    pub runs: usize,
+    pub passes: usize,
     /// Ground-truth items named in the final texts, over all runs, and the items the runs could have named.
-    prose: usize,
-    truth: usize,
-    reached: usize,
+    pub prose: usize,
+    pub truth: usize,
+    pub reached: usize,
     /// The mean share of steps done, over the runs that reached the tool; `None` when none did.
-    adherence: Option<f64>,
-    out_of_row: usize,
-    found: usize,
-    wrong: usize,
+    pub adherence: Option<f64>,
+    pub out_of_row: usize,
+    pub found: usize,
+    pub wrong: usize,
     /// Runs whose table held no finding: a reviewer that returns nothing is not precise.
-    silent: usize,
-    loaded: usize,
+    pub silent: usize,
+    pub loaded: usize,
 }
 
 impl Stats {
-    fn of(runs: &[&Graded]) -> Self {
+    pub fn of(runs: &[&Graded]) -> Self {
         let reached: Vec<&&Graded> = runs.iter().filter(|r| r.reached).collect();
         let found: Vec<&(String, String, Option<usize>)> = runs.iter().flat_map(|r| &r.findings).collect();
         Self {
             runs: runs.len(),
-            passes: runs.iter().filter(|r| r.passed()).count(),
+            passes: runs.iter().filter(|r| r.pass).count(),
             prose: runs.iter().map(|r| r.prose_hits).sum(),
             truth: runs.iter().map(|r| r.truth).sum(),
             reached: reached.len(),
@@ -333,39 +238,13 @@ impl Stats {
 
 /// A count as a float. Counts of trials and findings are far below 2^52.
 #[allow(clippy::cast_precision_loss)]
-fn float(n: usize) -> f64 {
+pub(crate) fn float(n: usize) -> f64 {
     n as f64
 }
 
 /// `k` over `n`, for `n` above 0.
-fn share(k: usize, n: usize) -> f64 {
+pub(crate) fn share(k: usize, n: usize) -> f64 {
     float(k) / float(n)
-}
-
-/// Fills the scores of a `bp-review` trial: the steps its transcript shows, the calls outside the role's row, the
-/// record in the vault log and the findings against the ground truth.
-fn score(g: &mut Graded, skill: &Skill, fx: &Fixture, trace: &Trace, log: &str) {
-    let calls = trace.bp_calls();
-    let allowed = skill.allowed();
-    let review = Review::parse(&trace.final_text());
-    let first = |c: &BpCall| c.args.split_whitespace().next().unwrap_or_default().to_string();
-    let head = short(&fx.head);
-    g.reached = !calls.is_empty();
-    g.steps = [
-        calls.iter().any(|c| c.verb == "walk" && c.args.contains("--for review")),
-        calls.iter().any(|c| c.verb == "list" && first(c) == "claim"),
-        trace.commands().iter().any(|c| c.contains("git") && c.contains("diff") && c.contains(head)),
-        calls.iter().any(|c| c.verb == "list" && first(c) == "delta"),
-        review.as_ref().is_some_and(|r| r.tables == 1 && r.head.starts_with(head)),
-    ];
-    g.out_of_row = calls.iter().filter(|c| !allowed.contains(&c.verb.as_str())).count();
-    g.done = log.lines().any(|l| l.starts_with("record review "));
-    let findings = review.map(|r| r.findings).unwrap_or_default();
-    let assigned = fx.assign(&findings);
-    g.hits = fx.hits(&assigned);
-    g.prose_hits = fx.named_in(&trace.final_text());
-    g.truth = fx.truth.len();
-    g.findings = findings.iter().zip(assigned).map(|(f, item)| (f.location.clone(), f.text.clone(), item)).collect();
 }
 
 /// The owner's lines of a result file: kept across a regrade.
@@ -412,16 +291,16 @@ fn wilson(k: usize, n: usize) -> (f64, f64, f64) {
     (p, (centre - spread) / scale, (centre + spread) / scale)
 }
 
-fn f2(x: f64) -> String {
+pub(crate) fn f2(x: f64) -> String {
     format!("{:.2}", if x.abs() < 0.005 { 0.0 } else { x })
 }
 
-fn short(sha: &str) -> &str {
+pub(crate) fn short(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
 
 /// `git hash-object --stdin`: the hash of the role file and the skill body together, the key of check 10.
-fn hash_object(text: &str) -> Result<String> {
+pub(crate) fn hash_object(text: &str) -> Result<String> {
     use std::io::Write;
     let mut child = Command::new("git")
         .args(["hash-object", "--stdin"])

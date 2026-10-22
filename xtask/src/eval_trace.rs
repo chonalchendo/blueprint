@@ -82,8 +82,11 @@ fn in_value(v: &Value, needle: &str) -> bool {
 }
 
 /// The `bp` calls of one shell command. The command splits at `;`, `&`, `|`, a newline, a parenthesis and a
-/// backtick, and a segment counts when its first word, after `export`, `env`, `timeout N` and assignments, is `bp`.
-/// A quoted `;` splits a string wrongly, which can drop a call or invent one; the grade is a count over many runs.
+/// backtick, and a segment counts when its first word, after `export`, `env`, `timeout N` and assignments, is `bp`
+/// (as the role's hook resolves it) or a path to a `bp` in a `bin*` directory, the sandbox's. A `bp` that the worker
+/// builds under `target/` is the code under test, not a call of the role, and `$B set` is no call either.
+/// A quoted `;` splits a string wrongly, and a line that starts with `bp` inside a heredoc counts as a call; either
+/// can drop a call or invent one, and the grade is a count over many runs.
 fn calls_in(command: &str) -> Vec<BpCall> {
     let mut out = Vec::new();
     for segment in command.split([';', '&', '|', '\n', '(', ')', '`']) {
@@ -97,7 +100,7 @@ fn calls_in(command: &str) -> Vec<BpCall> {
                 break;
             }
         }
-        if words.next().is_none_or(|w| w.rsplit('/').next() != Some("bp")) {
+        if words.next().is_none_or(|w| !is_bp(w)) {
             continue;
         }
         let rest: Vec<&str> = words.collect();
@@ -106,6 +109,11 @@ fn calls_in(command: &str) -> Vec<BpCall> {
         }
     }
     out
+}
+
+fn is_bp(word: &str) -> bool {
+    let mut parts = word.rsplit('/');
+    parts.next() == Some("bp") && parts.next().is_none_or(|dir| dir.starts_with("bin"))
 }
 
 /// The sha256 of a file as `shasum` prints it: a hash the result file holds, so a swapped transcript shows.
@@ -134,6 +142,10 @@ mod tests {
         let seen: Vec<_> = c.iter().map(|c| (c.verb.as_str(), c.args.as_str())).collect();
         assert_eq!(seen, [("walk", "a --for review --json"), ("list", "claim")]);
         assert!(calls_in("echo bp land; git diff").is_empty(), "a word later in a segment is no call");
+        assert!(
+            calls_in("target/release/bp set x; ./target/debug/bp create y; $B set z").is_empty(),
+            "code under test"
+        );
         assert!(calls_in("bp --help").is_empty(), "no verb");
     }
 

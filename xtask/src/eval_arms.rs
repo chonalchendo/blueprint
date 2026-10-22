@@ -160,6 +160,20 @@ mod tests {
     }
 
     #[test]
+    fn the_worker_arms_drop_one_skill_and_keep_the_other() {
+        let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bundle");
+        let role = std::fs::read_to_string(bundle.join("roles/bp-worker.md")).unwrap();
+        assert!(role.contains("skills: bp-complete, bp-respond") && role.contains("`Skill:`"));
+        let without = without_skill_sentences(&unpreload(&role, "bp-complete"));
+        assert!(without.contains("skills: bp-respond\n") && !without.contains("Skill:"), "{without}");
+        assert!(without.contains("Do not run a verb on the `Forbidden:` line."), "{without}");
+        for action in ["complete", "respond"] {
+            let template = std::fs::read_to_string(bundle.join(format!("roles/bp-worker/{action}.md"))).unwrap();
+            assert!(template.lines().any(|l| l == format!("Skill: bp-{action}")), "{action}");
+        }
+    }
+
+    #[test]
     fn the_role_body_loses_the_sentences_about_the_skill_line() {
         let role = "You are X. The prompt has five lines: `Node:`, `Skill:` and `Stop:`. Run the skill on the `Skill:` line for the node. Do not run a verb on the `Forbidden:` line. Return it.\n\nStop: here.\n";
         assert_eq!(

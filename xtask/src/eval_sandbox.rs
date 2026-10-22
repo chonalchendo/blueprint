@@ -1,6 +1,8 @@
 //! The sandbox of one trial (29, design change 1). It is the replay's: a clone at the fixture's recorded base wired to
 //! the fake forge, a scratch copy of the vault, the bundle installed into the clone with every config home pointed at
-//! a scratch directory, and the claim state and stop point of the stored run.
+//! a scratch directory, and the claim state and stop point of the stored run. Review and respond start at an open
+//! pull request at the fixture's head (respond adds the recorded review); complete starts at an open issue with no
+//! claim, and with a dependency's open pull request when the fixture is stacked.
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -9,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+
+use bp_operation::Action;
 
 use crate::eval::Skill;
 use crate::eval_arms::FILLER;
@@ -23,17 +27,24 @@ pub struct Sandbox {
     pub forge: PathBuf,
     pub issue: String,
     bindir: PathBuf,
-    /// One cargo target directory for every trial: the issue's block builds `xtask` in each clone.
+    /// This trial's own `$TMPDIR`: `cargo xtask scratch` and `forge` prune the shared one by age and count, and a
+    /// worker's blocks call them on every `check` and `pr`, so a shared directory could lose a live sandbox.
+    tmp: PathBuf,
+    /// One cargo target directory for every trial: the issue's block builds `xtask` in each clone. `$BP_EVAL_TARGET`
+    /// keeps it across runs, so a smoke trial warms the build of the full run.
     target: PathBuf,
     /// The vault's head when the agent starts: the log is what the agent and the session add after it.
     start: String,
+    /// What the worker's branch is measured against: the clone's base, or the dependency's head when stacked.
+    pub scope_base: String,
 }
 
 impl Sandbox {
-    /// Builds the sandbox of one trial of a review: the pull request `fx` records is open on the fake forge and its
-    /// issue is claimed, so `walk --for review` reads `needs-review`. `repo` holds the base and the head.
+    /// Builds the sandbox of one trial. For a review the pull request `fx` records is open on the fake forge and its
+    /// issue is claimed, so `walk --for review` reads `needs-review`; a respond adds the review, so it reads
+    /// `needs-response`; a complete leaves the issue open and unclaimed. `repo` holds the base and the head.
     ///
-    /// `check` asserts, before the agent costs anything, that the clone holds the arm: the skill and the role's
+    /// `check_arm` asserts, before the agent costs anything, that the clone holds the arm: the skill and the role's
     /// `skills:` line as shipped for `with` and `filler`, neither for `without`. A skill placed wrong reads as zero
     /// recall (RA 5.5, 6). `work` holds the arm binaries and the cargo target directory that the sandbox shares.
     pub fn build(
@@ -42,11 +53,14 @@ impl Sandbox {
         bindir: &Path,
         work: &Path,
         fx: &Fixture,
-        arm: Option<(&Skill, &str)>,
+        skill: &Skill,
+        check_arm: Option<&str>,
     ) -> Result<Self> {
         let exe = std::env::current_exe().context("find the xtask binary")?;
+        let tmp = crate::scratch::fresh(&work.join("tmp"), 3)?.canonicalize()?;
         let made = |verb: &[&str], vault: &Path| {
-            capture(Command::new(&exe).args(verb).env("BP_VAULT", vault).current_dir(work).stdin(Stdio::null()))
+            let mut c = Command::new(&exe);
+            capture(c.args(verb).env("BP_VAULT", vault).env("TMPDIR", &tmp).current_dir(work).stdin(Stdio::null()))
         };
         let vault = PathBuf::from(made(&["scratch"], source)?);
         let forge = PathBuf::from(made(&["forge", PROJECT], &vault)?);
@@ -55,25 +69,23 @@ impl Sandbox {
             forge,
             issue: String::new(),
             bindir: bindir.to_path_buf(),
-            target: work.join("target"),
+            tmp: tmp.clone(),
+            target: std::env::var_os("BP_EVAL_TARGET").map_or_else(|| work.join("target"), PathBuf::from),
             start: String::new(),
+            scope_base: fx.stack.as_ref().map_or(&fx.base, |s| &s.0).clone(),
         };
         let code = sb.code();
-        let git = |dir: &Path, args: &[&str]| {
-            capture(Command::new("git").args(args).current_dir(dir).env("GIT_ALLOW_PROTOCOL", "file"))
-        };
         let repo_arg = repo.display().to_string();
-        git(&code, &["fetch", "-q", &repo_arg, &fx.base, &fx.head])?;
+        // The landed head is the answer to a complete trial, so its objects stay out of that clone.
+        let mut fetch = vec!["fetch", "-q", repo_arg.as_str(), &fx.base];
+        fetch.extend((skill.action != Action::Complete).then_some(fx.head.as_str()));
+        fetch.extend(fx.stack.iter().map(|s| s.0.as_str()));
+        git(&code, &fetch)?;
         git(&code, &["reset", "-q", "--hard", &fx.base])?;
         git(&code, &["push", "-q", "-f", "origin", "HEAD:master"])?;
 
-        let body = |name: &str, text: &str| -> Result<String> {
-            let file = sb.forge.join(name);
-            std::fs::write(&file, text)?;
-            Ok(file.display().to_string())
-        };
-        let milestone = body("milestone.body", "## Goal\n\nA sandbox milestone for an eval trial.\n")?;
-        let issue = body("issue.body", &format!("{}\n", fx.issue))?;
+        let milestone = sb.forge.join("milestone.body");
+        std::fs::write(&milestone, "## Goal\n\nA sandbox milestone for an eval trial.\n")?;
         let m = "projects/bp/milestones/eval-sandbox";
         sb.bp(
             &code,
@@ -88,17 +100,11 @@ impl Sandbox {
                 "--under",
                 DESIGN,
                 "--body-file",
-                &milestone,
+                &milestone.display().to_string(),
             ],
         )?;
         sb.bp(&code, None, &["transition", m, "approved"])?;
-        let made = sb.bp(
-            &code,
-            None,
-            &["create", "issue", "--project", PROJECT, "--title", &fx.title, "--under", m, "--body-file", &issue],
-        )?;
-        sb.issue = made["id"].as_str().context("create issue returned no id")?.to_string();
-        sb.bp(&code, None, &["link", &sb.issue.clone(), "cites", DESIGN])?;
+        sb.issue = sb.create_issue(&code, m, &fx.title, &fx.issue)?;
 
         // Every config home points into the forge directory, so the install touches nothing of the real home.
         let cfg = sb.forge.join("config");
@@ -111,15 +117,49 @@ impl Sandbox {
         }
         capture(install.args(["install", "--target", "claude", "--json"]))?;
 
-        if let Some((skill, arm)) = arm {
+        if let Some(arm) = check_arm {
             sb.assert_arm(skill, arm)?;
         }
-        let claimed = sb.bp(&code, Some("worker"), &["cut", &sb.issue.clone()])?;
-        let worktree = PathBuf::from(claimed["worktree"].as_str().context("cut returned no worktree")?);
-        git(&worktree, &["merge", "-q", "--ff-only", &fx.head])?;
-        sb.bp(&worktree, Some("worker"), &["pr", &sb.issue.clone()])?;
+        if let Some((head, title)) = &fx.stack {
+            // The dependency holds an open pull request at its landed head and a check that needs no build, so the
+            // worker's `cut` stacks on it (21, the complete row) and the trial pays for only its own issue.
+            let stub = "## Check\n\n~~~check shell {name=stub expect=0}\ntrue\n~~~\n";
+            let dependency = sb.create_issue(&code, m, title, stub)?;
+            sb.open_pr(&code, &dependency, head)?;
+            sb.bp(&code, None, &["link", &sb.issue.clone(), "depends", &dependency])?;
+        }
+        match skill.action {
+            Action::Complete => {}
+            Action::Respond => {
+                sb.open_pr(&code, &sb.issue.clone(), &fx.head)?;
+                if !sb.record_review(&fx.head, &fx.review_body())? {
+                    bail!("the vault refused the recorded review of {}", fx.id);
+                }
+            }
+            _ => sb.open_pr(&code, &sb.issue.clone(), &fx.head)?,
+        }
         sb.start = git(&sb.vault, &["rev-parse", "HEAD"])?.trim().to_string();
         Ok(sb)
+    }
+
+    /// An issue under `milestone` that cites the design, so the walk accepts it (21, rule 3).
+    fn create_issue(&self, code: &Path, milestone: &str, title: &str, text: &str) -> Result<String> {
+        let file = self.forge.join("issue.body");
+        std::fs::write(&file, format!("{text}\n"))?;
+        let args = ["create", "issue", "--project", PROJECT, "--title", title, "--under", milestone, "--body-file"];
+        let made = self.bp(code, None, &[&args[..], &[&file.display().to_string()]].concat())?;
+        let id = made["id"].as_str().context("create issue returned no id")?.to_string();
+        self.bp(code, None, &["link", &id, "cites", DESIGN])?;
+        Ok(id)
+    }
+
+    /// The worker's cut, the fixture's commits and `pr`: a pull request at `head` that the claim holds.
+    fn open_pr(&self, code: &Path, issue: &str, head: &str) -> Result<()> {
+        let claimed = self.bp(code, Some("worker"), &["cut", issue])?;
+        let worktree = PathBuf::from(claimed["worktree"].as_str().context("cut returned no worktree")?);
+        git(&worktree, &["merge", "-q", "--ff-only", head])?;
+        self.bp(&worktree, Some("worker"), &["pr", issue])?;
+        Ok(())
     }
 
     /// The installed clone holds what the arm says (see [`Sandbox::build`]).
@@ -166,7 +206,10 @@ impl Sandbox {
             .env("PATH", path.unwrap_or_default())
             .env("BP_VAULT", &self.vault)
             .env("GIT_ALLOW_PROTOCOL", "file")
+            .env("TMPDIR", &self.tmp)
             .env("CARGO_TARGET_DIR", &self.target)
+            .env("CARGO_INCREMENTAL", "0")
+            .env("CARGO_BUILD_JOBS", std::env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| "4".into()))
             .env("CARGO_NET_OFFLINE", "true")
             .env_remove("BP_ROLE")
             .env_remove("BP_SESSION")
@@ -175,7 +218,7 @@ impl Sandbox {
         c
     }
 
-    fn bp(&self, dir: &Path, role: Option<&str>, args: &[&str]) -> Result<Value> {
+    pub(crate) fn bp(&self, dir: &Path, role: Option<&str>, args: &[&str]) -> Result<Value> {
         let mut c = self.command("bp", dir);
         if let Some(r) = role {
             c.env("BP_ROLE", r).env("BP_SESSION", "eval");
@@ -252,8 +295,31 @@ impl Sandbox {
             }
             std::thread::sleep(Duration::from_millis(200));
         };
+        self.stop_leftovers();
         Ok((transcript, failure))
     }
+
+    /// Kills any process whose working directory is under the sandbox: a `cargo` or `rustc` that outlived its shell
+    /// (the group kill reaches only the shell's own group) would overlap the next trial and fill the disk. `lsof`
+    /// lists the working directory of every process; a missing `lsof` leaves them alone.
+    fn stop_leftovers(&self) {
+        let Ok(out) = Command::new("lsof").args(["-d", "cwd", "-F", "pn"]).output() else { return };
+        let (mut pid, mut stale) = (String::new(), Vec::new());
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some(p) = line.strip_prefix('p') {
+                pid = p.to_string();
+            } else if line.strip_prefix('n').is_some_and(|dir| Path::new(dir).starts_with(&self.forge)) {
+                stale.push(pid.clone());
+            }
+        }
+        for pid in stale {
+            let _ = Command::new("kill").args(["-s", "KILL", &pid]).status();
+        }
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    capture(Command::new("git").args(args).current_dir(dir).env("GIT_ALLOW_PROTOCOL", "file"))
 }
 
 /// Runs a command and returns its stdout. A failure carries stderr, and stdout when it holds an envelope.

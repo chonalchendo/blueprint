@@ -1,16 +1,25 @@
-//! A review fixture and the review it is graded against (29, design change 2). A fixture is one file in
-//! `xtask/evals/<skill>/`: a pull request at a recorded base and head, the issue the sandbox holds for it, and the
-//! ground truth: the findings of a past review that the worker fixed (`analysis/review-pr-*.md`, "Disposition").
+//! A fixture and the outcome it is graded against (29, design change 2). A fixture is one file in
+//! `xtask/evals/<skill>/`: the clone's recorded base, the issue the sandbox holds, and a ground truth. For `bp-review`
+//! and `bp-respond` the head is a pull request and the truth is the findings of a past review that the worker fixed
+//! (`analysis/review-pr-*.md`, "Disposition"). For `bp-complete` the head is the landed squash, and the truth is the
+//! issue's crates: the first two path parts of the files that squash changed, as `replay-evidence.sh` computes them.
 //!
 //! ```text
 //! base: <sha>
 //! head: <sha>
 //! title: <issue title>
+//! stack: <sha> | <title>                   (complete only: the dependency's pull request head)
+//! scope: <path part> <path part> ...       (complete only)
 //! truth:
-//! - <path>:<line>[-<line>][, <line>] | <what the finding said>
+//! - [<severity> [fixed|declined]] <path>:<line>[-<line>][, <line>] | <what the finding said>
+//! probe: <n> | <shell command>             (respond only, optional: run in the worker's worktree; exit 0 = item n holds)
 //! ---
 //! <the issue body, verbatim>
 //! ```
+//!
+//! For `bp-respond` each truth item also says how the past review closed it. `fixed` (the default) needs the item's
+//! file in the worker's diff against the review's head, and the probe of that item when there is one; `declined`
+//! needs a reasoned decline, and a fix of it fails. Without this the eval would measure the disposition syntax.
 //!
 //! `holdout.txt` in the same directory lists the held-out ids, one per line: no run reads those.
 
@@ -25,6 +34,11 @@ pub struct Fixture {
     pub title: String,
     pub truth: Vec<Truth>,
     pub issue: String,
+    /// The head and title of the dependency's pull request: the sandbox opens it, and the issue depends on it.
+    pub stack: Option<(String, String)>,
+    pub scope: Vec<String>,
+    /// `(item, command)`: a check that item `n` of a respond fixture is fixed, run in the worker's worktree.
+    pub probes: Vec<(usize, String)>,
 }
 
 /// One finding of the ground truth: a file and the lines it named. No line means the whole file.
@@ -32,6 +46,10 @@ pub struct Truth {
     path: String,
     lines: Vec<(u32, u32)>,
     pub what: String,
+    /// The first column of the review table: `bp-respond`'s sandbox records these rows.
+    severity: String,
+    /// How the past review closed the item: fixed, or rightly declined.
+    pub fixed: bool,
 }
 
 pub struct Finding {
@@ -63,6 +81,9 @@ impl Fixture {
             title: String::new(),
             truth: Vec::new(),
             issue: issue.trim().to_string(),
+            stack: None,
+            scope: Vec::new(),
+            probes: Vec::new(),
         };
         for line in head.lines().filter(|l| !l.trim().is_empty()) {
             if let Some(item) = line.strip_prefix("- ") {
@@ -74,13 +95,27 @@ impl Fixture {
                     "base" => f.base = value,
                     "head" => f.head = value,
                     "title" => f.title = value,
+                    "scope" => f.scope = value.split_whitespace().map(str::to_string).collect(),
+                    "stack" => {
+                        let (sha, title) =
+                            value.split_once('|').with_context(|| format!("{id}: stack is `<sha> | <title>`"))?;
+                        f.stack = Some((sha.trim().into(), title.trim().into()));
+                    }
+                    "probe" => {
+                        let (n, cmd) =
+                            value.split_once('|').with_context(|| format!("{id}: probe is `<n> | <cmd>`"))?;
+                        f.probes.push((
+                            n.trim().parse().with_context(|| format!("{id}: probe item {n}"))?,
+                            cmd.trim().into(),
+                        ));
+                    }
                     "truth" => {}
                     _ => bail!("{id}: unknown key `{key}`"),
                 }
             }
         }
-        if [&f.base, &f.head, &f.title].iter().any(|v| v.is_empty()) || f.truth.is_empty() {
-            bail!("{id}: base, head, title and at least one truth item are required");
+        if [&f.base, &f.head, &f.title].iter().any(|v| v.is_empty()) || (f.truth.is_empty() && f.scope.is_empty()) {
+            bail!("{id}: base, head, title and a truth item or a scope are required");
         }
         Ok(f)
     }
@@ -121,6 +156,13 @@ impl Fixture {
         (0..self.truth.len()).filter(|i| assigned.contains(&Some(*i))).count()
     }
 
+    /// The review the session records for `bp-respond`: the `head:` line and one table row per ground-truth item.
+    pub fn review_body(&self) -> String {
+        let rows = self.truth.iter().map(|t| format!("| {} | `{}` | {} |", t.severity, t.location(), t.what));
+        let table = ["| severity | location | finding |".into(), "|---|---|---|".into()];
+        format!("head: {}\n{}", self.head, table.into_iter().chain(rows).collect::<Vec<String>>().join("\n"))
+    }
+
     /// How many ground-truth items a text names, in any form: its file and a line within `NEAR` of the item's.
     /// A reply with no findings table still counts, so recall does not hang on the shape only `bp-review` defines.
     pub fn named_in(&self, text: &str) -> usize {
@@ -136,14 +178,30 @@ pub fn holdout(dir: &Path) -> Vec<String> {
 
 impl Truth {
     fn parse(at: &str, what: &str) -> Result<Self> {
+        let (tag, at) = match at.strip_prefix('[').and_then(|a| a.split_once(']')) {
+            Some((s, rest)) => (s, rest.trim()),
+            None => ("warn", at),
+        };
+        let mut words = tag.split_whitespace();
+        let severity = words.next().unwrap_or("warn");
+        let fixed = match words.next() {
+            None | Some("fixed") => true,
+            Some("declined") => false,
+            Some(other) => bail!("`{other}` is neither fixed nor declined"),
+        };
         let (path, lines) = locate(at).context("a location is `<path>[:<line>[-<line>]]`")?;
-        Ok(Self { path, lines, what: what.to_string() })
+        Ok(Self { path, lines, what: what.to_string(), severity: severity.to_string(), fixed })
     }
 
     pub fn location(&self) -> String {
         let lines: Vec<String> =
             self.lines.iter().map(|&(a, b)| if a == b { a.to_string() } else { format!("{a}-{b}") }).collect();
         if lines.is_empty() { self.path.clone() } else { format!("{}:{}", self.path, lines.join(", ")) }
+    }
+
+    /// Whether the worker's diff against the review's head touches this item's file.
+    pub fn touched(&self, files: &[String]) -> bool {
+        files.iter().any(|f| self.in_file(f))
     }
 
     fn in_file(&self, path: &str) -> bool {
@@ -243,6 +301,17 @@ mod tests {
     }
 
     #[test]
+    fn a_truth_item_says_how_it_closed_and_a_probe_checks_it() {
+        let text = "base: b\nhead: h\ntitle: T\ntruth:\n- [major] a.rs:1 | One.\n- [nit declined] a.rs:9 | Two.\nprobe: 1 | test -f a.rs | true\n---\nbody\n";
+        let f = Fixture::parse("pr-1", text).unwrap();
+        assert_eq!(f.truth.iter().map(|t| t.fixed).collect::<Vec<_>>(), [true, false]);
+        assert_eq!(f.probes, [(1, "test -f a.rs | true".to_string())]);
+        assert!(f.truth[0].touched(&["x/a.rs".into()]) && !f.truth[0].touched(&["b.rs".into()]));
+        assert!(Fixture::parse("x", &text.replace("declined", "kept")).is_err());
+        assert!(f.review_body().contains("| nit | `a.rs:9` | Two. |"), "the expected closing stays out of the review");
+    }
+
+    #[test]
     fn a_fixture_without_its_parts_refuses() {
         assert!(Fixture::parse("x", "base: b\n---\nbody").is_err(), "no head, title or truth");
         assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\ntruth:\n- a.rs | w\n").is_err(), "no `---`");
@@ -259,6 +328,54 @@ mod tests {
         assert_eq!(ids, ["pr-1"]);
         assert!(Fixture::load(dir.path(), Some("pr-2")).is_err());
         assert_eq!(holdout(dir.path()), ["pr-2"]);
+    }
+
+    #[test]
+    fn a_fixture_holds_a_stack_a_scope_and_the_rows_of_its_review() {
+        let text = "base: b1\nhead: h1\ntitle: T\nstack: d1 | The dependency\nscope: a/x justfile\ntruth:\n- [major] a/x.rs:20 | One.\n- b.rs | Two.\n---\nbody\n";
+        let f = Fixture::parse("m-1", text).unwrap();
+        assert_eq!(f.stack, Some(("d1".into(), "The dependency".into())));
+        assert_eq!(f.scope, ["a/x", "justfile"]);
+        let review = Review::parse(&f.review_body()).unwrap();
+        assert_eq!((review.head.as_str(), review.tables, review.findings.len()), ("h1", 1, 2));
+        let rows: Vec<String> = f.review_body().lines().skip(3).map(str::to_string).collect();
+        assert_eq!(rows, ["| major | `a/x.rs:20` | One. |", "| warn | `b.rs` | Two. |"]);
+        assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\n---\nbody").is_err(), "no truth and no scope");
+        assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\nscope: a\nstack: only-a-sha\n---\nb").is_err());
+        assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\nscope: a\n---\nbody").is_ok(), "a scope is a truth");
+    }
+
+    /// The shipped fixtures: each parses, names commits of this repository when the history is present, and a
+    /// complete fixture's scope is what its landed commit changed (the first two path parts, as 29 computes them).
+    #[test]
+    fn the_shipped_fixtures_match_the_history_they_name() {
+        let evals = Path::new(env!("CARGO_MANIFEST_DIR")).join("evals");
+        let root = evals.parent().unwrap().parent().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(root).output().unwrap();
+            out.status.success().then(|| String::from_utf8(out.stdout).unwrap())
+        };
+        for skill in ["bp-review", "bp-complete", "bp-respond"] {
+            let fixtures = Fixture::load(&evals.join(skill), None).unwrap();
+            assert!(!fixtures.is_empty() && !holdout(&evals.join(skill)).is_empty(), "{skill}");
+            for f in fixtures {
+                let known = |sha: &str| git(&["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_some();
+                if !known(&f.base) {
+                    eprintln!("skipped {skill}/{}: history is shallow", f.id);
+                    continue;
+                }
+                let stack = f.stack.iter().map(|s| s.0.as_str());
+                assert!(stack.chain([f.head.as_str()]).all(known), "{skill}/{}", f.id);
+                if skill == "bp-complete" {
+                    let names = git(&["diff", "--name-only", &format!("{}^", f.head), &f.head]).unwrap();
+                    let mut crates: Vec<String> = names.lines().map(crate::eval_end::crate_of).collect();
+                    crates.sort();
+                    crates.dedup();
+                    assert_eq!(f.scope, crates, "{}", f.id);
+                    assert!(f.issue.contains("check shell {name="), "{}: a worker needs a named block", f.id);
+                }
+            }
+        }
     }
 
     #[test]
