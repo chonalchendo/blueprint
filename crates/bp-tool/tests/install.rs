@@ -203,8 +203,12 @@ fn the_session_hooks_record_the_seed_and_walk_it() {
     // One JSON object on stdout is the hook's output, so the walk goes as its context.
     let out: Value = serde_json::from_slice(&start.stdout).unwrap();
     assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart", "{out}");
-    let v: Value = serde_json::from_str(out["hookSpecificOutput"]["additionalContext"].as_str().unwrap()).unwrap();
+    let context = out["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+    let v: Value = serde_json::from_str(context).unwrap();
     assert_eq!((v["seed"].as_str(), v["for"].as_str()), (Some(MILESTONE), Some("derive")), "{v}");
+    // Claude Code shows a long context as a 2 KB preview of a file (27, the probe), so the map leads and has no bodies.
+    assert!(context.starts_with(r#"{"for":"derive","seed":"#) && v.get("bodies").is_none(), "{context}");
+    assert_eq!(v["next"], format!("bp walk {MILESTONE} --for derive --json"), "{v}");
 }
 
 #[test]
