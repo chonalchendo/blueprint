@@ -15,7 +15,7 @@ use crate::eval_trace::{BpCall, Trace};
 pub const RECALL: f64 = 0.5;
 
 /// The names of [`Graded::aspects`] for complete and for respond.
-pub const ASPECTS: [[&str; 2]; 2] = [["checks pass", "within scope"], ["all answered", "head moved"]];
+pub const ASPECTS: [[&str; 2]; 2] = [["checks pass", "within scope"], ["all answered", "fixes observed"]];
 
 #[derive(Default)]
 pub struct Graded {
@@ -66,6 +66,8 @@ pub fn score(g: &mut Graded, skill: &Skill, fx: &Fixture, trace: &Trace, log: &s
         Action::Review => review(g, fx, trace, &calls, log),
         _ => worker(g, skill, fx, &calls, log),
     }
+    // A trial the runner killed, or that left no transcript, did not finish: whatever the sandbox holds is not its result.
+    g.pass &= g.failure.is_none();
 }
 
 /// `bp-review`: the steps are the skill's steps 1 to 5; the outcome is recall against the ground truth.
@@ -92,13 +94,15 @@ fn review(g: &mut Graded, fx: &Fixture, trace: &Trace, calls: &[BpCall], log: &s
 }
 
 /// `bp-complete` and `bp-respond`: the steps are the calls of 21's row. The outcome is the stop (`walk --done`) with
-/// the claim not escalated, and then for complete the checks and the file scope of the landed issue, for respond a
-/// disposition for every finding, a reason for every decline and a moved head when a finding was fixed.
+/// the claim not escalated and the issue's body as the fixture gave it, and then for complete the checks and the file
+/// scope of the landed issue. For respond each finding must be closed as the past review closed it: a `fixed` item
+/// needs a fixed answer, its file in the diff against the review's head and its probe when it has one; a `declined`
+/// item needs a reasoned decline and no fix. Otherwise the outcome would measure the disposition syntax only.
 fn worker(g: &mut Graded, skill: &Skill, fx: &Fixture, calls: &[BpCall], log: &str) {
     let called = |verb: &str| calls.iter().any(|c| c.verb == verb);
     let walked = calls.iter().any(|c| c.verb == "walk" && c.args.contains(&format!("--for {}", skill.action)));
     g.end = End::parse(log);
-    let stopped = g.end.done && !g.end.escalated();
+    let stopped = g.end.done && !g.end.escalated() && g.end.kept(fx);
     let mut steps = vec![("walk".to_string(), walked)];
     if skill.action == Action::Complete {
         steps.extend(
@@ -109,14 +113,20 @@ fn worker(g: &mut Graded, skill: &Skill, fx: &Fixture, calls: &[BpCall], log: &s
         g.pass = stopped && g.aspects == [true; 2];
     } else {
         steps.extend([("check", called("check")), ("pr", called("pr"))].map(|(n, ok)| (n.to_string(), ok)));
-        let answered = |n: usize| g.end.answers.iter().any(|a| a.finding == n && (a.fixed || a.reasoned));
-        let all = (1..=fx.truth.len()).all(answered);
-        steps.extend((1..=fx.truth.len()).map(|n| (format!("disposition {n}"), answered(n))));
+        let of = |n: usize| g.end.answers.iter().filter(move |a| a.finding == n);
+        let probed = |n: usize| g.end.probes.iter().filter(|p| p.0 == n).all(|p| p.1);
+        let observed = |n: usize| of(n).any(|a| a.fixed) && fx.truth[n - 1].touched(&g.end.files) && probed(n);
+        let closed = |n: usize| {
+            if fx.truth[n - 1].fixed { observed(n) } else { of(n).all(|a| !a.fixed) && of(n).any(|a| a.reasoned) }
+        };
+        let items = 1..=fx.truth.len();
+        steps.extend(items.clone().map(|n| (format!("disposition {n}"), closed(n))));
         let fixed = g.end.answers.iter().any(|a| a.fixed);
         let commit = if fixed { g.end.moved } else { !g.end.answers.is_empty() };
         steps.push(("commit".to_string(), commit));
-        g.aspects = [all, g.end.moved];
-        g.pass = stopped && all && commit;
+        let answered = items.clone().all(|n| of(n).any(|a| a.fixed || a.reasoned));
+        g.aspects = [answered, items.clone().filter(|n| fx.truth[n - 1].fixed).all(observed)];
+        g.pass = stopped && commit && items.into_iter().all(closed);
     }
     g.steps = steps;
 }

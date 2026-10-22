@@ -38,7 +38,18 @@ impl Grade {
         let mut lines = Vec::new();
         for f in &self.fixtures {
             lines.push(format!("Fixture {} (base `{}`, head `{}`):\n", f.id, short(&f.base), short(&f.head)));
-            lines.extend(f.truth.iter().enumerate().map(|(i, t)| format!("{}. `{}`: {}", i + 1, t.location(), t.what)));
+            let respond = self.skill.action == Action::Respond;
+            lines.extend(f.truth.iter().enumerate().map(|(i, t)| {
+                let expect = if !respond {
+                    ""
+                } else if t.fixed {
+                    " (expect: fixed)"
+                } else {
+                    " (expect: a reasoned decline)"
+                };
+                format!("{}. `{}`{expect}: {}", i + 1, t.location(), t.what)
+            }));
+            lines.extend(f.probes.iter().map(|(n, cmd)| format!("Probe for item {n}: `{cmd}`")));
             if !f.scope.is_empty() {
                 lines.push(format!("The landed issue changed these crates: `{}`.", f.scope.join("`, `")));
             }
@@ -115,10 +126,16 @@ impl Grade {
                 "- **Outcome:** a run passes when `bp walk --for review --done` holds after the review is recorded and the findings table matches at least {RECALL} of the ground truth. That needs the shape only `bp-review` defines (a `head:` line, one table).\n- **Prose recall:** items of the ground truth that the final text names in any form (its file and a line within {NEAR} lines). It does not depend on the shape, so a gap in outcome with none in prose recall means the arm cannot write the shape.\n"
             ),
             Action::Complete => "- **Outcome:** a run passes when `bp walk --for complete --done` holds with the claim not released `escalated`, the latest run of each error block of the issue passed, and every changed file sits in a crate that the landed issue changed (the first two path parts, as `replay-evidence.sh` compares them). The file set is not compared: the model is not deterministic.\n- **Adherence:** the share of walk, cut, check and pr that the transcript shows as calls, over the runs that reached the tool.\n".to_string(),
-            _ => "- **Outcome:** a run passes when `bp walk --for respond --done` holds with the claim not released `escalated`, every finding has a disposition, every decline gives a reason, and the head moved if a finding was fixed. The quality of a fix is for the owner to read in the trace.\n- **Adherence:** the share of walk, check, pr, one disposition per finding and a commit that the transcript and the vault show, over the runs that reached the tool.\n".to_string(),
+            _ => "- **Outcome:** a run passes when `bp walk --for respond --done` holds with the claim not released `escalated` and each finding is closed as the past review closed it. A `fixed` finding needs a fixed disposition, its file in the worker's diff against the review's head, and its probe when the fixture gives one. A `declined` finding needs a reasoned decline, and a fix of it fails. The probe and the file are evidence of a fix, not proof of a good one: the owner reads the trace.\n- **Adherence:** the share of walk, check, pr, one closed disposition per finding and a commit that the transcript and the vault show, over the runs that reached the tool.\n".to_string(),
+        };
+        let counted = "- **Counted by line:** the adherence and `out of row` columns read `bp` calls from the transcript's Bash commands, one per line or `;`. A line inside a heredoc that starts with `bp` counts as a call, and a quoted `;` splits wrongly. A `bp` built under `target/` is not counted.\n";
+        let scope = if self.skill.action == Action::Complete {
+            "- **Scope:** the unit is the first two path parts, and `xtask` as a whole, so a test file in `xtask/tests` is in scope.\n"
+        } else {
+            ""
         };
         format!(
-            "\n{own}- **Uplift:** the `with` rate less the `without` rate; the result file gives its Newcombe 95% interval.\n- **Role body:** the `without` arm's copy drops the sentences about the `Skill:` line; the `filler` arm keeps them.\n"
+            "\n{own}{scope}{counted}- **Failed trial:** a trial the runner killed at its limit, or that left no transcript, fails whatever the sandbox holds. A rerun of the same command replaces it.\n- **Uplift:** the `with` rate less the `without` rate; the result file gives its Newcombe 95% interval.\n- **Role body:** the `without` arm's copy drops the sentences about the `Skill:` line; the `filler` arm keeps them.\n"
         )
     }
 
@@ -153,11 +170,19 @@ impl Grade {
             if t.loaded { "yes" } else { "NO" },
         )];
         if let Some(why) = &t.failure {
-            lines.push(format!("- FAILED: {why}"));
+            lines.push(format!("- FAILED: {why}; a failed trial counts as a fail"));
         }
-        if self.skill.action == Action::Complete {
+        if self.skill.action != Action::Review && !t.end.kept(self.fixture(&t.fixture)) {
+            lines.push("- the issue's body differs from the fixture's: the worker edited the issue".into());
+        }
+        if self.skill.action != Action::Review {
             let files = if t.end.files.is_empty() { "none".into() } else { t.end.files.join(", ") };
             lines.push(format!("- files changed: {files}"));
+        }
+        if !t.end.probes.is_empty() {
+            let probes: Vec<String> =
+                t.end.probes.iter().map(|(n, ok)| format!("{n} {}", if *ok { "pass" } else { "fail" })).collect();
+            lines.push(format!("- probes: {}", probes.join(", ")));
         }
         let answers: Vec<String> = t
             .end

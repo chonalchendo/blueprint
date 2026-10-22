@@ -28,13 +28,18 @@ pub struct Grade {
     pub fixtures: Vec<Fixture>,
 }
 
-/// The hash of the role file and the skill body together, `git hash-object --stdin`: the key of check 10. A run
-/// writes it beside its transcript, and a grade compares the traces' hash with the files'.
+/// The hash of the role file and the bodies of every skill that role preloads for the measured one,
+/// `git hash-object --stdin`: the key of check 10. For `bp-review` that is `bp-reviewer.md` and `bp-review`'s body;
+/// for both worker skills it is `bp-worker.md`, then `bp-complete`'s body, then `bp-respond`'s, because the `with`
+/// arm of each preloads both and a sibling edit changes what was measured. A run writes the hash beside its
+/// transcript, and a grade compares the traces' hash with the files'.
 pub fn bundle_hash(root: &Path, skill: &Skill) -> Result<String> {
-    let body = std::fs::read_to_string(root.join("bundle/skills").join(&skill.name).join("SKILL.md"))
-        .with_context(|| format!("read the body of {}", skill.name))?;
-    let role = std::fs::read_to_string(root.join(format!("bundle/roles/{}.md", skill.role_file())))?;
-    hash_object(&format!("{role}{body}"))
+    let mut text = std::fs::read_to_string(root.join(format!("bundle/roles/{}.md", skill.role_file())))?;
+    for name in skill.preloaded() {
+        text += &std::fs::read_to_string(root.join("bundle/skills").join(&name).join("SKILL.md"))
+            .with_context(|| format!("read the body of {name}"))?;
+    }
+    hash_object(&text)
 }
 
 impl Grade {
@@ -133,6 +138,10 @@ impl Grade {
     fn hash(&self) -> &str {
         let ran: BTreeSet<&String> = self.trials.iter().filter_map(|t| t.hash.as_ref()).collect();
         if ran.len() == 1 { ran.first().map_or(&self.current, |h| h) } else { &self.current }
+    }
+
+    pub fn fixture(&self, id: &str) -> &Fixture {
+        self.fixtures.iter().find(|f| f.id == id).expect("a graded trial names a loaded fixture")
     }
 
     pub fn arm(&self, arm: &str) -> Vec<&Graded> {
@@ -291,7 +300,7 @@ pub(crate) fn short(sha: &str) -> &str {
 }
 
 /// `git hash-object --stdin`: the hash of the role file and the skill body together, the key of check 10.
-fn hash_object(text: &str) -> Result<String> {
+pub(crate) fn hash_object(text: &str) -> Result<String> {
     use std::io::Write;
     let mut child = Command::new("git")
         .args(["hash-object", "--stdin"])

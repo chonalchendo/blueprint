@@ -11,10 +11,15 @@
 //! stack: <sha> | <title>                   (complete only: the dependency's pull request head)
 //! scope: <path part> <path part> ...       (complete only)
 //! truth:
-//! - [<severity>] <path>:<line>[-<line>][, <line>] | <what the finding said>
+//! - [<severity> [fixed|declined]] <path>:<line>[-<line>][, <line>] | <what the finding said>
+//! probe: <n> | <shell command>             (respond only, optional: run in the worker's worktree; exit 0 = item n holds)
 //! ---
 //! <the issue body, verbatim>
 //! ```
+//!
+//! For `bp-respond` each truth item also says how the past review closed it. `fixed` (the default) needs the item's
+//! file in the worker's diff against the review's head, and the probe of that item when there is one; `declined`
+//! needs a reasoned decline, and a fix of it fails. Without this the eval would measure the disposition syntax.
 //!
 //! `holdout.txt` in the same directory lists the held-out ids, one per line: no run reads those.
 
@@ -32,6 +37,8 @@ pub struct Fixture {
     /// The head and title of the dependency's pull request: the sandbox opens it, and the issue depends on it.
     pub stack: Option<(String, String)>,
     pub scope: Vec<String>,
+    /// `(item, command)`: a check that item `n` of a respond fixture is fixed, run in the worker's worktree.
+    pub probes: Vec<(usize, String)>,
 }
 
 /// One finding of the ground truth: a file and the lines it named. No line means the whole file.
@@ -41,6 +48,8 @@ pub struct Truth {
     pub what: String,
     /// The first column of the review table: `bp-respond`'s sandbox records these rows.
     severity: String,
+    /// How the past review closed the item: fixed, or rightly declined.
+    pub fixed: bool,
 }
 
 pub struct Finding {
@@ -74,6 +83,7 @@ impl Fixture {
             issue: issue.trim().to_string(),
             stack: None,
             scope: Vec::new(),
+            probes: Vec::new(),
         };
         for line in head.lines().filter(|l| !l.trim().is_empty()) {
             if let Some(item) = line.strip_prefix("- ") {
@@ -90,6 +100,14 @@ impl Fixture {
                         let (sha, title) =
                             value.split_once('|').with_context(|| format!("{id}: stack is `<sha> | <title>`"))?;
                         f.stack = Some((sha.trim().into(), title.trim().into()));
+                    }
+                    "probe" => {
+                        let (n, cmd) =
+                            value.split_once('|').with_context(|| format!("{id}: probe is `<n> | <cmd>`"))?;
+                        f.probes.push((
+                            n.trim().parse().with_context(|| format!("{id}: probe item {n}"))?,
+                            cmd.trim().into(),
+                        ));
                     }
                     "truth" => {}
                     _ => bail!("{id}: unknown key `{key}`"),
@@ -160,18 +178,30 @@ pub fn holdout(dir: &Path) -> Vec<String> {
 
 impl Truth {
     fn parse(at: &str, what: &str) -> Result<Self> {
-        let (severity, at) = match at.strip_prefix('[').and_then(|a| a.split_once(']')) {
+        let (tag, at) = match at.strip_prefix('[').and_then(|a| a.split_once(']')) {
             Some((s, rest)) => (s, rest.trim()),
             None => ("warn", at),
         };
+        let mut words = tag.split_whitespace();
+        let severity = words.next().unwrap_or("warn");
+        let fixed = match words.next() {
+            None | Some("fixed") => true,
+            Some("declined") => false,
+            Some(other) => bail!("`{other}` is neither fixed nor declined"),
+        };
         let (path, lines) = locate(at).context("a location is `<path>[:<line>[-<line>]]`")?;
-        Ok(Self { path, lines, what: what.to_string(), severity: severity.to_string() })
+        Ok(Self { path, lines, what: what.to_string(), severity: severity.to_string(), fixed })
     }
 
     pub fn location(&self) -> String {
         let lines: Vec<String> =
             self.lines.iter().map(|&(a, b)| if a == b { a.to_string() } else { format!("{a}-{b}") }).collect();
         if lines.is_empty() { self.path.clone() } else { format!("{}:{}", self.path, lines.join(", ")) }
+    }
+
+    /// Whether the worker's diff against the review's head touches this item's file.
+    pub fn touched(&self, files: &[String]) -> bool {
+        files.iter().any(|f| self.in_file(f))
     }
 
     fn in_file(&self, path: &str) -> bool {
@@ -268,6 +298,17 @@ mod tests {
         assert_eq!(hits(&["a/x.rs:60", "other.rs:20", "projects/bp/designs/x"]), 0);
         assert_eq!(f.assign(&[at("a/x.rs:20")]), vec![Some(0)], "the nearest item takes the finding");
         assert_eq!(f.assign(&[at("a/x.rs:60")]), vec![None]);
+    }
+
+    #[test]
+    fn a_truth_item_says_how_it_closed_and_a_probe_checks_it() {
+        let text = "base: b\nhead: h\ntitle: T\ntruth:\n- [major] a.rs:1 | One.\n- [nit declined] a.rs:9 | Two.\nprobe: 1 | test -f a.rs | true\n---\nbody\n";
+        let f = Fixture::parse("pr-1", text).unwrap();
+        assert_eq!(f.truth.iter().map(|t| t.fixed).collect::<Vec<_>>(), [true, false]);
+        assert_eq!(f.probes, [(1, "test -f a.rs | true".to_string())]);
+        assert!(f.truth[0].touched(&["x/a.rs".into()]) && !f.truth[0].touched(&["b.rs".into()]));
+        assert!(Fixture::parse("x", &text.replace("declined", "kept")).is_err());
+        assert!(f.review_body().contains("| nit | `a.rs:9` | Two. |"), "the expected closing stays out of the review");
     }
 
     #[test]

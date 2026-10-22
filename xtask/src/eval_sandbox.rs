@@ -27,6 +27,9 @@ pub struct Sandbox {
     pub forge: PathBuf,
     pub issue: String,
     bindir: PathBuf,
+    /// This trial's own `$TMPDIR`: `cargo xtask scratch` and `forge` prune the shared one by age and count, and a
+    /// worker's blocks call them on every `check` and `pr`, so a shared directory could lose a live sandbox.
+    tmp: PathBuf,
     /// One cargo target directory for every trial: the issue's block builds `xtask` in each clone. `$BP_EVAL_TARGET`
     /// keeps it across runs, so a smoke trial warms the build of the full run.
     target: PathBuf,
@@ -54,8 +57,10 @@ impl Sandbox {
         check_arm: Option<&str>,
     ) -> Result<Self> {
         let exe = std::env::current_exe().context("find the xtask binary")?;
+        let tmp = crate::scratch::fresh(&work.join("tmp"), 3)?.canonicalize()?;
         let made = |verb: &[&str], vault: &Path| {
-            capture(Command::new(&exe).args(verb).env("BP_VAULT", vault).current_dir(work).stdin(Stdio::null()))
+            let mut c = Command::new(&exe);
+            capture(c.args(verb).env("BP_VAULT", vault).env("TMPDIR", &tmp).current_dir(work).stdin(Stdio::null()))
         };
         let vault = PathBuf::from(made(&["scratch"], source)?);
         let forge = PathBuf::from(made(&["forge", PROJECT], &vault)?);
@@ -64,13 +69,16 @@ impl Sandbox {
             forge,
             issue: String::new(),
             bindir: bindir.to_path_buf(),
+            tmp: tmp.clone(),
             target: std::env::var_os("BP_EVAL_TARGET").map_or_else(|| work.join("target"), PathBuf::from),
             start: String::new(),
             scope_base: fx.stack.as_ref().map_or(&fx.base, |s| &s.0).clone(),
         };
         let code = sb.code();
         let repo_arg = repo.display().to_string();
-        let mut fetch = vec!["fetch", "-q", repo_arg.as_str(), &fx.base, &fx.head];
+        // The landed head is the answer to a complete trial, so its objects stay out of that clone.
+        let mut fetch = vec!["fetch", "-q", repo_arg.as_str(), &fx.base];
+        fetch.extend((skill.action != Action::Complete).then_some(fx.head.as_str()));
         fetch.extend(fx.stack.iter().map(|s| s.0.as_str()));
         git(&code, &fetch)?;
         git(&code, &["reset", "-q", "--hard", &fx.base])?;
@@ -198,7 +206,10 @@ impl Sandbox {
             .env("PATH", path.unwrap_or_default())
             .env("BP_VAULT", &self.vault)
             .env("GIT_ALLOW_PROTOCOL", "file")
+            .env("TMPDIR", &self.tmp)
             .env("CARGO_TARGET_DIR", &self.target)
+            .env("CARGO_INCREMENTAL", "0")
+            .env("CARGO_BUILD_JOBS", std::env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| "4".into()))
             .env("CARGO_NET_OFFLINE", "true")
             .env_remove("BP_ROLE")
             .env_remove("BP_SESSION")
@@ -284,7 +295,26 @@ impl Sandbox {
             }
             std::thread::sleep(Duration::from_millis(200));
         };
+        self.stop_leftovers();
         Ok((transcript, failure))
+    }
+
+    /// Kills any process whose working directory is under the sandbox: a `cargo` or `rustc` that outlived its shell
+    /// (the group kill reaches only the shell's own group) would overlap the next trial and fill the disk. `lsof`
+    /// lists the working directory of every process; a missing `lsof` leaves them alone.
+    fn stop_leftovers(&self) {
+        let Ok(out) = Command::new("lsof").args(["-d", "cwd", "-F", "pn"]).output() else { return };
+        let (mut pid, mut stale) = (String::new(), Vec::new());
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some(p) = line.strip_prefix('p') {
+                pid = p.to_string();
+            } else if line.strip_prefix('n').is_some_and(|dir| Path::new(dir).starts_with(&self.forge)) {
+                stale.push(pid.clone());
+            }
+        }
+        for pid in stale {
+            let _ = Command::new("kill").args(["-s", "KILL", &pid]).status();
+        }
     }
 }
 

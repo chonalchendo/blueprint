@@ -6,7 +6,8 @@
 //! cargo xtask eval --grade [--check] <skill>
 //! ```
 //!
-//! A run fills each arm and fixture to N stored trials (a retry runs only what is missing). A trial builds the
+//! A run fills each arm and fixture to N stored trials (a retry runs only what is missing, and a failed trial is
+//! missing: the retry replaces it). A trial builds the
 //! replay's sandbox, starts the agent in the clone, and stores the role's transcript and the vault log under
 //! `$BP_REDESIGN/analysis/evals-skills/<skill>/`. Then it grades the store, as `--grade` does. The agent is
 //! `$BP_EVAL_AGENT`, a shell command that reads the prompt from `$BP_EVAL_PROMPT`; if it writes the role's transcript
@@ -15,7 +16,8 @@
 //! `bp-complete`, which builds a whole issue; 1800 for `bp-respond`), and a trial with no transcript is stored as a
 //! failed trial; a failed trial counts as a fail, and the report names the reason. `$BP_VAULT` is the vault to copy.
 //! `$BP_EVAL_TARGET` is a cargo target directory to keep across runs (default: one per run), where a worker's blocks
-//! build the issue's code. Flags for a test: `--repo <dir>` (holds the fixtures' commits), `--fixtures <dir>`,
+//! build the issue's code; every trial gets its own `$TMPDIR` under the run's work directory, `CARGO_INCREMENTAL=0` and,
+//! unless set, `CARGO_BUILD_JOBS=4`. Flags for a test: `--repo <dir>` (holds the fixtures' commits), `--fixtures <dir>`,
 //! `--bin <arm>=<bp>` (trusted: the arm's clone is not asserted). A usage error exits 4, as every xtask check does.
 
 use std::path::{Path, PathBuf};
@@ -72,6 +74,16 @@ impl Skill {
             _ => return Err(usage(format!("{name}: no fixture or grader; the eval covers review, complete, respond"))),
         };
         Ok(Self { name: format!("bp-{action}"), action, role })
+    }
+
+    /// The skills whose bodies the result hash covers: the measured one, and for a worker its sibling, because the
+    /// role preloads both (`skills:` in `bp-worker.md`).
+    pub fn preloaded(&self) -> Vec<String> {
+        if self.role == Role::Worker {
+            vec!["bp-complete".into(), "bp-respond".into()]
+        } else {
+            vec![self.name.clone()]
+        }
     }
 
     pub fn role_file(&self) -> String {
@@ -201,24 +213,19 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
     let bin = bins(root, skill, &a.arms, &work, &a.bins)?;
     let repo = a.repo.canonicalize().with_context(|| format!("read {}", a.repo.display()))?;
     let hash = bundle_hash(root, skill)?;
-    let stored = |arm: &str, fx: &str| {
-        let taken = std::fs::read_dir(store).into_iter().flatten().flatten();
-        let prefix = format!("{arm}-{fx}-");
-        taken
-            .filter(|e| {
-                e.file_name().to_string_lossy().starts_with(&prefix)
-                    && e.path().extension().is_some_and(|x| x == "jsonl")
-            })
-            .count()
+    // A trial is stored once it has a transcript. One that holds the failure record does not count: the retry
+    // runs it again and replaces its files.
+    let stored = |id: &str| {
+        let text = std::fs::read_to_string(store.join(format!("{id}.jsonl"))).ok();
+        text.is_some_and(|t| Trace::parse(&t).failure().is_none())
     };
     for round in 1..=a.trials {
         for arm in &a.arms {
             for fx in &list {
-                let have = stored(arm, &fx.id);
-                if have >= round {
+                let id = format!("{arm}-{}-{round}", fx.id);
+                if stored(&id) {
                     continue;
                 }
-                let id = format!("{arm}-{}-{}", fx.id, have + 1);
                 eprintln!("eval: trial {id}");
                 let verify = !a.bins.iter().any(|(b, _)| b == arm);
                 let sb = Sandbox::build(

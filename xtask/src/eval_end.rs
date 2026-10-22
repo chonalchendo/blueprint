@@ -6,8 +6,11 @@
 //! ```text
 //! end: done true            walk --for <action> --done, which is also true for an escalated claim
 //! end: checks pass          the latest run of each error block of the issue passed
-//! end: file <path>          complete: a file that the worker's branch changed against the dependency head or the base
+//! end: file <path>          a file that the worker's branch changed against the dependency head or the base
+//!                           (complete), or against the review's head (respond)
 //! end: moved yes            respond: the worker's head is not the review's head
+//! end: probe 1 pass         respond: the fixture's probe for finding 1, run in the worker's worktree
+//! end: issue <sha>          the issue's body as the vault holds it at the end, `git hash-object --stdin`
 //! end: disposition 2 fixed  one line per recorded disposition: the finding, `fixed` or `declined`, then
 //!                           `reasoned` when a decline names a reason
 //! ```
@@ -38,15 +41,24 @@ pub struct End {
     pub files: Vec<String>,
     pub moved: bool,
     pub answers: Vec<Answer>,
-    /// The reason of the last `release` commit in the log, if the claim was released.
+    /// `(finding, passed)` for each probe the fixture gave.
+    pub probes: Vec<(usize, bool)>,
+    /// The hash of the issue's body at the end.
+    pub issue: Option<String>,
+    /// The reason of the last `release` commit in the log, if no `cut` followed it: a cut ends an escalation (21).
     pub released: Option<String>,
 }
 
 impl End {
     pub fn parse(log: &str) -> Self {
         let mut end = Self::default();
-        let release = log.lines().filter_map(|l| l.strip_prefix("release ")).next_back();
-        end.released = release.and_then(|r| r.split_whitespace().last()).map(str::to_string);
+        for line in log.lines() {
+            if let Some(release) = line.strip_prefix("release ") {
+                end.released = release.split_whitespace().last().map(str::to_string);
+            } else if line.starts_with("cut ") {
+                end.released = None;
+            }
+        }
         for line in log.lines().filter_map(|l| l.strip_prefix("end: ")) {
             let words: Vec<&str> = line.split_whitespace().collect();
             match words.as_slice() {
@@ -54,6 +66,8 @@ impl End {
                 ["checks", v] => end.checks = *v == "pass",
                 ["file", path] => end.files.push((*path).to_string()),
                 ["moved", v] => end.moved = *v == "yes",
+                ["probe", n, v] => end.probes.push((n.parse().unwrap_or(0), *v == "pass")),
+                ["issue", sha] => end.issue = Some((*sha).to_string()),
                 ["disposition", n, how, rest @ ..] => end.answers.push(Answer {
                     finding: n.parse().unwrap_or(0),
                     fixed: *how == "fixed",
@@ -75,10 +89,20 @@ impl End {
     pub fn within(&self, scope: &[String]) -> bool {
         self.files.iter().all(|f| scope.contains(&crate_of(f)))
     }
+
+    /// Whether the issue's body is the fixture's: a worker that edits the issue file in the scratch vault can weaken
+    /// a check block, and the guard confines Edit and Write only in the main checkout.
+    pub fn kept(&self, fx: &Fixture) -> bool {
+        crate::eval_grade::hash_object(fx.issue.trim()).ok().is_some_and(|h| self.issue.as_deref() == Some(&h))
+    }
 }
 
-/// The first two parts of a path: `crates/bp-tool` for `crates/bp-tool/src/cut.rs`, `justfile` for itself.
+/// The first two parts of a path: `crates/bp-tool` for `crates/bp-tool/src/cut.rs`, `justfile` for itself. `xtask`
+/// is one crate: its tests sit beside its source (`xtask/tests`), and a worker may rightly touch either.
 pub fn crate_of(path: &str) -> String {
+    if path.starts_with("xtask/") {
+        return "xtask".into();
+    }
     path.splitn(3, '/').take(2).collect::<Vec<_>>().join("/")
 }
 
@@ -98,13 +122,21 @@ impl Sandbox {
         }
         if let Some(w) = self.worktree()? {
             let git = |args: &[&str]| capture(Command::new("git").args(args).current_dir(&w));
-            if skill.action == Action::Complete {
-                let names = git(&["diff", "--name-only", &self.scope_base, "HEAD"])?;
-                out.extend(names.lines().map(|f| format!("end: file {f}")));
-            } else {
-                out.push(format!("end: moved {}", if git(&["rev-parse", "HEAD"])? == fx.head { "no" } else { "yes" }));
+            let base = if skill.action == Action::Complete { &self.scope_base } else { &fx.head };
+            let names = git(&["diff", "--name-only", base, "HEAD"])?;
+            out.extend(names.lines().map(|f| format!("end: file {f}")));
+            if skill.action == Action::Respond {
+                let moved = git(&["rev-parse", "HEAD"])? != fx.head;
+                out.push(format!("end: moved {}", if moved { "yes" } else { "no" }));
+                for (n, cmd) in &fx.probes {
+                    let ran = moved && self.command("sh", &w).args(["-c", cmd]).output()?.status.success();
+                    out.push(format!("end: probe {n} {}", if ran { "pass" } else { "fail" }));
+                }
             }
         }
+        let body = std::fs::read_to_string(self.vault.join(format!("{}.md", self.issue))).unwrap_or_default();
+        let body = body.strip_prefix("---\n").and_then(|t| t.split_once("\n---\n")).map_or("", |(_, b)| b);
+        out.push(format!("end: issue {}", crate::eval_grade::hash_object(body.trim())?));
         if skill.action == Action::Respond {
             out.extend(dispositions(&dir.join("reviews")));
         }
@@ -178,6 +210,9 @@ mod tests {
         assert!(!end.within(&scope(&["crates/a"])), "justfile is outside");
         assert!(!End::parse("").done && End::parse("").within(&[]), "an empty log has not stopped");
         assert_eq!(crate_of(".github/workflows/ci.yml"), ".github/workflows");
+        assert_eq!(crate_of("xtask/tests/lines.rs"), "xtask", "xtask is one crate");
+        let recut = End::parse("release projects/bp/issues/x escalated\n\ncut projects/bp/issues/x\n");
+        assert!(!recut.escalated(), "a cut after the release ends the escalation");
         assert_eq!(crate_of("justfile"), "justfile");
     }
 }
