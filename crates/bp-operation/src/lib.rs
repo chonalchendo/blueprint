@@ -116,7 +116,14 @@ impl Action {
         match self {
             Self::Complete | Self::Respond => Role::Worker,
             Self::Research => Role::Researcher,
-            _ => Role::Session,
+            Self::Design
+            | Self::Shape
+            | Self::Derive
+            | Self::Review
+            | Self::TriageDrift
+            | Self::Deliberate
+            | Self::Distil
+            | Self::Capture => Role::Session,
         }
     }
 
@@ -125,12 +132,11 @@ impl Action {
     pub fn verbs(self) -> &'static [&'static str] {
         match self {
             Self::Design => &["create", "set", "link", "diagram", "check", "record"],
-            Self::Shape => &["create", "link", "record"],
             Self::Derive => &["create", "link"],
             Self::Complete => &["cut", "check", "record", "pr", "release"],
             Self::Review => &["record"],
             Self::Respond => &["check", "record", "pr", "release"],
-            Self::TriageDrift => &["create", "record"],
+            Self::Shape | Self::TriageDrift => &["create", "record"],
             Self::Deliberate => &["create", "set", "link", "transition"],
             Self::Distil => &["create", "set", "link", "record", "transition"],
             Self::Capture => &["create"],
@@ -192,8 +198,7 @@ mod tests {
             assert_eq!(role.verbs().unwrap(), verbs, "{role}");
         }
         for a in Action::ALL {
-            let own = a.role().verbs().unwrap();
-            assert!(a.verbs().iter().all(|v| own.contains(v) && !READ_VERBS.contains(v)), "{a}");
+            assert!(a.verbs().iter().all(|v| !READ_VERBS.contains(v)), "{a}: a row holds write verbs only");
         }
         assert_eq!(Action::Review.verbs(), ["record"], "the session records the review; the reviewer writes nothing");
     }

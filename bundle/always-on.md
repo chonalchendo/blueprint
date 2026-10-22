@@ -5,7 +5,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - Do not edit a vault file by hand. `bp where --json` names the vault.
 - Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at most once. Exit 3 means the call had nothing to do.
 - Start each task from `bp walk <id> --for <action> --json`. Read a node from `ids` with `bp show <node> --json` only when a step needs it.
-- At session start, the context holds the map of a walk of the last seed. The map has the action, the intents and the top ids. Act on its first intent. Its `next` field is the call that returns the bodies.
+- At session start, the context holds the map of a walk of the last seed. The map has the action, the intents and the top ids. Act on its first intent. With no intent, ask the human for the task. Its `next` field is the call that returns the bodies.
 
 ### Intent to action
 

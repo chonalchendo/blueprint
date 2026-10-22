@@ -69,4 +69,4 @@ For a convention, get the template with `bp create convention --template --json`
 
 ## Stop
 
-Stop: the stop is call-shaped. The create call (Draft, step 12) or the delta call (Revise, step 2) returns a `commit`. Then `bp walk <design> --for design --done --json` returns `done` true.
+Stop: the stop is call-shaped. The create call (Draft, step 12) or the delta call (Revise, step 2) returns a `commit`. Then `bp walk <design> --for design --done --json` returns `done` true. For a convention or a decision, the `commit` alone is the stop, because `--done` refuses those ids.

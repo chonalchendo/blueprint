@@ -344,8 +344,9 @@ fn named_writes(dir: &str, files: &Files) -> BTreeSet<String> {
     named
 }
 
-/// Check 12 of 17: the write verbs of each skill equal its action's row, so a body cannot reach for a verb its role
-/// lacks, and a row cannot name a verb that no body runs.
+/// Check 12 of 17: the write verbs of each skill equal its action's row, so a body cannot name a verb its role lacks,
+/// and a row cannot name a verb that no body names. It counts a named verb, not a run: a body may quote the session's
+/// call, as `bp-review` does. It reads `SKILL.md` only, because a reference hands the human `stamp` or `transition`.
 #[test]
 fn write_verbs_equal_action_row() {
     let files = read(&root());
@@ -353,7 +354,10 @@ fn write_verbs_equal_action_row() {
     for dir in
         files.keys().filter_map(|p| p.strip_prefix("skills/")?.split_once('/').map(|(d, _)| d)).collect::<BTreeSet<_>>()
     {
-        let Ok(action) = dir.trim_start_matches("bp-").parse::<Action>() else { continue };
+        let Ok(action) = dir.trim_start_matches("bp-").parse::<Action>() else {
+            errors.push(format!("skills/{dir}: bp-<action>, and the action names its row"));
+            continue;
+        };
         let row: BTreeSet<String> = action.verbs().iter().map(|v| (*v).to_string()).collect();
         let named = named_writes(dir, &files);
         if named != row {
