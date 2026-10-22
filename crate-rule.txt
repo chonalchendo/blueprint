@@ -12,6 +12,6 @@ bp-reasoning -> bp-vault
 bp-operation -> bp-vault
 bp-vault     ->
 bp-diagram   ->
-xtask        ->
+xtask        -> bp-operation
 only bp-view: tokio
 only bp-view: axum

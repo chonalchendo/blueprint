@@ -99,15 +99,20 @@ fn a_reserved_dependency_directly_and_through_another_crate() {
 #[test]
 fn a_rule_row_with_no_package() {
     let dir = copy_workspace();
-    edit(dir.path(), "crate-rule.txt", "xtask        ->", "xtask        ->\nbp-gone      -> bp-vault");
+    edit(
+        dir.path(),
+        "crate-rule.txt",
+        "xtask        -> bp-operation",
+        "xtask        -> bp-operation\nbp-gone      -> bp-vault",
+    );
     assert_eq!(deps(dir.path()), (Some(2), vec!["rule row with no package: bp-gone".into()]));
 }
 
 #[test]
 fn a_reserved_crate_only_the_merged_graph_shows() {
-    // serde_json reaches serde_derive only when another member turns on serde's `derive`; xtask's build never does.
+    // serde_json reaches serde_derive only when another member turns on serde's `derive`; bp-diagram's build never does.
     let dir = copy_workspace();
     edit(dir.path(), "crate-rule.txt", "only bp-view: tokio", "only bp-view: tokio\nonly bp-vault: serde_derive");
     let (_, lines) = deps(dir.path());
-    assert!(!lines.iter().any(|l| l.starts_with("external dependency reserved for bp-vault: xtask")), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.starts_with("external dependency reserved for bp-vault: bp-diagram")), "{lines:?}");
 }

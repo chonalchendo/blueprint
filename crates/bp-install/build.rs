@@ -5,7 +5,11 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundle");
+    // `cargo xtask eval` builds the arms that lack the skill, or hold filler for it, from a copy of the bundle (29,
+    // design change 1). The manifest check forbids editing an installed file, so the arm needs its own binary.
+    println!("cargo:rerun-if-env-changed=BP_BUNDLE_DIR");
+    let root = std::env::var_os("BP_BUNDLE_DIR")
+        .map_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bundle"), PathBuf::from);
     println!("cargo:rerun-if-changed={}", root.display());
     let mut files = Vec::new();
     walk(&root, &mut files);
