@@ -72,6 +72,14 @@ for verb in "${verbs[@]}"; do
     esac
 done
 [ -n "$role" ] || exit 0
+# The prefix also names the harness, as the start hook does, so a later `bp walk` checks only this harness's bundle
+# (17, check 7). It follows `BP_ROLE=`, as the allow rule `Bash(export BP_ROLE=*)` needs that start, and it stays a
+# literal, as the rule does not allow a substitution.
+case $(cd "$(dirname "$0")/.." && pwd) in
+*/.claude) harness=" BP_HARNESS=claude" ;;
+*/.codex) harness=" BP_HARNESS=codex" ;;
+*) harness= ;;
+esac
 # The whole input goes back, as `updatedInput` replaces it; no permission is decided, so the user's rules still apply.
-jq -c --arg role "$role" --arg session "$session" '{hookSpecificOutput: {hookEventName: "PreToolUse",
-    updatedInput: (.tool_input + {command: "export BP_ROLE=\($role) BP_SESSION=\($session | @sh); \(.tool_input.command)"})}}' <<< "$input"
+jq -c --arg role "$role" --arg harness "$harness" --arg session "$session" '{hookSpecificOutput: {hookEventName: "PreToolUse",
+    updatedInput: (.tool_input + {command: "export BP_ROLE=\($role)\($harness) BP_SESSION=\($session | @sh); \(.tool_input.command)"})}}' <<< "$input"

@@ -254,6 +254,27 @@ fn the_session_hooks_record_the_seed_and_walk_it() {
 }
 
 #[test]
+fn the_role_hook_prefix_names_the_harness_for_a_later_walk() {
+    let w = World::new();
+    w.bp(&w.code(), &[], &["install", "--target", "codex"]);
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    std::fs::write(w.code().join(".codex/hooks/bp-start.sh"), "stale").unwrap();
+    let path = bin(&w.t.path().join("bin"), &[("bp", assert_cmd::cargo::cargo_bin("bp"))], true);
+    let input = serde_json::json!({
+        "hook_event_name": "PreToolUse", "session_id": "s", "tool_name": "Bash",
+        "tool_input": { "command": format!("bp walk {MILESTONE} --for derive --ids --json") },
+    });
+    let out = w.hook("bp-role.sh", &input.to_string(), &path, &[]);
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let command = v["hookSpecificOutput"]["updatedInput"]["command"].as_str().unwrap();
+    // The allow rule `Bash(export BP_ROLE=*)` needs this start, and a literal prefix.
+    assert!(command.starts_with("export BP_ROLE=session BP_HARNESS=claude BP_SESSION='s'; bp walk"), "{command}");
+    let run = w.command("bash", &w.code()).env("PATH", &path).args(["-c", command]).output().unwrap();
+    let walked: Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert!(walked["code"].is_null(), "the stale Codex bundle does not stop the Claude walk: {walked}");
+}
+
+#[test]
 fn a_handoff_seed_follows_a_record_to_its_node() {
     let w = World::new();
     let head = "a".repeat(40);
@@ -299,7 +320,10 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
     let message = git(w.vault.path(), &["log", "-1", "--format=%B"]);
     assert!(message.contains("Bp-Role: session\nBp-Session: s-one"), "{message}");
     let out = call("bp walk x --for complete --json | jq .", Some("bp-worker"));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("export BP_ROLE=worker BP_SESSION='a-one'; bp walk"));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("export BP_ROLE=worker BP_HARNESS=claude BP_SESSION='a-one'; bp walk")
+    );
     // A read and a call with no verb pass for every role; an agent type with no role reads with no prefix.
     for (command, agent, prefix) in [
         ("bp list issue --json", Some("bp-reviewer"), "export BP_ROLE=reviewer"),
