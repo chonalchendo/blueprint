@@ -48,6 +48,7 @@ crate::closed_enum! {
         DiagramInvalid = "diagram_invalid",
         BaseMoved = "base_moved",
         NotEditorial = "not_editorial",
+        VerbOutsideRole = "verb_outside_role",
     }
 }
 

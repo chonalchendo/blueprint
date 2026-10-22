@@ -65,6 +65,10 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
     let ours: Vec<&serde_json::Value> = groups.map(|g| &g["hooks"][0]).filter(|h| h["command"] != "mine.sh").collect();
     assert_eq!(ours.len(), 4);
     assert!(ours.iter().all(|h| h["onFailure"] == "block"), "{ours:?}");
+    // The harness kills a SessionEnd hook after 1.5 s unless it carries a timeout; the other hooks keep the default.
+    let timeouts: Vec<Option<u64>> = ours.iter().map(|h| h["timeout"].as_u64()).collect();
+    assert_eq!(timeouts.iter().flatten().collect::<Vec<_>>(), [&10], "only the SessionEnd hook: {ours:?}");
+    assert!(settings["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"].as_u64() >= Some(10));
     let allow = &settings["permissions"]["allow"];
     assert_eq!(allow, &serde_json::json!(["Bash(ls *)", "Bash(export BP_ROLE=*)"]), "an older rule of ours goes");
     let manifest: serde_json::Value = serde_json::from_str(&read(t, ".claude/skills/bundle.json")).unwrap();

@@ -378,6 +378,9 @@ fn merged(mut settings: Value, spec: &Spec) -> Option<Value> {
         if spec.block_on_failure {
             hook["onFailure"] = "block".into();
         }
+        if let Some(seconds) = h.timeout {
+            hook["timeout"] = seconds.into();
+        }
         let mut group = json!({ "hooks": [hook] });
         if let Some(m) = h.matcher {
             group["matcher"] = m.into();

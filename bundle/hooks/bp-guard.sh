@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# PreToolUse on Edit and Write: denies a write under the vault root, because bp is the vault's only writer (12).
+# PreToolUse on Edit and Write: denies a write under the vault root, because bp is the vault's only writer (12), and a
+# `bp-worker`'s write inside the clone's main checkout, because a worker edits its claim's worktree (17, Hooks).
 # Exit 2 blocks the call. A guard fails closed (17, Hooks): when it cannot read its input or find the vault (no jq,
 # no bp on the hook's PATH, `bp where` refuses), it denies, and the message names the cause.
 deny() {
@@ -22,7 +23,8 @@ IFS=/ read -ra parts <<< "$path"
 for p in "${parts[@]}"; do
     case $p in '' | .) ;; ..) norm=${norm%/*} ;; *) norm=$norm/$p ;; esac
 done
-in_vault() {
+# Whether $1 sits under the directory $2, as the file or the nearest existing ancestor resolves.
+inside() {
     local p=$1 dir n=0 t
     # A file that is a symlink is tested where it points, as a Write follows it.
     while [ -L "$p" ] && [ $n -lt 40 ]; do
@@ -30,14 +32,24 @@ in_vault() {
         case $t in /*) p=$t ;; *) p=${p%/*}/$t ;; esac
         n=$((n + 1))
     done
-    # A new file has no directory yet: its nearest existing ancestor decides, through symlinks, as the vault root is.
+    # A new file has no directory yet: its nearest existing ancestor decides, through symlinks, as the root is.
     dir=${p%/*}
     while [ -n "$dir" ] && [ ! -d "$dir" ]; do dir=${dir%/*}; done
     dir=$(cd "${dir:-/}" && pwd -P)
-    case $dir/ in "$vault"/*) return 0 ;; esac
+    case $dir/ in "$2"/*) return 0 ;; esac
     return 1
 }
+# The main checkout is two levels above this script, where `install` puts the hooks. The claim's worktree and the
+# system temp directory, where `bp-complete` writes the delta body, sit outside it, so the deny alone lets them pass:
+# `place` puts a worktree beside the checkout, never in it. No `bp list claim` call is needed, and a claim row holds no
+# worktree to read.
+if [ "$(jq -r 'select(.agent_id) | .agent_type // empty' <<< "$input")" = bp-worker ]; then
+    top=$(cd "$(dirname "$0")/../.." && pwd -P)
+    for p in "$path" "${norm:-/}"; do
+        inside "$p" "$top" && deny "$path is in the main checkout; a worker edits only its claim's worktree ($top-worktrees/<issue>, the worktree field of bp cut's result), so write the same file there"
+    done
+fi
 for p in "$path" "${norm:-/}"; do
-    in_vault "$p" && deny "$path is in the vault; change it with a bp verb (bp --help)"
+    inside "$p" "$vault" && deny "$path is in the vault; change it with a bp verb (bp --help)"
 done
 exit 0

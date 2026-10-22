@@ -3,6 +3,7 @@
 //! directory. `lines`, the file cap: exit 2 with one line per non-test file over 500 lines. `forge <project>`, a fake
 //! forge for a repo block: prints its directory. `gh`, the fake `gh` that directory's shim runs. `eval`, the skill eval and its grader
 //! (`eval.rs`).
+//! `sandbox [claim]`, 27's prelude as `export` lines.
 
 mod bench;
 mod eval;
@@ -15,6 +16,7 @@ mod eval_trace;
 mod forge;
 mod gh;
 mod lines;
+mod sandbox;
 mod scratch;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -50,6 +52,18 @@ fn main() -> ExitCode {
                 done => report(done),
             };
         }
+        Some("sandbox") => {
+            return match sandbox::run(&args[1..]) {
+                Ok(lines) => {
+                    print!("{lines}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("xtask: {e:#}");
+                    ExitCode::from(1)
+                }
+            };
+        }
         Some(verb @ ("scratch" | "forge")) => {
             let made = if verb == "scratch" { scratch::run() } else { forge::run(&args[1..]) };
             return match made {
@@ -65,7 +79,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project> | cargo xtask eval <skill> --trials N | cargo xtask eval --grade [--check] <skill>"
+                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project> | cargo xtask eval <skill> --trials N | cargo xtask eval --grade [--check]  <skill> | cargo xtask sandbox [claim]"
             );
             return ExitCode::from(4);
         }

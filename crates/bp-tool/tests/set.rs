@@ -308,10 +308,12 @@ fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
     for role in ["session", "worker", "reviewer", "researcher"] {
         for act in acts {
             let (code, v) = bp_env(root, &[("BP_ROLE", role)], act);
-            assert_eq!((code, v["code"].as_str()), (Some(2), Some("role_forbidden")), "{role} {act:?}: {v}");
+            // Only the session's row holds `transition`; the other roles meet the row check before the human's act.
+            let want = if act[0] == "transition" && role != "session" { "verb_outside_role" } else { "role_forbidden" };
+            assert_eq!((code, v["code"].as_str()), (Some(2), Some(want)), "{role} {act:?}: {v}");
         }
     }
-    let (_, v) = bp_env(root, &[("BP_ROLE", "worker")], &["transition", "projects/bp/designs/none", "draft"]);
+    let (_, v) = bp_env(root, &[("BP_ROLE", "session")], &["transition", "projects/bp/designs/none", "draft"]);
     assert_eq!(v["code"], "no_node", "another move is not the human's: {v}");
     let (_, v) = bp_env(root, &[("BP_ROLE", "")], &["transition", "projects/bp/designs/product", "active"]);
     assert!(v["commit"].is_string(), "the human activates: {v}");
