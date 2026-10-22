@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # PreToolUse on Bash: names the role of each command that names bp, and denies a verb outside the role's verbs (21,
-# rule 6; 27, design change 3). A dispatch carries an `agent_id`, and its `agent_type` names the role; else the role is
-# the session's. The role is a label an agent can forge, not a gate: the forge stays the gate. The hook fails closed:
-# when it cannot read its input or decide the role, it exits 2, which blocks the call, and names the cause.
+# rule 6; 27, design change 3). It also denies a worker's `run_in_background` flag, whatever the command. A dispatch
+# carries an `agent_id`, and its `agent_type` names the role; else the role is the session's. The role is a label an
+# agent can forge, not a gate: the forge stays the gate. The hook fails closed: when it cannot read its input or decide
+# the role, it exits 2, which blocks the call, and names the cause.
 deny() {
-    echo "bp-role: $1" >&2
+    echo "bp-role: $*" >&2
     exit 2
 }
 command -v jq > /dev/null || deny "jq is not installed, so every Bash call is denied; install jq"
@@ -12,6 +13,14 @@ input=$(< /dev/stdin)
 [ -n "$input" ] || deny "the hook input is empty, so the call is denied"
 command=$(jq -er '.tool_input.command | strings' <<< "$input" 2> /dev/null) ||
     deny "the hook input is not the JSON of a Bash call, so the call is denied"
+# A worker that backgrounds a command ends its turn to wait for a child that the harness never reports back: at least
+# 16 stalls in anvil, past a prose rule. This catches the flag only, not `cmd &`, `nohup` or `sleep` polling: those are
+# plain text in the command, and no parse tells a wait from work. It runs before the bp test, as the flag is no bp verb.
+flagged=$(jq -r 'select(.agent_id and .agent_type == "bp-worker"
+    and (.tool_input.run_in_background // false) != false) | "x"' <<< "$input")
+[ -z "$flagged" ] ||
+    deny "a worker does not set run_in_background, so the call is denied; run the command in the foreground" \
+        "and bound it with a timeout"
 # The label goes on any command that names bp as a word, as a call the parse misses would commit as `human`, the one
 # label the approval measure trusts. The prefix is an `export`, so a nested `bash -c`, `eval` or loop body inherits it.
 bps=$(tr -c '[:alnum:]_.-' '\n' <<< "$command" | grep -cx bp)

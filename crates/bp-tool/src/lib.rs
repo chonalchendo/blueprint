@@ -17,6 +17,7 @@ mod link;
 mod record;
 mod redraw;
 mod rename;
+mod row;
 mod schema;
 mod set;
 mod snapshot;
@@ -183,6 +184,9 @@ pub struct Where {
 
 /// Runs one verb from `cwd` and returns the exit code: 0 ok, 1 error, 2 refused, 3 no-op, 4 usage.
 pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
+    if let Err(refusal) = row::check(&cli.verb) {
+        return finish::<Value>(Err(refusal), cli.json, out);
+    }
     match &cli.verb {
         Verb::Where => finish(where_(cwd), cli.json, out),
         Verb::Show(show) => finish(show_(cwd, show), cli.json, out),

@@ -311,7 +311,7 @@ fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
             assert_eq!((code, v["code"].as_str()), (Some(2), Some("role_forbidden")), "{role} {act:?}: {v}");
         }
     }
-    let (_, v) = bp_env(root, &[("BP_ROLE", "worker")], &["transition", "projects/bp/designs/none", "draft"]);
+    let (_, v) = bp_env(root, &[("BP_ROLE", "session")], &["transition", "projects/bp/designs/none", "draft"]);
     assert_eq!(v["code"], "no_node", "another move is not the human's: {v}");
     let (_, v) = bp_env(root, &[("BP_ROLE", "")], &["transition", "projects/bp/designs/product", "active"]);
     assert!(v["commit"].is_string(), "the human activates: {v}");

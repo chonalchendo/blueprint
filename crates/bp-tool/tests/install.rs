@@ -218,6 +218,53 @@ fn the_guard_denies_a_vault_path_and_fails_closed() {
 }
 
 #[test]
+fn the_guard_keeps_a_worker_out_of_the_main_checkout() {
+    let w = World::new();
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    let path = bin(&w.t.path().join("bin"), &[("bp", assert_cmd::cargo::cargo_bin("bp"))], true);
+    let write = |agent: Option<&str>, p: &Path| {
+        let mut input = serde_json::json!({ "hook_event_name": "PreToolUse", "tool_name": "Write",
+            "tool_input": { "file_path": p } });
+        if let Some(kind) = agent {
+            input["agent_id"] = "a-q".into();
+            input["agent_type"] = kind.into();
+        }
+        w.hook("bp-guard.sh", &input.to_string(), &path, &[])
+    };
+    let worker = |p: &Path| write(Some("bp-worker"), p);
+    let (code, tree) = (w.code(), w.t.path().join("code-worktrees/0001.a"));
+    std::fs::create_dir_all(&tree).unwrap();
+    let denied = |p: &Path, what: &str| {
+        let out = worker(p);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{what}: {err}");
+        assert!(err.contains("main checkout") && err.contains("worktree"), "the message names cause and action: {err}");
+    };
+    denied(&code.join("notes.md"), "the checkout");
+    denied(&code.join(".git/config"), "git's own files");
+    denied(&code.join(".claude/hooks/bp-guard.sh"), "the hook itself");
+    denied(&code.join("nope/../notes.md"), "`..` after a directory that does not exist");
+    denied(&tree.join("../../code/notes.md"), "`..` out of the worktree");
+    let sibling = w.t.path().join("code-worktrees/0001.a/link");
+    std::os::unix::fs::symlink(&code, &sibling).unwrap();
+    denied(&sibling.join("new/deep.md"), "a symlinked directory");
+    std::os::unix::fs::symlink(code.join("README.md"), tree.join("readme")).unwrap();
+    denied(&tree.join("readme"), "a symlinked file");
+    // On a case-insensitive volume, `CODE` names the checkout.
+    let upper = w.t.path().join("CODE/notes.md");
+    if upper.parent().unwrap().exists() {
+        denied(&upper, "the checkout, spelt in another case");
+    }
+    for ok in [tree.join("a/b.md"), w.home.path().join("delta.md")] {
+        let out = worker(&ok);
+        assert_eq!(out.status.code(), Some(0), "{}: {}", ok.display(), String::from_utf8_lossy(&out.stderr));
+    }
+    for agent in [None, Some("bp-reviewer")] {
+        assert_eq!(write(agent, &code.join("notes.md")).status.code(), Some(0), "only a worker is confined: {agent:?}");
+    }
+}
+
+#[test]
 fn the_session_hooks_record_the_seed_and_walk_it() {
     let w = World::new();
     w.bp(&w.code(), &[], &["install", "--target", "claude"]);

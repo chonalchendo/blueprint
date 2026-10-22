@@ -10,6 +10,8 @@ pub(crate) struct Hook {
     pub(crate) event: &'static str,
     pub(crate) matcher: Option<&'static str>,
     pub(crate) script: &'static str,
+    /// Seconds the harness waits for the script. `None` takes the harness's default.
+    pub(crate) timeout: Option<u32>,
 }
 
 /// Where a target reads each part, as paths from the clone's top, and the limits it holds.
@@ -47,7 +49,7 @@ pub(crate) struct Spec {
     pub(crate) listing: usize,
 }
 
-const START: Hook = Hook { event: "SessionStart", matcher: None, script: "bp-start.sh" };
+const START: Hook = Hook { event: "SessionStart", matcher: None, script: "bp-start.sh", timeout: None };
 
 pub(crate) const CLAUDE: Spec = Spec {
     target: Target::Claude,
@@ -63,9 +65,11 @@ pub(crate) const CLAUDE: Spec = Spec {
     top: "\"$CLAUDE_PROJECT_DIR\"",
     events: &[
         START,
-        Hook { event: "PreToolUse", matcher: Some("Edit|Write"), script: "bp-guard.sh" },
-        Hook { event: "PreToolUse", matcher: Some("Bash"), script: "bp-role.sh" },
-        Hook { event: "SessionEnd", matcher: None, script: "bp-end.sh" },
+        Hook { event: "PreToolUse", matcher: Some("Edit|Write"), script: "bp-guard.sh", timeout: None },
+        Hook { event: "PreToolUse", matcher: Some("Bash"), script: "bp-role.sh", timeout: None },
+        // Claude Code kills a SessionEnd hook after 1.5 s unless `timeout` is set, with no message; the commit of
+        // `bp record` can outlast that.
+        Hook { event: "SessionEnd", matcher: None, script: "bp-end.sh", timeout: Some(10) },
     ],
     description_max: 1024,
     body_lines: 500,
