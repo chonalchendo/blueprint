@@ -1,20 +1,22 @@
-//! `cargo xtask eval`, the skill eval (29, design change 1; 17 check 6). Blueprint never runs an agent, so the runner
-//! lives here, and the owner starts it in their own terminal.
+//! `cargo xtask eval`, the skill eval (29, design changes 1 and 2; 17 check 6). Blueprint never runs an agent, so the
+//! runner lives here, and the owner starts it in their own terminal. Skills: `bp-review`, `bp-complete`, `bp-respond`.
 //!
 //! ```text
 //! cargo xtask eval <skill> --trials N [--arms with,without[,filler]] [--fixture <id>]
 //! cargo xtask eval --grade [--check] <skill>
 //! ```
 //!
-//! A run fills each arm and fixture to N stored trials (a retry runs only what is missing). A trial builds the replay's sandbox, starts the agent in the clone,
-//! and stores the role's transcript and the vault log under `$BP_REDESIGN/analysis/evals-skills/<skill>/`. Then it
-//! grades the store, as `--grade` does. The agent is `$BP_EVAL_AGENT`, a shell command that reads the prompt from
-//! `$BP_EVAL_PROMPT`; if it writes the role's transcript to `$BP_EVAL_TRANSCRIPT`, that file is the trace, and if it
-//! does not, the newest transcript of the role's subagent that Claude Code wrote for the sandbox is. A run past
-//! `$BP_EVAL_TIMEOUT` seconds (default 1200) is killed, and a trial with no transcript is stored as a failed trial; a
-//! failed trial counts as a fail, and the report names the reason. `$BP_VAULT` is the vault to copy. Flags for a
-//! test: `--repo <dir>` (holds the fixtures' commits), `--fixtures <dir>`, `--bin <arm>=<bp>` (trusted: the arm's
-//! clone is not asserted). A usage error exits 4, as every xtask check does.
+//! A run fills each arm and fixture to N stored trials (a retry runs only what is missing). A trial builds the
+//! replay's sandbox, starts the agent in the clone, and stores the role's transcript and the vault log under
+//! `$BP_REDESIGN/analysis/evals-skills/<skill>/`. Then it grades the store, as `--grade` does. The agent is
+//! `$BP_EVAL_AGENT`, a shell command that reads the prompt from `$BP_EVAL_PROMPT`; if it writes the role's transcript
+//! to `$BP_EVAL_TRANSCRIPT`, that file is the trace, and if it does not, the newest transcript of the role's subagent
+//! that Claude Code wrote for the sandbox is. A run past `$BP_EVAL_TIMEOUT` seconds is killed (default 1200; 3600 for
+//! `bp-complete`, which builds a whole issue; 1800 for `bp-respond`), and a trial with no transcript is stored as a
+//! failed trial; a failed trial counts as a fail, and the report names the reason. `$BP_VAULT` is the vault to copy.
+//! `$BP_EVAL_TARGET` is a cargo target directory to keep across runs (default: one per run), where a worker's blocks
+//! build the issue's code. Flags for a test: `--repo <dir>` (holds the fixtures' commits), `--fixtures <dir>`,
+//! `--bin <arm>=<bp>` (trusted: the arm's clone is not asserted). A usage error exits 4, as every xtask check does.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -63,23 +65,33 @@ impl Skill {
     fn parse(name: &str) -> Result<Self> {
         let action: Action =
             name.strip_prefix("bp-").unwrap_or(name).parse().map_err(|_| usage(format!("{name} is no skill")))?;
-        if action != Action::Review {
-            return Err(usage(format!(
-                "{name}: no fixture or grader yet; issue 6 of milestone 6 adds complete and respond"
-            )));
-        }
         // The reviewer returns the review and the session records it (21), so no action belongs to the reviewer role.
-        Ok(Self { name: format!("bp-{action}"), action, role: Role::Reviewer })
+        let role = match action {
+            Action::Review => Role::Reviewer,
+            Action::Complete | Action::Respond => Role::Worker,
+            _ => return Err(usage(format!("{name}: no fixture or grader; the eval covers review, complete, respond"))),
+        };
+        Ok(Self { name: format!("bp-{action}"), action, role })
     }
 
     pub fn role_file(&self) -> String {
         format!("bp-{}", self.role)
     }
 
-    /// The verbs the dispatched role may run: the read verbs and the role's row, which is empty for the reviewer.
-    /// Issue 6 gives the worker the row of its action here.
+    /// The verbs the dispatched role may run for this action: the read verbs and the action's row in 21. The reviewer
+    /// has no row, because the session records its review.
     pub fn allowed(&self) -> Vec<&'static str> {
-        READ_VERBS.iter().copied().chain(self.role.verbs().unwrap_or_default()).collect()
+        let row = if self.role == Role::Reviewer { &[][..] } else { self.action.verbs() };
+        READ_VERBS.iter().copied().chain(row.iter().copied()).collect()
+    }
+
+    /// Seconds a trial may run by default: a complete trial builds a whole issue.
+    fn seconds(&self) -> u64 {
+        match self.action {
+            Action::Complete => 3600,
+            Action::Respond => 1800,
+            _ => 1200,
+        }
     }
 }
 
@@ -179,7 +191,7 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
 fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -> Result<()> {
     let source = std::env::var_os("BP_VAULT").context("set BP_VAULT to the vault to copy")?;
     let agent = std::env::var("BP_EVAL_AGENT").unwrap_or_else(|_| AGENT.into());
-    let seconds = std::env::var("BP_EVAL_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
+    let seconds = std::env::var("BP_EVAL_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(skill.seconds());
     if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
         eprintln!("eval: ANTHROPIC_API_KEY is set; `claude -p` then bills the API key, not your subscription");
     }
@@ -215,7 +227,8 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                     &bin[arm],
                     &work,
                     fx,
-                    verify.then_some((skill, arm.as_str())),
+                    skill,
+                    verify.then_some(arm.as_str()),
                 )
                 .with_context(|| format!("build the sandbox of {id}"))?;
                 // An arm built from an edited bundle dispatches from that bundle's template.
@@ -253,10 +266,17 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                         record
                     );
                 }
-                if let Some(review) = Review::parse(&Trace::parse(&text).final_text()) {
-                    sb.record_review(&fx.head, &review.body)?;
-                }
-                std::fs::write(store.join(format!("{id}.vault.log")), sb.vault_log()?)?;
+                // A reviewer returns its review and the session records it (21); a worker's stop is read from the
+                // sandbox as the agent left it.
+                let log = if skill.action == Action::Review {
+                    if let Some(review) = Review::parse(&Trace::parse(&text).final_text()) {
+                        sb.record_review(&fx.head, &review.body)?;
+                    }
+                    sb.vault_log()?
+                } else {
+                    format!("{}\n{}", sb.vault_log()?, sb.end_state(skill, fx)?)
+                };
+                std::fs::write(store.join(format!("{id}.vault.log")), log)?;
                 std::fs::write(store.join(format!("{id}.hash")), format!("{hash}\n"))?;
                 // The transcript lands last: a trial is stored once it has one, so an aborted run leaves no half trial.
                 std::fs::write(store.join(format!("{id}.jsonl")), text)?;
@@ -274,9 +294,16 @@ mod tests {
     fn the_reviewer_may_read_and_nothing_else() {
         let s = Skill::parse("bp-review").unwrap();
         assert_eq!((s.role_file().as_str(), s.allowed()), ("bp-reviewer", READ_VERBS.to_vec()));
-        assert!(
-            Skill::parse("bp-complete").is_err() && Skill::parse("review").is_ok() && Skill::parse("nope").is_err()
-        );
+        assert!(Skill::parse("review").is_ok() && Skill::parse("nope").is_err() && Skill::parse("bp-design").is_err());
+    }
+
+    #[test]
+    fn a_worker_may_run_the_row_of_its_action() {
+        let (complete, respond) = (Skill::parse("bp-complete").unwrap(), Skill::parse("respond").unwrap());
+        assert_eq!(complete.role_file(), "bp-worker");
+        assert_eq!(respond.role_file(), "bp-worker");
+        assert!(complete.allowed().contains(&"cut") && !respond.allowed().contains(&"cut"), "cut is complete's");
+        assert!(respond.allowed().contains(&"pr") && !respond.allowed().contains(&"create"));
     }
 
     #[test]

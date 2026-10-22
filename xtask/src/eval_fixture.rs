@@ -1,13 +1,17 @@
-//! A review fixture and the review it is graded against (29, design change 2). A fixture is one file in
-//! `xtask/evals/<skill>/`: a pull request at a recorded base and head, the issue the sandbox holds for it, and the
-//! ground truth: the findings of a past review that the worker fixed (`analysis/review-pr-*.md`, "Disposition").
+//! A fixture and the outcome it is graded against (29, design change 2). A fixture is one file in
+//! `xtask/evals/<skill>/`: the clone's recorded base, the issue the sandbox holds, and a ground truth. For `bp-review`
+//! and `bp-respond` the head is a pull request and the truth is the findings of a past review that the worker fixed
+//! (`analysis/review-pr-*.md`, "Disposition"). For `bp-complete` the head is the landed squash, and the truth is the
+//! issue's crates: the first two path parts of the files that squash changed, as `replay-evidence.sh` computes them.
 //!
 //! ```text
 //! base: <sha>
 //! head: <sha>
 //! title: <issue title>
+//! stack: <sha> | <title>                   (complete only: the dependency's pull request head)
+//! scope: <path part> <path part> ...       (complete only)
 //! truth:
-//! - <path>:<line>[-<line>][, <line>] | <what the finding said>
+//! - [<severity>] <path>:<line>[-<line>][, <line>] | <what the finding said>
 //! ---
 //! <the issue body, verbatim>
 //! ```
@@ -25,6 +29,9 @@ pub struct Fixture {
     pub title: String,
     pub truth: Vec<Truth>,
     pub issue: String,
+    /// The head and title of the dependency's pull request: the sandbox opens it, and the issue depends on it.
+    pub stack: Option<(String, String)>,
+    pub scope: Vec<String>,
 }
 
 /// One finding of the ground truth: a file and the lines it named. No line means the whole file.
@@ -32,6 +39,8 @@ pub struct Truth {
     path: String,
     lines: Vec<(u32, u32)>,
     pub what: String,
+    /// The first column of the review table: `bp-respond`'s sandbox records these rows.
+    severity: String,
 }
 
 pub struct Finding {
@@ -63,6 +72,8 @@ impl Fixture {
             title: String::new(),
             truth: Vec::new(),
             issue: issue.trim().to_string(),
+            stack: None,
+            scope: Vec::new(),
         };
         for line in head.lines().filter(|l| !l.trim().is_empty()) {
             if let Some(item) = line.strip_prefix("- ") {
@@ -74,13 +85,19 @@ impl Fixture {
                     "base" => f.base = value,
                     "head" => f.head = value,
                     "title" => f.title = value,
+                    "scope" => f.scope = value.split_whitespace().map(str::to_string).collect(),
+                    "stack" => {
+                        let (sha, title) =
+                            value.split_once('|').with_context(|| format!("{id}: stack is `<sha> | <title>`"))?;
+                        f.stack = Some((sha.trim().into(), title.trim().into()));
+                    }
                     "truth" => {}
                     _ => bail!("{id}: unknown key `{key}`"),
                 }
             }
         }
-        if [&f.base, &f.head, &f.title].iter().any(|v| v.is_empty()) || f.truth.is_empty() {
-            bail!("{id}: base, head, title and at least one truth item are required");
+        if [&f.base, &f.head, &f.title].iter().any(|v| v.is_empty()) || (f.truth.is_empty() && f.scope.is_empty()) {
+            bail!("{id}: base, head, title and a truth item or a scope are required");
         }
         Ok(f)
     }
@@ -121,6 +138,13 @@ impl Fixture {
         (0..self.truth.len()).filter(|i| assigned.contains(&Some(*i))).count()
     }
 
+    /// The review the session records for `bp-respond`: the `head:` line and one table row per ground-truth item.
+    pub fn review_body(&self) -> String {
+        let rows = self.truth.iter().map(|t| format!("| {} | `{}` | {} |", t.severity, t.location(), t.what));
+        let table = ["| severity | location | finding |".into(), "|---|---|---|".into()];
+        format!("head: {}\n{}", self.head, table.into_iter().chain(rows).collect::<Vec<String>>().join("\n"))
+    }
+
     /// How many ground-truth items a text names, in any form: its file and a line within `NEAR` of the item's.
     /// A reply with no findings table still counts, so recall does not hang on the shape only `bp-review` defines.
     pub fn named_in(&self, text: &str) -> usize {
@@ -136,8 +160,12 @@ pub fn holdout(dir: &Path) -> Vec<String> {
 
 impl Truth {
     fn parse(at: &str, what: &str) -> Result<Self> {
+        let (severity, at) = match at.strip_prefix('[').and_then(|a| a.split_once(']')) {
+            Some((s, rest)) => (s, rest.trim()),
+            None => ("warn", at),
+        };
         let (path, lines) = locate(at).context("a location is `<path>[:<line>[-<line>]]`")?;
-        Ok(Self { path, lines, what: what.to_string() })
+        Ok(Self { path, lines, what: what.to_string(), severity: severity.to_string() })
     }
 
     pub fn location(&self) -> String {
@@ -259,6 +287,54 @@ mod tests {
         assert_eq!(ids, ["pr-1"]);
         assert!(Fixture::load(dir.path(), Some("pr-2")).is_err());
         assert_eq!(holdout(dir.path()), ["pr-2"]);
+    }
+
+    #[test]
+    fn a_fixture_holds_a_stack_a_scope_and_the_rows_of_its_review() {
+        let text = "base: b1\nhead: h1\ntitle: T\nstack: d1 | The dependency\nscope: a/x justfile\ntruth:\n- [major] a/x.rs:20 | One.\n- b.rs | Two.\n---\nbody\n";
+        let f = Fixture::parse("m-1", text).unwrap();
+        assert_eq!(f.stack, Some(("d1".into(), "The dependency".into())));
+        assert_eq!(f.scope, ["a/x", "justfile"]);
+        let review = Review::parse(&f.review_body()).unwrap();
+        assert_eq!((review.head.as_str(), review.tables, review.findings.len()), ("h1", 1, 2));
+        let rows: Vec<String> = f.review_body().lines().skip(3).map(str::to_string).collect();
+        assert_eq!(rows, ["| major | `a/x.rs:20` | One. |", "| warn | `b.rs` | Two. |"]);
+        assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\n---\nbody").is_err(), "no truth and no scope");
+        assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\nscope: a\nstack: only-a-sha\n---\nb").is_err());
+        assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\nscope: a\n---\nbody").is_ok(), "a scope is a truth");
+    }
+
+    /// The shipped fixtures: each parses, names commits of this repository when the history is present, and a
+    /// complete fixture's scope is what its landed commit changed (the first two path parts, as 29 computes them).
+    #[test]
+    fn the_shipped_fixtures_match_the_history_they_name() {
+        let evals = Path::new(env!("CARGO_MANIFEST_DIR")).join("evals");
+        let root = evals.parent().unwrap().parent().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(root).output().unwrap();
+            out.status.success().then(|| String::from_utf8(out.stdout).unwrap())
+        };
+        for skill in ["bp-review", "bp-complete", "bp-respond"] {
+            let fixtures = Fixture::load(&evals.join(skill), None).unwrap();
+            assert!(!fixtures.is_empty() && !holdout(&evals.join(skill)).is_empty(), "{skill}");
+            for f in fixtures {
+                let known = |sha: &str| git(&["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_some();
+                if !known(&f.base) {
+                    eprintln!("skipped {skill}/{}: history is shallow", f.id);
+                    continue;
+                }
+                let stack = f.stack.iter().map(|s| s.0.as_str());
+                assert!(stack.chain([f.head.as_str()]).all(known), "{skill}/{}", f.id);
+                if skill == "bp-complete" {
+                    let names = git(&["diff", "--name-only", &format!("{}^", f.head), &f.head]).unwrap();
+                    let mut crates: Vec<String> = names.lines().map(crate::eval_end::crate_of).collect();
+                    crates.sort();
+                    crates.dedup();
+                    assert_eq!(f.scope, crates, "{}", f.id);
+                    assert!(f.issue.contains("check shell {name="), "{}: a worker needs a named block", f.id);
+                }
+            }
+        }
     }
 
     #[test]

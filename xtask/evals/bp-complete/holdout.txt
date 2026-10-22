@@ -1,0 +1,8 @@
+# The five latest landed issues as of 2026-10-22, master ecc5da5 (29, decision 9): m6-3 confinement, m6-1 eval-runner-review,
+# m6-7 harness-bundle-check, m6-2 the-ledger, m6-5 verb-table. No run reads them. Later issues are not held out until
+# this list names them.
+m6-1
+m6-2
+m6-3
+m6-5
+m6-7

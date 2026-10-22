@@ -1,0 +1,185 @@
+//! The report the owner reads at the walkthrough (29, issue 1): per arm, then per trial with a pointer to the raw
+//! trace. The columns follow the skill: a review is scored on its findings, a worker on its stop, its checks and
+//! its file scope (complete) or its dispositions (respond).
+
+use std::path::Path;
+
+use bp_operation::Action;
+
+use crate::eval_fixture::NEAR;
+use crate::eval_grade::{Grade, Stats, f2, short};
+use crate::eval_score::{ASPECTS, Graded, RECALL};
+
+fn yes(b: bool) -> &'static str {
+    if b { "yes" } else { "no" }
+}
+
+impl Grade {
+    pub fn report(&self, store: &Path) -> String {
+        let mut lines =
+            vec![format!("# Eval report: {}\n", self.skill.name), format!("Traces: `{}`\n", store.display())];
+        lines.push("## Ground truth\n".into());
+        lines.extend(self.truth_lines());
+        lines.push("## Arms\n".into());
+        lines.extend(self.arm_lines());
+        lines.push(self.notes());
+        lines.push("## Trials".into());
+        for t in &self.trials {
+            lines.extend(self.trial_lines(t, store));
+        }
+        lines.join("\n") + "\n"
+    }
+
+    fn aspects(&self) -> [&'static str; 2] {
+        ASPECTS[usize::from(self.skill.action == Action::Respond)]
+    }
+
+    fn truth_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for f in &self.fixtures {
+            lines.push(format!("Fixture {} (base `{}`, head `{}`):\n", f.id, short(&f.base), short(&f.head)));
+            lines.extend(f.truth.iter().enumerate().map(|(i, t)| format!("{}. `{}`: {}", i + 1, t.location(), t.what)));
+            if !f.scope.is_empty() {
+                lines.push(format!("The landed issue changed these crates: `{}`.", f.scope.join("`, `")));
+            }
+            if let Some((sha, title)) = &f.stack {
+                lines.push(format!(
+                    "Stacked: the dependency \"{title}\" holds an open pull request at `{}`.",
+                    short(sha)
+                ));
+            }
+            lines.push(String::new());
+        }
+        lines
+    }
+
+    /// The arms table: the review columns, or the worker's stop and its two aspects.
+    fn arm_lines(&self) -> Vec<String> {
+        let review = self.skill.action == Action::Review;
+        let names = self.aspects();
+        let mut lines = vec![if review {
+            "| arm | runs | outcome | prose recall | reached the tool | adherence there | out of row | findings | false | runs with no finding | skill loaded |".to_string()
+        } else {
+            format!(
+                "| arm | runs | outcome | stop reached | escalated | {} | {} | reached the tool | adherence there | out of row | skill loaded |",
+                names[0], names[1]
+            )
+        }];
+        lines.push("|---|---|---|---|---|---|---|---|---|---|---|".into());
+        for arm in ["with", "without", "filler"] {
+            let runs = self.arm(arm);
+            let s = Stats::of(&runs);
+            if s.runs == 0 {
+                continue;
+            }
+            let adherence = s.adherence.map_or("n/a".into(), f2);
+            let count = |f: fn(&Graded) -> bool| runs.iter().filter(|r| f(r)).count();
+            lines.push(if review {
+                format!(
+                    "| {arm} | {} | {} of {} | {} of {} | {} | {adherence} | {} | {} | {} | {} | {} |",
+                    s.runs,
+                    s.passes,
+                    s.runs,
+                    s.prose,
+                    s.truth,
+                    s.reached,
+                    s.out_of_row,
+                    s.found,
+                    s.wrong,
+                    s.silent,
+                    s.loaded
+                )
+            } else {
+                format!(
+                    "| {arm} | {} | {} of {} | {} | {} | {} | {} | {} | {adherence} | {} | {} |",
+                    s.runs,
+                    s.passes,
+                    s.runs,
+                    count(|r| r.end.done && !r.end.escalated()),
+                    count(|r| r.end.escalated()),
+                    count(|r| r.aspects[0]),
+                    count(|r| r.aspects[1]),
+                    s.reached,
+                    s.out_of_row,
+                    s.loaded
+                )
+            });
+        }
+        lines
+    }
+
+    /// What the columns mean, for the skill. The last two bullets hold for every skill.
+    fn notes(&self) -> String {
+        let own = match self.skill.action {
+            Action::Review => format!(
+                "- **Outcome:** a run passes when `bp walk --for review --done` holds after the review is recorded and the findings table matches at least {RECALL} of the ground truth. That needs the shape only `bp-review` defines (a `head:` line, one table).\n- **Prose recall:** items of the ground truth that the final text names in any form (its file and a line within {NEAR} lines). It does not depend on the shape, so a gap in outcome with none in prose recall means the arm cannot write the shape.\n"
+            ),
+            Action::Complete => "- **Outcome:** a run passes when `bp walk --for complete --done` holds with the claim not released `escalated`, the latest run of each error block of the issue passed, and every changed file sits in a crate that the landed issue changed (the first two path parts, as `replay-evidence.sh` compares them). The file set is not compared: the model is not deterministic.\n- **Adherence:** the share of walk, cut, check and pr that the transcript shows as calls, over the runs that reached the tool.\n".to_string(),
+            _ => "- **Outcome:** a run passes when `bp walk --for respond --done` holds with the claim not released `escalated`, every finding has a disposition, every decline gives a reason, and the head moved if a finding was fixed. The quality of a fix is for the owner to read in the trace.\n- **Adherence:** the share of walk, check, pr, one disposition per finding and a commit that the transcript and the vault show, over the runs that reached the tool.\n".to_string(),
+        };
+        format!(
+            "\n{own}- **Uplift:** the `with` rate less the `without` rate; the result file gives its Newcombe 95% interval.\n- **Role body:** the `without` arm's copy drops the sentences about the `Skill:` line; the `filler` arm keeps them.\n"
+        )
+    }
+
+    fn trial_lines(&self, t: &Graded, store: &Path) -> Vec<String> {
+        let names = self.aspects();
+        let outcome = if t.pass { "pass" } else { "fail" };
+        let head = match self.skill.action {
+            Action::Review => format!(
+                "outcome: {outcome}; recorded: {}; ground truth matched by a table row: {} of {}; named in the text: {}",
+                yes(t.end.done),
+                t.hits,
+                t.truth,
+                t.prose_hits
+            ),
+            _ => format!(
+                "outcome: {outcome}; stop reached: {}; escalated: {}; {}: {}; {}: {}",
+                yes(t.end.done),
+                yes(t.end.escalated()),
+                names[0],
+                yes(t.aspects[0]),
+                names[1],
+                yes(t.aspects[1])
+            ),
+        };
+        let steps: Vec<String> = t.steps.iter().map(|(n, ok)| format!("{n} {}", yes(*ok))).collect();
+        let (dir, trial) = (store.display(), &t.trial);
+        let mut lines = vec![format!(
+            "\n### {trial}\n\n- {head}\n- reached the tool: {}; steps: {}\n- out of row: {}; skill loaded as designed: {}\n- trace: `{dir}/{trial}.jsonl`, vault log: `{dir}/{trial}.vault.log`",
+            yes(t.reached),
+            steps.join(", "),
+            t.out_of_row,
+            if t.loaded { "yes" } else { "NO" },
+        )];
+        if let Some(why) = &t.failure {
+            lines.push(format!("- FAILED: {why}"));
+        }
+        if self.skill.action == Action::Complete {
+            let files = if t.end.files.is_empty() { "none".into() } else { t.end.files.join(", ") };
+            lines.push(format!("- files changed: {files}"));
+        }
+        let answers: Vec<String> = t
+            .end
+            .answers
+            .iter()
+            .map(|a| {
+                let how = match (a.fixed, a.reasoned) {
+                    (true, _) => "fixed",
+                    (false, true) => "declined with a reason",
+                    (false, false) => "declined, no reason",
+                };
+                format!("{} {how}", a.finding)
+            })
+            .collect();
+        if !answers.is_empty() {
+            lines.push(format!("- dispositions: {}", answers.join(", ")));
+        }
+        for (at, what, item) in &t.findings {
+            let what: String = what.chars().take(160).collect();
+            let verdict = item.map_or("FALSE".to_string(), |i| format!("match, truth item {}", i + 1));
+            lines.push(format!("  - {verdict} `{at}`: {what}"));
+        }
+        lines
+    }
+}
