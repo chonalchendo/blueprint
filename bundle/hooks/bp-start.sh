@@ -29,6 +29,6 @@ fi
 # walks for the bodies. A refusal passes through whole.
 walk=$(bp walk "$seed" --for "$action" --ids --json |
     jq -c --arg next "bp walk $seed --for $action --json" \
-        'if .code then . else {for, seed, next: $next, intents: .intents[:5], ids: [.ids[:15][] | {id, kind}]} end')
+        'if .code then . else {"for": .for, seed, next: $next, intents: .intents[:5], ids: [.ids[:15][] | {id, kind}]} end')
 jq -cn --arg walk "$walk" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $walk}}'
 exit 0
