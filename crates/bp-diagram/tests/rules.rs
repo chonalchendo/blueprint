@@ -313,7 +313,7 @@ fn a_side_without_cards_keeps_its_straight_route() {
     let path = &path[path.find(" d=\"").unwrap() + 4..];
     let path = &path[..path.find('"').unwrap()];
     assert!(
-        path.starts_with("M152,60") && path.ends_with("L224,68"),
+        path.starts_with("M128,84") && path.ends_with("L200,92"),
         "a--b leaves a's right side and enters b's left: {path}"
     );
 }
