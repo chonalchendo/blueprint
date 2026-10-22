@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SessionStart: walks the latest seed of a handoff with its kind's first action, else the project for shape (17, Hooks).
-# The walk's JSON goes to the session's context as `additionalContext`: stdout that is one JSON object is read as the
+# The walk's map goes to the session's context as `additionalContext`: stdout that is one JSON object is read as the
 # hook's output, not as context. A refusal is context too. The line that names `jq` is plain text, which is context.
 command -v jq > /dev/null || { echo "bp-start: jq is not installed, so the last seed is not walked; install jq"; exit 0; }
 here=$(bp where --json 2> /dev/null) || exit 0
@@ -24,6 +24,11 @@ if [ -n "$seed" ]; then
 else
     seed=projects/$project/project
 fi
-walk=$(bp walk "$seed" --for "$action" --json)
+# Claude Code moves a long context to a file and shows the agent a 2 KB preview (27, the probe: a project walk is 31 KB),
+# so the context is the map, not the slice: the action, the seed and its intents first, then the top ids. The agent
+# walks for the bodies. A refusal passes through whole.
+walk=$(bp walk "$seed" --for "$action" --ids --json |
+    jq -c --arg next "bp walk $seed --for $action --json" \
+        'if .code then . else {for, seed, next: $next, intents: .intents[:5], ids: [.ids[:15][] | {id, kind}]} end')
 jq -cn --arg walk "$walk" '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $walk}}'
 exit 0
