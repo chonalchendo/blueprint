@@ -23,14 +23,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bp_operation::{Action, READ_VERBS, Role};
 use serde_json::json;
 
 use crate::eval_agent::claude_transcript;
 use crate::eval_arms::{bins, prompt};
 use crate::eval_fixture::{Fixture, Review};
-use crate::eval_grade::{Grade, Owner, bundle_hash, differences};
+use crate::eval_grade::{Grade, Owner, bundle_hash, differences, read_hash, stamp};
 use crate::eval_sandbox::Sandbox;
 use crate::eval_trace::Trace;
 
@@ -64,7 +64,7 @@ pub struct Skill {
 }
 
 impl Skill {
-    pub fn parse(name: &str) -> Result<Self> {
+    pub(crate) fn parse(name: &str) -> Result<Self> {
         let action: Action =
             name.strip_prefix("bp-").unwrap_or(name).parse().map_err(|_| usage(format!("{name} is no skill")))?;
         // The reviewer returns the review and the session records it (21), so no action belongs to the reviewer role.
@@ -209,19 +209,30 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
     }
     let list = Fixture::load(fixtures, a.fixture.as_deref())?;
     std::fs::create_dir_all(store)?;
-    let work = crate::scratch::fresh(&std::env::temp_dir().join("bp-eval"), 8)?;
-    let bin = bins(root, skill, &a.arms, &work, &a.bins)?;
-    let repo = a.repo.canonicalize().with_context(|| format!("read {}", a.repo.display()))?;
-    let hash = bundle_hash(root, skill)?;
     // A trial is stored once it has a transcript. One that holds the failure record does not count: the retry
     // runs it again and replaces its files.
     let stored = |id: &str| {
         let text = std::fs::read_to_string(store.join(format!("{id}.jsonl"))).ok();
         text.is_some_and(|t| Trace::parse(&t).failure().is_none())
     };
+    // A stored trial of another fixture or arm protocol would be kept and graded beside the new ones: refuse before
+    // anything is built.
+    let stamps = list.iter().map(stamp).collect::<Result<Vec<_>>>()?;
+    for (fx, stamp) in list.iter().zip(&stamps) {
+        for id in (1..=a.trials).flat_map(|n| a.arms.iter().map(move |arm| format!("{arm}-{}-{n}", fx.id))) {
+            let have = read_hash(store, &id).map(|h| h.1);
+            if stored(&id) && have.as_ref() != Some(stamp) {
+                bail!("{id} ran on another fixture or arm protocol; move {} aside and rerun", store.display());
+            }
+        }
+    }
+    let work = crate::scratch::fresh(&std::env::temp_dir().join("bp-eval"), 8)?;
+    let bin = bins(root, skill, &a.arms, &work, &a.bins)?;
+    let repo = a.repo.canonicalize().with_context(|| format!("read {}", a.repo.display()))?;
+    let hash = bundle_hash(root, skill)?;
     for round in 1..=a.trials {
         for arm in &a.arms {
-            for fx in &list {
+            for (fx, stamp) in list.iter().zip(&stamps) {
                 let id = format!("{arm}-{}-{round}", fx.id);
                 if stored(&id) {
                     continue;
@@ -284,7 +295,7 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                     format!("{}\n{}", sb.vault_log()?, sb.end_state(skill, fx)?)
                 };
                 std::fs::write(store.join(format!("{id}.vault.log")), log)?;
-                std::fs::write(store.join(format!("{id}.hash")), format!("{hash}\n"))?;
+                std::fs::write(store.join(format!("{id}.hash")), format!("{hash}\nstamp: {stamp}\n"))?;
                 // The transcript lands last: a trial is stored once it has one, so an aborted run leaves no half trial.
                 std::fs::write(store.join(format!("{id}.jsonl")), text)?;
             }

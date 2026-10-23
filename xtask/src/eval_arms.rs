@@ -16,6 +16,10 @@ use crate::eval_sandbox::capture;
 /// The text of the `filler` arm's body: it holds no instruction and no fact.
 pub const FILLER: &str = "This line holds no instruction.";
 
+/// The version of how the arms are built. A trial stores it beside the fixture's hash (`eval_grade::stamp`), so a
+/// store of trials that ran under another construction is refused. Bump it when `arm_bundle` changes.
+pub const PROTOCOL: &str = "arms-2";
+
 /// What follows a skill file's frontmatter.
 pub fn body_of(skill_md: &str) -> &str {
     skill_md.strip_prefix("---\n").and_then(|t| t.split_once("\n---\n")).map_or(skill_md, |(_, body)| body)

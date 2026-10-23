@@ -11,9 +11,11 @@
 //! stack: <sha> | <title>                   (complete only: the dependency's pull request head)
 //! scope: <path part> <path part> ...       (complete only)
 //! truth:
-//! - [<severity> [fixed|declined]] <path>:<line>[-<line>][, <line>] | <what the finding said> | match: <word>, <word>
-//! probe: <n> | <shell command>             (optional: run in the worker's worktree or the head's tree; exit 0 = item n holds)
+//! - [<severity> [fixed|declined]] <path>:<line>[-<line>][, <line>] | <what the finding said> | match: <slot>, <slot>
+//! probe: <n> | <shell command>             (optional: respond runs it in the worker's worktree; review, in a directory
+//!                                          whose repository holds the head. Exit 0 = item n holds)
 //! rule: <title> | <text>                   (review only, optional: a design the issue cites, so the walk carries its body)
+//! unless: <phrase>, <phrase>               (review only, optional: a finding that holds one of these matches no item)
 //! ---
 //! <the issue body, verbatim>
 //! ```
@@ -22,9 +24,11 @@
 //! file in the worker's diff against the review's head, and the probe of that item when there is one; `declined`
 //! needs a reasoned decline, and a fix of it fails. Without this the eval would measure the disposition syntax.
 //!
-//! A review finding substantiates an item when its text holds every `match:` word, in any case. Where it points only
-//! breaks a tie, so a finding at the right line with other words earns nothing. An item without `match:` words is
-//! matched by nothing.
+//! A review finding substantiates an item when its text holds every `match:` slot, in any case. A slot is words
+//! split by `|`, and the text holds the slot when it holds one of them. The words come from the item's own text, never
+//! from a run. A finding that holds an `unless:` phrase as a whole word matches no item: keywords cannot read a
+//! negation, and these phrases are the negations a reviewer writes. Where a finding points only breaks a tie, so a
+//! finding at the right line with other words earns nothing. An item without `match:` slots is matched by nothing.
 //!
 //! `holdout.txt` in the same directory lists the held-out ids, one per line: no run reads those.
 
@@ -47,6 +51,8 @@ pub struct Fixture {
     pub probes: Vec<(usize, String)>,
     /// `(title, text)`: designs under the system design that the issue cites, so a rule of the truth is in the walk.
     pub rules: Vec<(String, String)>,
+    /// Lowercase phrases that void a review match.
+    unless: Vec<String>,
 }
 
 /// One finding of the ground truth: a file and the lines it named. No line means the whole file.
@@ -54,8 +60,8 @@ pub struct Truth {
     path: String,
     lines: Vec<(u32, u32)>,
     pub what: String,
-    /// Lowercase words that a finding holds when it substantiates the item.
-    keywords: Vec<String>,
+    /// Slots of lowercase alternatives: a finding substantiates the item when it holds one alternative of each.
+    keywords: Vec<Vec<String>>,
     /// The first column of the review table: `bp-respond`'s sandbox records these rows.
     severity: String,
     /// How the past review closed the item: fixed, or rightly declined.
@@ -91,6 +97,7 @@ impl Fixture {
             scope: Vec::new(),
             probes: Vec::new(),
             rules: Vec::new(),
+            unless: Vec::new(),
         };
         for line in head.lines().filter(|l| !l.trim().is_empty()) {
             if let Some(item) = line.strip_prefix("- ") {
@@ -120,6 +127,10 @@ impl Fixture {
                         let (title, text) =
                             value.split_once('|').with_context(|| format!("{id}: rule is `<title> | <text>`"))?;
                         f.rules.push((title.trim().into(), text.trim().into()));
+                    }
+                    "unless" => {
+                        f.unless =
+                            value.split(',').map(|w| w.trim().to_lowercase()).filter(|w| !w.is_empty()).collect();
                     }
                     "truth" => {}
                     _ => bail!("{id}: unknown key `{key}`"),
@@ -156,7 +167,7 @@ impl Fixture {
     /// The ground-truth item each finding substantiates, if any: one item per finding.
     pub fn assign(&self, findings: &[Finding]) -> Vec<Option<usize>> {
         let all = || self.truth.iter().enumerate();
-        findings.iter().map(|f| best(all(), &f.location, &f.text)).collect()
+        findings.iter().map(|f| self.best(all(), &f.location, &f.text)).collect()
     }
 
     /// How many ground-truth items some finding matches.
@@ -171,34 +182,46 @@ impl Fixture {
         format!("head: {}\n{}", self.head, table.into_iter().chain(rows).collect::<Vec<String>>().join("\n"))
     }
 
+    /// The item whose slots a text holds all of: the one with the most slots, then the nearest to `location`. A text
+    /// that holds an `unless:` phrase matches none.
+    fn best<'a>(&self, items: impl Iterator<Item = (usize, &'a Truth)>, location: &str, text: &str) -> Option<usize> {
+        let text = text.to_lowercase();
+        let whole = |at: usize, w: &str| {
+            let (before, after) = (text[..at].chars().next_back(), text[at + w.len()..].chars().next());
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        };
+        if self.unless.iter().any(|u| text.match_indices(u.as_str()).any(|(at, _)| whole(at, u))) {
+            return None;
+        }
+        let held = items.filter(|(_, t)| {
+            !t.keywords.is_empty() && t.keywords.iter().all(|slot| slot.iter().any(|w| text.contains(w.as_str())))
+        });
+        held.map(|(i, t)| (std::cmp::Reverse(t.keywords.len()), t.apart(location), i)).min().map(|c| c.2)
+    }
+
     /// How many ground-truth items a text substantiates. A citation is a file name of the truth, with the line number
     /// after it when there is one, and it earns at most one item: the best that the words of its own line hold. A
     /// reply with no findings table still counts, so recall does not hang on the shape only `bp-review` defines.
     pub fn named_in(&self, text: &str) -> usize {
+        let cited: BTreeSet<&str> = self.truth.iter().map(|t| t.path.rsplit('/').next().unwrap_or(&t.path)).collect();
         let mut named = BTreeSet::new();
         for line in text.lines() {
-            for t in &self.truth {
-                let name = t.path.rsplit('/').next().unwrap_or(&t.path);
-                for (at, _) in line.match_indices(name) {
+            for name in &cited {
+                // A name inside a longer one (`guidelines.rs` for `lines.rs`) is another file.
+                let own = |at: &usize| !line[..*at].ends_with(|c: char| c.is_alphanumeric() || matches!(c, '_' | '-'));
+                for at in line.match_indices(name).map(|m| m.0).filter(own) {
                     let after = &line[at + name.len()..];
                     let cited = after
                         .find(|c: char| !(c.is_ascii_digit() || matches!(c, ':' | '-' | ',')))
                         .unwrap_or(after.len());
                     let here = format!("{name}{}", &after[..cited]);
                     let files = self.truth.iter().enumerate().filter(|(_, o)| o.in_file(name));
-                    named.extend(best(files, &here, line));
+                    named.extend(self.best(files, &here, line));
                 }
             }
         }
         named.len()
     }
-}
-
-/// The item whose words a text holds all of: the one with the most words, then the nearest to `location`.
-fn best<'a>(items: impl Iterator<Item = (usize, &'a Truth)>, location: &str, text: &str) -> Option<usize> {
-    let text = text.to_lowercase();
-    let held = items.filter(|(_, t)| !t.keywords.is_empty() && t.keywords.iter().all(|k| text.contains(k)));
-    held.map(|(i, t)| (std::cmp::Reverse(t.keywords.len()), t.apart(location), i)).min().map(|c| c.2)
 }
 
 /// The ids in `holdout.txt`; a missing file holds none.
@@ -222,7 +245,8 @@ impl Truth {
         };
         let (path, lines) = locate(at).context("a location is `<path>[:<line>[-<line>]]`")?;
         let (what, words) = what.split_once(" | match:").unwrap_or((what, ""));
-        let keywords = words.split(',').map(|w| w.trim().to_lowercase()).filter(|w| !w.is_empty()).collect();
+        let slot = |s: &str| s.split('|').map(|w| w.trim().to_lowercase()).collect::<Vec<_>>();
+        let keywords = words.split(',').filter(|s| !s.trim().is_empty()).map(slot).collect();
         Ok(Self { path, lines, what: what.trim().to_string(), keywords, severity: severity.to_string(), fixed })
     }
 
@@ -337,23 +361,66 @@ mod tests {
         assert_eq!(named("x.rs:20 first cfg(test)\nx.rs:34 skips the tests dir\nx.rs 500 and 501"), 3);
     }
 
+    fn pr_20() -> Fixture {
+        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("evals/bp-review/pr-20.md");
+        Fixture::parse("pr-20", &std::fs::read_to_string(file).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn each_item_of_the_review_fixture_is_assigned_its_own_text() {
+        let f = pr_20();
+        for (i, t) in f.truth.iter().enumerate() {
+            let own = Finding { location: t.location(), text: t.what.clone() };
+            assert_eq!(f.assign(&[own]), [Some(i)], "item {}: {}", i + 1, t.what);
+        }
+    }
+
     #[test]
     fn the_review_fixture_credits_substance_and_never_a_place() {
-        let evals = Path::new(env!("CARGO_MANIFEST_DIR")).join("evals/bp-review/pr-20.md");
-        let f = Fixture::parse("pr-20", &std::fs::read_to_string(evals).unwrap()).unwrap();
+        let f = pr_20();
         let at = |l: &str, t: &str| f.assign(&[Finding { location: l.into(), text: t.into() }])[0];
-        let disposition = "The diff skips every `tests/` and `target/` directory, and the Shape names neither: declare it in the Shape.";
-        assert_eq!(at("xtask/src/lines.rs:34", disposition), Some(2), "the tests/ skip, with the words of item 3");
-        // A finding of the first real run, which the old grader called FALSE five times.
-        let first = "`sources` skips every `tests/` directory, but the issue's Shape counts each `.rs` file up to its first `#[cfg(test)]`";
-        assert_eq!(at("xtask/src/lines.rs:34", first), Some(2), "the nearer item takes it");
-        // The over-count the first run's `with-5` raised at item 1's line: the right line, the wrong substance.
-        let exact = "The test module is found only when a line is exactly `#[cfg(test)]`, so the one-line form counts, against the Shape's first `#[cfg(test)]`.";
-        assert_eq!(at("xtask/src/lines.rs:20", exact), None, "item 1's line with other words earns nothing");
+        let lines = "xtask/src/lines.rs";
+        // The human review's own finding, which the first grader called FALSE five times.
+        let tests = "`sources` skips every `tests/` directory, but the issue's Shape counts each `.rs` file up to its first `#[cfg(test)]` and no block in `## Check` tests the skip with a 501-line file.";
+        assert_eq!(at(&format!("{lines}:34"), tests), Some(2), "the nearer item takes a tie in slots");
+        assert_eq!(
+            at(&format!("{lines}:34"), "The walk skips every `tests/` dir, which the Shape does not name."),
+            Some(2)
+        );
+        // `with-5`'s Check-block gap: the same class as item 2.
+        let gap = "The Shape says a file over the cap prints its path and count, but the `file-cap` block tests only the exit code 2.";
+        assert_eq!(at(&format!("{lines}:23"), gap), Some(1));
+        let other_words = "The `file-cap` block tries one case only; a file at exactly the cap is never tried, so the boundary is untested.";
+        assert_eq!(at(lines, other_words), Some(1), "item 2 in other words");
+        // Item 1 in the words of the truth, and in the words of a test-only item.
         let under = "The count stops at the first `#[cfg(test)]` even when it guards a helper, so the code below escapes the cap.";
-        assert_eq!(at("xtask/src/lines.rs:20", under), Some(0));
-        assert_eq!(f.named_in(&format!("xtask/src/lines.rs:20 {under}")), 1);
-        assert_eq!(f.named_in(&format!("xtask/src/lines.rs:20 {exact}")), 0);
+        assert_eq!(at(&format!("{lines}:20"), under), Some(0));
+        let test_only =
+            "It stops at the first `#[cfg(test)]` even on a test-only item, and every line after it goes uncounted.";
+        assert_eq!(at(&format!("{lines}:20"), test_only), Some(0));
+        // The over-count `with-5` raised at item 1's line: the right line, the wrong substance.
+        let exact = "The test module is found only when a line is exactly `#[cfg(test)]`, so the one-line form counts, against the Shape's first `#[cfg(test)]`.";
+        assert_eq!(at(&format!("{lines}:20"), exact), None, "a place earns nothing");
+        // A finding that says the item is not a defect matches nothing, with the item's words in it.
+        let right = "The cut-off at the first `#[cfg(test)]` is correct even when a test helper sits above the module.";
+        assert_eq!(at(&format!("{lines}:20"), right), None);
+        assert_eq!(at(lines, "The Check block tests the boundary and the exit code; this is by design."), None);
+        assert_eq!(at(&format!("{lines}:34"), "Skipping `tests/` is fine; the Shape names it."), None);
+        let defined = "The tests/ skip is defined in the Shape, so the skip is undeclared in no way.";
+        assert_eq!(at(&format!("{lines}:34"), defined), Some(2), "`fine` is a whole word: `defined` does not void");
+    }
+
+    #[test]
+    fn prose_credits_a_citation_by_substance_and_not_a_negation() {
+        let f = pr_20();
+        let lines = "xtask/src/lines.rs";
+        let under =
+            "stops at the first `#[cfg(test)]` even on a test-only item, so a file can get under the cap that way";
+        assert_eq!(f.named_in(&format!("| 3 | low | `{lines}` (`take_while`) | {under} |")), 1);
+        assert_eq!(f.named_in(&format!("{lines}:20 {under}")), 1);
+        assert_eq!(f.named_in(&format!("{lines}:20 a test helper above the module is fine, `#[cfg(test)]`")), 0);
+        assert_eq!(f.named_in(&format!("{lines}:34 skips `tests/`, not a defect; the Shape names it")), 0);
+        assert_eq!(f.named_in(&format!("guidelines.rs:20 {under}")), 0, "another file");
     }
 
     #[test]
