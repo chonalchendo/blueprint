@@ -2,7 +2,7 @@
 //! runner lives here, and the owner starts it in their own terminal. Skills: `bp-review`, `bp-complete`, `bp-respond`.
 //!
 //! ```text
-//! cargo xtask eval <skill> --trials N [--arms with,without[,filler]] [--fixture <id>]
+//! cargo xtask eval <skill> --trials N [--arms with,without,filler] [--fixture <id>]
 //! cargo xtask eval --grade [--check] <skill>
 //! ```
 //!
@@ -64,7 +64,7 @@ pub struct Skill {
 }
 
 impl Skill {
-    fn parse(name: &str) -> Result<Self> {
+    pub fn parse(name: &str) -> Result<Self> {
         let action: Action =
             name.strip_prefix("bp-").unwrap_or(name).parse().map_err(|_| usage(format!("{name} is no skill")))?;
         // The reviewer returns the review and the session records it (21), so no action belongs to the reviewer role.
@@ -125,7 +125,7 @@ impl Args {
         let mut a = Self {
             skill: String::new(),
             trials: 0,
-            arms: vec!["with".into(), "without".into()],
+            arms: vec!["with".into(), "without".into(), "filler".into()],
             fixture: None,
             fixtures: None,
             repo: ".".into(),
@@ -319,6 +319,11 @@ mod tests {
         let a = args("bp-review --trials 5 --arms with,without,filler --fixture pr-20").unwrap();
         assert_eq!((a.trials, a.arms.len(), a.fixture.as_deref()), (5, 3, Some("pr-20")));
         assert!(args("--grade --check bp-review").is_ok());
+        assert_eq!(
+            args("bp-review --trials 5").unwrap().arms,
+            ["with", "without", "filler"],
+            "the same n for each arm"
+        );
         for bad in [
             "bp-review",
             "bp-review --trials 2 --check",

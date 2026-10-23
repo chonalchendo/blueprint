@@ -1,8 +1,8 @@
 //! The arms of an eval (29, design change 1). An arm is a `bp` binary that embeds another bundle: the manifest check
 //! (17, check 7) refuses an installed file that differs from the embedded one, so the skill cannot be taken out of an
-//! install. `without` has no skill directory, no preload, no `Skill:` line in the dispatch template and no sentence
-//! about that line in the role body. `filler` keeps the structure and replaces the skill's body with equal-length text
-//! that holds no instruction.
+//! install. `without` has no skill directory and no preload, and its dispatch keeps the five lines of the shipped one
+//! with `Skill: none`: the baseline tests the missing body, not a different protocol. The role body is the shipped
+//! one. `filler` keeps the structure and replaces the skill's body with equal-length text that holds no instruction.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -44,15 +44,6 @@ fn unpreload(role: &str, skill: &str) -> String {
     out.join("\n") + "\n"
 }
 
-/// The text without each sentence that names the `Skill:` line. A sentence ends at a full stop and a space.
-fn without_skill_sentences(text: &str) -> String {
-    let lines: Vec<String> = text
-        .lines()
-        .map(|l| l.split_inclusive(". ").filter(|s| !s.contains("`Skill:`")).collect::<String>().trim_end().to_string())
-        .collect();
-    lines.join("\n") + "\n"
-}
-
 /// A copy of the bundle at `dest` with the arm's edit: no skill and no preload, or the skill's body as filler.
 fn arm_bundle(root: &Path, skill: &Skill, arm: &str, dest: &Path) -> Result<()> {
     capture(Command::new("cp").arg("-R").arg(root.join("bundle")).arg(dest))?;
@@ -61,13 +52,11 @@ fn arm_bundle(root: &Path, skill: &Skill, arm: &str, dest: &Path) -> Result<()> 
         std::fs::remove_dir_all(&dir)?;
         let role = dest.join(format!("roles/{}.md", skill.role_file()));
         std::fs::write(&role, unpreload(&std::fs::read_to_string(&role)?, &skill.name))?;
-        // The role body tells the agent to run the skill on the `Skill:` line; the arm's dispatch has no such line.
-        std::fs::write(&role, without_skill_sentences(&std::fs::read_to_string(&role)?))?;
-        // Install refuses a template that names a skill its role does not preload, so the arm's dispatch names none.
+        // Install refuses a template that names a skill its role does not preload, and accepts `none`.
         let template = dest.join(format!("roles/{}/{}.md", skill.role_file(), skill.action));
         let text = std::fs::read_to_string(&template)?;
-        let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with("Skill:")).collect();
-        std::fs::write(&template, kept.join("\n") + "\n")?;
+        let lines: Vec<&str> = text.lines().map(|l| if l.starts_with("Skill:") { "Skill: none" } else { l }).collect();
+        std::fs::write(&template, lines.join("\n") + "\n")?;
     } else {
         let file = dir.join("SKILL.md");
         let text = std::fs::read_to_string(&file)?;
@@ -160,29 +149,32 @@ mod tests {
     }
 
     #[test]
+    fn the_without_arm_keeps_the_five_line_dispatch_and_the_role_body() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let dest = tempfile::tempdir().unwrap();
+        let skill = Skill::parse("bp-review").unwrap();
+        arm_bundle(&root, &skill, "without", &dest.path().join("b")).unwrap();
+        let (shipped, arm) = (root.join("bundle"), dest.path().join("b"));
+        let read = |dir: &Path, f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+        let (want, have) = (read(&shipped, "roles/bp-reviewer/review.md"), read(&arm, "roles/bp-reviewer/review.md"));
+        assert_eq!(have.lines().count(), 5);
+        assert_eq!(have, want.replace("Skill: bp-review", "Skill: none"), "only the Skill line differs");
+        let role = read(&shipped, "roles/bp-reviewer.md");
+        assert_eq!(read(&arm, "roles/bp-reviewer.md"), role.replace("skills: bp-review\n", ""), "only the preload");
+        assert!(!arm.join("skills/bp-review").exists() && arm.join("skills/bp-capture").exists());
+    }
+
+    #[test]
     fn the_worker_arms_drop_one_skill_and_keep_the_other() {
         let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bundle");
         let role = std::fs::read_to_string(bundle.join("roles/bp-worker.md")).unwrap();
         assert!(role.contains("skills: bp-complete, bp-respond") && role.contains("`Skill:`"));
-        let without = without_skill_sentences(&unpreload(&role, "bp-complete"));
-        assert!(without.contains("skills: bp-respond\n") && !without.contains("Skill:"), "{without}");
-        assert!(without.contains("Do not run a verb on the `Forbidden:` line."), "{without}");
+        let without = unpreload(&role, "bp-complete");
+        assert!(without.contains("skills: bp-respond\n"), "{without}");
+        assert_eq!(without.replace("skills: bp-respond", "skills: bp-complete, bp-respond"), role, "only the preload");
         for action in ["complete", "respond"] {
             let template = std::fs::read_to_string(bundle.join(format!("roles/bp-worker/{action}.md"))).unwrap();
             assert!(template.lines().any(|l| l == format!("Skill: bp-{action}")), "{action}");
         }
-    }
-
-    #[test]
-    fn the_role_body_loses_the_sentences_about_the_skill_line() {
-        let role = "You are X. The prompt has five lines: `Node:`, `Skill:` and `Stop:`. Run the skill on the `Skill:` line for the node. Do not run a verb on the `Forbidden:` line. Return it.\n\nStop: here.\n";
-        assert_eq!(
-            without_skill_sentences(role),
-            "You are X. Do not run a verb on the `Forbidden:` line. Return it.\n\nStop: here.\n"
-        );
-        let real =
-            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../bundle/roles/bp-reviewer.md"))
-                .unwrap();
-        assert!(real.contains("`Skill:`") && !without_skill_sentences(&real).contains("Skill:"));
     }
 }

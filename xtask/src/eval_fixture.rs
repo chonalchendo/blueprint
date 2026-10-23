@@ -11,8 +11,9 @@
 //! stack: <sha> | <title>                   (complete only: the dependency's pull request head)
 //! scope: <path part> <path part> ...       (complete only)
 //! truth:
-//! - [<severity> [fixed|declined]] <path>:<line>[-<line>][, <line>] | <what the finding said>
-//! probe: <n> | <shell command>             (respond only, optional: run in the worker's worktree; exit 0 = item n holds)
+//! - [<severity> [fixed|declined]] <path>:<line>[-<line>][, <line>] | <what the finding said> | match: <word>, <word>
+//! probe: <n> | <shell command>             (optional: run in the worker's worktree or the head's tree; exit 0 = item n holds)
+//! rule: <title> | <text>                   (review only, optional: a design the issue cites, so the walk carries its body)
 //! ---
 //! <the issue body, verbatim>
 //! ```
@@ -21,8 +22,13 @@
 //! file in the worker's diff against the review's head, and the probe of that item when there is one; `declined`
 //! needs a reasoned decline, and a fix of it fails. Without this the eval would measure the disposition syntax.
 //!
+//! A review finding substantiates an item when its text holds every `match:` word, in any case. Where it points only
+//! breaks a tie, so a finding at the right line with other words earns nothing. An item without `match:` words is
+//! matched by nothing.
+//!
 //! `holdout.txt` in the same directory lists the held-out ids, one per line: no run reads those.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -39,6 +45,8 @@ pub struct Fixture {
     pub scope: Vec<String>,
     /// `(item, command)`: a check that item `n` of a respond fixture is fixed, run in the worker's worktree.
     pub probes: Vec<(usize, String)>,
+    /// `(title, text)`: designs under the system design that the issue cites, so a rule of the truth is in the walk.
+    pub rules: Vec<(String, String)>,
 }
 
 /// One finding of the ground truth: a file and the lines it named. No line means the whole file.
@@ -46,6 +54,8 @@ pub struct Truth {
     path: String,
     lines: Vec<(u32, u32)>,
     pub what: String,
+    /// Lowercase words that a finding holds when it substantiates the item.
+    keywords: Vec<String>,
     /// The first column of the review table: `bp-respond`'s sandbox records these rows.
     severity: String,
     /// How the past review closed the item: fixed, or rightly declined.
@@ -66,10 +76,6 @@ pub struct Review {
     pub body: String,
 }
 
-/// A finding at most this many lines from a ground-truth range still matches it: reviewers cite the line of the
-/// symptom or of its cause.
-pub const NEAR: u32 = 3;
-
 impl Fixture {
     pub fn parse(id: &str, text: &str) -> Result<Self> {
         let (head, issue) =
@@ -84,6 +90,7 @@ impl Fixture {
             stack: None,
             scope: Vec::new(),
             probes: Vec::new(),
+            rules: Vec::new(),
         };
         for line in head.lines().filter(|l| !l.trim().is_empty()) {
             if let Some(item) = line.strip_prefix("- ") {
@@ -108,6 +115,11 @@ impl Fixture {
                             n.trim().parse().with_context(|| format!("{id}: probe item {n}"))?,
                             cmd.trim().into(),
                         ));
+                    }
+                    "rule" => {
+                        let (title, text) =
+                            value.split_once('|').with_context(|| format!("{id}: rule is `<title> | <text>`"))?;
+                        f.rules.push((title.trim().into(), text.trim().into()));
                     }
                     "truth" => {}
                     _ => bail!("{id}: unknown key `{key}`"),
@@ -141,14 +153,10 @@ impl Fixture {
         Ok(all)
     }
 
-    /// The ground-truth item each finding matches, if any. A finding matches at most one item: the nearest by lines,
-    /// the narrower range on a tie, then the first.
+    /// The ground-truth item each finding substantiates, if any: one item per finding.
     pub fn assign(&self, findings: &[Finding]) -> Vec<Option<usize>> {
-        let nearest = |f: &Finding| {
-            let near = self.truth.iter().enumerate().filter_map(|(i, t)| Some((t.gap(&f.location)?, i)));
-            near.min().map(|(_, i)| i)
-        };
-        findings.iter().map(nearest).collect()
+        let all = || self.truth.iter().enumerate();
+        findings.iter().map(|f| best(all(), &f.location, &f.text)).collect()
     }
 
     /// How many ground-truth items some finding matches.
@@ -163,11 +171,34 @@ impl Fixture {
         format!("head: {}\n{}", self.head, table.into_iter().chain(rows).collect::<Vec<String>>().join("\n"))
     }
 
-    /// How many ground-truth items a text names, in any form: its file and a line within `NEAR` of the item's.
-    /// A reply with no findings table still counts, so recall does not hang on the shape only `bp-review` defines.
+    /// How many ground-truth items a text substantiates. A citation is a file name of the truth, with the line number
+    /// after it when there is one, and it earns at most one item: the best that the words of its own line hold. A
+    /// reply with no findings table still counts, so recall does not hang on the shape only `bp-review` defines.
     pub fn named_in(&self, text: &str) -> usize {
-        self.truth.iter().filter(|t| t.named_in(text)).count()
+        let mut named = BTreeSet::new();
+        for line in text.lines() {
+            for t in &self.truth {
+                let name = t.path.rsplit('/').next().unwrap_or(&t.path);
+                for (at, _) in line.match_indices(name) {
+                    let after = &line[at + name.len()..];
+                    let cited = after
+                        .find(|c: char| !(c.is_ascii_digit() || matches!(c, ':' | '-' | ',')))
+                        .unwrap_or(after.len());
+                    let here = format!("{name}{}", &after[..cited]);
+                    let files = self.truth.iter().enumerate().filter(|(_, o)| o.in_file(name));
+                    named.extend(best(files, &here, line));
+                }
+            }
+        }
+        named.len()
     }
+}
+
+/// The item whose words a text holds all of: the one with the most words, then the nearest to `location`.
+fn best<'a>(items: impl Iterator<Item = (usize, &'a Truth)>, location: &str, text: &str) -> Option<usize> {
+    let text = text.to_lowercase();
+    let held = items.filter(|(_, t)| !t.keywords.is_empty() && t.keywords.iter().all(|k| text.contains(k)));
+    held.map(|(i, t)| (std::cmp::Reverse(t.keywords.len()), t.apart(location), i)).min().map(|c| c.2)
 }
 
 /// The ids in `holdout.txt`; a missing file holds none.
@@ -190,7 +221,9 @@ impl Truth {
             Some(other) => bail!("`{other}` is neither fixed nor declined"),
         };
         let (path, lines) = locate(at).context("a location is `<path>[:<line>[-<line>]]`")?;
-        Ok(Self { path, lines, what: what.to_string(), severity: severity.to_string(), fixed })
+        let (what, words) = what.split_once(" | match:").unwrap_or((what, ""));
+        let keywords = words.split(',').map(|w| w.trim().to_lowercase()).filter(|w| !w.is_empty()).collect();
+        Ok(Self { path, lines, what: what.trim().to_string(), keywords, severity: severity.to_string(), fixed })
     }
 
     pub fn location(&self) -> String {
@@ -208,33 +241,16 @@ impl Truth {
         self.path == path || self.path.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{}", self.path))
     }
 
-    /// How far a finding's location is from this item, or `None` when it names another file or lines more than
-    /// `NEAR` away. The pair orders by lines apart, then by the item's width, so a narrow item beats a wide one that
-    /// holds the same line. A location with no lines, or an item with none, is as far as can be.
-    fn gap(&self, location: &str) -> Option<(u32, u32)> {
-        let (path, lines) = locate(location)?;
-        if !self.in_file(&path) {
-            return None;
-        }
+    /// How far a finding's location is from this item, to break a tie between items its words fit: the lines apart
+    /// and then the item's width, so a narrow item beats a wide one that holds the same line. Another file, or no
+    /// lines on either side, is as far as can be.
+    fn apart(&self, location: &str) -> (u32, u32) {
         let width = self.lines.iter().map(|&(a, b)| b - a).min().unwrap_or(u32::MAX);
-        if self.lines.is_empty() || lines.is_empty() {
-            return Some((u32::MAX, width));
-        }
+        let far = (u32::MAX, width);
+        let Some((_, lines)) = locate(location).filter(|(p, _)| self.in_file(p)) else { return far };
         let apart = |(a, b): (u32, u32), (c, d): (u32, u32)| c.saturating_sub(b).max(a.saturating_sub(d));
-        let gap = self.lines.iter().flat_map(|&t| lines.iter().map(move |&l| apart(t, l))).min()?;
-        (gap <= NEAR).then_some((gap, width))
-    }
-
-    /// Whether the text writes this item's file name followed, within 40 characters, by a number inside the item's
-    /// lines widened by `NEAR`. With no lines on the item, the file name is enough.
-    fn named_in(&self, text: &str) -> bool {
-        let name = self.path.rsplit('/').next().unwrap_or(&self.path);
-        text.match_indices(name).any(|(at, _)| {
-            let after: String = text[at + name.len()..].chars().take(40).collect();
-            let numbers = after.split(|c: char| !c.is_ascii_digit()).filter_map(|n| n.parse::<u32>().ok());
-            self.lines.is_empty()
-                || numbers.into_iter().any(|n| self.lines.iter().any(|&(a, b)| n + NEAR >= a && n <= b + NEAR))
-        })
+        let gap = self.lines.iter().flat_map(|&t| lines.iter().map(move |&l| apart(t, l))).min();
+        gap.map_or(far, |g| (g, width))
     }
 }
 
@@ -285,19 +301,59 @@ impl Review {
 mod tests {
     use super::*;
 
-    const FIXTURE: &str = "base: b1\nhead: h1\ntitle: T\ntruth:\n- a/x.rs:20 | one\n- a/x.rs:11-27 | two\n- justfile:18-21 | three\n---\n## Problem\n\nbody\n";
+    const FIXTURE: &str = "base: b1\nhead: h1\ntitle: T\nrule: The cap | No file over 500 lines.\ntruth:\n- a/x.rs:20 | one | match: cfg(test), first\n- a/x.rs | two | match: 500, 501\n- a/x.rs:34 | three | match: skip, tests\n- justfile:18-21 | four\n---\n## Problem\n\nbody\n";
 
     #[test]
-    fn parses_a_fixture_and_matches_by_file_and_nearby_lines() {
+    fn parses_a_fixture_and_matches_by_substance() {
         let f = Fixture::parse("pr-1", FIXTURE).unwrap();
         assert_eq!((f.base.as_str(), f.head.as_str(), f.issue.as_str()), ("b1", "h1", "## Problem\n\nbody"));
-        assert_eq!(f.truth[1].location(), "a/x.rs:11-27");
-        let at = |l: &str| Finding { location: l.into(), text: String::new() };
-        let hits = |l: &[&str]| f.hits(&f.assign(&l.iter().map(|x| at(x)).collect::<Vec<_>>()));
-        assert_eq!(hits(&["x.rs:22", "justfile:21", "`a/x.rs`"]), 3, "a basename, a near line, a bare file");
-        assert_eq!(hits(&["a/x.rs:60", "other.rs:20", "projects/bp/designs/x"]), 0);
-        assert_eq!(f.assign(&[at("a/x.rs:20")]), vec![Some(0)], "the nearest item takes the finding");
-        assert_eq!(f.assign(&[at("a/x.rs:60")]), vec![None]);
+        assert_eq!((f.truth[0].what.as_str(), f.rules.len()), ("one", 1));
+        assert_eq!(f.truth[1].location(), "a/x.rs");
+        let at = |l: &str, t: &str| Finding { location: l.into(), text: t.into() };
+        let one = |l: &str, t: &str| f.assign(&[at(l, t)])[0];
+        assert_eq!(one("x.rs:20", "stops at the first `#[cfg(test)]`"), Some(0), "words and a near line");
+        assert_eq!(one("x.rs:99", "Stops at the FIRST #[CFG(TEST)] line"), Some(0), "case and place do not matter");
+        assert_eq!(one("x.rs:20", "an exact line match misses other forms"), None, "a place earns nothing");
+        assert_eq!(one("x.rs:20", "the first cfg(test) only"), Some(0));
+        assert_eq!(one("x.rs:34", "`sources` skips every `tests/` dir"), Some(2), "a skipped tests dir");
+        assert_eq!(one("justfile:19", "the cap needs its own recipe"), None, "an item with no words is unmatched");
+        assert_eq!(one("other.rs", "a check of 500 and 501 lines"), Some(1), "another file, whole-file item");
+        let both = "first cfg(test) skip tests, 500 and 501";
+        assert_eq!(one("x.rs:20", both), Some(0), "equal words: the nearer line");
+        assert_eq!(one("x.rs:34", both), Some(2));
+        assert_eq!(f.hits(&[Some(0), Some(0), None]), 1, "one item, however many findings");
+    }
+
+    #[test]
+    fn prose_names_an_item_once_per_citation_by_its_words() {
+        let f = Fixture::parse("pr-1", FIXTURE).unwrap();
+        let named = |t: &str| f.named_in(t);
+        assert_eq!(named("x.rs:20 stops at the first cfg(test)\nnothing else"), 1);
+        assert_eq!(named("x.rs stops at the first cfg(test)"), 1, "a file-only citation with the words");
+        assert_eq!(named("x.rs:20 is wrong"), 0, "the line without the words");
+        assert_eq!(named("stops at the first cfg(test) but names no file"), 0);
+        assert_eq!(named("x.rs:20 first cfg(test) skip tests"), 1, "one item per citation: the nearer");
+        assert_eq!(named("x.rs:20 first cfg(test), x.rs:34 skip tests"), 2);
+        assert_eq!(named("x.rs:20 first cfg(test)\nx.rs:34 skips the tests dir\nx.rs 500 and 501"), 3);
+    }
+
+    #[test]
+    fn the_review_fixture_credits_substance_and_never_a_place() {
+        let evals = Path::new(env!("CARGO_MANIFEST_DIR")).join("evals/bp-review/pr-20.md");
+        let f = Fixture::parse("pr-20", &std::fs::read_to_string(evals).unwrap()).unwrap();
+        let at = |l: &str, t: &str| f.assign(&[Finding { location: l.into(), text: t.into() }])[0];
+        let disposition = "The diff skips every `tests/` and `target/` directory, and the Shape names neither: declare it in the Shape.";
+        assert_eq!(at("xtask/src/lines.rs:34", disposition), Some(2), "the tests/ skip, with the words of item 3");
+        // A finding of the first real run, which the old grader called FALSE five times.
+        let first = "`sources` skips every `tests/` directory, but the issue's Shape counts each `.rs` file up to its first `#[cfg(test)]`";
+        assert_eq!(at("xtask/src/lines.rs:34", first), Some(2), "the nearer item takes it");
+        // The over-count the first run's `with-5` raised at item 1's line: the right line, the wrong substance.
+        let exact = "The test module is found only when a line is exactly `#[cfg(test)]`, so the one-line form counts, against the Shape's first `#[cfg(test)]`.";
+        assert_eq!(at("xtask/src/lines.rs:20", exact), None, "item 1's line with other words earns nothing");
+        let under = "The count stops at the first `#[cfg(test)]` even when it guards a helper, so the code below escapes the cap.";
+        assert_eq!(at("xtask/src/lines.rs:20", under), Some(0));
+        assert_eq!(f.named_in(&format!("xtask/src/lines.rs:20 {under}")), 1);
+        assert_eq!(f.named_in(&format!("xtask/src/lines.rs:20 {exact}")), 0);
     }
 
     #[test]
@@ -366,6 +422,9 @@ mod tests {
                 }
                 let stack = f.stack.iter().map(|s| s.0.as_str());
                 assert!(stack.chain([f.head.as_str()]).all(known), "{skill}/{}", f.id);
+                if skill == "bp-review" {
+                    assert!(f.truth.iter().all(|t| !t.keywords.is_empty()), "{}: an item with no words", f.id);
+                }
                 if skill == "bp-complete" {
                     let names = git(&["diff", "--name-only", &format!("{}^", f.head), &f.head]).unwrap();
                     let mut crates: Vec<String> = names.lines().map(crate::eval_end::crate_of).collect();

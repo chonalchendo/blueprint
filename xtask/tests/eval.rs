@@ -59,7 +59,7 @@ fn setup() -> Option<Setup> {
     let head = git(&repo, &["rev-parse", "HEAD"]);
 
     let fixture = format!(
-        "base: {base}\nhead: {head}\ntitle: A fixture\ntruth:\n- src/a.rs:1 | The count is wrong.\n---\n## Problem\n\nx\n\n## Check\n\n~~~check shell {{name=sandbox expect=0}}\ntest -f README.md\n~~~\n"
+        "base: {base}\nhead: {head}\ntitle: A fixture\ntruth:\n- src/a.rs:1 | The count is wrong. | match: count, wrong\n---\n## Problem\n\nx\n\n## Check\n\n~~~check shell {{name=sandbox expect=0}}\ntest -f README.md\n~~~\n"
     );
     write(&t.join("fixtures/pr-1.md"), &fixture);
     write(&t.join("fixtures/pr-2.md"), &fixture);
@@ -95,7 +95,7 @@ struct Ran {
 }
 
 impl Ran {
-    /// Runs `trials` trials of the with and without arms and one of filler, with the fake agent.
+    /// Runs `trials` trials of each default arm with the fake agent.
     fn new(trials: &str) -> Option<Self> {
         let s = setup()?;
         let t = s.dir.path();
@@ -104,29 +104,13 @@ impl Ran {
             t.join("repo").display().to_string(),
             s.bp.display().to_string(),
         );
+        // No `--arms`: the default runs the same trials for each of the three arms.
         let bins = ["with", "without", "filler"].map(|a| format!("{a}={bp}"));
-        let mut run =
-            vec!["bp-review", "--trials", trials, "--arms", "with,without", "--fixtures", &fixtures, "--repo", &repo];
-        for b in &bins[..2] {
+        let mut run = vec!["bp-review", "--trials", trials, "--fixtures", &fixtures, "--repo", &repo];
+        for b in &bins {
             run.extend(["--bin", b]);
         }
         let (code, out) = xtask(&s, &run);
-        assert_eq!(code, Some(0), "{out}");
-        // One filler trial, as the walkthrough's filler run.
-        let filler = [
-            "bp-review",
-            "--trials",
-            "1",
-            "--arms",
-            "filler",
-            "--fixtures",
-            &fixtures,
-            "--repo",
-            &repo,
-            "--bin",
-            &bins[2],
-        ];
-        let (code, out) = xtask(&s, &filler);
         assert_eq!(code, Some(0), "{out}");
         let results = t.join("redesign/analysis/evals-skills");
         Some(Self { s, fixtures, results })
@@ -189,11 +173,11 @@ fn a_fake_agent_runs_the_whole_pipeline_and_stores_what_the_grader_reads() {
     assert!(!ci.starts_with("0.00") && ci.ends_with("1.00]"), "an interval over 0 would mark a fold: {ci}");
     assert_eq!(
         text.lines().filter(|l| ["| with-", "| without-", "| filler-"].iter().any(|p| l.starts_with(p))).count(),
-        5
+        6
     );
 
     let store = r.results.join("bp-review");
-    for name in ["with-pr-1-1", "with-pr-1-2", "without-pr-1-1", "filler-pr-1-1"] {
+    for name in ["with-pr-1-1", "with-pr-1-2", "without-pr-1-1", "filler-pr-1-1", "filler-pr-1-2"] {
         for ext in ["jsonl", "vault.log", "hash"] {
             assert!(store.join(format!("{name}.{ext}")).is_file(), "{name}.{ext}");
         }

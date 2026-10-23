@@ -6,9 +6,17 @@ use std::path::Path;
 
 use bp_operation::Action;
 
-use crate::eval_fixture::NEAR;
 use crate::eval_grade::{Grade, Stats, f2, short};
 use crate::eval_score::{ASPECTS, Graded, RECALL};
+
+/// The arms table's last column: how many runs had the skill where the arm puts it.
+fn state(arm: &str, loaded: usize, runs: usize) -> String {
+    match (arm, loaded == runs) {
+        ("without", true) => "absent, as designed".into(),
+        ("without", false) => format!("present in {} of {runs}", runs - loaded),
+        _ => loaded.to_string(),
+    }
+}
 
 fn yes(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
@@ -98,7 +106,7 @@ impl Grade {
                     s.found,
                     s.wrong,
                     s.silent,
-                    s.loaded
+                    state(arm, s.loaded, s.runs)
                 )
             } else {
                 format!(
@@ -112,7 +120,7 @@ impl Grade {
                     count(|r| r.aspects[1]),
                     s.reached,
                     s.out_of_row,
-                    s.loaded
+                    state(arm, s.loaded, s.runs)
                 )
             });
         }
@@ -123,7 +131,7 @@ impl Grade {
     fn notes(&self) -> String {
         let own = match self.skill.action {
             Action::Review => format!(
-                "- **Outcome:** a run passes when `bp walk --for review --done` holds after the review is recorded and the findings table matches at least {RECALL} of the ground truth. That needs the shape only `bp-review` defines (a `head:` line, one table).\n- **Prose recall:** items of the ground truth that the final text names in any form (its file and a line within {NEAR} lines). It does not depend on the shape, so a gap in outcome with none in prose recall means the arm cannot write the shape.\n"
+                "- **Outcome:** a run passes when `bp walk --for review --done` holds after the review is recorded and the findings table matches at least {RECALL} of the ground truth. A finding matches the item whose words (the `match:` words of the fixture) its text holds, the most words first, then the nearest line; where it points earns nothing. That needs the shape only `bp-review` defines (a `head:` line, one table).\n- **Prose recall:** items of the ground truth that the final text substantiates in any form: a citation of the item's file, with a line number or none, on a line that holds the item's words. A citation earns one item. It does not depend on the shape, so a gap in outcome with none in prose recall means the arm cannot write the shape.\n"
             ),
             Action::Complete => "- **Outcome:** a run passes when `bp walk --for complete --done` holds with the claim not released `escalated`, the latest run of each error block of the issue passed, and every changed file sits in a crate that the landed issue changed (the first two path parts, as `replay-evidence.sh` compares them). The file set is not compared: the model is not deterministic.\n- **Adherence:** the share of walk, cut, check and pr that the transcript shows as calls, over the runs that reached the tool.\n".to_string(),
             _ => "- **Outcome:** a run passes when `bp walk --for respond --done` holds with the claim not released `escalated` and each finding is closed as the past review closed it. A `fixed` finding needs a fixed disposition, its file in the worker's diff against the review's head, and its probe when the fixture gives one. A `declined` finding needs a reasoned decline, and a fix of it fails. The probe and the file are evidence of a fix, not proof of a good one: the owner reads the trace.\n- **Adherence:** the share of walk, check, pr, one closed disposition per finding and a commit that the transcript and the vault show, over the runs that reached the tool.\n".to_string(),
@@ -135,7 +143,7 @@ impl Grade {
             ""
         };
         format!(
-            "\n{own}{scope}{counted}- **Failed trial:** a trial the runner killed at its limit, or that left no transcript, fails whatever the sandbox holds. A rerun of the same command replaces it.\n- **Uplift:** the `with` rate less the `without` rate; the result file gives its Newcombe 95% interval.\n- **Role body:** the `without` arm's copy drops the sentences about the `Skill:` line; the `filler` arm keeps them.\n"
+            "\n{own}{scope}{counted}- **Failed trial:** a trial the runner killed at its limit, or that left no transcript, fails whatever the sandbox holds. A rerun of the same command replaces it.\n- **Uplift:** the `with` rate less the `without` rate; the result file gives its Newcombe 95% interval.\n- **Role body:** the `without` arm's role body is the shipped one and its dispatch reads `Skill: none`, so it differs from `with` in the missing body and preload only.\n"
         )
     }
 
@@ -163,11 +171,16 @@ impl Grade {
         let steps: Vec<String> = t.steps.iter().map(|(n, ok)| format!("{n} {}", yes(*ok))).collect();
         let (dir, trial) = (store.display(), &t.trial);
         let mut lines = vec![format!(
-            "\n### {trial}\n\n- {head}\n- reached the tool: {}; steps: {}\n- out of row: {}; skill loaded as designed: {}\n- trace: `{dir}/{trial}.jsonl`, vault log: `{dir}/{trial}.vault.log`",
+            "\n### {trial}\n\n- {head}\n- reached the tool: {}; steps: {}\n- out of row: {}; skill: {}\n- trace: `{dir}/{trial}.jsonl`, vault log: `{dir}/{trial}.vault.log`",
             yes(t.reached),
             steps.join(", "),
             t.out_of_row,
-            if t.loaded { "yes" } else { "NO" },
+            match (t.arm.as_str(), t.loaded) {
+                ("without", true) => "absent, as designed",
+                ("without", false) => "PRESENT, not as designed",
+                (_, true) => "loaded as designed",
+                (_, false) => "NOT loaded as designed",
+            },
         )];
         if let Some(why) = &t.failure {
             lines.push(format!("- FAILED: {why}; a failed trial counts as a fail"));
