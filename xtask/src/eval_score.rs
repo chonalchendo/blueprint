@@ -27,6 +27,8 @@ pub struct Graded {
     pub log_sha: String,
     /// The hash of the role file and skill body this trial ran on, from `<trial>.hash`.
     pub hash: Option<String>,
+    /// The fixture and arm protocol this trial ran on, from the second line of `<trial>.hash`; empty when absent.
+    pub stamp: String,
     pub models: BTreeSet<String>,
     /// The skill is where the arm puts it: preloaded in `with`, absent in `without`, filler in `filler`.
     pub loaded: bool,

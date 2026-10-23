@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use bp_operation::Action;
 
 use crate::eval::Skill;
-use crate::eval_arms::{FILLER, body_of};
+use crate::eval_arms::{FILLER, PROTOCOL, body_of};
 use crate::eval_fixture::Fixture;
 use crate::eval_score::{Graded, score};
 use crate::eval_trace::{Trace, sha256};
@@ -40,6 +40,21 @@ pub fn bundle_hash(root: &Path, skill: &Skill) -> Result<String> {
             .with_context(|| format!("read the body of {name}"))?;
     }
     hash_object(&text)
+}
+
+/// What a trial saw besides the bundle: the fixture's base, head, title, issue, rules and stack, and the arm
+/// protocol. The truth, the match words and the probe are left out, so a regrade after a grader fix keeps its trials.
+pub(crate) fn stamp(fx: &Fixture) -> Result<String> {
+    let seen = format!("{}\n{}\n{}\n{}\n{:?}\n{:?}", fx.base, fx.head, fx.title, fx.issue, fx.rules, fx.stack);
+    Ok(format!("{} {PROTOCOL}", hash_object(&seen)?))
+}
+
+/// A trial's `.hash` file: the bundle hash, then `stamp: <stamp>`. A file from before the stamp has an empty one.
+pub(crate) fn read_hash(store: &Path, trial: &str) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(store.join(format!("{trial}.hash"))).ok()?;
+    let mut lines = text.lines();
+    let hash = lines.next()?.trim().to_string();
+    Some((hash, lines.find_map(|l| l.strip_prefix("stamp: ")).unwrap_or_default().to_string()))
 }
 
 impl Grade {
@@ -74,6 +89,7 @@ impl Grade {
                 "filler" => trace.preloaded(FILLER) && !trace.mentions(&marker),
                 _ => bail!("{trial}: arm {arm} is none of with, without, filler"),
             };
+            let (hash, stamp) = read_hash(store, &trial).unzip();
             let mut graded = Graded {
                 arm: arm.into(),
                 fixture: fixture.into(),
@@ -81,7 +97,8 @@ impl Grade {
                 trial: trial.clone(),
                 sha: sha256(&path)?,
                 log_sha: if log_path.is_file() { sha256(&log_path)? } else { String::new() },
-                hash: std::fs::read_to_string(store.join(format!("{trial}.hash"))).ok().map(|h| h.trim().to_string()),
+                hash,
+                stamp: stamp.unwrap_or_default(),
                 models: trace.models(),
                 loaded,
                 failure: trace.failure().map(str::to_string),
@@ -113,6 +130,16 @@ impl Grade {
             out.push(format!(
                 "the trials ran on {h}, the role and skill files hash to {}; rerun the evals",
                 self.current
+            ));
+        }
+        let mut stamps = std::collections::BTreeMap::<&String, BTreeSet<&String>>::new();
+        for t in &self.trials {
+            stamps.entry(&t.fixture).or_default().insert(&t.stamp);
+        }
+        for (fixture, seen) in stamps.iter().filter(|s| s.1.len() > 1) {
+            out.push(format!(
+                "{fixture}: the trials ran on {} fixture or arm protocols: {seen:?}; move the store aside and rerun",
+                seen.len()
             ));
         }
         let groups: BTreeSet<(&String, &String)> = self.trials.iter().map(|t| (&t.arm, &t.fixture)).collect();

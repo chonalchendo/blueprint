@@ -105,6 +105,17 @@ impl Sandbox {
         )?;
         sb.bp(&code, None, &["transition", m, "approved"])?;
         sb.issue = sb.create_issue(&code, m, &fx.title, &fx.issue)?;
+        // A rule the fixture's truth rests on has to be in the reviewer's walk, and the walk carries the body of a
+        // design only (21, the context column): the rule is a component of the system design, cited by the issue.
+        for (title, text) in &fx.rules {
+            let file = sb.forge.join("rule.body");
+            std::fs::write(&file, format!("{text}\n"))?;
+            let slug = format!("components/{}", title.to_lowercase().replace(' ', "-"));
+            let args = ["create", "design", "--project", PROJECT, "--under", DESIGN, "--slug", &slug, "--title", title];
+            let made = sb.bp(&code, None, &[&args[..], &["--body-file", &file.display().to_string()]].concat())?;
+            let id = made["id"].as_str().context("create design returned no id")?.to_string();
+            sb.bp(&code, None, &["link", &sb.issue.clone(), "cites", &id])?;
+        }
 
         // Every config home points into the forge directory, so the install touches nothing of the real home.
         let cfg = sb.forge.join("config");

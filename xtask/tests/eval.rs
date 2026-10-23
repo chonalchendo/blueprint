@@ -59,7 +59,7 @@ fn setup() -> Option<Setup> {
     let head = git(&repo, &["rev-parse", "HEAD"]);
 
     let fixture = format!(
-        "base: {base}\nhead: {head}\ntitle: A fixture\ntruth:\n- src/a.rs:1 | The count is wrong.\n---\n## Problem\n\nx\n\n## Check\n\n~~~check shell {{name=sandbox expect=0}}\ntest -f README.md\n~~~\n"
+        "base: {base}\nhead: {head}\ntitle: A fixture\ntruth:\n- src/a.rs:1 | The count is wrong. | match: count, wrong\n---\n## Problem\n\nx\n\n## Check\n\n~~~check shell {{name=sandbox expect=0}}\ntest -f README.md\n~~~\n"
     );
     write(&t.join("fixtures/pr-1.md"), &fixture);
     write(&t.join("fixtures/pr-2.md"), &fixture);
@@ -95,7 +95,7 @@ struct Ran {
 }
 
 impl Ran {
-    /// Runs `trials` trials of the with and without arms and one of filler, with the fake agent.
+    /// Runs `trials` trials of each default arm with the fake agent.
     fn new(trials: &str) -> Option<Self> {
         let s = setup()?;
         let t = s.dir.path();
@@ -104,29 +104,13 @@ impl Ran {
             t.join("repo").display().to_string(),
             s.bp.display().to_string(),
         );
+        // No `--arms`: the default runs the same trials for each of the three arms.
         let bins = ["with", "without", "filler"].map(|a| format!("{a}={bp}"));
-        let mut run =
-            vec!["bp-review", "--trials", trials, "--arms", "with,without", "--fixtures", &fixtures, "--repo", &repo];
-        for b in &bins[..2] {
+        let mut run = vec!["bp-review", "--trials", trials, "--fixtures", &fixtures, "--repo", &repo];
+        for b in &bins {
             run.extend(["--bin", b]);
         }
         let (code, out) = xtask(&s, &run);
-        assert_eq!(code, Some(0), "{out}");
-        // One filler trial, as the walkthrough's filler run.
-        let filler = [
-            "bp-review",
-            "--trials",
-            "1",
-            "--arms",
-            "filler",
-            "--fixtures",
-            &fixtures,
-            "--repo",
-            &repo,
-            "--bin",
-            &bins[2],
-        ];
-        let (code, out) = xtask(&s, &filler);
         assert_eq!(code, Some(0), "{out}");
         let results = t.join("redesign/analysis/evals-skills");
         Some(Self { s, fixtures, results })
@@ -189,16 +173,19 @@ fn a_fake_agent_runs_the_whole_pipeline_and_stores_what_the_grader_reads() {
     assert!(!ci.starts_with("0.00") && ci.ends_with("1.00]"), "an interval over 0 would mark a fold: {ci}");
     assert_eq!(
         text.lines().filter(|l| ["| with-", "| without-", "| filler-"].iter().any(|p| l.starts_with(p))).count(),
-        5
+        6
     );
 
     let store = r.results.join("bp-review");
-    for name in ["with-pr-1-1", "with-pr-1-2", "without-pr-1-1", "filler-pr-1-1"] {
+    for name in ["with-pr-1-1", "with-pr-1-2", "without-pr-1-1", "filler-pr-1-1", "filler-pr-1-2"] {
         for ext in ["jsonl", "vault.log", "hash"] {
             assert!(store.join(format!("{name}.{ext}")).is_file(), "{name}.{ext}");
         }
     }
-    assert_eq!(std::fs::read_to_string(store.join("with-pr-1-1.hash")).unwrap().trim(), hash);
+    let stamped = std::fs::read_to_string(store.join("with-pr-1-1.hash")).unwrap();
+    let mut lines = stamped.lines();
+    assert_eq!(lines.next(), Some(hash.as_str()));
+    assert!(lines.next().is_some_and(|l| l.starts_with("stamp: ") && l.ends_with(" arms-2")), "{stamped}");
     let log = std::fs::read_to_string(store.join("with-pr-1-1.vault.log")).unwrap();
     assert!(log.lines().any(|l| l.starts_with("record review ")), "{log}");
     assert!(!std::fs::read_to_string(store.join("without-pr-1-1.vault.log")).unwrap().contains("record review"));
@@ -295,4 +282,29 @@ fn a_regrade_keeps_the_owner_lines() {
     std::fs::write(r.file(), kept.replace("status: regression", "status: capability")).unwrap();
     let (code, out) = r.grade(&["--check"]);
     assert!(code == Some(2) && out.contains("does not clear 0"), "{out}");
+}
+
+#[test]
+fn a_store_from_another_fixture_or_protocol_is_refused() {
+    let Some(r) = Ran::new("1") else { return };
+    let store = r.results.join("bp-review");
+    // A trial from before the stamp, beside the stamped ones: refused at grade, and a run adds nothing to it.
+    let hash = store.join("with-pr-1-1.hash");
+    let first = std::fs::read_to_string(&hash).unwrap().lines().next().unwrap().to_string();
+    std::fs::write(&hash, format!("{first}\n")).unwrap();
+    let (code, out) = r.grade(&[]);
+    assert!(code == Some(2) && out.contains("pr-1: the trials ran on 2 fixture or arm protocols"), "{out}");
+    let args = ["bp-review", "--trials", "1", "--arms", "with", "--fixtures", &r.fixtures, "--repo", &r.repo()];
+    let (code, out) = xtask(&r.s, &args);
+    assert!(code == Some(1) && out.contains("with-pr-1-1 ran on another fixture or arm protocol"), "{out}");
+    // A fixture the model saw differently is another stamp; the truth is not part of it.
+    std::fs::write(&hash, std::fs::read_to_string(store.join("without-pr-1-1.hash")).unwrap()).unwrap();
+    assert_eq!(r.grade(&[]).0, Some(0));
+    let fixture = std::fs::read_to_string(format!("{}/pr-1.md", r.fixtures)).unwrap();
+    std::fs::write(format!("{}/pr-1.md", r.fixtures), fixture.replace("The count is wrong. | match", "Other. | match"))
+        .unwrap();
+    assert_eq!(r.grade(&[]).0, Some(0), "a grader fix keeps the trials");
+    std::fs::write(format!("{}/pr-1.md", r.fixtures), fixture.replace("## Problem\n\nx", "## Problem\n\ny")).unwrap();
+    let (code, out) = xtask(&r.s, &args);
+    assert!(code == Some(1) && out.contains("ran on another fixture"), "{out}");
 }

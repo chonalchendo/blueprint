@@ -139,7 +139,8 @@ pub(crate) fn validate(bundle: &[(&str, &[u8])], spec: &Spec) -> Result<(), Refu
             ));
         };
         let skill = text.lines().find_map(|l| l.strip_prefix("Skill:")).map(str::trim).unwrap_or_default();
-        if !skill.is_empty() && !loaded.iter().any(|s| s == skill) {
+        // `none` is the dispatch of a role that preloads no skill: the eval's `without` arm (29, issue 8).
+        if !skill.is_empty() && skill != "none" && !loaded.iter().any(|s| s == skill) {
             return Err(invalid(path, "Skill", &format!("the role {role} preloads the template's skill, {skill}")));
         }
     }
@@ -255,6 +256,9 @@ mod tests {
         assert_eq!(verdict(&b), "bundle/roles/bp-worker/a.md: Skill");
         assert_eq!(broken("roles/bp-worker/a.md", "Skill: c\n"), "bundle/roles/bp-worker/a.md: Skill", "any prefix");
         assert_eq!(broken("roles/bp-ghost/a.md", "Node: x\n"), "bundle/roles/bp-ghost/a.md: Skill", "no role file");
+        let mut b = good();
+        b.insert("roles/bp-worker/a.md".into(), "Node: x\nSkill: none\n".into());
+        assert_eq!(verdict(&b), "ok", "a dispatch that names no skill");
     }
 
     #[test]
