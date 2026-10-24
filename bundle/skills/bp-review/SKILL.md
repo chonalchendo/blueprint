@@ -18,7 +18,7 @@ Do not trust the worker's account of what it tested, in the pull request, the is
 7. Write one finding for each defect. A finding cites the issue, a design, a convention or a failing command. Write no finding for a taste that no convention states.
 8. Remove each finding of these kinds:
    - A style that the formatter sets, such as `cargo fmt`.
-   - A case that the diff already handles, such as an exact-line match on a line that the formatter writes in one form.
+   - A case that the diff already handles. For example, an exact-line match on a line that the formatter writes in one form.
    - A rule that no cited design or convention states.
    - A line outside the diff. The tool refuses a review with such a row.
 
