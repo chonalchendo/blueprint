@@ -82,18 +82,23 @@ fn in_value(v: &Value, needle: &str) -> bool {
 }
 
 /// The `bp` calls of one shell command. The command splits at `;`, `&`, `|`, a newline, a parenthesis and a
-/// backtick, and a segment counts when its first word, after `export`, `env`, `timeout N` and assignments, is `bp`
-/// (as the role's hook resolves it) or a path to a `bp` in a `bin*` directory, the sandbox's. A `bp` that the worker
-/// builds under `target/` is the code under test, not a call of the role, and `$B set` is no call either.
-/// A redirect is removed first, as `2>&1` would else split at its `&` and leave `2>` as the verb. A heredoc body is skipped, from the line after `<<WORD` to the line that is `WORD`: it is text the shell never
-/// runs, and source code in it that quotes `bp set <id>` would invent a call. A quoted `;` still splits a string
-/// wrongly and can drop a call or invent one, and the grade is a count over many runs.
+/// backtick, and a segment counts when its first word, after `export`, `env`, `timeout N`, a keyword that opens a
+/// command (`do`, `then`, `else`, `{`, `!`) and assignments, is `bp` (as the role's hook resolves it) or a path to a
+/// `bp` in a `bin*` directory, the sandbox's. A `bp` that the worker builds under `target/` is the code under test, not
+/// a call of the role, and `$B set` is no call either.
+/// A redirect is removed first, as `2>&1` would else split at its `&` and leave `2>` as the verb. A heredoc body is
+/// skipped, from the line after `<<WORD` to the line that is `WORD`: it is text the shell never runs, and source code
+/// in it that quotes `bp set <id>` would invent a call. A body counts only once its terminator line is seen, so a
+/// stray `<<` hides nothing, unless a later line happens to equal the word after it. A quoted `;` still splits a
+/// string wrongly and can drop a call or invent one, and the grade is a count over many runs.
 fn calls_in(command: &str) -> Vec<BpCall> {
     let mut out = Vec::new();
     for segment in without_redirects(&without_heredocs(command)).split([';', '&', '|', '\n', '(', ')', '`']) {
         let mut words = segment.split_whitespace().peekable();
         while let Some(w) = words.peek() {
-            if matches!(*w, "export" | "env" | "command" | "exec") || (w.contains('=') && !w.starts_with('-')) {
+            if matches!(*w, "export" | "env" | "command" | "exec" | "do" | "then" | "else" | "{" | "!")
+                || (w.contains('=') && !w.starts_with('-'))
+            {
                 words.next();
             } else if *w == "timeout" {
                 words.nth(1);
@@ -114,17 +119,23 @@ fn calls_in(command: &str) -> Vec<BpCall> {
 
 fn without_heredocs(command: &str) -> String {
     let mut kept = Vec::new();
+    let mut held = Vec::new();
     let mut open: Vec<&str> = Vec::new();
     for line in command.lines() {
         if let Some(&end) = open.first() {
+            held.push(line);
             if line.trim() == end {
                 open.remove(0);
+                if open.is_empty() {
+                    held.clear();
+                }
             }
             continue;
         }
         open.extend(heredoc_words(line));
         kept.push(line);
     }
+    kept.extend(held);
     kept.join("\n")
 }
 
@@ -165,7 +176,8 @@ fn without_redirects(text: &str) -> String {
     out
 }
 
-/// The terminators of the `<<WORD`, `<<-WORD` and quoted forms on one line; `<<<` is a here-string, no heredoc.
+/// The terminators of the `<<WORD`, `<<-WORD`, `<<\WORD` and quoted forms on one line; `<<<` is a here-string, no
+/// heredoc. A quoted word runs to its closing quote.
 fn heredoc_words(line: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut rest = line;
@@ -175,10 +187,15 @@ fn heredoc_words(line: &str) -> Vec<&str> {
             rest = rest.trim_start_matches('<');
             continue;
         }
-        let rest_word = rest.strip_prefix('-').unwrap_or(rest).trim_start().trim_start_matches(['\'', '"']);
-        let end = rest_word.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest_word.len());
-        if end > 0 {
-            out.push(&rest_word[..end]);
+        let word = rest.strip_prefix('-').unwrap_or(rest).trim_start();
+        let word = if let Some(q @ ('\'' | '"')) = word.chars().next() {
+            word[1..].split_once(q).map_or("", |(w, _)| w)
+        } else {
+            let word = word.strip_prefix('\\').unwrap_or(word);
+            &word[..word.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(word.len())]
+        };
+        if !word.is_empty() {
+            out.push(word);
         }
     }
     out
@@ -245,6 +262,27 @@ mod tests {
         assert_eq!(verbs("bp show x >out.txt 2>>err.txt </dev/null; bp walk y >&2"), ["show", "walk"]);
         assert_eq!(calls_in("bp show x 2>&1 | head")[0].args, "x", "the redirect leaves no argument");
         assert_eq!(verbs("cat <<< bp\nbp show y"), ["show"], "a here-string stays");
+    }
+
+    #[test]
+    fn a_stray_double_angle_opens_no_body() {
+        let verbs = |c: &str| calls_in(c).into_iter().map(|c| c.verb).collect::<Vec<_>>();
+        assert_eq!(verbs("echo \"a << b\"; bp cut x --json"), ["cut"]);
+        assert_eq!(verbs("echo $((1<<3)); bp walk y"), ["walk"]);
+        assert_eq!(verbs("python3 -c \"print('<<')\"\nbp show z"), ["show"]);
+        assert_eq!(verbs("python3 -c \"print(1 << 4)\"\nbp check i --json"), ["check"], "an unclosed body is kept");
+        assert!(calls_in("cat <<'PR-BODY'\nbp set fake\nPR-BODY").is_empty(), "a quoted word with a dash");
+        assert_eq!(verbs("cat <<'PR-BODY'\nbp set fake\nPR-BODY\nbp show real"), ["show"]);
+        assert_eq!(verbs("cat <<\\EOF\nbp set fake\nEOF\nbp show real"), ["show"], "a backslash word");
+    }
+
+    #[test]
+    fn counts_calls_after_a_command_keyword() {
+        let verbs = |c: &str| calls_in(c).into_iter().map(|c| c.verb).collect::<Vec<_>>();
+        assert_eq!(verbs("for n in 1 2; do bp record x"), ["record"]);
+        assert_eq!(verbs("d(){ bp record x; }"), ["record"]);
+        assert_eq!(verbs("if true; then bp pr i; else bp walk i; fi"), ["pr", "walk"]);
+        assert_eq!(verbs("! bp check i"), ["check"]);
     }
 
     #[test]
