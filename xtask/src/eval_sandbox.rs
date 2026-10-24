@@ -2,7 +2,8 @@
 //! the fake forge, a scratch copy of the vault, the bundle installed into the clone with every config home pointed at
 //! a scratch directory, and the claim state and stop point of the stored run. Review and respond start at an open
 //! pull request at the fixture's head (respond adds the recorded review); complete starts at an open issue with no
-//! claim, and with a dependency's open pull request when the fixture is stacked.
+//! claim, and with a dependency's open pull request when the fixture is stacked. A mutant fixture's pull request is its
+//! head with the mutant planted in it (30, design change 1).
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -37,6 +38,8 @@ pub struct Sandbox {
     start: String,
     /// What the worker's branch is measured against: the clone's base, or the dependency's head when stacked.
     pub scope_base: String,
+    /// The head of the fixture's pull request: the fixture's own, or the planted one of a mutant.
+    pub head: String,
 }
 
 impl Sandbox {
@@ -73,6 +76,7 @@ impl Sandbox {
             target: std::env::var_os("BP_EVAL_TARGET").map_or_else(|| work.join("target"), PathBuf::from),
             start: String::new(),
             scope_base: fx.stack.as_ref().map_or(&fx.base, |s| &s.0).clone(),
+            head: fx.head.clone(),
         };
         let code = sb.code();
         let repo_arg = repo.display().to_string();
@@ -136,18 +140,21 @@ impl Sandbox {
             // worker's `cut` stacks on it (21, the complete row) and the trial pays for only its own issue.
             let stub = "## Check\n\n~~~check shell {name=stub expect=0}\ntrue\n~~~\n";
             let dependency = sb.create_issue(&code, m, title, stub)?;
-            sb.open_pr(&code, &dependency, head)?;
+            sb.open_pr(&code, &dependency, head, None)?;
             sb.bp(&code, None, &["link", &sb.issue.clone(), "depends", &dependency])?;
         }
         match skill.action {
             Action::Complete => {}
             Action::Respond => {
-                sb.open_pr(&code, &sb.issue.clone(), &fx.head)?;
+                sb.open_pr(&code, &sb.issue.clone(), &fx.head, None)?;
                 if !sb.record_review(&fx.head, &fx.review_body())? {
                     bail!("the vault refused the recorded review of {}", fx.id);
                 }
             }
-            _ => sb.open_pr(&code, &sb.issue.clone(), &fx.head)?,
+            _ => {
+                sb.head =
+                    sb.open_pr(&code, &sb.issue.clone(), &fx.head, fx.mutant.as_ref().map(|m| m.diff.as_str()))?;
+            }
         }
         sb.start = git(&sb.vault, &["rev-parse", "HEAD"])?.trim().to_string();
         Ok(sb)
@@ -164,13 +171,19 @@ impl Sandbox {
         Ok(id)
     }
 
-    /// The worker's cut, the fixture's commits and `pr`: a pull request at `head` that the claim holds.
-    fn open_pr(&self, code: &Path, issue: &str, head: &str) -> Result<()> {
+    /// The worker's cut, the fixture's commits, the mutant planted when there is one, and `pr`: a pull request that the
+    /// claim holds. Returns its head.
+    fn open_pr(&self, code: &Path, issue: &str, head: &str, mutant: Option<&str>) -> Result<String> {
         let claimed = self.bp(code, Some("worker"), &["cut", issue])?;
         let worktree = PathBuf::from(claimed["worktree"].as_str().context("cut returned no worktree")?);
         git(&worktree, &["merge", "-q", "--ff-only", head])?;
+        if let Some(diff) = mutant {
+            let file = self.forge.join("mutant.diff");
+            std::fs::write(&file, diff)?;
+            plant(&worktree, &file)?;
+        }
         self.bp(&worktree, Some("worker"), &["pr", issue])?;
-        Ok(())
+        git(&worktree, &["rev-parse", "HEAD"])
     }
 
     /// The installed clone holds what the arm says (see [`Sandbox::build`]).
@@ -329,6 +342,16 @@ impl Sandbox {
     }
 }
 
+/// Applies a mutant's diff to the head commit in `dir` and amends that commit, message and author kept. The pull
+/// request is then one commit, as the landed one was, so its history does not point at the defect. The committer is
+/// `bp-eval`, because the sandbox may have no git identity.
+fn plant(dir: &Path, diff: &Path) -> Result<()> {
+    git(dir, &["apply", &diff.display().to_string()])?;
+    let me = ["-c", "user.name=bp-eval", "-c", "user.email=bp-eval@bp.invalid"];
+    git(dir, &[&me[..], &["commit", "-q", "--no-verify", "-a", "--amend", "--no-edit"]].concat())?;
+    Ok(())
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     capture(Command::new("git").args(args).current_dir(dir).env("GIT_ALLOW_PROTOCOL", "file"))
 }
@@ -345,4 +368,39 @@ pub(crate) fn capture(cmd: &mut Command) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_planted_head_differs_from_the_landed_head_by_the_mutant_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("r");
+        let g = |args: &[&str]| {
+            let me = ["-c", "user.name=t", "-c", "user.email=t@t.invalid"];
+            git(&repo, &[&me[..], args].concat()).unwrap()
+        };
+        std::fs::create_dir(&repo).unwrap();
+        g(&["init", "-q"]);
+        std::fs::write(repo.join("a.rs"), "fn a() -> bool {\n    1 > 0\n}\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "base"]);
+        let base = g(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("a.rs"), "fn a() -> bool {\n    2 > 0\n}\n\nfn b() {}\n").unwrap();
+        g(&["commit", "-qam", "the landed change (#9)"]);
+        let head = g(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("a.rs"), "fn a() -> bool {\n    2 >= 0\n}\n\nfn b() {}\n").unwrap();
+        let diff = format!("{}\n", g(&["diff"]));
+        g(&["checkout", "-q", "."]);
+        let file = dir.path().join("mutant.diff");
+        std::fs::write(&file, &diff).unwrap();
+
+        plant(&repo, &file).unwrap();
+        assert_eq!(format!("{}\n", g(&["diff", &head, "HEAD"])), diff, "the mutant and nothing else");
+        assert_eq!(g(&["rev-parse", "HEAD^"]), base, "one commit on the base, as landed");
+        assert_eq!(g(&["log", "-1", "--format=%s %an"]), "the landed change (#9) t", "message and author kept");
+        assert!(g(&["status", "--porcelain"]).is_empty());
+    }
 }
