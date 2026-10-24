@@ -82,17 +82,23 @@ fn in_value(v: &Value, needle: &str) -> bool {
 }
 
 /// The `bp` calls of one shell command. The command splits at `;`, `&`, `|`, a newline, a parenthesis and a
-/// backtick, and a segment counts when its first word, after `export`, `env`, `timeout N` and assignments, is `bp`
-/// (as the role's hook resolves it) or a path to a `bp` in a `bin*` directory, the sandbox's. A `bp` that the worker
-/// builds under `target/` is the code under test, not a call of the role, and `$B set` is no call either.
-/// A quoted `;` splits a string wrongly, and a line that starts with `bp` inside a heredoc counts as a call; either
-/// can drop a call or invent one, and the grade is a count over many runs.
+/// backtick, and a segment counts when its first word, after `export`, `env`, `timeout N`, a keyword that opens a
+/// command (`do`, `then`, `else`, `{`, `!`) and assignments, is `bp` (as the role's hook resolves it) or a path to a
+/// `bp` in a `bin*` directory, the sandbox's. A `bp` that the worker builds under `target/` is the code under test, not
+/// a call of the role, and `$B set` is no call either.
+/// A redirect is removed first, as `2>&1` would else split at its `&` and leave `2>` as the verb. A heredoc body is
+/// skipped, from the line after `<<WORD` to the line that is `WORD`: it is text the shell never runs, and source code
+/// in it that quotes `bp set <id>` would invent a call. A body counts only once its terminator line is seen, so a
+/// stray `<<` hides nothing, unless a later line happens to equal the word after it. A quoted `;` still splits a
+/// string wrongly and can drop a call or invent one, and the grade is a count over many runs.
 fn calls_in(command: &str) -> Vec<BpCall> {
     let mut out = Vec::new();
-    for segment in command.split([';', '&', '|', '\n', '(', ')', '`']) {
+    for segment in without_redirects(&without_heredocs(command)).split([';', '&', '|', '\n', '(', ')', '`']) {
         let mut words = segment.split_whitespace().peekable();
         while let Some(w) = words.peek() {
-            if matches!(*w, "export" | "env" | "command" | "exec") || (w.contains('=') && !w.starts_with('-')) {
+            if matches!(*w, "export" | "env" | "command" | "exec" | "do" | "then" | "else" | "{" | "!")
+                || (w.contains('=') && !w.starts_with('-'))
+            {
                 words.next();
             } else if *w == "timeout" {
                 words.nth(1);
@@ -106,6 +112,90 @@ fn calls_in(command: &str) -> Vec<BpCall> {
         let rest: Vec<&str> = words.collect();
         if let Some(i) = rest.iter().position(|w| !w.starts_with('-')) {
             out.push(BpCall { verb: rest[i].to_string(), args: rest[i + 1..].join(" ") });
+        }
+    }
+    out
+}
+
+fn without_heredocs(command: &str) -> String {
+    let mut kept = Vec::new();
+    let mut held = Vec::new();
+    let mut open: Vec<&str> = Vec::new();
+    for line in command.lines() {
+        if let Some(&end) = open.first() {
+            held.push(line);
+            if line.trim() == end {
+                open.remove(0);
+                if open.is_empty() {
+                    held.clear();
+                }
+            }
+            continue;
+        }
+        open.extend(heredoc_words(line));
+        kept.push(line);
+    }
+    kept.extend(held);
+    kept.join("\n")
+}
+
+/// The text without its redirects (`N>&M`, `>&N`, `&>f`, `N>f`, `>f`, `>>f`, `<f`), which sit at the start of a word. A
+/// `<<` opener and a `<<<` here-string stay: the first is the heredoc scan's, and the second reads as a word.
+fn without_redirects(text: &str) -> String {
+    let b = text.as_bytes();
+    let stops = |c: u8| c.is_ascii_whitespace() || b";&|()`".contains(&c);
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if i == 0 || stops(b[i - 1]) {
+            let mut j = i;
+            while b.get(j).is_some_and(u8::is_ascii_digit) {
+                j += 1;
+            }
+            let op = if b[j..].starts_with(b"&>>") {
+                3
+            } else if b[j..].starts_with(b"&>") || b[j..].starts_with(b">>") || b[j..].starts_with(b">&") {
+                2
+            } else {
+                usize::from(b.get(j) == Some(&b'>') || (b.get(j) == Some(&b'<') && b.get(j + 1) != Some(&b'<')))
+            };
+            if op > 0 {
+                j += op;
+                while j < b.len() && !stops(b[j]) {
+                    j += 1;
+                }
+                out.push(' ');
+                i = j;
+                continue;
+            }
+        }
+        let c = text[i..].chars().next().unwrap_or_default();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// The terminators of the `<<WORD`, `<<-WORD`, `<<\WORD` and quoted forms on one line; `<<<` is a here-string, no
+/// heredoc. A quoted word runs to its closing quote.
+fn heredoc_words(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(i) = rest.find("<<") {
+        rest = &rest[i + 2..];
+        if rest.starts_with('<') {
+            rest = rest.trim_start_matches('<');
+            continue;
+        }
+        let word = rest.strip_prefix('-').unwrap_or(rest).trim_start();
+        let word = if let Some(q @ ('\'' | '"')) = word.chars().next() {
+            word[1..].split_once(q).map_or("", |(w, _)| w)
+        } else {
+            let word = word.strip_prefix('\\').unwrap_or(word);
+            &word[..word.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(word.len())]
+        };
+        if !word.is_empty() {
+            out.push(word);
         }
     }
     out
@@ -147,6 +237,59 @@ mod tests {
             "code under test"
         );
         assert!(calls_in("bp --help").is_empty(), "no verb");
+    }
+
+    #[test]
+    fn skips_heredoc_bodies() {
+        let rust =
+            "cat <<'EOF' > f.rs\n/// `bp set <id> x`\nlet s = format!(\"bp record delta ...\");\nbp set <id> y\nEOF";
+        assert!(calls_in(rust).is_empty(), "a Rust body is no call");
+        let python = "python3 - <<'PY'\nimport os\nos.system(\"bp show x\")\nbp land x\nPY\n";
+        assert!(calls_in(python).is_empty(), "a Python body is no call");
+        let after = "cat <<-EOF > f\n\tbp set a b\n\tEOF\nbp cut a1 --json\n";
+        let seen: Vec<_> = calls_in(after).into_iter().map(|c| (c.verb, c.args)).collect();
+        assert_eq!(seen, [("cut".to_string(), "a1 --json".to_string())], "a call after the terminator counts");
+        let two = "cat <<A <<\"B\"\nbp set 1\nA\nbp set 2\nB\nbp show z";
+        assert_eq!(calls_in(two).len(), 1, "two heredocs on one line");
+        assert_eq!(calls_in("cat <<< bp\nbp show y").len(), 1, "a here-string opens no body");
+    }
+
+    #[test]
+    fn skips_redirects() {
+        assert!(calls_in("bp --help 2>&1 | head -40").is_empty(), "no verb behind a 2>&1");
+        let verbs = |c: &str| calls_in(c).into_iter().map(|c| c.verb).collect::<Vec<_>>();
+        assert_eq!(verbs("cmd &> log; bp cut x --json"), ["cut"]);
+        assert_eq!(verbs("bp show x >out.txt 2>>err.txt </dev/null; bp walk y >&2"), ["show", "walk"]);
+        assert_eq!(calls_in("bp show x 2>&1 | head")[0].args, "x", "the redirect leaves no argument");
+        assert_eq!(verbs("cat <<< bp\nbp show y"), ["show"], "a here-string stays");
+    }
+
+    #[test]
+    fn a_stray_double_angle_opens_no_body() {
+        let verbs = |c: &str| calls_in(c).into_iter().map(|c| c.verb).collect::<Vec<_>>();
+        assert_eq!(verbs("echo \"a << b\"; bp cut x --json"), ["cut"]);
+        assert_eq!(verbs("echo $((1<<3)); bp walk y"), ["walk"]);
+        assert_eq!(verbs("python3 -c \"print('<<')\"\nbp show z"), ["show"]);
+        assert_eq!(verbs("python3 -c \"print(1 << 4)\"\nbp check i --json"), ["check"], "an unclosed body is kept");
+        assert!(calls_in("cat <<'PR-BODY'\nbp set fake\nPR-BODY").is_empty(), "a quoted word with a dash");
+        assert_eq!(verbs("cat <<'PR-BODY'\nbp set fake\nPR-BODY\nbp show real"), ["show"]);
+        assert_eq!(verbs("cat <<\\EOF\nbp set fake\nEOF\nbp show real"), ["show"], "a backslash word");
+    }
+
+    #[test]
+    fn counts_calls_after_a_command_keyword() {
+        let verbs = |c: &str| calls_in(c).into_iter().map(|c| c.verb).collect::<Vec<_>>();
+        assert_eq!(verbs("for n in 1 2; do bp record x"), ["record"]);
+        assert_eq!(verbs("d(){ bp record x; }"), ["record"]);
+        assert_eq!(verbs("if true; then bp pr i; else bp walk i; fi"), ["pr", "walk"]);
+        assert_eq!(verbs("! bp check i"), ["check"]);
+    }
+
+    #[test]
+    fn counts_substitutions() {
+        let c = calls_in("x=$(bp show x --json); echo `bp list claim`");
+        let seen: Vec<_> = c.iter().map(|c| c.verb.as_str()).collect();
+        assert_eq!(seen, ["show", "list"]);
     }
 
     #[test]
