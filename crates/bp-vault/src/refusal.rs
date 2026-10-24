@@ -49,6 +49,7 @@ crate::closed_enum! {
         BaseMoved = "base_moved",
         NotEditorial = "not_editorial",
         VerbOutsideRole = "verb_outside_role",
+        FindingInvalid = "finding_invalid",
     }
 }
 

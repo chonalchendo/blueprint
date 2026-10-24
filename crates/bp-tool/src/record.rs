@@ -259,6 +259,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
         Some(w) => w.clean(&targets)?,
         None => vault.clean(&targets)?,
     }
+    crate::review_rows::check(index, kind, parent.as_ref(), &given, &body)?;
     if identity && let Some(already) = taken(&vault.root, &id, &text)? {
         return Ok(already);
     }
@@ -341,7 +342,7 @@ fn taken(root: &Path, id: &Id, text: &str) -> Result<Option<Wrote>, Refusal> {
     ))
 }
 
-fn schema(subject: String, fix: String) -> Refusal {
+pub(crate) fn schema(subject: String, fix: String) -> Refusal {
     Refusal::new(Code::SchemaInvalid, subject, "a record holds its kind's fields (13, the record tables)", fix)
 }
 

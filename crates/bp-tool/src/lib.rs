@@ -17,6 +17,7 @@ mod link;
 mod record;
 mod redraw;
 mod rename;
+mod review_rows;
 mod row;
 mod schema;
 mod set;
