@@ -11,7 +11,7 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
 2. Find the worktree. Run `bp list claim --under <id> --json`, then `bp show <claim> --json` for the last row. Edit and commit only in its `worktree`.
 3. Read the findings in the table of the review body. Each row under the header is one finding, numbered from 1.
 4. Fix each finding in the worktree and commit, or decline it. A decline needs a reason from the issue, a design or a convention. A finding can need work that the issue does not hold. Decline it, and name that work in the reason.
-5. Run the blocks before you push: `bp check <id> --json`. A block that fails once and passes on a rerun is a flake, not a pass. Report both runs in your reply. Never drop the failed run.
+5. Run the blocks before you push: `bp check <id> --json`. A block that fails once and passes on a rerun, here or in `bp pr <id> --json`, is a flake. Go on, and name the flaky block and its two run ids in the pull request body.
 6. Record one disposition for each finding. `<review>` is the review `id`, and `<n>` is the row number of the finding. `<sha>` is the output of `git rev-parse HEAD` in the worktree.
    - Fixed: `bp record disposition <review> --field finding=<n> --field as=fixed --field head=<sha> --json`.
    - Declined: `bp record disposition <review> --field finding=<n> --field as=declined --field reason="<why>" --json`.

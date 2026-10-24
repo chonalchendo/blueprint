@@ -18,7 +18,8 @@
 //! `$BP_EVAL_TARGET` is a cargo target directory to keep across runs (default: one per run), where a worker's blocks
 //! build the issue's code; every trial gets its own `$TMPDIR` under the run's work directory, `CARGO_INCREMENTAL=0` and,
 //! unless set, `CARGO_BUILD_JOBS=4`. Flags for a test: `--repo <dir>` (holds the fixtures' commits), `--fixtures <dir>`,
-//! `--bin <arm>=<bp>` (trusted: the arm's clone is not asserted). An arm outside `with`, `without` and `filler`, such
+//! `--bin <arm>=<bp>` (trusted: the arm's clone is not asserted, and its trials carry the shipped role-and-skill hash, because
+//! the store holds one hash; the arm's body is the caller's claim). An arm outside `with`, `without` and `filler`, such
 //! as a body with one rule cut, runs only with its `--bin`, and grades as `with` does. A usage error exits 4, as every
 //! xtask check does.
 

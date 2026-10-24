@@ -15,12 +15,7 @@ Do not trust the worker's account of what it tested, in the pull request, the is
 4. Compare the diff with the issue. Find each change that the issue does not ask for. Find each change that no named block in the `## Check` section of the issue tests.
 5. Find the target designs: the `cites` of `bp show <id> --json`. Compare the diff with each target design. A change that makes a design false needs a delta. List the deltas with `bp list delta --under <design> --json`. Read each `cause` with `bp show <delta> --json`. Look for a delta whose `cause` is `<id>`.
 6. The slice gives conventions as ids. Read only the sections that the diff touches: `bp show <convention> --section <heading> --json`.
-7. Write one finding for each defect. A finding cites the issue, a design, a convention or a failing command. Write no finding for a taste that no convention states.
-8. Remove each finding of these kinds:
-   - A style that the formatter sets, such as `cargo fmt`.
-   - A case that the diff already handles. For example, an exact-line match on a line that the formatter writes in one form.
-   - A rule that no cited design or convention states.
-   - A line outside the diff. The tool refuses a review with such a row.
+7. Write one finding for each defect. A finding cites the issue, a design, a convention or a failing command. Write none for a taste that no cited design or convention states. Write none for a style the project's formatter sets, nor for a case the diff already handles. A defect with no line in the diff cites a node id.
 
 Write the review in this shape:
 

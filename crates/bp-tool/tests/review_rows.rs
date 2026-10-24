@@ -20,7 +20,7 @@ struct World {
 }
 
 /// A vault, a bare origin and its clone, [`ISSUE`] cut, and one commit in its worktree: `src/b.rs` line 30 changed
-/// (so lines 27 to 33 show) and `src/a.rs` added.
+/// (so lines 27 to 33 show), `src/a.rs` and `sp/a b.txt` added, and `src/old.rs` renamed whole to `src/new.rs`.
 fn world() -> World {
     let t = tempfile::tempdir().unwrap();
     let origin = t.path().join("origin.git");
@@ -32,6 +32,7 @@ fn world() -> World {
     let forty = (1..=40).map(|n| format!("fn b{n}() {{}}")).collect::<Vec<_>>().join("\n") + "\n";
     std::fs::create_dir_all(code.join("src")).unwrap();
     std::fs::write(code.join("src/b.rs"), &forty).unwrap();
+    std::fs::write(code.join("src/old.rs"), "fn old() {}\n".repeat(6)).unwrap();
     git(&code, &["add", "-A"]);
     git(&code, &["commit", "-qm", "one"]);
     git(&code, &["remote", "add", "origin", &origin.display().to_string()]);
@@ -50,6 +51,9 @@ fn world() -> World {
     let w = PathBuf::from(out["worktree"].as_str().unwrap());
     std::fs::write(w.join("src/b.rs"), forty.replace("fn b30() {}", "fn b30() { todo!() }")).unwrap();
     std::fs::write(w.join("src/a.rs"), "fn a() {}\n".repeat(12)).unwrap();
+    std::fs::create_dir_all(w.join("sp")).unwrap();
+    std::fs::write(w.join("sp/a b.txt"), "one\n").unwrap();
+    git(&w, &["mv", "src/old.rs", "src/new.rs"]);
     git(&w, &["add", "-A"]);
     git(&w, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "two"]);
     let head = git(&w, &["rev-parse", "HEAD"]).trim().to_string();
@@ -111,6 +115,14 @@ fn refuses_an_empty_finding_row() {
         let fix = w.refused(ISSUE, &w.body(&["| warn | src/a.rs:2 | Fine. |", row]));
         assert!(fix.starts_with("fill row 2"), "{row}: {fix}");
     }
+}
+
+#[test]
+fn refuses_a_second_table() {
+    let w = world();
+    let rows = ["| warn | src/a.rs:2 | Fine. |", "|---|---|---|", "| warn | src/a.rs:3 | Fine. |"];
+    let fix = w.refused(ISSUE, &w.body(&rows));
+    assert!(fix.contains("second table"), "{fix}");
 }
 
 #[test]
@@ -179,4 +191,19 @@ fn a_review_whose_rows_sit_in_the_diff_records() {
     assert_eq!(exit, Some(0), "{v}");
     let (_, shown) = common::bp(w.v(), &["show", v["id"].as_str().unwrap()]);
     assert!(shown["body"].as_str().unwrap().contains("projects/bp/project"), "{shown}");
+}
+
+#[test]
+fn refuses_nothing_for_a_path_with_a_space() {
+    let w = world();
+    let (exit, v) = w.review(ISSUE, &w.body(&["| error | sp/a b.txt:1 | Wrong. |", "| warn | sp/a b.txt | Wrong. |"]));
+    assert_eq!(exit, Some(0), "git ends the name of a path with a space with a tab: {v}");
+}
+
+#[test]
+fn a_renamed_file_with_no_hunk_is_cited_by_its_bare_path() {
+    let w = world();
+    let (exit, v) = w.review(ISSUE, &w.body(&["| error | src/new.rs | Wrong. |"]));
+    assert_eq!(exit, Some(0), "a 100% rename shows no hunk: {v}");
+    w.refused(ISSUE, &w.body(&["| error | src/new.rs:1 | Wrong. |"]));
 }
