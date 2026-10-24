@@ -84,10 +84,10 @@ impl Grade {
             let log_path = store.join(format!("{trial}.vault.log"));
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             let loaded = match arm {
-                "with" => trace.preloaded(&marker),
                 "without" => !trace.mentions(&marker) && !trace.mentions(FILLER),
                 "filler" => trace.preloaded(FILLER) && !trace.mentions(&marker),
-                _ => bail!("{trial}: arm {arm} is none of with, without, filler"),
+                // `with`, or an arm that ran with its own `--bin`: an edited body keeps the body's first line.
+                _ => trace.preloaded(&marker),
             };
             let (hash, stamp) = read_hash(store, &trial).unzip();
             let mut graded = Graded {

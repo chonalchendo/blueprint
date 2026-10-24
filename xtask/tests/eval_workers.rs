@@ -97,7 +97,7 @@ fn setup() -> Option<Setup> {
     write(&t.join("complete/holdout.txt"), "# a held-out fixture\nheld\n");
     write(&t.join("complete/held.md"), &complete(&shas[1], ""));
     let respond = format!(
-        "base: {}\nhead: {}\ntitle: A fixture\ntruth:\n- [major fixed] crates/x/src/a.rs:1 | The count is wrong.\n- [minor declined] README.md | A taste.\nprobe: 1 | grep -q 'fn a() {{ 1 }}' crates/x/src/a.rs\n---\n{issue}",
+        "base: {}\nhead: {}\ntitle: A fixture\ntruth:\n- [major fixed] crates/x/src/a.rs:1 | The count is wrong.\n- [minor declined] dep.txt | A taste.\nprobe: 1 | grep -q 'fn a() {{ 1 }}' crates/x/src/a.rs\n---\n{issue}",
         shas[0], shas[2]
     );
     write(&t.join("respond/rev-1.md"), &respond);

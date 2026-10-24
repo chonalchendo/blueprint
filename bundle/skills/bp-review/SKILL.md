@@ -7,13 +7,15 @@ Task: review the pull request of the issue on the `Node:` line of the dispatch. 
 
 You write nothing: no file, no commit and no record. Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at most once. Exit 3 means the call had nothing to do. Stop and report the envelope when `fix` needs a verb on the `Forbidden:` line. Also stop and report it when the call fails again after `fix`.
 
+Do not trust the worker's account of what it tested, in the pull request, the issue or a commit. Read the diff.
+
 1. Read the slice: `bp walk <id> --for review --json`. It holds the issue and the designs near it. Its intent item for `<id>` must read `needs-review`. Else stop and report the intent.
 2. Find the worktree. Run `bp list claim --under <id> --json`, then `bp show <claim> --json` for the last row. It gives `worktree`, and `base` is the commit the branch starts from.
 3. Read the head from the slice: the `head` of its `pull_request`. If `pull_request` is null, stop and report that no pull request is in view. Do not read the head of the worktree, because the worker can commit after the push. Read the diff with `git -C <worktree> diff <base> <head>`.
 4. Compare the diff with the issue. Find each change that the issue does not ask for. Find each change that no named block in the `## Check` section of the issue tests.
 5. Find the target designs: the `cites` of `bp show <id> --json`. Compare the diff with each target design. A change that makes a design false needs a delta. List the deltas with `bp list delta --under <design> --json`. Read each `cause` with `bp show <delta> --json`. Look for a delta whose `cause` is `<id>`.
 6. The slice gives conventions as ids. Read only the sections that the diff touches: `bp show <convention> --section <heading> --json`.
-7. Write one finding for each defect. A finding cites the issue, a design, a convention or a failing command. Write no finding for a taste that no convention states.
+7. Write one finding for each defect. A finding cites the issue, a design, a convention or a failing command. Write none for a taste that no cited design or convention states. Write none for a style the project's formatter sets, nor for a case the diff already handles. A defect with no line in the diff cites a node id.
 
 Write the review in this shape:
 

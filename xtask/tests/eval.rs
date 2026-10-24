@@ -20,7 +20,7 @@ S=$(printf %.7s "$FAKE_HEAD"); B=$(printf %.7s "$FAKE_BASE")
 T=$BP_EVAL_TRANSCRIPT
 call() { printf '{"type":"assistant","message":{"model":"fake-model","content":[{"type":"tool_use","name":"Bash","input":{"command":"%s"}}]}}\n' "$1" >> "$T"; }
 case $BP_EVAL_ARM in
-with) LINE=$(awk 'f >= 2 && NF { print; exit } /^---$/ { f++ }' "$FAKE_SKILL" | sed 's/\\/\\\\/g; s/"/\\"/g') ;;
+with | list) LINE=$(awk 'f >= 2 && NF { print; exit } /^---$/ { f++ }' "$FAKE_SKILL" | sed 's/\\/\\\\/g; s/"/\\"/g') ;;
 filler) LINE='This line holds no instruction.' ;;
 *) LINE= ;;
 esac
@@ -33,7 +33,7 @@ fi
 call "bp list claim --under $ID --json"
 call "git -C /w diff $B $S"
 call "bp list delta --under projects/bp/designs/system --json"
-printf '{"type":"assistant","message":{"model":"fake-model","content":[{"type":"text","text":"head: %s\\n| severity | location | finding |\\n|---|---|---|\\n| error | src/a.rs:1 | The count is wrong. |\\n| warn | other.rs:9 | A taste. |"}]}}\n' "$S" >> "$T"
+printf '{"type":"assistant","message":{"model":"fake-model","content":[{"type":"text","text":"head: %s\\n| severity | location | finding |\\n|---|---|---|\\n| error | src/a.rs:1 | The count is wrong. |\\n| warn | src/a.rs:1 | A taste. |"}]}}\n' "$S" >> "$T"
 "#;
 
 struct Setup {
@@ -196,7 +196,7 @@ fn a_fake_agent_runs_the_whole_pipeline_and_stores_what_the_grader_reads() {
             && report.contains("with-pr-1-1.jsonl"),
         "{report}"
     );
-    assert!(report.contains("FALSE `other.rs:9`") && report.contains("match, truth item 1 `src/a.rs:1`"), "{report}");
+    assert!(report.contains("FALSE `src/a.rs:1`") && report.contains("match, truth item 1 `src/a.rs:1`"), "{report}");
     assert!(report.contains("prose recall"), "{report}");
 
     // `--trials N` fills to N: a rerun at 2 runs nothing, a run at 3 adds one trial per arm and fixture.
@@ -307,4 +307,17 @@ fn a_store_from_another_fixture_or_protocol_is_refused() {
     std::fs::write(format!("{}/pr-1.md", r.fixtures), fixture.replace("## Problem\n\nx", "## Problem\n\ny")).unwrap();
     let (code, out) = xtask(&r.s, &args);
     assert!(code == Some(1) && out.contains("ran on another fixture"), "{out}");
+}
+
+#[test]
+fn an_arm_outside_the_three_runs_only_with_its_own_bp() {
+    let Some(r) = Ran::new("1") else { return };
+    let bin = format!("list={}", r.s.bp.display());
+    let args = ["bp-review", "--trials", "1", "--arms", "list", "--fixtures", &r.fixtures, "--repo", &r.repo()];
+    let (code, out) = xtask(&r.s, &args);
+    assert_eq!(code, Some(4), "no --bin: {out}");
+    let (code, out) = xtask(&r.s, &[&args[..], &["--bin", &bin]].concat());
+    assert!(code == Some(0) && out.contains("eval: trial list-pr-1-1"), "{out}");
+    let report = std::fs::read_to_string(r.results.join("bp-review/report.md")).unwrap();
+    assert!(report.contains("| list | 1 | 1 of 1 |"), "graded as with: {report}");
 }

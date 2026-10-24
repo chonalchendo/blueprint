@@ -329,10 +329,13 @@ fn the_role_hook_prefix_names_the_harness_for_a_later_walk() {
 fn a_handoff_seed_follows_a_record_to_its_node() {
     let w = World::new();
     let head = "a".repeat(40);
+    let body = tempfile::tempdir().unwrap();
+    let file = body.path().join("review.md");
+    std::fs::write(&file, format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n")).unwrap();
     let (code, v) = w.bp(
         w.vault.path(),
         &[("BP_SESSION", "s-r")],
-        &["record", "review", ISSUE, "--field", &format!("head={head}")],
+        &["record", "review", ISSUE, "--field", &format!("head={head}"), "--body-file", file.to_str().unwrap()],
     );
     assert_eq!(code, Some(0), "{v}");
     let (code, v) = w.bp(w.vault.path(), &[], &["record", "handoff", "projects/bp/project", "--field", "session=s-r"]);

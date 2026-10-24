@@ -2,7 +2,7 @@
 //! runner lives here, and the owner starts it in their own terminal. Skills: `bp-review`, `bp-complete`, `bp-respond`.
 //!
 //! ```text
-//! cargo xtask eval <skill> --trials N [--arms with,without,filler] [--fixture <id>]
+//! cargo xtask eval <skill> --trials N [--arms with,without,filler,<arm>] [--fixture <id>] [--bin <arm>=<bp>]...
 //! cargo xtask eval --grade [--check] <skill>
 //! ```
 //!
@@ -18,7 +18,10 @@
 //! `$BP_EVAL_TARGET` is a cargo target directory to keep across runs (default: one per run), where a worker's blocks
 //! build the issue's code; every trial gets its own `$TMPDIR` under the run's work directory, `CARGO_INCREMENTAL=0` and,
 //! unless set, `CARGO_BUILD_JOBS=4`. Flags for a test: `--repo <dir>` (holds the fixtures' commits), `--fixtures <dir>`,
-//! `--bin <arm>=<bp>` (trusted: the arm's clone is not asserted). A usage error exits 4, as every xtask check does.
+//! `--bin <arm>=<bp>` (trusted: the arm's clone is not asserted, and its trials carry the shipped role-and-skill hash, because
+//! the store holds one hash; the arm's body is the caller's claim). An arm outside `with`, `without` and `filler`, such
+//! as a body with one rule cut, runs only with its `--bin`, and grades as `with` does. A usage error exits 4, as every
+//! xtask check does.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -157,8 +160,14 @@ impl Args {
                 "usage: cargo xtask eval <skill> --trials N [--arms ...] [--fixture <id>] | cargo xtask eval --grade [--check] <skill>",
             ));
         }
-        if let Some(bad) = a.arms.iter().find(|x| !["with", "without", "filler"].contains(&x.as_str())) {
-            return Err(usage(format!("arm {bad} is none of with, without, filler")));
+        // The runner builds only the three arms; another arm's bundle is the caller's, so its binary must come with it.
+        // A trial is `<arm>-<fixture>-<n>`, so an arm is one lower-case word.
+        let known = |x: &String| ["with", "without", "filler"].contains(&x.as_str());
+        let given = |x: &String| a.bins.iter().any(|(b, _)| b == x) && x.bytes().all(|b| b.is_ascii_lowercase());
+        if let Some(bad) = a.arms.iter().find(|x| !known(x) && !given(x)) {
+            return Err(usage(format!(
+                "arm {bad} is none of with, without, filler; another arm is one lower-case word with --bin {bad}=<bp>"
+            )));
         }
         Ok(a)
     }
@@ -330,6 +339,8 @@ mod tests {
         let a = args("bp-review --trials 5 --arms with,without,filler --fixture pr-20").unwrap();
         assert_eq!((a.trials, a.arms.len(), a.fixture.as_deref()), (5, 3, Some("pr-20")));
         assert!(args("--grade --check bp-review").is_ok());
+        let list = args("bp-review --trials 5 --arms with,list --bin list=/tmp/bp").unwrap();
+        assert_eq!(list.arms, ["with", "list"], "an arm outside the three runs with its own bp");
         assert_eq!(
             args("bp-review --trials 5").unwrap().arms,
             ["with", "without", "filler"],
@@ -339,6 +350,8 @@ mod tests {
             "bp-review",
             "bp-review --trials 2 --check",
             "bp-review --trials 2 --arms with,more",
+            "bp-review --trials 2 --arms with,more --bin with=/x",
+            "bp-review --trials 2 --arms with,mo-re --bin mo-re=/x",
             "bp-review --trials",
             "bp-review --trials x",
         ] {

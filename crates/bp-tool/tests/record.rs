@@ -41,6 +41,13 @@ fn vault() -> tempfile::TempDir {
     dir
 }
 
+/// A review body in `dir` with the head line and a findings table with no row (29 design change 6).
+fn review_body(dir: &Path, head: &str) -> String {
+    let file = dir.join("review.md");
+    std::fs::write(&file, format!("head: {head}\n\n| severity | location | finding |\n|---|---|---|\n")).unwrap();
+    file.display().to_string()
+}
+
 fn bp(root: &Path, args: &[&str]) -> (Option<i32>, serde_json::Value) {
     let out = Command::cargo_bin("bp")
         .unwrap()
@@ -64,15 +71,26 @@ fn each_kind_writes_one_file_at_its_path() {
     let head = "0123456789abcdef0123456789abcdef01234567";
     let ms = format!("milestone={MILESTONE}");
     let (h, iss, review) = (format!("head={head}"), format!("issue={ISSUE}"), format!("{ISSUE}/reviews/{head}"));
+    let found = tempfile::tempdir().unwrap();
+    let r = review_body(found.path(), head);
     for (args, id) in [
         (
             vec!["delta", DESIGN, "--field", &ms, "--body-file", body.to_str().unwrap()],
             "projects/bp/designs/system/deltas/2026-10-19T10-00-00Z",
         ),
-        (vec!["review", ISSUE, "--field", &h, "--field", "role=reviewer"], review.as_str()),
-        (vec!["review", ISSUE, "--field", &h], &format!("{review}-2")),
+        (vec!["review", ISSUE, "--field", &h, "--field", "role=reviewer", "--body-file", &r], review.as_str()),
+        (vec!["review", ISSUE, "--field", &h, "--body-file", &r], &format!("{review}-2")),
         (
-            vec!["disposition", &review, "--field", "finding=2", "--field", "as=declined"],
+            vec![
+                "disposition",
+                &review,
+                "--field",
+                "finding=2",
+                "--field",
+                "as=declined",
+                "--field",
+                "reason=out of scope",
+            ],
             &format!("{review}/dispositions/2"),
         ),
         (
@@ -131,7 +149,9 @@ fn an_identity_refuses_a_second_and_a_retry_changes_nothing() {
     let root = dir.path();
     let head = "0123456789abcdef0123456789abcdef01234567";
     let review = format!("{ISSUE}/reviews/{head}");
-    let (exit, _) = bp(root, &["record", "review", ISSUE, "--field", &format!("head={head}")]);
+    let found = tempfile::tempdir().unwrap();
+    let r = review_body(found.path(), head);
+    let (exit, _) = bp(root, &["record", "review", ISSUE, "--field", &format!("head={head}"), "--body-file", &r]);
     assert_eq!(exit, Some(0));
     let fixed = ["record", "disposition", &review, "--field", "finding=1", "--field", "as=fixed"];
     let handoff = ["record", "handoff", "projects/bp/project", "--field", "session=8b8b7784-352c"];
@@ -141,7 +161,8 @@ fn an_identity_refuses_a_second_and_a_retry_changes_nothing() {
         let (exit, v) = bp(root, args);
         assert_eq!((exit, v["id"].as_str().is_some()), (Some(3), true), "an identical retry: {v}");
     }
-    let (exit, v) = bp(root, &["record", "disposition", &review, "--field", "finding=01", "--field", "as=declined"]);
+    let declined = ["--field", "as=declined", "--field", "reason=out of scope"];
+    let (exit, v) = bp(root, &[&["record", "disposition", &review, "--field", "finding=01"][..], &declined].concat());
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("id_taken")), "{v}");
     let (exit, v) = bp(root, &["record", "disposition", &review, "--field", "finding=0", "--field", "as=fixed"]);
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "findings count from 1: {v}");

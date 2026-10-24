@@ -85,7 +85,13 @@ impl Grade {
             )
         }];
         lines.push("|---|---|---|---|---|---|---|---|---|---|---|".into());
-        for arm in ["with", "without", "filler"] {
+        let mut arms = vec!["with", "without", "filler"];
+        for t in &self.trials {
+            if !arms.contains(&t.arm.as_str()) {
+                arms.push(&t.arm);
+            }
+        }
+        for arm in arms {
             let runs = self.arm(arm);
             let s = Stats::of(&runs);
             if s.runs == 0 {
