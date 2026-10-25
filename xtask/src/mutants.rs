@@ -9,9 +9,10 @@
 //! In a throwaway clone at that head it lists `cargo-mutants`' candidates on the lines the diff changed. A mutant that
 //! CI catches is a CI finding, not a review finding, so a survivor passes all of CI at the planted head: first
 //! `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`, the cheap gates, then the
-//! tests of every crate the diff touches, one mutant at a time. It shuffles the survivors with a seed of `s` and the
-//! pull request, takes at most one per function, and keeps `k`. It commits each on the head as `bp-eval` and records
-//! the diff. It writes `mutant-<n>-<i>.md` for each and `control-<n>.md` with no mutant (`eval_fixture.rs` has the
+//! tests of every crate the diff touches, one mutant at a time. A guard mutant (`MatchArmGuard`) is dropped before
+//! that: the tool writes a literal `true` or `false`, which any reader sees. It shuffles the survivors with a seed of
+//! `s` and the pull request, takes at most one per function, and keeps `k`. It commits each on the head as `bp-eval`
+//! and records the diff. It writes `mutant-<n>-<i>.md` for each and `control-<n>.md` with no mutant (`eval_fixture.rs` has the
 //! shape), into `--out` (default `xtask/evals/bp-review-mutants`).
 //!
 //! The issue is the landed pull request's own, from its body (`gh pr view <n>`, read once, here): its `## Problem`,
@@ -150,7 +151,11 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &std::ffi::Os
     let listed: Vec<Value> =
         serde_json::from_str(if listed.trim().is_empty() { "[]" } else { &listed }).context("parse --list --json")?;
     let crates: BTreeSet<String> = listed.iter().filter_map(|m| m["package"].as_str().map(str::to_string)).collect();
-    let clean: Vec<&Value> = listed.iter().filter(|m| ci_clean(code, cargo, &head, m).unwrap_or(false)).collect();
+    // A guard mutant writes a literal `true` or `false` into the guard, which any reader sees (30, design change 1).
+    let clean: Vec<&Value> = listed
+        .iter()
+        .filter(|m| m["genre"] != "MatchArmGuard" && ci_clean(code, cargo, &head, m).unwrap_or(false))
+        .collect();
     eprintln!(
         "mutants: #{pr}: {} of {} candidates pass fmt and clippy ({} s)",
         clean.len(),
