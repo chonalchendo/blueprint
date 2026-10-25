@@ -3,32 +3,41 @@ base: fc51d9b5c2f37edc8a957153b89639f55084b713
 head: 7b71a68d92873a4643fe2f2faf3f6b50f522283d
 title: Row checks in record, do-not-flag list, a --bin eval arm
 genre: BinaryOperator
-span: xtask/src/eval_grade.rs:87-87
+span: xtask/src/eval_grade.rs:88-88
 seed: 7
 mutant_diff: |
     diff --git a/xtask/src/eval_grade.rs b/xtask/src/eval_grade.rs
-    index 3d229a5..c1ac431 100644
+    index 3d229a5..6aab691 100644
     --- a/xtask/src/eval_grade.rs
     +++ b/xtask/src/eval_grade.rs
-    @@ -84,7 +84,7 @@ impl Grade {
-                 let log_path = store.join(format!("{trial}.vault.log"));
+    @@ -85,7 +85,7 @@ impl Grade {
                  let log = std::fs::read_to_string(&log_path).unwrap_or_default();
                  let loaded = match arm {
-    -                "without" => !trace.mentions(&marker) && !trace.mentions(FILLER),
-    +                "without" => !trace.mentions(&marker) || !trace.mentions(FILLER),
-                     "filler" => trace.preloaded(FILLER) && !trace.mentions(&marker),
+                     "without" => !trace.mentions(&marker) && !trace.mentions(FILLER),
+    -                "filler" => trace.preloaded(FILLER) && !trace.mentions(&marker),
+    +                "filler" => trace.preloaded(FILLER) || !trace.mentions(&marker),
                      // `with`, or an arm that ran with its own `--bin`: an edited body keeps the body's first line.
                      _ => trace.preloaded(&marker),
+                 };
 truth:
-- xtask/src/eval_grade.rs:87-87 | replace && with || in Grade::read
+- xtask/src/eval_grade.rs:88-88 | replace && with || in Grade::read
 ---
 ## Problem
 
-Runs after issue 1, so the report shows false findings before and after. The row checks and the do-not-flag list ship in one issue. The row check acts at `record`, after the reviewer returns, so it moves `recorded:` and `outcome`, not `false_findings`, which reads the trace. A third arm, `list`, drops the trust line and keeps the list; it says which text change moves the rate. A trial now passes only when `record review` accepts the review, so run 2 and later runs do not compare on `outcome` (review of PR 61).
+`bp record review` accepts any body. A review with no `head:` line, no findings table, an empty row or a location outside the diff is recorded, and the responder meets it later. `bp record disposition --field as=declined` records with no `reason` (`record.rs:122`, the field is optional).
+
+In review eval run 2, 3 of the 8 `with` findings are false (`analysis/evals-skills/bp-review/report.md`). All three flag the exact-line `#[cfg(test)]` match at `xtask/src/lines.rs:20`, which the formatter makes safe. `bp-review` has no do-not-flag list, and `bp-respond` has no rule for a flaky block.
 
 ## Shape
 
-6. **Row checks in `record`** (15). `record review` refuses `finding_invalid`: no `head:` line, no findings table, an empty finding, or a location outside the diff. `record disposition` refuses `as=declined` with no `reason` (today the field is optional, `record.rs:122`). `bp-review` gains the do-not-flag list and a line: do not trust the worker's account. `bp-respond` gains the flake rule. Both have anvil evidence [AE reviewing-pr, responding-to-pr-review, xc-2].
+| Before | After |
+|---|---|
+| `record review` records any body | Refuses `finding_invalid` (exit 2): no `head:` line that names the head, no table, a row with an empty cell, a location outside the diff of the head against the claim's base, or a row with no claim to read a diff from. New code: additive. |
+| `record disposition --field as=declined` with no `reason` records | Refuses `schema_invalid`, subject `disposition reason`. Breaking for a caller that declines with no reason. |
+| `bp-review` has no do-not-flag list | Step 7 writes no finding for a taste, a formatter style or a case the diff handles; one line says "Do not trust the worker's account … Read the diff." |
+| `bp-respond` step 5 runs the blocks | It also says a block that fails once and passes on a rerun is a flake: go on, and name the block and its two run ids in the pull request body. |
+| `cargo xtask eval --arms` takes only `with`, `without`, `filler` | Another arm (one lower-case word) runs when `--bin <arm>=<bp>` gives its binary. The grade scores it as `with`; the report adds its row. Additive. The `list` arm drops the trust line only. |
+| The review eval's trial passes when the reviewer returns | A review eval trial now passes only when `record review` accepts the review. Run 2 and the rerun are not comparable on `outcome` or `recorded:`. The row check cannot move `false_findings`, which reads the trace. |
 
 ## Check
 

@@ -6,16 +6,24 @@ truth:
 ---
 ## Problem
 
-Needs the verb table of issue 5, because the widened check reads it.
+A worker can still write in the main checkout and background a command, and the tool checks no verb against the role. Three prose rules failed in anvil.
+
+- A whole fix landed in the main checkout while the check read green (anvil 0249).
+- At least 16 worker stalls came from `run_in_background`, past a prose rule (anvil 0183 and the chain after it).
+- A SessionEnd hook that outlasts 1.5 s dies with no message, and `bp-end.sh` has no `timeout`.
+- `BP_ROLE=worker bp create inbox --title Q --json` creates the inbox node. It should refuse. Only `stamp`, `land` and a `transition` to `approved` or `active` refuse an agent role today.
 
 ## Shape
 
-5. **Confinement** (17 Hooks, check 11).
-   - `bp-guard.sh` denies an Edit or Write by `bp-worker` inside the clone's main checkout. It confines nothing else: the claim's worktree and the system temp directory (where `bp-complete` step 6 writes its delta body) pass, and so do a sibling worktree, another repository and `$HOME`. It makes no claim call, because a claim row holds no worktree. Paths compare with `-ef` up the ancestors, so case and links cannot slip past (review of PR 58). Issue 3 bounds the hook at 200 ms (choice; 42 ms measured).
-   - `bp-role.sh` denies the `run_in_background` flag for `bp-worker`. It does not catch `cmd &`, `nohup` or `sleep` polling.
-   - `bp-end.sh` gets a `timeout`.
-   - The tool refuses, with a new closed code `verb_outside_role`, every verb outside the row of `BP_ROLE`. A code never changes meaning [`refusal.rs`], so `role_forbidden` keeps its text. The check reads the role's verbs, the union of its rows in design change 7's table, because `BP_ROLE` names a role, not an action. A `transition` to `approved` or `active` still refuses `role_forbidden` first. The label is forgeable, so this stops a slip, not an attack [`set.rs:136`].
-   - Scope: the guard covers the Edit and Write tools on Claude Code. Bash redirects, `git` and `sed -i` are not covered. On Codex the tool check works only if `BP_ROLE` reaches the subagent, which Codex does not document [27 design change 3]. That is unverified.
+| Before | After |
+|---|---|
+| `bp-guard.sh` denies a write in the vault only | It also denies a `bp-worker` Edit or Write inside the clone's main checkout |
+| `bp-role.sh` checks `bp` verbs only | It also denies `run_in_background` for `bp-worker`, on any command |
+| The SessionEnd entry has no `timeout` | The entry has `"timeout": 10` |
+| The tool refuses `stamp`, `land` and an approving `transition` under an agent role | It also refuses every verb outside the row of `BP_ROLE` with the new code `verb_outside_role`. A new code on verbs that ran before: under an agent role, a verb outside its row now refuses. |
+| No fixture for a hook block | `cargo xtask sandbox [claim]` prints 27's prelude as `export` lines. With `claim` it adds a held worker claim: `$I`, `$W`, `$G`, `$K`. |
+
+`role_forbidden` keeps its text. `stamp`, `land` and a `transition` to `approved` or `active` still return it (15: a code never changes meaning).
 
 ## Check
 

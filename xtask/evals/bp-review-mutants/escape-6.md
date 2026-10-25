@@ -7,11 +7,19 @@ truth:
 ---
 ## Problem
 
-`bp-operation` holds each role's verbs, from 21's rows; the hook and the templates read them.
+A vault commit cannot name the agent role that made it. Today every commit from a Claude Code session or dispatch carries `Bp-Role: human`, because nothing sets `BP_ROLE`. An agent can also run a human act: `BP_ROLE=worker bp stamp <m>` and `bp land <i>` do not refuse on master `9575da5`. So 25's interim approver (the latest `transition … approved` commit with `Bp-Role: human`) cannot be measured.
 
 ## Shape
 
-3. **Each commit names its role** (21, rules 6 and 7; 26, design change 7). On `claude`, a `PreToolUse` hook on `Bash`, `"$CLAUDE_PROJECT_DIR"/.claude/hooks/bp-role.sh`, acts on each command that calls `bp`. With an `agent_id`, it maps `agent_type` (`bp-worker`, `bp-reviewer`, `bp-researcher`) to the role; with none, the role is `session`. Another subagent runs only the read verbs (21, rule 6). It denies a verb outside the role's verbs in `bp-operation` with exit 2. Else it returns the whole `tool_input` through `updatedInput`, prefixed with `export BP_ROLE=<role> BP_SESSION=<agent_id, else session_id>;`, and decides no permission. On `codex`, each role's TOML sets `BP_ROLE` through `shell_environment_policy`, which Codex does not document for a subagent. A human shell sets neither, so its commits stay `human`. The role is a label, not a gate; the forge stays the gate. Under an agent role, `stamp`, `land` and a `transition` to `approved` or `active` refuse a new code, `role_forbidden` (exit 2), before any other test. So a milestone's approval is its latest `transition … approved` commit with `Bp-Role: human` (13). Additive: one code.
+| Before | After |
+|---|---|
+| `install --target claude` registers three hooks. | It also registers `"$CLAUDE_PROJECT_DIR"/.claude/hooks/bp-role.sh` on `PreToolUse` with matcher `Bash`. Codex gets no role hook (17). |
+| A Claude hook script that cannot start lets the call run. | Each Claude hook entry has `"onFailure": "block"`. |
+| A `bp` call from Claude Code commits `Bp-Role: human`. | The hook returns the whole `tool_input` through `updatedInput`, with `export BP_ROLE=<role> BP_SESSION=<agent_id, else session_id>;` before the command. It does this for every command that names `bp` as a word. It decides no permission. |
+| — | Install writes the allow rule `Bash(export BP_ROLE=*)` into `settings.local.json` `permissions.allow`, beside the user's rules, so the prefix does not prompt. |
+| A dispatch can run any verb. | The hook denies a write verb outside the role's verbs with exit 2. The reason names the verb, the role and the next step. The read verbs (`where`, `show`, `list`, `search`, `walk`) and a call with no verb pass for every role and every subagent. |
+| `bp-start.sh` prints the walk as one JSON object, which the harness reads as hook output. | It prints `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"<walk JSON>"}}`. |
+| — | New code `role_forbidden` (exit 2). Under an agent role, `stamp`, `land` and `transition` to `approved` or `active` refuse it before any other test. Additive. |
 
 ## Check
 
