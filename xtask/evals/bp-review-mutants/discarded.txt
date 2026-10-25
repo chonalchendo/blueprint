@@ -1,0 +1,1 @@
+- mutant-62-1: replace != with == in without_redirects (eval_trace.rs:160) only changes how a word that starts with < is read; on the 1,237 Bash commands of the 106 stored traces, 0 of 770 calls change, and no graded number reads it

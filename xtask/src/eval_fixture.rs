@@ -31,11 +31,22 @@
 //! finding at the right line with other words earns nothing. An item without `match:` slots is matched by nothing.
 //!
 //! `holdout.txt` in the same directory lists the held-out ids, one per line: no run reads those.
+//!
+//! A fixture of `cargo xtask mutants` (30, design changes 1 and 6) adds `kind:`. A `mutant` plants one defect in a
+//! landed pull request: `genre:` and `span:` name it in `cargo-mutants`' terms, `seed:` is the pick's, and the lines
+//! indented four spaces under `mutant_diff: |` are the diff the sandbox commits on top of the head. Its one truth item
+//! is the span, in the planted head's lines. A `control` is the same pull request with no defect and no truth; its
+//! `known: <path>:<line> | <text>` lines name defects the landed head already holds, which the grader neither credits
+//! nor counts as false rows. An `escape` is a defect that passed a past review, with its truth at the fix commit's
+//! location.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+
+/// What opens each line of a fixture's `mutant_diff:` block.
+pub const INDENT: &str = "    ";
 
 pub struct Fixture {
     pub id: String,
@@ -53,6 +64,20 @@ pub struct Fixture {
     pub rules: Vec<(String, String)>,
     /// Lowercase phrases that void a review match.
     unless: Vec<String>,
+    /// `mutant`, `control` or `escape`; none for a past review or a landed issue.
+    pub kind: Option<String>,
+    pub mutant: Option<Mutant>,
+    /// A control's defects that the landed head already holds (30, design change 5 for #62).
+    pub known: Vec<Truth>,
+}
+
+/// The defect a `mutant` fixture plants: the head plus `diff` is the pull request the reviewer sees.
+#[derive(Debug, Default, PartialEq)]
+pub struct Mutant {
+    pub genre: String,
+    pub span: String,
+    pub diff: String,
+    pub seed: u64,
 }
 
 /// One finding of the ground truth: a file and the lines it named. No line means the whole file.
@@ -98,8 +123,16 @@ impl Fixture {
             probes: Vec::new(),
             rules: Vec::new(),
             unless: Vec::new(),
+            kind: None,
+            mutant: None,
+            known: Vec::new(),
         };
-        for line in head.lines().filter(|l| !l.trim().is_empty()) {
+        let (mut m, mut seed) = (Mutant::default(), None);
+        let mut lines = head.lines().peekable();
+        while let Some(line) = lines.next() {
+            if line.trim().is_empty() {
+                continue;
+            }
             if let Some(item) = line.strip_prefix("- ") {
                 let (at, what) = item.split_once('|').with_context(|| format!("{id}: truth `{item}` has no `|`"))?;
                 f.truth.push(Truth::parse(at.trim(), what.trim()).with_context(|| format!("{id}: truth `{item}`"))?);
@@ -132,13 +165,48 @@ impl Fixture {
                         f.unless =
                             value.split(',').map(|w| w.trim().to_lowercase()).filter(|w| !w.is_empty()).collect();
                     }
+                    "kind" if ["mutant", "control", "escape"].contains(&value.as_str()) => f.kind = Some(value),
+                    "kind" => bail!("{id}: kind `{value}` is none of mutant, control, escape"),
+                    "known" => {
+                        let (at, what) = value
+                            .split_once('|')
+                            .with_context(|| format!("{id}: known is `<path>:<line> | <text>`"))?;
+                        f.known.push(Truth::parse(at.trim(), what.trim()).with_context(|| format!("{id}: known"))?);
+                    }
+                    "genre" => m.genre = value,
+                    "span" => m.span = value,
+                    "seed" => seed = Some(value.parse().with_context(|| format!("{id}: seed `{value}`"))?),
+                    // The diff's own `- ` and `---` lines stay indented, so neither reads as a truth item or the end.
+                    "mutant_diff" => {
+                        while let Some(l) = lines.next_if(|l| l.starts_with(INDENT)) {
+                            m.diff += &l[INDENT.len()..];
+                            m.diff.push('\n');
+                        }
+                    }
                     "truth" => {}
                     _ => bail!("{id}: unknown key `{key}`"),
                 }
             }
         }
-        if [&f.base, &f.head, &f.title].iter().any(|v| v.is_empty()) || (f.truth.is_empty() && f.scope.is_empty()) {
+        let control = f.kind.as_deref() == Some("control");
+        if !control && !f.known.is_empty() {
+            bail!("{id}: known: belongs to kind: control");
+        }
+        if [&f.base, &f.head, &f.title].iter().any(|v| v.is_empty())
+            || (f.truth.is_empty() && f.scope.is_empty() && !control)
+        {
             bail!("{id}: base, head, title and a truth item or a scope are required");
+        }
+        if f.kind.as_deref() == Some("mutant") {
+            let Some(seed) = seed.filter(|_| ![&m.genre, &m.span, &m.diff].iter().any(|v| v.is_empty())) else {
+                bail!("{id}: a mutant needs genre, span, mutant_diff and seed");
+            };
+            if f.truth.len() != 1 {
+                bail!("{id}: a mutant's truth is one item, its span");
+            }
+            f.mutant = Some(Mutant { seed, ..m });
+        } else if m != Mutant::default() || seed.is_some() {
+            bail!("{id}: genre, span, seed and mutant_diff belong to kind: mutant");
         }
         Ok(f)
     }
@@ -500,6 +568,19 @@ mod tests {
                     assert_eq!(f.scope, crates, "{}", f.id);
                     assert!(f.issue.contains("check shell {name="), "{}: a worker needs a named block", f.id);
                 }
+            }
+        }
+        // The development set of `cargo xtask mutants`: a mutant's diff changes its span's file and nothing else.
+        for f in Fixture::load(&evals.join("bp-review-mutants"), None).unwrap() {
+            assert!(f.kind.is_some() && f.issue.contains("check shell {name="), "{}", f.id);
+            if let Some(m) = &f.mutant {
+                let file = m.span.split(':').next().unwrap();
+                let changed: Vec<&str> = m.diff.lines().filter_map(|l| l.strip_prefix("+++ b/")).collect();
+                assert_eq!(changed, [file], "{}", f.id);
+            }
+            if git(&["cat-file", "-e", &format!("{}^{{commit}}", f.head)]).is_some() {
+                let parent = git(&["rev-parse", &format!("{}^", f.head)]).unwrap();
+                assert_eq!(parent.trim(), f.base, "{}: the base is the squash's parent", f.id);
             }
         }
     }

@@ -42,10 +42,14 @@ pub fn bundle_hash(root: &Path, skill: &Skill) -> Result<String> {
     hash_object(&text)
 }
 
-/// What a trial saw besides the bundle: the fixture's base, head, title, issue, rules and stack, and the arm
-/// protocol. The truth, the match words and the probe are left out, so a regrade after a grader fix keeps its trials.
+/// What a trial saw besides the bundle: the fixture's base, head, title, issue, rules and stack, a mutant's diff, and
+/// the arm protocol. The truth, the match words and the probe are left out, so a regrade after a grader fix keeps its
+/// trials. A fixture with no mutant hashes as before, so its stored trials keep their stamps.
 pub(crate) fn stamp(fx: &Fixture) -> Result<String> {
-    let seen = format!("{}\n{}\n{}\n{}\n{:?}\n{:?}", fx.base, fx.head, fx.title, fx.issue, fx.rules, fx.stack);
+    let mut seen = format!("{}\n{}\n{}\n{}\n{:?}\n{:?}", fx.base, fx.head, fx.title, fx.issue, fx.rules, fx.stack);
+    if let Some(m) = &fx.mutant {
+        seen = format!("{seen}\n{}", m.diff);
+    }
     Ok(format!("{} {PROTOCOL}", hash_object(&seen)?))
 }
 
@@ -65,8 +69,13 @@ impl Grade {
             .with_context(|| format!("read the body of {}", skill.name))?;
         let marker = body_of(&body).lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string();
         let mut trials = Vec::new();
-        let mut names: Vec<_> = std::fs::read_dir(store)
-            .with_context(|| format!("read {}", store.display()))?
+        // A fixture set no run has reached yet has no store: it grades as no trials.
+        let entries = match std::fs::read_dir(store) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            listed => listed.with_context(|| format!("read {}", store.display()))?.collect(),
+        };
+        let mut names: Vec<_> = entries
+            .into_iter()
             .filter_map(|e| e.ok()?.file_name().to_str().map(str::to_string))
             .filter(|n| Path::new(n).extension().is_some_and(|e| e == "jsonl"))
             .collect();
@@ -104,7 +113,10 @@ impl Grade {
                 failure: trace.failure().map(str::to_string),
                 ..Graded::default()
             };
-            score(&mut graded, skill, fx, &trace, &log);
+            // A trial from before the `.head` file ran at the fixture's own head.
+            let head = std::fs::read_to_string(store.join(format!("{trial}.head")))
+                .map_or_else(|_| fx.head.clone(), |h| h.trim().to_string());
+            score(&mut graded, skill, fx, &head, &trace, &log);
             trials.push(graded);
         }
         let holdout = crate::eval_fixture::holdout(fixtures).len();

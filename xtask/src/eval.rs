@@ -22,6 +22,10 @@
 //! the store holds one hash; the arm's body is the caller's claim). An arm outside `with`, `without` and `filler`, such
 //! as a body with one rule cut, runs only with its `--bin`, and grades as `with` does. A usage error exits 4, as every
 //! xtask check does.
+//!
+//! A fixture set other than the skill's own writes its own store and result file (30, "Blocks of 24 to 29"): the
+//! directory `<skill>-<set>` names them `<skill>-<set>`, and the development set `<skill>-mutants` names them
+//! `<skill>-dev`. A set with no trials and no result file grades as nothing to check.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -55,7 +59,7 @@ impl std::fmt::Display for Usage {
 
 impl std::error::Error for Usage {}
 
-fn usage(message: impl Into<String>) -> anyhow::Error {
+pub(crate) fn usage(message: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Usage(message.into()))
 }
 
@@ -180,8 +184,9 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     let root = Path::new(".");
     let redesign = std::env::var_os("BP_REDESIGN").context("set BP_REDESIGN to the designs repository")?;
     let results = Path::new(&redesign).join("analysis/evals-skills");
-    let store = results.join(&skill.name);
     let fixtures = a.fixtures.clone().unwrap_or_else(|| root.join("xtask/evals").join(&skill.name));
+    let name = set_name(&skill.name, &fixtures);
+    let store = results.join(&name);
     if !a.grade {
         trials(&a, &skill, root, &fixtures, &store)?;
     }
@@ -190,7 +195,11 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     if !problems.is_empty() {
         return Ok(problems);
     }
-    let file = results.join(format!("{}.md", skill.name));
+    let file = results.join(format!("{name}.md"));
+    if grade.trials.is_empty() && !file.exists() {
+        eprintln!("eval: no trials in {}", store.display());
+        return Ok(Vec::new());
+    }
     let existing = std::fs::read_to_string(&file).ok();
     let owner = Owner::of(existing.as_deref())?;
     let text = grade.result(&owner);
@@ -206,6 +215,16 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     std::fs::write(store.join("report.md"), grade.report(&store))?;
     println!("{}\n{}", file.display(), store.join("report.md").display());
     Ok(Vec::new())
+}
+
+/// The store and result-file name of the fixture set in `fixtures` (see the module comment).
+fn set_name(skill: &str, fixtures: &Path) -> String {
+    let dir = fixtures.file_name().and_then(|d| d.to_str()).unwrap_or_default();
+    match dir.strip_prefix(skill).and_then(|d| d.strip_prefix('-')) {
+        Some("mutants") => format!("{skill}-dev"),
+        Some(set) if !set.is_empty() => format!("{skill}-{set}"),
+        _ => skill.to_string(),
+    }
 }
 
 /// Fills each arm and fixture to `a.trials` stored trials, the arms interleaved so that host drift falls on both.
@@ -297,7 +316,7 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                 // sandbox as the agent left it.
                 let log = if skill.action == Action::Review {
                     if let Some(review) = Review::parse(&Trace::parse(&text).final_text()) {
-                        sb.record_review(&fx.head, &review.body)?;
+                        sb.record_review(&sb.head, &review.body)?;
                     }
                     sb.vault_log()?
                 } else {
@@ -305,6 +324,8 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                 };
                 std::fs::write(store.join(format!("{id}.vault.log")), log)?;
                 std::fs::write(store.join(format!("{id}.hash")), format!("{hash}\nstamp: {stamp}\n"))?;
+                // The pull request's head: a mutant's planted one is what the reviewer diffs and names.
+                std::fs::write(store.join(format!("{id}.head")), format!("{}\n", sb.head))?;
                 // The transcript lands last: a trial is stored once it has one, so an aborted run leaves no half trial.
                 std::fs::write(store.join(format!("{id}.jsonl")), text)?;
             }
@@ -331,6 +352,16 @@ mod tests {
         assert_eq!(respond.role_file(), "bp-worker");
         assert!(complete.allowed().contains(&"cut") && !respond.allowed().contains(&"cut"), "cut is complete's");
         assert!(respond.allowed().contains(&"pr") && !respond.allowed().contains(&"create"));
+    }
+
+    #[test]
+    fn a_fixture_set_names_its_store_and_result_file() {
+        let name = |d: &str| set_name("bp-review", Path::new(d));
+        assert_eq!(name("xtask/evals/bp-review"), "bp-review");
+        assert_eq!(name("xtask/evals/bp-review-mutants/"), "bp-review-dev");
+        assert_eq!(name("xtask/evals/bp-review-holdout"), "bp-review-holdout");
+        assert_eq!(name("/tmp/x/fixtures"), "bp-review", "a test's own directory keeps the skill's name");
+        assert_eq!(name("/tmp/bp-reviewer"), "bp-review");
     }
 
     #[test]
