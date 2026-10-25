@@ -33,7 +33,7 @@ fi
 call "bp list claim --under $ID --json"
 call "git -C /w diff $B $S"
 call "bp list delta --under projects/bp/designs/system --json"
-printf '{"type":"assistant","message":{"model":"fake-model","content":[{"type":"text","text":"head: %s\\n| severity | location | finding |\\n|---|---|---|\\n| error | src/a.rs:1 | The count is wrong. |\\n| warn | src/a.rs:1 | A taste. |"}]}}\n' "$S" >> "$T"
+printf '{"type":"assistant","message":{"model":"fake-model","content":[{"type":"text","text":"head: %s\\n| severity | location | finding |\\n|---|---|---|\\n| error | src/a.rs:1 | The count is wrong. |\\n| warn | projects/bp/designs/system | A taste. |"}]}}\n' "$S" >> "$T"
 "#;
 
 struct Setup {
@@ -61,9 +61,9 @@ fn setup() -> Option<Setup> {
     let fixture = format!(
         "base: {base}\nhead: {head}\ntitle: A fixture\ntruth:\n- src/a.rs:1 | The count is wrong. | match: count, wrong\n---\n## Problem\n\nx\n\n## Check\n\n~~~check shell {{name=sandbox expect=0}}\ntest -f README.md\n~~~\n"
     );
-    write(&t.join("fixtures/pr-1.md"), &fixture);
-    write(&t.join("fixtures/pr-2.md"), &fixture);
-    write(&t.join("fixtures/holdout.txt"), "pr-2\n");
+    write(&t.join("bp-review/pr-1.md"), &fixture);
+    write(&t.join("bp-review/pr-2.md"), &fixture);
+    write(&t.join("bp-review/holdout.txt"), "pr-2\n");
 
     common::vault(&t.join("vault"));
     write(&t.join("agent.sh"), AGENT);
@@ -100,7 +100,7 @@ impl Ran {
         let s = setup()?;
         let t = s.dir.path();
         let (fixtures, repo, bp) = (
-            t.join("fixtures").display().to_string(),
+            t.join("bp-review").display().to_string(),
             t.join("repo").display().to_string(),
             s.bp.display().to_string(),
         );
@@ -196,7 +196,9 @@ fn a_fake_agent_runs_the_whole_pipeline_and_stores_what_the_grader_reads() {
             && report.contains("with-pr-1-1.jsonl"),
         "{report}"
     );
-    assert!(report.contains("FALSE `src/a.rs:1`") && report.contains("match, truth item 1 `src/a.rs:1`"), "{report}");
+    // The taste sits on a node, not on the matched item: a row on the item's line would be a duplicate.
+    let false_row = "FALSE `projects/bp/designs/system`";
+    assert!(report.contains(false_row) && report.contains("match, truth item 1 `src/a.rs:1`"), "{report}");
     assert!(report.contains("prose recall"), "{report}");
 
     // `--trials N` fills to N: a rerun at 2 runs nothing, a run at 3 adds one trial per arm and fixture.
@@ -281,7 +283,7 @@ fn a_regrade_keeps_the_owner_lines() {
     // One trial per arm leaves the interval over 0, so `capability` contradicts it.
     std::fs::write(r.file(), kept.replace("status: regression", "status: capability")).unwrap();
     let (code, out) = r.grade(&["--check"]);
-    assert!(code == Some(2) && out.contains("does not clear 0"), "{out}");
+    assert!(code == Some(2) && out.contains("lower bound of uplift_ci is") && out.contains("not above 0"), "{out}");
 }
 
 #[test]

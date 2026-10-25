@@ -38,7 +38,7 @@
 //! is the span, in the planted head's lines. A `control` is the same pull request with no defect and no truth; its
 //! `known: <path>:<line> | <text>` lines name defects the landed head already holds, which the grader neither credits
 //! nor counts as false rows. An `escape` is a defect that passed a past review, with its truth at the fix commit's
-//! location.
+//! location. The grader reads a planted item by place and evidence, not by words (`eval_grade::verdicts`).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -47,6 +47,12 @@ use anyhow::{Context, Result, bail};
 
 /// What opens each line of a fixture's `mutant_diff:` block.
 pub const INDENT: &str = "    ";
+
+/// A location that cites this many lines or more covers no planted item: it points at nothing.
+const WIDE: u32 = 20;
+
+/// How many lines from an item a row may sit and still be on it: a control's `known:` entry, or a duplicate.
+pub const NEAR: u32 = 3;
 
 pub struct Fixture {
     pub id: String,
@@ -176,13 +182,7 @@ impl Fixture {
                     "genre" => m.genre = value,
                     "span" => m.span = value,
                     "seed" => seed = Some(value.parse().with_context(|| format!("{id}: seed `{value}`"))?),
-                    // The diff's own `- ` and `---` lines stay indented, so neither reads as a truth item or the end.
-                    "mutant_diff" => {
-                        while let Some(l) = lines.next_if(|l| l.starts_with(INDENT)) {
-                            m.diff += &l[INDENT.len()..];
-                            m.diff.push('\n');
-                        }
-                    }
+                    "mutant_diff" => m.diff = indented(&mut lines),
                     "truth" => {}
                     _ => bail!("{id}: unknown key `{key}`"),
                 }
@@ -238,9 +238,13 @@ impl Fixture {
         findings.iter().map(|f| self.best(all(), &f.location, &f.text)).collect()
     }
 
-    /// How many ground-truth items some finding matches.
-    pub fn hits(&self, assigned: &[Option<usize>]) -> usize {
-        (0..self.truth.len()).filter(|i| assigned.contains(&Some(*i))).count()
+    /// The genre of this fixture's planted items: the mutant's, or `escape`; none for a control or a past review.
+    pub fn genre(&self) -> Option<&str> {
+        match self.kind.as_deref() {
+            Some("mutant") => self.mutant.as_ref().map(|m| m.genre.as_str()),
+            Some("escape") => Some("escape"),
+            _ => None,
+        }
     }
 
     /// The review the session records for `bp-respond`: the `head:` line and one table row per ground-truth item.
@@ -261,9 +265,7 @@ impl Fixture {
         if self.unless.iter().any(|u| text.match_indices(u.as_str()).any(|(at, _)| whole(at, u))) {
             return None;
         }
-        let held = items.filter(|(_, t)| {
-            !t.keywords.is_empty() && t.keywords.iter().all(|slot| slot.iter().any(|w| text.contains(w.as_str())))
-        });
+        let held = items.filter(|(_, t)| t.worded(&text));
         held.map(|(i, t)| (std::cmp::Reverse(t.keywords.len()), t.apart(location), i)).min().map(|c| c.2)
     }
 
@@ -289,6 +291,25 @@ impl Fixture {
             }
         }
         named.len()
+    }
+}
+
+/// The block of lines indented by [`INDENT`] that opens at `lines`, less the indent. The diff's own `- ` and `---`
+/// lines stay indented, so neither reads as a truth item or the end. A whitespace-only line before another indented
+/// line is still the block's (an editor may strip an empty context line's indent): it is kept as it stands, less the
+/// indent.
+fn indented(lines: &mut std::iter::Peekable<std::str::Lines>) -> String {
+    let mut out = String::new();
+    loop {
+        let blank = |l: &&str| !l.starts_with(INDENT) && l.trim().is_empty();
+        let gap = lines.clone().take_while(blank).count();
+        if !lines.clone().nth(gap).is_some_and(|l| l.starts_with(INDENT)) {
+            return out;
+        }
+        for l in lines.by_ref().take(gap + 1) {
+            out += l.strip_prefix(INDENT).unwrap_or(l.trim_start_matches(' '));
+            out.push('\n');
+        }
     }
 }
 
@@ -333,6 +354,39 @@ impl Truth {
         self.path == path || self.path.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{}", self.path))
     }
 
+    /// Whether a row's `location` points inside this item (30, design change 2): the same file, and a cited range
+    /// that overlaps the item's lines. The ranges of one location cite fewer than [`WIDE`] lines in all, since a wider
+    /// citation points at nothing, and a reversed range (`113-1`) covers nothing. An item with no line is its whole
+    /// file.
+    pub fn covers(&self, location: &str) -> bool {
+        let Some((_, lines)) = locate(location).filter(|(p, _)| self.in_file(p)) else { return false };
+        let cited: u32 = lines.iter().map(|&(a, b)| if b < a { WIDE } else { b - a + 1 }).fold(0, u32::saturating_add);
+        let inside = |&(a, b): &(u32, u32)| a <= b && self.lines.iter().any(|&(c, d)| a <= d && c <= b);
+        self.lines.is_empty() || (cited < WIDE && lines.iter().any(inside))
+    }
+
+    /// Whether `text` holds one `match:` slot of this item: it names the item's substance, if not all of it.
+    pub fn touched_by(&self, text: &str) -> bool {
+        let text = text.to_lowercase();
+        self.keywords.iter().any(|slot| slot.iter().any(|w| has_word(&text, w)))
+    }
+
+    /// Whether a row's `location` is in this item's file.
+    pub fn in_file_at(&self, location: &str) -> bool {
+        locate(location).is_some_and(|(p, _)| self.in_file(&p))
+    }
+
+    /// Whether a row's `location` is in this item's file within `lines` lines of it; never for an item with no line.
+    pub fn near(&self, location: &str, lines: u32) -> bool {
+        self.apart(location).0 <= lines
+    }
+
+    /// Whether `text` holds every `match:` slot of this item; an item with no slots is named by nothing.
+    pub fn worded(&self, text: &str) -> bool {
+        let text = text.to_lowercase();
+        !self.keywords.is_empty() && self.keywords.iter().all(|slot| slot.iter().any(|w| has_word(&text, w)))
+    }
+
     /// How far a finding's location is from this item, to break a tie between items its words fit: the lines apart
     /// and then the item's width, so a narrow item beats a wide one that holds the same line. Another file, or no
     /// lines on either side, is as far as can be.
@@ -344,6 +398,13 @@ impl Truth {
         let gap = self.lines.iter().flat_map(|&t| lines.iter().map(move |&l| apart(t, l))).min();
         gap.map_or(far, |g| (g, width))
     }
+}
+
+/// Whether `text` holds `word` at the start of a word, so the slot `if` is not found in `different` and `quot` is
+/// found in `quoted`. A word that opens with a sign, such as `;`, may follow anything.
+pub fn has_word(text: &str, word: &str) -> bool {
+    let alone = |at: usize| !word.starts_with(char::is_alphanumeric) || !text[..at].ends_with(char::is_alphanumeric);
+    text.match_indices(word).any(|(at, _)| alone(at))
 }
 
 /// A path and the line ranges after its colon. A word after the location, as in `a.rs:22-33 (note)`, is ignored.
@@ -378,7 +439,7 @@ impl Review {
             }
             tables += usize::from(!inside);
             (inside, last) = (true, Some(i));
-            let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            let cells = crate::eval_grade::cells(line);
             let rule = cells.iter().all(|c| c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')));
             if cells.len() >= 3 && !rule && !cells[0].eq_ignore_ascii_case("severity") {
                 findings.push(Finding { location: cells[1].to_string(), text: cells[2..].join("|") });
@@ -413,7 +474,6 @@ mod tests {
         let both = "first cfg(test) skip tests, 500 and 501";
         assert_eq!(one("x.rs:20", both), Some(0), "equal words: the nearer line");
         assert_eq!(one("x.rs:34", both), Some(2));
-        assert_eq!(f.hits(&[Some(0), Some(0), None]), 1, "one item, however many findings");
     }
 
     #[test]
@@ -583,6 +643,24 @@ mod tests {
                 assert_eq!(parent.trim(), f.base, "{}: the base is the squash's parent", f.id);
             }
         }
+    }
+
+    /// An empty context line of a diff is one space; indented, a whitespace-only line. Both forms stay in the diff
+    /// byte for byte, and a blank line after the block is not the diff's.
+    #[test]
+    fn a_whitespace_only_line_in_a_mutant_diff_is_kept() {
+        let text = |diff: &str| {
+            format!(
+                "kind: mutant\nbase: b\nhead: h\ntitle: T\ngenre: G\nspan: a.rs:2-2\nseed: 1\nmutant_diff: |\n{diff}\ntruth:\n- a.rs:2-2 | x\n---\nbody"
+            )
+        };
+        let want = "@@ -1,3 +1,3 @@\n \n-a\n+b\n";
+        let kept = "    @@ -1,3 +1,3 @@\n     \n    -a\n    +b\n";
+        let mutant = |diff: &str| Fixture::parse("m", &text(diff)).unwrap().mutant.unwrap().diff;
+        assert_eq!(mutant(kept), want, "an indented space stays");
+        let stripped = "    @@ -1,3 +1,3 @@\n\n    -a\n    +b\n";
+        assert_eq!(mutant(stripped), "@@ -1,3 +1,3 @@\n\n-a\n+b\n", "a stripped line keeps the block going");
+        assert_eq!(mutant(&format!("{kept}\n  \n")), want, "a blank line after the block is not the diff's");
     }
 
     #[test]

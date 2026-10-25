@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! cargo xtask eval <skill> --trials N [--arms with,without,filler,<arm>] [--fixture <id>] [--bin <arm>=<bp>]...
+//!                                     [--arm <arm>=<git ref>]...
 //! cargo xtask eval --grade [--check] <skill>
 //! ```
 //!
@@ -12,22 +13,26 @@
 //! `$BP_REDESIGN/analysis/evals-skills/<skill>/`. Then it grades the store, as `--grade` does. The agent is
 //! `$BP_EVAL_AGENT`, a shell command that reads the prompt from `$BP_EVAL_PROMPT`; if it writes the role's transcript
 //! to `$BP_EVAL_TRANSCRIPT`, that file is the trace, and if it does not, the newest transcript of the role's subagent
-//! that Claude Code wrote for the sandbox is. A run past `$BP_EVAL_TIMEOUT` seconds is killed (default 1200; 3600 for
-//! `bp-complete`, which builds a whole issue; 1800 for `bp-respond`), and a trial with no transcript is stored as a
+//! that Claude Code wrote for the sandbox is. A run past `$BP_EVAL_TIMEOUT` seconds is killed (default 1800; 3600 for
+//! `bp-complete`, which builds a whole issue), and a trial with no transcript is stored as a
 //! failed trial; a failed trial counts as a fail, and the report names the reason. `$BP_VAULT` is the vault to copy.
 //! `$BP_EVAL_TARGET` is a cargo target directory to keep across runs (default: one per run), where a worker's blocks
 //! build the issue's code; every trial gets its own `$TMPDIR` under the run's work directory, `CARGO_INCREMENTAL=0` and,
 //! unless set, `CARGO_BUILD_JOBS=4`. Flags for a test: `--repo <dir>` (holds the fixtures' commits), `--fixtures <dir>`,
 //! `--bin <arm>=<bp>` (trusted: the arm's clone is not asserted, and its trials carry the shipped role-and-skill hash, because
 //! the store holds one hash; the arm's body is the caller's claim). An arm outside `with`, `without` and `filler`, such
-//! as a body with one rule cut, runs only with its `--bin`, and grades as `with` does. A usage error exits 4, as every
-//! xtask check does.
+//! as a body with one rule cut, runs only with its `--bin` or its `--arm`, and grades as `with` does. `--arm old=<ref>`
+//! (30, design change 2) builds the arm from `git archive <ref> bundle/`: its trials carry that ref's hash and a
+//! `ref:` line, dispatch from its template and check its body's first line, and `--arm` adds the arm to `--arms`. A
+//! usage error exits 4, as every xtask check does.
 //!
 //! A fixture set other than the skill's own writes its own store and result file (30, "Blocks of 24 to 29"): the
-//! directory `<skill>-<set>` names them `<skill>-<set>`, and the development set `<skill>-mutants` names them
-//! `<skill>-dev`. A set with no trials and no result file grades as nothing to check.
+//! directory's name names them, and the development set `<skill>-mutants` names them `<skill>-dev`. A set with no
+//! trials and no result file grades as nothing to check.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -37,8 +42,9 @@ use serde_json::json;
 use crate::eval_agent::claude_transcript;
 use crate::eval_arms::{bins, prompt};
 use crate::eval_fixture::{Fixture, Review};
-use crate::eval_grade::{Grade, Owner, bundle_hash, differences, read_hash, stamp};
-use crate::eval_sandbox::Sandbox;
+use crate::eval_grade::{Grade, bundle_hash, read_hash, ref_hash, stamp};
+use crate::eval_result::{Owner, differences};
+use crate::eval_sandbox::{Sandbox, capture};
 use crate::eval_trace::Trace;
 
 /// The agent the owner's replay used, headless: a session that dispatches the role. The tools are allowed by name,
@@ -108,8 +114,8 @@ impl Skill {
     fn seconds(&self) -> u64 {
         match self.action {
             Action::Complete => 3600,
-            Action::Respond => 1800,
-            _ => 1200,
+            // A probing review builds and runs the code (30, design change 5).
+            _ => 1800,
         }
     }
 }
@@ -123,6 +129,8 @@ struct Args {
     fixtures: Option<PathBuf>,
     repo: PathBuf,
     bins: Vec<(String, PathBuf)>,
+    /// `(arm, git ref)`: an arm built from the bundle at that ref.
+    refs: Vec<(String, String)>,
     grade: bool,
     check: bool,
 }
@@ -137,6 +145,7 @@ impl Args {
             fixtures: None,
             repo: ".".into(),
             bins: Vec::new(),
+            refs: Vec::new(),
             grade: false,
             check: false,
         };
@@ -155,6 +164,10 @@ impl Args {
                     let (arm, path) = value()?.split_once('=').ok_or_else(|| usage("--bin is <arm>=<path>"))?;
                     a.bins.push((arm.into(), path.into()));
                 }
+                "--arm" => {
+                    let (arm, at) = value()?.split_once('=').ok_or_else(|| usage("--arm is <arm>=<git ref>"))?;
+                    a.refs.push((arm.into(), at.into()));
+                }
                 s if !s.starts_with('-') && a.skill.is_empty() => a.skill = s.into(),
                 s => return Err(usage(format!("unknown argument {s}"))),
             }
@@ -164,13 +177,22 @@ impl Args {
                 "usage: cargo xtask eval <skill> --trials N [--arms ...] [--fixture <id>] | cargo xtask eval --grade [--check] <skill>",
             ));
         }
-        // The runner builds only the three arms; another arm's bundle is the caller's, so its binary must come with it.
-        // A trial is `<arm>-<fixture>-<n>`, so an arm is one lower-case word.
+        // The runner builds the three arms and an arm from a git ref; another arm's bundle is the caller's, so its
+        // binary must come with it. A trial is `<arm>-<fixture>-<n>`, so an arm is one lower-case word.
         let known = |x: &String| ["with", "without", "filler"].contains(&x.as_str());
-        let given = |x: &String| a.bins.iter().any(|(b, _)| b == x) && x.bytes().all(|b| b.is_ascii_lowercase());
+        for (arm, _) in &a.refs {
+            if known(arm) || a.bins.iter().any(|(b, _)| b == arm) || arm.is_empty() {
+                return Err(usage(format!("--arm {arm}: an arm from a git ref is a new name, with no --bin")));
+            }
+            if !a.arms.contains(arm) {
+                a.arms.push(arm.clone());
+            }
+        }
+        let named = |x: &String| a.bins.iter().any(|(b, _)| b == x) || a.refs.iter().any(|(r, _)| r == x);
+        let given = |x: &String| named(x) && x.bytes().all(|b| b.is_ascii_lowercase());
         if let Some(bad) = a.arms.iter().find(|x| !known(x) && !given(x)) {
             return Err(usage(format!(
-                "arm {bad} is none of with, without, filler; another arm is one lower-case word with --bin {bad}=<bp>"
+                "arm {bad} is none of with, without, filler; another arm is one lower-case word with --bin {bad}=<bp> or --arm {bad}=<git ref>"
             )));
         }
         Ok(a)
@@ -203,13 +225,16 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     let existing = std::fs::read_to_string(&file).ok();
     let owner = Owner::of(existing.as_deref())?;
     let text = grade.result(&owner);
+    // The grader refuses a `capability` that the interval does not carry, and writes nothing.
+    let refused: Vec<String> = grade.refusal(&owner).into_iter().collect();
     if a.check {
         let Some(have) = existing else {
             return Ok(vec![format!("{} does not exist; run cargo xtask eval --grade {}", file.display(), skill.name)]);
         };
-        let mut out: Vec<String> = owner.contradicts(grade.uplift_low()).into_iter().collect();
-        out.extend(differences(&text, &have));
-        return Ok(out);
+        return Ok(refused.into_iter().chain(differences(&text, &have)).collect());
+    }
+    if !refused.is_empty() {
+        return Ok(refused);
     }
     std::fs::write(&file, text)?;
     std::fs::write(store.join("report.md"), grade.report(&store))?;
@@ -217,14 +242,30 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
-/// The store and result-file name of the fixture set in `fixtures` (see the module comment).
+/// The store and result-file name of the fixture set in `fixtures` (see the module comment): the directory's name,
+/// and `<skill>-dev` for the development set `<skill>-mutants`. Another directory never falls back to the skill's own
+/// store, so a test's set cannot overwrite the shipped result file.
 fn set_name(skill: &str, fixtures: &Path) -> String {
-    let dir = fixtures.file_name().and_then(|d| d.to_str()).unwrap_or_default();
-    match dir.strip_prefix(skill).and_then(|d| d.strip_prefix('-')) {
-        Some("mutants") => format!("{skill}-dev"),
-        Some(set) if !set.is_empty() => format!("{skill}-{set}"),
-        _ => skill.to_string(),
+    let full = fixtures.canonicalize().unwrap_or_else(|_| fixtures.to_path_buf());
+    let dir = full.file_name().and_then(|d| d.to_str()).unwrap_or_default();
+    if dir.strip_prefix(skill).and_then(|d| d.strip_prefix('-')) == Some("mutants") {
+        format!("{skill}-dev")
+    } else {
+        dir.to_string()
     }
+}
+
+/// Each `--arm <arm>=<git ref>` as its commit and the hash of the role and skill files there.
+fn resolve(refs: &[(String, String)], root: &Path, skill: &Skill) -> Result<BTreeMap<String, (String, String)>> {
+    let mut out = BTreeMap::new();
+    for (arm, at) in refs {
+        let sha =
+            capture(Command::new("git").args(["rev-parse", "--verify", &format!("{at}^{{commit}}")]).current_dir(root))
+                .with_context(|| format!("--arm {arm}={at}: no commit"))?;
+        let hash = ref_hash(root, skill, &sha)?.0;
+        out.insert(arm.clone(), (sha, hash));
+    }
+    Ok(out)
 }
 
 /// Fills each arm and fixture to `a.trials` stored trials, the arms interleaved so that host drift falls on both.
@@ -254,10 +295,12 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
             }
         }
     }
+    let refs = resolve(&a.refs, root, skill)?;
     let work = crate::scratch::fresh(&std::env::temp_dir().join("bp-eval"), 8)?;
-    let bin = bins(root, skill, &a.arms, &work, &a.bins)?;
+    let shas = refs.iter().map(|(arm, (sha, _))| (arm.clone(), sha.clone())).collect();
+    let bin = bins(root, skill, &a.arms, &work, (&a.bins, &shas))?;
     let repo = a.repo.canonicalize().with_context(|| format!("read {}", a.repo.display()))?;
-    let hash = bundle_hash(root, skill)?;
+    let shipped = bundle_hash(root, skill)?;
     for round in 1..=a.trials {
         for arm in &a.arms {
             for (fx, stamp) in list.iter().zip(&stamps) {
@@ -274,7 +317,7 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                     &work,
                     fx,
                     skill,
-                    verify.then_some(arm.as_str()),
+                    verify.then_some((arm.as_str(), refs.get(arm).map(|r| r.0.as_str()))),
                 )
                 .with_context(|| format!("build the sandbox of {id}"))?;
                 // An arm built from an edited bundle dispatches from that bundle's template.
@@ -323,7 +366,11 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                     format!("{}\n{}", sb.vault_log()?, sb.end_state(skill, fx)?)
                 };
                 std::fs::write(store.join(format!("{id}.vault.log")), log)?;
-                std::fs::write(store.join(format!("{id}.hash")), format!("{hash}\nstamp: {stamp}\n"))?;
+                // An arm from a git ref ran that ref's body: its hash, and the ref the grader reads it from.
+                let (hash, at) = refs
+                    .get(arm)
+                    .map_or((shipped.as_str(), String::new()), |(sha, hash)| (hash.as_str(), format!("ref: {sha}\n")));
+                std::fs::write(store.join(format!("{id}.hash")), format!("{hash}\nstamp: {stamp}\n{at}"))?;
                 // The pull request's head: a mutant's planted one is what the reviewer diffs and names.
                 std::fs::write(store.join(format!("{id}.head")), format!("{}\n", sb.head))?;
                 // The transcript lands last: a trial is stored once it has one, so an aborted run leaves no half trial.
@@ -360,8 +407,8 @@ mod tests {
         assert_eq!(name("xtask/evals/bp-review"), "bp-review");
         assert_eq!(name("xtask/evals/bp-review-mutants/"), "bp-review-dev");
         assert_eq!(name("xtask/evals/bp-review-holdout"), "bp-review-holdout");
-        assert_eq!(name("/tmp/x/fixtures"), "bp-review", "a test's own directory keeps the skill's name");
-        assert_eq!(name("/tmp/bp-reviewer"), "bp-review");
+        assert_eq!(name("/tmp/x/fixtures"), "fixtures", "another directory names its own store");
+        assert_eq!(name("/tmp/bp-reviewer"), "bp-reviewer");
     }
 
     #[test]
@@ -377,7 +424,17 @@ mod tests {
             ["with", "without", "filler"],
             "the same n for each arm"
         );
+        let old = args("bp-review --trials 1 --arms with --arm old=b7ae491").unwrap();
+        assert_eq!(
+            (old.arms.as_slice(), old.refs.len()),
+            (&["with".to_string(), "old".into()][..], 1),
+            "--arm adds it"
+        );
         for bad in [
+            "bp-review --trials 1 --arm with=HEAD",
+            "bp-review --trials 1 --arm old=HEAD --bin old=/x",
+            "bp-review --trials 1 --arm old",
+            "bp-review --trials 1 --arm Old=HEAD",
             "bp-review",
             "bp-review --trials 2 --check",
             "bp-review --trials 2 --arms with,more",

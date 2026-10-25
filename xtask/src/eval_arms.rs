@@ -3,6 +3,7 @@
 //! install. `without` has no skill directory and no preload, and its dispatch keeps the five lines of the shipped one
 //! with `Skill: none`: the baseline tests the missing body, not a different protocol. The role body is the shipped
 //! one. `filler` keeps the structure and replaces the skill's body with equal-length text that holds no instruction.
+//! An arm from a git ref, such as `old` (30, design change 2), is the bundle at that commit, from `git archive`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -70,15 +71,28 @@ fn arm_bundle(root: &Path, skill: &Skill, arm: &str, dest: &Path) -> Result<()> 
     Ok(())
 }
 
-/// One directory per arm, each holding a `bp`. `given` names binaries the caller built; the others build here, the
-/// edited bundles first and the shipped bundle last, so `target/release/bp` ends as the shipped bundle's even when
-/// only an edited arm runs.
+/// The bundle of the commit `sha` at `dest`, from `git archive <sha> bundle/`.
+fn ref_bundle(root: &Path, sha: &str, dest: &Path) -> Result<()> {
+    let unpacked = dest.with_extension("archive");
+    std::fs::create_dir_all(&unpacked)?;
+    let tar = unpacked.join("bundle.tar");
+    capture(
+        Command::new("git").args(["archive", "--format=tar", "-o"]).arg(&tar).args([sha, "bundle/"]).current_dir(root),
+    )?;
+    capture(Command::new("tar").arg("-xf").arg(&tar).arg("-C").arg(&unpacked))?;
+    std::fs::rename(unpacked.join("bundle"), dest).with_context(|| format!("move the bundle of {sha}"))?;
+    Ok(())
+}
+
+/// One directory per arm, each holding a `bp`. `given` names binaries the caller built, and `refs` the commits whose
+/// bundle an arm runs; the others build here, the edited bundles first and the shipped bundle last, so
+/// `target/release/bp` ends as the shipped bundle's even when only an edited arm runs.
 pub fn bins(
     root: &Path,
     skill: &Skill,
     arms: &[String],
     work: &Path,
-    given: &[(String, PathBuf)],
+    (given, refs): (&[(String, PathBuf)], &BTreeMap<String, String>),
 ) -> Result<BTreeMap<String, PathBuf>> {
     let mut out = BTreeMap::new();
     let mut order: Vec<String> = arms.to_vec();
@@ -97,7 +111,10 @@ pub fn bins(
                 None
             } else {
                 let b = work.join(format!("bundle-{arm}"));
-                arm_bundle(root, skill, &arm, &b)?;
+                match refs.get(&arm) {
+                    Some(sha) => ref_bundle(root, sha, &b)?,
+                    None => arm_bundle(root, skill, &arm, &b)?,
+                }
                 Some(b.canonicalize()?)
             };
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -166,6 +183,22 @@ mod tests {
         let role = read(&shipped, "roles/bp-reviewer.md");
         assert_eq!(read(&arm, "roles/bp-reviewer.md"), role.replace("skills: bp-review\n", ""), "only the preload");
         assert!(!arm.join("skills/bp-review").exists() && arm.join("skills/bp-capture").exists());
+    }
+
+    #[test]
+    fn an_arm_from_a_git_ref_is_the_bundle_at_that_commit() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let git = |args: &[&str]| capture(Command::new("git").args(args).current_dir(&root)).ok();
+        let Some(sha) = git(&["rev-parse", "--verify", "7b71a68^{commit}"]) else {
+            eprintln!("skipped: history is shallow");
+            return;
+        };
+        let dest = tempfile::tempdir().unwrap();
+        ref_bundle(&root, &sha, &dest.path().join("bundle-old")).unwrap();
+        let file = "skills/bp-review/SKILL.md";
+        let have = std::fs::read_to_string(dest.path().join("bundle-old").join(file)).unwrap();
+        assert_eq!(Some(have.trim().to_string()), git(&["show", &format!("{sha}:bundle/{file}")]));
+        assert!(dest.path().join("bundle-old/roles/bp-reviewer/review.md").is_file(), "the arm's own template");
     }
 
     #[test]

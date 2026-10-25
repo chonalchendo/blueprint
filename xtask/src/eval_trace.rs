@@ -82,22 +82,36 @@ fn in_value(v: &Value, needle: &str) -> bool {
 }
 
 /// The `bp` calls of one shell command. The command splits at `;`, `&`, `|`, a newline, a parenthesis and a
-/// backtick, and a segment counts when its first word, after `export`, `env`, `timeout N`, a keyword that opens a
-/// command (`do`, `then`, `else`, `{`, `!`) and assignments, is `bp` (as the role's hook resolves it) or a path to a
-/// `bp` in a `bin*` directory, the sandbox's. A `bp` that the worker builds under `target/` is the code under test, not
-/// a call of the role, and `$B set` is no call either.
+/// backtick outside quotes ([`segments`]), and a segment counts when its first word, after `export`, `env`,
+/// `timeout N`, a keyword that opens a command (`if`, `elif`, `while`, `until`, `do`, `then`, `else`, `{`, `!`) and
+/// assignments, is `bp` (as the role's hook resolves it) or a path to a `bp` in a `bin*` directory, the sandbox's. A
+/// `bp` that the worker builds under `target/` is the code under test, not a call of the role, and `$B set` is no call
+/// either.
 /// A redirect is removed first, as `2>&1` would else split at its `&` and leave `2>` as the verb. A heredoc body is
 /// skipped, from the line after `<<WORD` to the line that is `WORD`: it is text the shell never runs, and source code
 /// in it that quotes `bp set <id>` would invent a call. A body counts only once its terminator line is seen, so a
-/// stray `<<` hides nothing, unless a later line happens to equal the word after it. A quoted `;` still splits a
-/// string wrongly and can drop a call or invent one, and the grade is a count over many runs.
+/// stray `<<` hides nothing, unless a later line happens to equal the word after it.
 fn calls_in(command: &str) -> Vec<BpCall> {
     let mut out = Vec::new();
-    for segment in without_redirects(&without_heredocs(command)).split([';', '&', '|', '\n', '(', ')', '`']) {
+    for segment in segments(&without_redirects(&without_heredocs(command))) {
         let mut words = segment.split_whitespace().peekable();
         while let Some(w) = words.peek() {
-            if matches!(*w, "export" | "env" | "command" | "exec" | "do" | "then" | "else" | "{" | "!")
-                || (w.contains('=') && !w.starts_with('-'))
+            if matches!(
+                *w,
+                "export"
+                    | "env"
+                    | "command"
+                    | "exec"
+                    | "if"
+                    | "elif"
+                    | "while"
+                    | "until"
+                    | "do"
+                    | "then"
+                    | "else"
+                    | "{"
+                    | "!"
+            ) || (w.contains('=') && !w.starts_with('-'))
             {
                 words.next();
             } else if *w == "timeout" {
@@ -112,6 +126,114 @@ fn calls_in(command: &str) -> Vec<BpCall> {
         let rest: Vec<&str> = words.collect();
         if let Some(i) = rest.iter().position(|w| !w.starts_with('-')) {
             out.push(BpCall { verb: rest[i].to_string(), args: rest[i + 1..].join(" ") });
+        }
+    }
+    out
+}
+
+/// Where a character of a command sits: in quotes, or in a substitution that opened inside double quotes.
+#[derive(Clone, Copy, PartialEq)]
+enum Quote {
+    Single,
+    /// ANSI-C quoting, `$'…'`: a backslash escapes, so `\'` does not close it.
+    Ansi,
+    Double,
+    /// `$(` inside double quotes, with the depth of the parentheses opened in it.
+    Sub(u32),
+    /// A backtick inside double quotes.
+    Tick,
+}
+
+/// The command split at `;`, `&`, `|`, a newline, a parenthesis and a backtick, none of them quoted or escaped: a
+/// quoted `;` is text, not a second command. A `$(` or a backtick inside double quotes opens a substitution, which
+/// splits as the command does, so `"$(bp show x)"` is still a call. A comment runs to the end of its line, so its
+/// apostrophe opens no quote.
+fn segments(command: &str) -> Vec<String> {
+    let mut stack: Vec<Quote> = Vec::new();
+    let mut out = vec![String::new()];
+    let mut chars = command.chars().peekable();
+    let mut word_start = true;
+    while let Some(c) = chars.next() {
+        // An escaped character is text, outside single quotes. In `$'…'` it is too, so `$'it\'s'` stays one word.
+        if c == '\\' && stack.last() != Some(&Quote::Single) {
+            let segment = out.last_mut().expect("one segment");
+            segment.push(c);
+            segment.extend(chars.next());
+            word_start = false;
+            continue;
+        }
+        let split = match stack.last().copied() {
+            Some(Quote::Single | Quote::Ansi) => {
+                if c == '\'' {
+                    stack.pop();
+                }
+                false
+            }
+            Some(Quote::Double) => match c {
+                '"' => {
+                    stack.pop();
+                    false
+                }
+                '$' if chars.peek() == Some(&'(') => {
+                    chars.next();
+                    stack.push(Quote::Sub(0));
+                    true
+                }
+                '`' => {
+                    stack.push(Quote::Tick);
+                    true
+                }
+                _ => false,
+            },
+            top => match c {
+                '$' if chars.peek() == Some(&'\'') => {
+                    out.last_mut().expect("one segment").push(c);
+                    out.last_mut().expect("one segment").extend(chars.next());
+                    stack.push(Quote::Ansi);
+                    word_start = false;
+                    continue;
+                }
+                '#' if word_start => {
+                    while chars.next_if(|n| *n != '\n').is_some() {}
+                    continue;
+                }
+                '\'' => {
+                    stack.push(Quote::Single);
+                    false
+                }
+                '"' => {
+                    stack.push(Quote::Double);
+                    false
+                }
+                '(' => {
+                    if let Some(Quote::Sub(depth)) = stack.last_mut() {
+                        *depth += 1;
+                    }
+                    true
+                }
+                ')' => {
+                    match stack.last_mut() {
+                        Some(Quote::Sub(0)) => drop(stack.pop()),
+                        Some(Quote::Sub(depth)) => *depth -= 1,
+                        _ => {}
+                    }
+                    true
+                }
+                '`' => {
+                    if top == Some(Quote::Tick) {
+                        stack.pop();
+                    }
+                    true
+                }
+                ';' | '&' | '|' | '\n' => true,
+                _ => false,
+            },
+        };
+        word_start = split || c.is_whitespace();
+        if split {
+            out.push(String::new());
+        } else {
+            out.last_mut().expect("one segment").push(c);
         }
     }
     out
@@ -143,7 +265,8 @@ fn without_heredocs(command: &str) -> String {
 /// `<<` opener and a `<<<` here-string stay: the first is the heredoc scan's, and the second reads as a word.
 fn without_redirects(text: &str) -> String {
     let b = text.as_bytes();
-    let stops = |c: u8| c.is_ascii_whitespace() || b";&|()`".contains(&c);
+    // A quote ends a redirect's target too: the redirect goes, the quote stays, and the quotes stay paired.
+    let stops = |c: u8| c.is_ascii_whitespace() || b";&|()`'\"".contains(&c);
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < b.len() {
@@ -283,6 +406,29 @@ mod tests {
         assert_eq!(verbs("d(){ bp record x; }"), ["record"]);
         assert_eq!(verbs("if true; then bp pr i; else bp walk i; fi"), ["pr", "walk"]);
         assert_eq!(verbs("! bp check i"), ["check"]);
+    }
+
+    #[test]
+    fn counts_calls_after_if_and_while() {
+        let verbs = |c: &str| calls_in(c).into_iter().map(|c| c.verb).collect::<Vec<_>>();
+        assert_eq!(verbs("if bp check i --json; then echo ok; fi"), ["check"]);
+        assert_eq!(verbs("if false; then :; elif bp list claim; then :; fi"), ["list"]);
+        assert_eq!(verbs("while ! bp walk x --for review --done; do sleep 1; done"), ["walk"]);
+        assert_eq!(verbs("until bp show x; do :; done"), ["show"]);
+    }
+
+    #[test]
+    fn a_quoted_semicolon_does_not_split() {
+        let verbs = |c: &str| calls_in(c).into_iter().map(|c| c.verb).collect::<Vec<_>>();
+        assert_eq!(verbs("echo 'a; bp set x'; bp show y"), ["show"], "single quotes");
+        assert!(verbs("git commit -qm \"fix; bp land z\"").is_empty(), "double quotes");
+        assert_eq!(verbs("echo \"a | bp cut x\" && bp walk y"), ["walk"], "a quoted pipe");
+        assert_eq!(verbs("echo \"it's; bp set x\"; bp show y"), ["show"], "an apostrophe in double quotes");
+        assert_eq!(verbs("x=\"$(bp show x --json)\"; echo \"`bp list claim`\""), ["show", "list"], "substitutions");
+        assert_eq!(verbs("# don't; bp set x\nbp show z"), ["show"], "a comment opens no quote");
+        assert_eq!(verbs("find . -exec cat {} \\; ; bp walk q"), ["walk"], "an escaped semicolon");
+        assert_eq!(verbs("echo hi >\"out file\"; bp show y"), ["show"], "a quoted redirect target");
+        assert_eq!(verbs("echo $'it\\'s; x'; bp set n status x"), ["set"], "an escaped quote in ANSI-C quoting");
     }
 
     #[test]

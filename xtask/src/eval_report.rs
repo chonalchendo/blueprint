@@ -6,7 +6,9 @@ use std::path::Path;
 
 use bp_operation::Action;
 
-use crate::eval_grade::{Grade, Stats, f2, short};
+use crate::eval_grade::{Grade, Stats, short};
+use crate::eval_kills::label;
+use crate::eval_result::f2;
 use crate::eval_score::{ASPECTS, Graded, RECALL};
 
 /// The arms table's last column: how many runs had the skill where the arm puts it.
@@ -85,13 +87,7 @@ impl Grade {
             )
         }];
         lines.push("|---|---|---|---|---|---|---|---|---|---|---|".into());
-        let mut arms = vec!["with", "without", "filler"];
-        for t in &self.trials {
-            if !arms.contains(&t.arm.as_str()) {
-                arms.push(&t.arm);
-            }
-        }
-        for arm in arms {
+        for arm in self.arms() {
             let runs = self.arm(arm);
             let s = Stats::of(&runs);
             if s.runs == 0 {
@@ -130,19 +126,31 @@ impl Grade {
                 )
             });
         }
+        if self.kill_set() {
+            lines.extend([
+                "\n| arm | planted items killed | false rows per control trial | duplicate rows |".into(),
+                "|---|---|---|---|".into(),
+            ]);
+            for arm in self.arms() {
+                let (k, n) = self.kills(arm);
+                let control = self.control_false(arm).map_or("n/a".into(), f2);
+                lines.push(format!("| {arm} | {k} of {n} | {control} | {} |", Stats::of(&self.arm(arm)).duplicates));
+            }
+        }
         lines
     }
 
     /// What the columns mean, for the skill. The last two bullets hold for every skill.
     fn notes(&self) -> String {
         let own = match self.skill.action {
+            Action::Review if self.kill_set() => "- **Outcome:** on a mutant or an escape, a run passes when its review is recorded and kills every planted item: a row points into the item's span (the same file, a range that overlaps the span, and fewer than 20 cited lines in all) and carries evidence: a command in backticks that opens a command the run executed (a read such as `git diff` or `cat` does not count), a design or convention id, or `design NN` or `(NN, <section>)` naming an existing design and a section of it. When two items share a span, the row must also hold one of the item's `match:` words. A row with prose, a place or an advised command only kills nothing. On a control a run passes with no false row; a row within 3 lines of a `known:` entry, or in its file with its `match:` words, is `known`.\n- **Duplicate:** a row on an item that another row matched is neither a match nor a false row.\n- **Kills:** an arm kills an item when more than half of its trials on the item's fixture killed it. `holdout_gain` in the result file is `with`'s kills less `old`'s over the planted items, with its Newcombe 95% interval.\n".to_string(),
             Action::Review => format!(
                 "- **Outcome:** a run passes when `bp walk --for review --done` holds after the review is recorded and the findings table matches at least {RECALL} of the ground truth. A finding matches the item whose slots (the `match:` words of the fixture) its text holds, the most slots first, then the nearest line; where it points earns nothing, and a finding with an `unless:` phrase matches nothing. Keywords cannot read a negation or a verdict, so read each match and each FALSE row. That needs the shape only `bp-review` defines (a `head:` line, one table).\n- **Prose recall:** an upper bound, never an outcome. Items of the ground truth that the final text substantiates in any form: a citation of the item's file, with a line number or none, on a line that holds the item's words. A citation earns one item, and a line that states the item is no defect can still earn it when it holds no `unless:` phrase. It does not depend on the shape, so a gap in outcome with none in prose recall means the arm cannot write the shape.\n"
             ),
             Action::Complete => "- **Outcome:** a run passes when `bp walk --for complete --done` holds with the claim not released `escalated`, the latest run of each error block of the issue passed, and every changed file sits in a crate that the landed issue changed (the first two path parts, as `replay-evidence.sh` compares them). The file set is not compared: the model is not deterministic.\n- **Adherence:** the share of walk, cut, check and pr that the transcript shows as calls, over the runs that reached the tool.\n".to_string(),
             _ => "- **Outcome:** a run passes when `bp walk --for respond --done` holds with the claim not released `escalated` and each finding is closed as the past review closed it. A `fixed` finding needs a fixed disposition, its file in the worker's diff against the review's head, and its probe when the fixture gives one. A `declined` finding needs a reasoned decline, and a fix of it fails. The probe and the file are evidence of a fix, not proof of a good one: the owner reads the trace.\n- **Adherence:** the share of walk, check, pr, one closed disposition per finding and a commit that the transcript and the vault show, over the runs that reached the tool.\n".to_string(),
         };
-        let counted = "- **Counted by line:** the adherence and `out of row` columns read `bp` calls from the transcript's Bash commands, one per line, `;`, `&`, `|`, parenthesis or backtick. A heredoc body and a redirect are skipped. A quoted `;` splits wrongly, and a stray `<<` hides a body only when a later line equals the word after it. A `bp` built under `target/` is not counted.\n";
+        let counted = "- **Counted by line:** the adherence and `out of row` columns read `bp` calls from the transcript's Bash commands, one per line, `;`, `&`, `|`, parenthesis or backtick outside quotes, after `if`, `while` and the other keywords that open a command. A heredoc body, a redirect and a comment are skipped, and a stray `<<` hides a body only when a later line equals the word after it. A `bp` built under `target/` is not counted.\n";
         let scope = if self.skill.action == Action::Complete {
             "- **Scope:** the unit is the first two path parts, and `xtask` as a whole, so a test file in `xtask/tests` is in scope.\n"
         } else {
@@ -221,8 +229,7 @@ impl Grade {
         }
         for (at, what, item) in &t.findings {
             let what: String = what.chars().take(160).collect();
-            let verdict = item.map_or("FALSE".to_string(), |i| format!("match, truth item {}", i + 1));
-            lines.push(format!("  - {verdict} `{at}`: {what}"));
+            lines.push(format!("  - {} `{at}`: {what}", label(*item)));
         }
         lines
     }
