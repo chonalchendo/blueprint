@@ -22,6 +22,7 @@ mod forge;
 mod gh;
 mod lines;
 mod mutants;
+mod mutants_walk;
 mod sandbox;
 mod scratch;
 
