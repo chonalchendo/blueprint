@@ -32,7 +32,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - A dispatch template is a file `<role>-<action>.md` in the `bp/dispatch/` directory beside the skill directory.
 - Copy the template. Fill its five lines: `Node:`, `Skill:`, `Budget:`, `Forbidden:` and `Stop:`. Add no text above the five lines.
 - A research dispatch holds its question below the five lines.
-- The reviewer writes nothing. Write the findings table of its reply to a file outside the vault.
+- The reviewer writes nothing in the vault or in a worktree; it probes in a copy. Write its review, from `head:` to the end of its `What holds:` list, to a file outside the vault.
 - Then run the record call on the last line of the reply. Its `--body-file` names that file.
 
 ### The human's acts
