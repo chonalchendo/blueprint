@@ -80,8 +80,9 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     capture(Command::new("git").args(["clone", "-q", "--no-hardlinks"]).arg(&root).arg(&code))?;
     std::fs::create_dir_all(&a.out)?;
     let git = |args: &[&str]| capture(Command::new("git").args(args).current_dir(&code));
+    // Read once, before the first checkout detaches the clone at an older head.
+    let log = git(&["log", "--format=%H %s", "--first-parent", "HEAD"])?;
     for &pr in &a.prs {
-        let log = git(&["log", "--format=%H %s", "--first-parent", "HEAD"])?;
         let (head, subject) = log
             .lines()
             .filter_map(|l| l.split_once(' '))
@@ -112,11 +113,12 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
             .context("parse --list --json")?;
         let crates: BTreeSet<String> =
             listed.iter().filter_map(|m| m["package"].as_str().map(str::to_string)).collect();
-        // CI's `cargo test --workspace` builds every binary first, and some tests drive one (`xtask`'s eval tests
-        // need `bp`): without them those tests pass as skipped, and mutants they would kill look missed.
-        capture(Command::new(&cargo).args(["build", "-q", "--workspace", "--bins"]).current_dir(&code))?;
         let mut missed = BTreeSet::new();
         for krate in &crates {
+            // CI's `cargo test --workspace` builds every binary first, and some tests drive one (`xtask`'s eval tests
+            // need `bp`): without them those tests pass as skipped, and mutants they would kill look missed. It is
+            // rebuilt per crate, because the last mutant of the crate before leaves its binary built with the defect.
+            capture(Command::new(&cargo).args(["build", "-q", "--workspace", "--bins"]).current_dir(&code))?;
             let out = work.join(format!("out-{pr}-{krate}"));
             let out_arg = out.display().to_string();
             // `--in-place` runs one mutant at a time in the throwaway clone, and builds in its own target.
