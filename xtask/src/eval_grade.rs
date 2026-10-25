@@ -113,7 +113,10 @@ impl Grade {
                 failure: trace.failure().map(str::to_string),
                 ..Graded::default()
             };
-            score(&mut graded, skill, fx, &trace, &log);
+            // A trial from before the `.head` file ran at the fixture's own head.
+            let head = std::fs::read_to_string(store.join(format!("{trial}.head")))
+                .map_or_else(|_| fx.head.clone(), |h| h.trim().to_string());
+            score(&mut graded, skill, fx, &head, &trace, &log);
             trials.push(graded);
         }
         let holdout = crate::eval_fixture::holdout(fixtures).len();

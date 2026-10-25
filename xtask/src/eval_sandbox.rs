@@ -85,6 +85,13 @@ impl Sandbox {
         fetch.extend((skill.action != Action::Complete).then_some(fx.head.as_str()));
         fetch.extend(fx.stack.iter().map(|s| s.0.as_str()));
         git(&code, &fetch)?;
+        let top =
+            if skill.action == Action::Complete { fx.stack.as_ref().map_or(&fx.base, |s| &s.0) } else { &fx.head };
+        let named: Vec<String> = named_commits(&code, top)?.into_iter().filter(|c| *c != fx.head).collect();
+        if !named.is_empty() {
+            let refs: Vec<&str> = named.iter().map(String::as_str).collect();
+            git(&code, &[&["fetch", "-q", repo_arg.as_str()][..], &refs].concat())?;
+        }
         git(&code, &["reset", "-q", "--hard", &fx.base])?;
         git(&code, &["push", "-q", "-f", "origin", "HEAD:master"])?;
 
@@ -342,6 +349,23 @@ impl Sandbox {
     }
 }
 
+/// The commits that the fixtures under `xtask/evals/` at `at` name on their `base:`, `head:` and `stack:` lines. From
+/// #60 on, xtask's `the_shipped_fixtures_match_the_history_they_name` asserts that they are in the clone, and an issue's
+/// Check that runs xtask's tests runs it. A fixture's head can be a branch commit that the fetched heads do not reach,
+/// as `pr-20`'s is, so the clone fetches them too (review of PR 63, major 1).
+fn named_commits(code: &Path, at: &str) -> Result<Vec<String>> {
+    let files = git(code, &["ls-tree", "-r", "--name-only", at, "--", "xtask/evals"])?;
+    let mut shas = std::collections::BTreeSet::new();
+    for file in files.lines().filter(|f| Path::new(f).extension().is_some_and(|e| e == "md")) {
+        let text = git(code, &["show", &format!("{at}:{file}")])?;
+        for line in text.split("\n---\n").next().unwrap_or_default().lines() {
+            let value = ["base:", "head:", "stack:"].iter().find_map(|k| line.strip_prefix(k));
+            shas.extend(value.and_then(|v| v.split_whitespace().next()).map(str::to_string));
+        }
+    }
+    Ok(shas.into_iter().collect())
+}
+
 /// Applies a mutant's diff to the head commit in `dir` and amends that commit, message and author kept. The pull
 /// request is then one commit, as the landed one was, so its history does not point at the defect. The committer is
 /// `bp-eval`, because the sandbox may have no git identity.
@@ -402,5 +426,58 @@ mod tests {
         assert_eq!(g(&["rev-parse", "HEAD^"]), base, "one commit on the base, as landed");
         assert_eq!(g(&["log", "-1", "--format=%s %an"]), "the landed change (#9) t", "message and author kept");
         assert!(g(&["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn the_clone_fetches_the_commits_its_own_fixtures_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, clone) = (dir.path().join("r"), dir.path().join("c"));
+        let g = |at: &Path, args: &[&str]| {
+            let me = ["-c", "user.name=t", "-c", "user.email=t@t.invalid"];
+            git(at, &[&me[..], args].concat()).unwrap()
+        };
+        std::fs::create_dir(&repo).unwrap();
+        g(&repo, &["init", "-q", "-b", "master"]);
+        std::fs::write(repo.join("a.rs"), "fn a() {}\n").unwrap();
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "base"]);
+        let base = g(&repo, &["rev-parse", "HEAD"]);
+        // A branch commit that master never reaches, as `pr-20`'s head is.
+        g(&repo, &["checkout", "-q", "-b", "side"]);
+        std::fs::write(repo.join("b.rs"), "fn b() {}\n").unwrap();
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "side"]);
+        let side = g(&repo, &["rev-parse", "HEAD"]);
+        g(&repo, &["checkout", "-q", "master"]);
+        g(&repo, &["branch", "-q", "-D", "side"]);
+        let fixture = format!(
+            "kind: mutant\nbase: {base}\nhead: {side}\nmutant_diff: |\n    head: {base}x\ntruth:\n---\nhead: no\n"
+        );
+        std::fs::create_dir_all(repo.join("xtask/evals/bp-review")).unwrap();
+        std::fs::write(repo.join("xtask/evals/bp-review/pr-1.md"), fixture).unwrap();
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "head"]);
+        let head = g(&repo, &["rev-parse", "HEAD"]);
+
+        std::fs::create_dir(&clone).unwrap();
+        g(&clone, &["init", "-q"]);
+        g(&clone, &["fetch", "-q", &repo.display().to_string(), &head]);
+        let named = named_commits(&clone, &head).unwrap();
+        assert_eq!(
+            named,
+            {
+                let mut v = vec![base.clone(), side.clone()];
+                v.sort();
+                v
+            },
+            "the keys only, not the diff or the body"
+        );
+        assert!(
+            git(&clone, &["cat-file", "-e", &format!("{side}^{{commit}}")]).is_err(),
+            "the head's fetch leaves it out"
+        );
+        let refs: Vec<&str> = named.iter().map(String::as_str).collect();
+        g(&clone, &[&["fetch", "-q", &repo.display().to_string()][..], &refs].concat());
+        assert!(git(&clone, &["cat-file", "-e", &format!("{side}^{{commit}}")]).is_ok(), "an unreachable sha fetches");
     }
 }

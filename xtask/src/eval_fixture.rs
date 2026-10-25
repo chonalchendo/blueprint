@@ -35,8 +35,10 @@
 //! A fixture of `cargo xtask mutants` (30, design changes 1 and 6) adds `kind:`. A `mutant` plants one defect in a
 //! landed pull request: `genre:` and `span:` name it in `cargo-mutants`' terms, `seed:` is the pick's, and the lines
 //! indented four spaces under `mutant_diff: |` are the diff the sandbox commits on top of the head. Its one truth item
-//! is the span. A `control` is the same pull request with no defect and no truth. An `escape` is a defect that passed
-//! a past review, with its truth at the fix commit's location.
+//! is the span, in the planted head's lines. A `control` is the same pull request with no defect and no truth; its
+//! `known: <path>:<line> | <text>` lines name defects the landed head already holds, which the grader neither credits
+//! nor counts as false rows. An `escape` is a defect that passed a past review, with its truth at the fix commit's
+//! location.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -65,6 +67,8 @@ pub struct Fixture {
     /// `mutant`, `control` or `escape`; none for a past review or a landed issue.
     pub kind: Option<String>,
     pub mutant: Option<Mutant>,
+    /// A control's defects that the landed head already holds (30, design change 5 for #62).
+    pub known: Vec<Truth>,
 }
 
 /// The defect a `mutant` fixture plants: the head plus `diff` is the pull request the reviewer sees.
@@ -121,6 +125,7 @@ impl Fixture {
             unless: Vec::new(),
             kind: None,
             mutant: None,
+            known: Vec::new(),
         };
         let (mut m, mut seed) = (Mutant::default(), None);
         let mut lines = head.lines().peekable();
@@ -162,6 +167,12 @@ impl Fixture {
                     }
                     "kind" if ["mutant", "control", "escape"].contains(&value.as_str()) => f.kind = Some(value),
                     "kind" => bail!("{id}: kind `{value}` is none of mutant, control, escape"),
+                    "known" => {
+                        let (at, what) = value
+                            .split_once('|')
+                            .with_context(|| format!("{id}: known is `<path>:<line> | <text>`"))?;
+                        f.known.push(Truth::parse(at.trim(), what.trim()).with_context(|| format!("{id}: known"))?);
+                    }
                     "genre" => m.genre = value,
                     "span" => m.span = value,
                     "seed" => seed = Some(value.parse().with_context(|| format!("{id}: seed `{value}`"))?),
@@ -178,6 +189,9 @@ impl Fixture {
             }
         }
         let control = f.kind.as_deref() == Some("control");
+        if !control && !f.known.is_empty() {
+            bail!("{id}: known: belongs to kind: control");
+        }
         if [&f.base, &f.head, &f.title].iter().any(|v| v.is_empty())
             || (f.truth.is_empty() && f.scope.is_empty() && !control)
         {

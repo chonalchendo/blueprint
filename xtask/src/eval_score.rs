@@ -59,13 +59,14 @@ impl Graded {
 }
 
 /// Fills the scores of a trial from its transcript and its vault log, which holds the `end:` lines of a worker.
-pub fn score(g: &mut Graded, skill: &Skill, fx: &Fixture, trace: &Trace, log: &str) {
+/// `head` is the head of the trial's pull request: a mutant's planted head, not the fixture's.
+pub fn score(g: &mut Graded, skill: &Skill, fx: &Fixture, head: &str, trace: &Trace, log: &str) {
     let calls = trace.bp_calls();
     let allowed = skill.allowed();
     g.reached = !calls.is_empty();
     g.out_of_row = calls.iter().filter(|c| !allowed.contains(&c.verb.as_str())).count();
     match skill.action {
-        Action::Review => review(g, fx, trace, &calls, log),
+        Action::Review => review(g, fx, head, trace, &calls, log),
         _ => worker(g, skill, fx, &calls, log),
     }
     // A trial the runner killed, or that left no transcript, did not finish: whatever the sandbox holds is not its result.
@@ -73,9 +74,9 @@ pub fn score(g: &mut Graded, skill: &Skill, fx: &Fixture, trace: &Trace, log: &s
 }
 
 /// `bp-review`: the steps are the skill's steps 1 to 5; the outcome is recall against the ground truth.
-fn review(g: &mut Graded, fx: &Fixture, trace: &Trace, calls: &[BpCall], log: &str) {
+fn review(g: &mut Graded, fx: &Fixture, head: &str, trace: &Trace, calls: &[BpCall], log: &str) {
     let first = |c: &BpCall| c.args.split_whitespace().next().unwrap_or_default().to_string();
-    let head = crate::eval_grade::short(&fx.head);
+    let head = crate::eval_grade::short(head);
     let review = Review::parse(&trace.final_text());
     let steps = [
         ("walk", calls.iter().any(|c| c.verb == "walk" && c.args.contains("--for review"))),
@@ -131,4 +132,30 @@ fn worker(g: &mut Graded, skill: &Skill, fx: &Fixture, calls: &[BpCall], log: &s
         g.pass = stopped && commit && items.into_iter().all(closed);
     }
     g.steps = steps;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mutant trial's reviewer diffs and names the planted head, so the two steps that check the head read it.
+    #[test]
+    fn the_review_steps_read_the_pull_requests_head() {
+        let fx = Fixture::parse("m", "base: b0000000\nhead: 1111111aaaa\ntitle: T\ntruth:\n- a.rs:1 | x\n---\nbody")
+            .unwrap();
+        let planted = "2222222bbbb";
+        let lines = [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git diff b0000000 2222222"}}]}}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"head: 2222222\n| severity | location | finding |\n|---|---|---|\n| warn | a.rs:1 | x |"}]}}"#.to_string(),
+        ];
+        let trace = Trace::parse(&lines.join("\n"));
+        let step = |g: &Graded, n: &str| g.steps.iter().find(|s| s.0 == n).unwrap().1;
+        let skill = Skill::parse("bp-review").unwrap();
+        let mut g = Graded::default();
+        score(&mut g, &skill, &fx, planted, &trace, "");
+        assert!(step(&g, "diff") && step(&g, "review"), "{:?}", g.steps);
+        let mut landed = Graded::default();
+        score(&mut landed, &skill, &fx, &fx.head, &trace, "");
+        assert!(!step(&landed, "diff") && !step(&landed, "review"));
+    }
 }

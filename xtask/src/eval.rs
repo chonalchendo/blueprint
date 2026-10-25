@@ -324,6 +324,8 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                 };
                 std::fs::write(store.join(format!("{id}.vault.log")), log)?;
                 std::fs::write(store.join(format!("{id}.hash")), format!("{hash}\nstamp: {stamp}\n"))?;
+                // The pull request's head: a mutant's planted one is what the reviewer diffs and names.
+                std::fs::write(store.join(format!("{id}.head")), format!("{}\n", sb.head))?;
                 // The transcript lands last: a trial is stored once it has one, so an aborted run leaves no half trial.
                 std::fs::write(store.join(format!("{id}.jsonl")), text)?;
             }

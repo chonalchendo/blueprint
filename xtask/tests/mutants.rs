@@ -17,5 +17,5 @@ fn mutants_refuses_with_the_install_line_when_cargo_mutants_is_absent() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("cargo-mutants is not installed: cargo install --locked cargo-mutants"), "{stderr}");
+    assert!(stderr.contains("is not installed: cargo install --locked cargo-mutants@27.1.0"), "{stderr}");
 }
