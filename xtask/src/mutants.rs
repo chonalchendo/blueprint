@@ -390,10 +390,19 @@ mod tests {
         );
         assert_eq!(f.issue, issue.trim());
 
-        let control =
-            Fixture::parse("control-9", &format!("kind: control\nbase: b\nhead: h\ntitle: T\ntruth:\n---\n{issue}"));
-        assert!(control.is_ok_and(|c| c.truth.is_empty() && c.mutant.is_none()), "a control has no truth");
+        let known = "known: xtask/src/a.rs:96 | A quoted ; still splits.\n";
+        let control = Fixture::parse(
+            "control-9",
+            &format!("kind: control\nbase: b\nhead: h\ntitle: T\n{known}truth:\n---\n{issue}"),
+        )
+        .unwrap();
+        assert!(control.truth.is_empty() && control.mutant.is_none(), "a control has no truth");
+        assert_eq!(
+            control.known.iter().map(|k| (k.location(), k.what.as_str())).collect::<Vec<_>>(),
+            [("xtask/src/a.rs:96".into(), "A quoted ; still splits.")]
+        );
         for bad in [
+            text.replace("truth:\n", &format!("{known}truth:\n")),
             text.replace("seed: 7\n", ""),
             text.replace("kind: mutant", "kind: other"),
             text.replace("kind: mutant\n", ""),
