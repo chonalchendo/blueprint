@@ -14,6 +14,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - `needs-derivation`: an approved milestone has fewer than three live issues, and a finish-line block that no issue covers. Run the skill `bp-derive`.
 - `ready`: an issue is open and unclaimed. Dispatch `bp-worker` with its `complete` template.
 - `needs-review`: dispatch `bp-reviewer` with its `review` template. Then record the review.
+- After the worker pushes fixes for a review, the pull request has a new head: run the walk again. `needs-review` then means dispatch `bp-reviewer` again with the same five lines, then record the review.
 - `needs-response`: a review has a finding with no disposition. Dispatch `bp-worker` with its `respond` template.
 - `drifted`: a drift run failed, and nothing cites it. Run the skill `bp-triage-drift`.
 - The context cannot answer a question: run the skill `bp-deliberate`.
