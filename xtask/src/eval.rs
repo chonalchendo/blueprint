@@ -317,7 +317,7 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                     &work,
                     fx,
                     skill,
-                    verify.then_some(arm.as_str()),
+                    verify.then_some((arm.as_str(), refs.get(arm).map(|r| r.0.as_str()))),
                 )
                 .with_context(|| format!("build the sandbox of {id}"))?;
                 // An arm built from an edited bundle dispatches from that bundle's template.

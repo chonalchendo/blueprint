@@ -4,61 +4,72 @@
 //! item when more than half of its trials on that fixture killed it, and `holdout_gain` compares the `with` and `old`
 //! arms over the items.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use crate::eval_grade::{Grade, Stats, Verdict, float};
 use crate::eval_result::{f2, newcombe};
 use crate::eval_score::Graded;
 
-/// The first words of a command in backticks: a row that names one shows its reproduction.
-const PROGRAMS: [&str; 26] = [
-    "awk", "bash", "bp", "cargo", "cat", "cd", "cmp", "diff", "echo", "env", "find", "git", "grep", "jq", "just",
-    "mkdir", "printf", "python3", "rg", "sed", "sh", "tar", "test", "timeout", "wc", "xargs",
-];
+/// What a row's evidence is checked against: the trial's own Bash commands, and the text of each numbered design by
+/// its number (`NN-*.md` under `$BP_REDESIGN`), lowercased.
+pub struct Proof<'a> {
+    pub commands: Vec<&'a str>,
+    pub designs: &'a BTreeMap<String, String>,
+}
 
-/// Whether a row's text carries evidence (30, design change 3): a command in backticks, or a design or convention
-/// id. A command is a backtick span of two words or more in which a word that opens a command is one of [`PROGRAMS`]
-/// or a path (`./`, `/`, `target/`, `$`). An id is a vault path under `projects/…/designs/` or `shared/conventions/`,
-/// or a numbered design cite: `(22)`, `(17, check 10)`, `design 21`.
-pub fn evidence(text: &str) -> bool {
-    // A word opens a command at the span's start, after `&&`, `||`, `|` or `;`, after an assignment, and inside `$(`.
-    let command = |span: &str| {
-        let mut open = true;
-        for word in span.split_whitespace() {
-            let word = word.trim_start_matches("$(");
-            let assignment = word.split_once('=').is_some_and(|(k, _)| is_name(k));
-            let path = ["./", "/", "target/", "$"].iter().any(|p| word.len() > p.len() && word.starts_with(p));
-            if open && !assignment && (PROGRAMS.contains(&word) || path) {
-                return span.split_whitespace().count() > 1;
-            }
-            open = assignment || matches!(word, "&&" | "||" | "|" | ";") || word.ends_with(';');
+/// The numbered designs under `dir`: `NN-*.md`, by `NN`, lowercased. No directory holds none.
+pub fn designs(dir: Option<&Path>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for entry in dir.and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let number =
+            name.split_once('-').map(|n| n.0).filter(|n| n.len() == 2 && n.bytes().all(|b| b.is_ascii_digit()));
+        if let (Some(n), true) = (number, Path::new(&name).extension().is_some_and(|e| e == "md")) {
+            out.insert(n.to_string(), std::fs::read_to_string(entry.path()).unwrap_or_default().to_lowercase());
         }
-        false
+    }
+    out
+}
+
+/// Whether a row's text carries evidence (30, design changes 2 and 3): a command the trial ran, or a design or
+/// convention id. A command is a backtick span of two words or more that one of the trial's Bash commands holds, so a
+/// command the reviewer only advises is no reproduction. An id is a vault path under `projects/…/designs/` or
+/// `shared/conventions/`, `design NN`, or `(NN, <words>)` where design `NN` exists and holds the words.
+pub fn evidence(text: &str, proof: &Proof) -> bool {
+    let ran = |span: &str| {
+        let span = span.trim();
+        span.split_whitespace().nth(1).is_some() && proof.commands.iter().any(|c| c.contains(span))
     };
-    let spans = text.split('`').skip(1).step_by(2);
     let id = text.split_whitespace().any(|w| {
         let w = w.trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '-' | '_')));
         (w.starts_with("projects/") && w.contains("/designs/")) || w.starts_with("shared/conventions/")
     });
-    spans.into_iter().any(command) || id || numbered(text)
+    text.split('`').skip(1).step_by(2).any(ran) || id || numbered(text, proof.designs)
 }
 
-fn is_name(word: &str) -> bool {
-    word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// A design cited by its two-digit number: `(22)`, `(17, …)` or `design 21`.
-fn numbered(text: &str) -> bool {
+/// A design cited by its two-digit number: `design 21`, or `(17, check 10)` where design 17 holds `check 10` or a
+/// heading word that starts with `check`. So `(12, not 9)` names no section of design 12.
+fn numbered(text: &str, designs: &BTreeMap<String, String>) -> bool {
     let lower = text.to_lowercase();
-    let two = |rest: &str| {
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        (digits.len() == 2).then(|| rest[2..].chars().next())
-    };
-    let cited = |opener: &str, ends: &[char]| {
-        lower
-            .match_indices(opener)
-            .any(|(at, _)| two(&lower[at + opener.len()..]).is_some_and(|next| next.is_none_or(|c| ends.contains(&c))))
-    };
-    cited("(", &[')', ',']) || cited("design ", &[' ', ')', ',', '.', ';', ':'])
+    let two = |s: &str| s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit());
+    let design = lower.match_indices("design ").any(|(at, _)| {
+        let rest = &lower[at + "design ".len()..];
+        rest.get(..2).is_some_and(two) && !rest[2..].starts_with(|c: char| c.is_alphanumeric())
+    });
+    let cite = lower.match_indices('(').any(|(at, _)| {
+        let inner = &lower[at + 1..];
+        let Some((number, words)) = inner.split_once(')').and_then(|(i, _)| i.split_once(", ")) else { return false };
+        let words = words.trim();
+        let first = words.split_whitespace().next().unwrap_or("").trim_matches(|c: char| !c.is_alphanumeric());
+        let heading = |d: &str| {
+            d.lines().filter(|l| l.starts_with('#')).flat_map(str::split_whitespace).any(|w| w.starts_with(first))
+        };
+        two(number)
+            && first.starts_with(char::is_alphabetic)
+            && designs.get(number).is_some_and(|d| d.contains(words) || heading(d))
+    });
+    design || cite
 }
 
 /// One planted item: a fixture, the item's position in its truth, and its genre.
@@ -112,11 +123,14 @@ impl Grade {
         (ran("with") && ran("old") && n > 0).then(|| newcombe((with, n), (old, n)))
     }
 
-    /// The kill lines of the result file, for the `with` arm.
+    /// The kill lines of the result file. `mutants:` counts the items of `kind: mutant` fixtures and `planted:` every
+    /// planted item, escapes too; `kills:`, `kills_<genre>:`, `control_false:` and `duplicates:` are the `with` arm's,
+    /// and `holdout_gain` is over every planted item.
     pub(crate) fn kill_lines(&self) -> Vec<String> {
         let planted = self.planted();
         let (killed, n) = self.kills("with");
-        let mut lines = vec![format!("mutants: {n}"), format!("kills: {killed}/{n}")];
+        let mutants = planted.iter().filter(|p| self.fixture(p.fixture).kind.as_deref() == Some("mutant")).count();
+        let mut lines = vec![format!("mutants: {mutants}"), format!("planted: {n}"), format!("kills: {killed}/{n}")];
         let mut genres: Vec<&str> = planted.iter().map(|p| p.genre).collect();
         genres.sort_unstable();
         genres.dedup();
@@ -151,28 +165,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn evidence_is_a_command_or_a_design_id() {
+    fn evidence_is_a_command_the_trial_ran_or_a_design_id() {
+        let designs: BTreeMap<String, String> = [
+            ("30", "## design change\n5. **the reader defects**"),
+            ("17", "## checks this design carries\n10. the eval"),
+            ("12", "## responsibility\nthe vault container"),
+        ]
+        .map(|(n, t)| (n.to_string(), t.to_string()))
+        .into();
+        let commands = vec![
+            "cd /w && cargo test -p xtask -- eval_trace 2>&1 | tail -5",
+            "T=$(mktemp -d) && git archive HEAD | tar -x -C $T && cd $T",
+            "./target/debug/bp walk x --json; echo $?",
+            "head -40 crates/bp-diagram/src/svg.rs",
+        ];
+        let proof = Proof { commands, designs: &designs };
         for yes in [
             "`cargo test -p xtask -- eval_trace` fails: 0 calls",
             "`T=$(mktemp -d) && git archive HEAD | tar -x -C $T` then the probe",
             "`./target/debug/bp walk x --json` exits 2",
+            "`head -40 crates/bp-diagram/src/svg.rs` shows the divide",
             "breaks projects/bp/designs/system, the check of 10",
             "against shared/conventions/convention.testing, item 6",
             "the reader must count it (30, design change 5)",
+            "the eval of (17, check 10) says so",
             "the row of design 21 says so",
-            "the cap (22)",
         ] {
-            assert!(evidence(yes), "{yes}");
+            assert!(evidence(yes, &proof), "{yes}");
         }
         for no in [
             "the span `drill_box` returns the wrong width",
             "`n.rect.right() - 12 / w` is wrong",
             "`cargo` is not run",
+            "Run `cargo test -p bp-diagram` to see it fail.",
             "line 113 subtracts where it should divide (12 lines)",
             "the count is wrong",
             "in (2026) it changed",
+            "The width is off by one (12, not 9).",
+            "The drill box shrinks (10) pixels too far.",
+            "`$width - 12` divides here",
+            "the cap (22)",
+            "the designer 21 times",
+            "(31, check 10) names no design",
         ] {
-            assert!(!evidence(no), "{no}");
+            assert!(!evidence(no, &proof), "{no}");
         }
     }
 }

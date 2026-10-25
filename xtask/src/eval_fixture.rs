@@ -48,8 +48,11 @@ use anyhow::{Context, Result, bail};
 /// What opens each line of a fixture's `mutant_diff:` block.
 pub const INDENT: &str = "    ";
 
-/// A cited range this many lines long or longer covers no planted item: it points at nothing.
+/// A location that cites this many lines or more covers no planted item: it points at nothing.
 const WIDE: u32 = 20;
+
+/// How many lines from an item a row may sit and still be on it: a control's `known:` entry, or a duplicate.
+pub const NEAR: u32 = 3;
 
 pub struct Fixture {
     pub id: String,
@@ -352,17 +355,23 @@ impl Truth {
     }
 
     /// Whether a row's `location` points inside this item (30, design change 2): the same file, and a cited range
-    /// that overlaps the item's lines and is shorter than [`WIDE`] lines, since a wider one points at nothing. An item
-    /// with no line is its whole file.
+    /// that overlaps the item's lines. The ranges of one location cite fewer than [`WIDE`] lines in all, since a wider
+    /// citation points at nothing, and a reversed range (`113-1`) covers nothing. An item with no line is its whole
+    /// file.
     pub fn covers(&self, location: &str) -> bool {
         let Some((_, lines)) = locate(location).filter(|(p, _)| self.in_file(p)) else { return false };
-        let inside = |&(a, b): &(u32, u32)| {
-            b.saturating_sub(a) < WIDE && self.lines.iter().any(|&(c, d)| a <= d && c <= b.max(a))
-        };
-        self.lines.is_empty() || lines.iter().any(inside)
+        let cited: u32 = lines.iter().map(|&(a, b)| if b < a { WIDE } else { b - a + 1 }).fold(0, u32::saturating_add);
+        let inside = |&(a, b): &(u32, u32)| a <= b && self.lines.iter().any(|&(c, d)| a <= d && c <= b);
+        self.lines.is_empty() || (cited < WIDE && lines.iter().any(inside))
     }
 
-    /// Whether a row's `location` is in this item's file within `lines` lines of it.
+    /// Whether `text` holds one `match:` slot of this item: it names the item's substance, if not all of it.
+    pub fn touched_by(&self, text: &str) -> bool {
+        let text = text.to_lowercase();
+        self.keywords.iter().any(|slot| slot.iter().any(|w| text.contains(w.as_str())))
+    }
+
+    /// Whether a row's `location` is in this item's file within `lines` lines of it; never for an item with no line.
     pub fn near(&self, location: &str, lines: u32) -> bool {
         self.apart(location).0 <= lines
     }

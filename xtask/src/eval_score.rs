@@ -2,7 +2,7 @@
 //! the outcome. The steps are named calls and records, not verb order, because verb order carried only dispatch shape
 //! (17 E7). Each skill's steps come from its row in 21.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bp_operation::Action;
 
@@ -10,6 +10,7 @@ use crate::eval::Skill;
 use crate::eval_end::End;
 use crate::eval_fixture::{Fixture, Review};
 use crate::eval_grade::{Verdict, verdicts};
+use crate::eval_kills::Proof;
 use crate::eval_trace::{BpCall, Trace};
 
 /// A review passes when its review is recorded (`walk --done`) and finds at least this share of the ground truth.
@@ -65,13 +66,22 @@ impl Graded {
 
 /// Fills the scores of a trial from its transcript and its vault log, which holds the `end:` lines of a worker.
 /// `head` is the head of the trial's pull request: a mutant's planted head, not the fixture's.
-pub fn score(g: &mut Graded, skill: &Skill, fx: &Fixture, head: &str, trace: &Trace, log: &str) {
+/// `designs` holds the numbered designs a row may cite as evidence (`eval_kills::designs`).
+pub fn score(
+    g: &mut Graded,
+    skill: &Skill,
+    fx: &Fixture,
+    head: &str,
+    trace: &Trace,
+    log: &str,
+    designs: &BTreeMap<String, String>,
+) {
     let calls = trace.bp_calls();
     let allowed = skill.allowed();
     g.reached = !calls.is_empty();
     g.out_of_row = calls.iter().filter(|c| !allowed.contains(&c.verb.as_str())).count();
     match skill.action {
-        Action::Review => review(g, fx, head, trace, &calls, log),
+        Action::Review => review(g, fx, (head, designs), trace, &calls, log),
         _ => worker(g, skill, fx, &calls, log),
     }
     // A trial the runner killed, or that left no transcript, did not finish: whatever the sandbox holds is not its result.
@@ -80,7 +90,14 @@ pub fn score(g: &mut Graded, skill: &Skill, fx: &Fixture, head: &str, trace: &Tr
 
 /// `bp-review`: the steps are the skill's steps 1 to 5. The outcome on a past review's fixture is recall against the
 /// ground truth. On a planted fixture it is every item killed, and on a control no false row (30, design change 2).
-fn review(g: &mut Graded, fx: &Fixture, head: &str, trace: &Trace, calls: &[BpCall], log: &str) {
+fn review(
+    g: &mut Graded,
+    fx: &Fixture,
+    (head, designs): (&str, &BTreeMap<String, String>),
+    trace: &Trace,
+    calls: &[BpCall],
+    log: &str,
+) {
     let first = |c: &BpCall| c.args.split_whitespace().next().unwrap_or_default().to_string();
     let head = crate::eval_grade::short(head);
     let review = Review::parse(&trace.final_text());
@@ -94,7 +111,7 @@ fn review(g: &mut Graded, fx: &Fixture, head: &str, trace: &Trace, calls: &[BpCa
     g.steps = steps.into_iter().map(|(n, ok)| (n.to_string(), ok)).collect();
     g.end.done = log.lines().any(|l| l.starts_with("record review "));
     let findings = review.map(|r| r.findings).unwrap_or_default();
-    let verdicts = verdicts(fx, &findings);
+    let verdicts = verdicts(fx, &findings, &Proof { commands: trace.commands(), designs });
     let matched: BTreeSet<usize> =
         verdicts.iter().filter_map(|v| if let Verdict::Match(i) = v { Some(*i) } else { None }).collect();
     g.hits = matched.len();
@@ -168,10 +185,10 @@ mod tests {
         let step = |g: &Graded, n: &str| g.steps.iter().find(|s| s.0 == n).unwrap().1;
         let skill = Skill::parse("bp-review").unwrap();
         let mut g = Graded::default();
-        score(&mut g, &skill, &fx, planted, &trace, "");
+        score(&mut g, &skill, &fx, planted, &trace, "", &BTreeMap::new());
         assert!(step(&g, "diff") && step(&g, "review"), "{:?}", g.steps);
         let mut landed = Graded::default();
-        score(&mut landed, &skill, &fx, &fx.head, &trace, "");
+        score(&mut landed, &skill, &fx, &fx.head, &trace, "", &BTreeMap::new());
         assert!(!step(&landed, "diff") && !step(&landed, "review"));
     }
 }

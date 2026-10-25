@@ -151,11 +151,8 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &std::ffi::Os
     let listed: Vec<Value> =
         serde_json::from_str(if listed.trim().is_empty() { "[]" } else { &listed }).context("parse --list --json")?;
     let crates: BTreeSet<String> = listed.iter().filter_map(|m| m["package"].as_str().map(str::to_string)).collect();
-    // A guard mutant writes a literal `true` or `false` into the guard, which any reader sees (30, design change 1).
-    let clean: Vec<&Value> = listed
-        .iter()
-        .filter(|m| m["genre"] != "MatchArmGuard" && ci_clean(code, cargo, &head, m).unwrap_or(false))
-        .collect();
+    let clean: Vec<&Value> =
+        listed.iter().filter(|m| readable(m) && ci_clean(code, cargo, &head, m).unwrap_or(false)).collect();
     eprintln!(
         "mutants: #{pr}: {} of {} candidates pass fmt and clippy ({} s)",
         clean.len(),
@@ -291,6 +288,12 @@ fn planted_lines(diff: &str) -> (usize, usize) {
         (Some(&a), Some(&b)) => (a, b),
         _ => (cut.unwrap_or(1), cut.unwrap_or(1)),
     }
+}
+
+/// Whether a reader could not see the mutant in the diff: a guard mutant (`MatchArmGuard`) writes a literal `true` or
+/// `false` into the guard, which any reader sees (30, design change 1).
+fn readable(m: &Value) -> bool {
+    m["genre"] != "MatchArmGuard"
 }
 
 /// `count` survivors in an order shuffled by `seed`, at most one from each function: two mutants of one function are
@@ -436,6 +439,15 @@ mod tests {
         let all = Fixture::load(dir.path(), None).unwrap();
         assert_eq!(all.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["control-1", "mutant-1-1"]);
         assert_eq!(all[1].mutant.as_ref().map(|m| (m.genre.as_str(), m.seed)), Some(("UnaryOperator", 3)));
+    }
+
+    #[test]
+    fn a_guard_mutant_is_dropped() {
+        let listed: Vec<Value> =
+            serde_json::from_str(r#"[{"name":"a","genre":"MatchArmGuard"},{"name":"b","genre":"BinaryOperator"}]"#)
+                .unwrap();
+        let kept: Vec<&str> = listed.iter().filter(|m| readable(m)).filter_map(|m| m["name"].as_str()).collect();
+        assert_eq!(kept, ["b"]);
     }
 
     #[test]

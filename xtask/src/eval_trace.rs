@@ -135,6 +135,8 @@ fn calls_in(command: &str) -> Vec<BpCall> {
 #[derive(Clone, Copy, PartialEq)]
 enum Quote {
     Single,
+    /// ANSI-C quoting, `$'…'`: a backslash escapes, so `\'` does not close it.
+    Ansi,
     Double,
     /// `$(` inside double quotes, with the depth of the parentheses opened in it.
     Sub(u32),
@@ -152,7 +154,7 @@ fn segments(command: &str) -> Vec<String> {
     let mut chars = command.chars().peekable();
     let mut word_start = true;
     while let Some(c) = chars.next() {
-        // An escaped character is text, outside single quotes.
+        // An escaped character is text, outside single quotes. In `$'…'` it is too, so `$'it\'s'` stays one word.
         if c == '\\' && stack.last() != Some(&Quote::Single) {
             let segment = out.last_mut().expect("one segment");
             segment.push(c);
@@ -161,7 +163,7 @@ fn segments(command: &str) -> Vec<String> {
             continue;
         }
         let split = match stack.last().copied() {
-            Some(Quote::Single) => {
+            Some(Quote::Single | Quote::Ansi) => {
                 if c == '\'' {
                     stack.pop();
                 }
@@ -184,6 +186,13 @@ fn segments(command: &str) -> Vec<String> {
                 _ => false,
             },
             top => match c {
+                '$' if chars.peek() == Some(&'\'') => {
+                    out.last_mut().expect("one segment").push(c);
+                    out.last_mut().expect("one segment").extend(chars.next());
+                    stack.push(Quote::Ansi);
+                    word_start = false;
+                    continue;
+                }
                 '#' if word_start => {
                     while chars.next_if(|n| *n != '\n').is_some() {}
                     continue;
@@ -419,6 +428,7 @@ mod tests {
         assert_eq!(verbs("# don't; bp set x\nbp show z"), ["show"], "a comment opens no quote");
         assert_eq!(verbs("find . -exec cat {} \\; ; bp walk q"), ["walk"], "an escaped semicolon");
         assert_eq!(verbs("echo hi >\"out file\"; bp show y"), ["show"], "a quoted redirect target");
+        assert_eq!(verbs("echo $'it\\'s; x'; bp set n status x"), ["set"], "an escaped quote in ANSI-C quoting");
     }
 
     #[test]

@@ -15,8 +15,9 @@ use anyhow::{Context, Result, bail};
 
 use crate::eval::Skill;
 use crate::eval_arms::{FILLER, PROTOCOL, body_of};
+use crate::eval_fixture::NEAR;
 use crate::eval_fixture::{Finding, Fixture};
-use crate::eval_kills::evidence;
+use crate::eval_kills::{Proof, evidence};
 use crate::eval_score::{Graded, score};
 use crate::eval_trace::{Trace, sha256};
 
@@ -48,19 +49,22 @@ pub fn bundle_hash(root: &Path, skill: &Skill) -> Result<String> {
 /// [`bundle_hash`] of the files at the commit `sha`, and the first line of the skill's body there: what an arm built
 /// from that commit ran, and the line its preload shows.
 pub(crate) fn ref_hash(root: &Path, skill: &Skill, sha: &str) -> Result<(String, String)> {
-    let show = |path: String| -> Result<String> {
-        let out = Command::new("git").args(["show", &format!("{sha}:{path}")]).current_dir(root).output()?;
-        if !out.status.success() {
-            bail!("git show {sha}:{path}: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    };
+    let show = |path: String| show_at(root, sha, &path);
     let mut text = show(format!("bundle/roles/{}.md", skill.role_file()))?;
     for name in skill.preloaded() {
         text += &show(format!("bundle/skills/{name}/SKILL.md"))?;
     }
     let body = show(format!("bundle/skills/{}/SKILL.md", skill.name))?;
     Ok((hash_object(&text)?, marker(&body)))
+}
+
+/// The file at `path` in the commit `sha`, byte for byte.
+pub(crate) fn show_at(root: &Path, sha: &str, path: &str) -> Result<String> {
+    let out = Command::new("git").args(["show", &format!("{sha}:{path}")]).current_dir(root).output()?;
+    if !out.status.success() {
+        bail!("git show {sha}:{path}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The first line of a skill's body: the text a preload of that body shows.
@@ -129,20 +133,26 @@ pub(crate) fn cells(row: &str) -> Vec<&str> {
     out
 }
 
-/// The verdict of each row. A control's row is `Known` when it is within 3 lines of a `known:` entry or holds its
-/// `match:` words, and false otherwise. On a planted fixture a row matches the first open item whose span it points
-/// into when it carries evidence ([`evidence`]); on a past review's, the item its words fit. A row that matches no
-/// open item but points into a matched one is a duplicate, so a second true row is not a false one.
-pub fn verdicts(fx: &Fixture, findings: &[Finding]) -> Vec<Verdict> {
+/// The verdict of each row. A control's row is `Known` when it is within [`NEAR`] lines of a `known:` entry or holds
+/// its `match:` words, and false otherwise. On a planted fixture a row with evidence ([`evidence`]) matches the first
+/// open item whose span it points into; when two items share the span, it must also hold one of the item's `match:`
+/// slots. On a past review's fixture a row matches the item its words fit. A row that matches no open item is a
+/// duplicate when it sits on a matched one, so a second true row is not a false one: on a planted fixture it points
+/// into the item's span; on a past review's it is within [`NEAR`] lines of the item, or in its file and holding one of
+/// its slots.
+pub fn verdicts(fx: &Fixture, findings: &[Finding], proof: &Proof) -> Vec<Verdict> {
     if fx.kind.as_deref() == Some("control") {
-        let known = |f: &Finding| fx.known.iter().position(|k| k.near(&f.location, 3) || k.worded(&f.text));
+        let known = |f: &Finding| fx.known.iter().position(|k| k.near(&f.location, NEAR) || k.worded(&f.text));
         return findings.iter().map(|f| known(f).map_or(Verdict::False, Verdict::Known)).collect();
     }
+    let planted = fx.genre().is_some();
     let mut matched = BTreeSet::new();
-    let first: Vec<Option<Verdict>> = if fx.genre().is_some() {
+    let first: Vec<Option<Verdict>> = if planted {
         let mut kill = |f: &Finding| {
-            let open = (0..fx.truth.len()).find(|i| !matched.contains(i) && fx.truth[*i].covers(&f.location));
-            let i = open.filter(|_| evidence(&f.text))?;
+            let covering: Vec<usize> = (0..fx.truth.len()).filter(|i| fx.truth[*i].covers(&f.location)).collect();
+            let shared = covering.len() > 1;
+            let open = |i: &usize| !matched.contains(i) && (!shared || fx.truth[*i].touched_by(&f.text));
+            let i = covering.into_iter().find(open).filter(|_| evidence(&f.text, proof))?;
             matched.insert(i);
             Some(Verdict::Match(i))
         };
@@ -151,11 +161,19 @@ pub fn verdicts(fx: &Fixture, findings: &[Finding]) -> Vec<Verdict> {
         let mut take = |i: usize| if matched.insert(i) { Verdict::Match(i) } else { Verdict::Duplicate(i) };
         fx.assign(findings).into_iter().map(|a| a.map(&mut take)).collect()
     };
-    let on = |f: &Finding| matched.iter().copied().find(|i| fx.truth[*i].covers(&f.location));
+    let on = |f: &Finding, i: usize| {
+        let t = &fx.truth[i];
+        if planted {
+            t.covers(&f.location)
+        } else {
+            t.near(&f.location, NEAR) || (t.covers(&f.location) && t.touched_by(&f.text))
+        }
+    };
+    let duplicate = |f: &Finding| matched.iter().copied().find(|i| on(f, *i));
     findings
         .iter()
         .zip(first)
-        .map(|(f, v)| v.unwrap_or_else(|| on(f).map_or(Verdict::False, Verdict::Duplicate)))
+        .map(|(f, v)| v.unwrap_or_else(|| duplicate(f).map_or(Verdict::False, Verdict::Duplicate)))
         .collect()
 }
 
@@ -166,6 +184,8 @@ impl Grade {
         let body = std::fs::read_to_string(root.join("bundle/skills").join(&skill.name).join("SKILL.md"))
             .with_context(|| format!("read the body of {}", skill.name))?;
         let shipped = marker(&body);
+        // A numbered design cite is evidence only when the design exists (30, design change 2).
+        let designs = crate::eval_kills::designs(std::env::var_os("BP_REDESIGN").as_deref().map(Path::new));
         let mut refs = BTreeMap::new();
         let mut markers = BTreeMap::new();
         let mut trials = Vec::new();
@@ -226,7 +246,7 @@ impl Grade {
             // A trial from before the `.head` file ran at the fixture's own head.
             let head = std::fs::read_to_string(store.join(format!("{trial}.head")))
                 .map_or_else(|_| fx.head.clone(), |h| h.trim().to_string());
-            score(&mut graded, skill, fx, &head, &trace, &log);
+            score(&mut graded, skill, fx, &head, &trace, &log, &designs);
             trials.push(graded);
         }
         let holdout = crate::eval_fixture::holdout(fixtures).len();
@@ -287,6 +307,19 @@ impl Grade {
             numbers.sort_unstable();
             if numbers != (1..=numbers.len()).collect::<Vec<_>>() {
                 out.push(format!("{arm}-{fixture}: trial numbers {numbers:?} are not 1 to {}", numbers.len()));
+            }
+        }
+        // A planted set's numbers are over every item: an arm that ran part of the set would count the rest as
+        // missed, and `holdout_gain` would stand on trials that never ran.
+        if self.kill_set() {
+            let runs = |arm: &str, id: &str| self.trials.iter().filter(|t| t.arm == arm && t.fixture == id).count();
+            let most = self.arms().iter().flat_map(|a| self.fixtures.iter().map(|f| runs(a, &f.id))).max().unwrap_or(0);
+            for arm in self.arms() {
+                let full = self.fixtures.iter().filter(|f| runs(arm, &f.id) == most).count();
+                if full < self.fixtures.len() {
+                    let times = if most > 1 { format!(" {most} times") } else { String::new() };
+                    out.push(format!("the {arm} arm ran {full} of {} fixtures{times}; rerun it", self.fixtures.len()));
+                }
             }
         }
         out
@@ -391,23 +424,39 @@ mod tests {
         review.unwrap().findings
     }
 
+    fn fixture(path: &str) -> Fixture {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let id = Path::new(path).file_stem().unwrap().to_str().unwrap();
+        Fixture::parse(id, &std::fs::read_to_string(root.join("evals").join(path)).unwrap()).unwrap()
+    }
+
+    const NO_DESIGNS: &BTreeMap<String, String> = &BTreeMap::new();
+
     /// Run 3's `with-pr-20-1`: the first row names item 2's gap at item 1's line, and the third row matches item 2 by
-    /// its words. The first is a second true row on item 2, not a false one. A planted span counts its first killing row.
+    /// its words. The first is a second true row on item 2, not a false one. A row in item 1's file that names none of
+    /// its substance is false. A planted span counts its first killing row.
     #[test]
     fn a_second_row_on_a_matched_item_is_duplicate() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let pr_20 =
-            Fixture::parse("pr-20", &std::fs::read_to_string(root.join("evals/bp-review/pr-20.md")).unwrap()).unwrap();
+        let pr_20 = fixture("bp-review/pr-20.md");
+        let none = Proof { commands: Vec::new(), designs: NO_DESIGNS };
         let run_3 = rows(
             "| warn | xtask/src/lines.rs:20 | The `#[cfg(test)]` cutoff is not tested by the `file-cap` block, because its only over-cap file has no test module; to pass, add a case where a file has at most 500 lines before `#[cfg(test)]` and more than 500 in total, and assert that `cargo xtask lines` exits 0. |\n\
              | warn | xtask/src/lines.rs:34 | Skipping whole `tests/` and `target` directories is not in the Shape of projects/bp/issues/the-file-cap, which counts each `.rs` file over `crates/` and `xtask/`, and no check block tests it. |\n\
              | warn | projects/bp/issues/the-file-cap | The `file-cap` block tests only 501 lines, so the other side of the boundary is never asserted. |\n\
              | warn | xtask/src/lines.rs:35 | The walk skips every `tests/` dir, which the Shape does not name. |\n\
-             | warn | xtask/src/other.rs:3 | An unrelated taste. |",
+             | warn | xtask/src/other.rs:3 | An unrelated taste. |\n\
+             | warn | xtask/src/lines.rs:3 | The walk leaks a file handle. |",
         );
         assert_eq!(
-            verdicts(&pr_20, &run_3),
-            [Verdict::Duplicate(1), Verdict::Match(2), Verdict::Match(1), Verdict::Duplicate(2), Verdict::False]
+            verdicts(&pr_20, &run_3, &none),
+            [
+                Verdict::Duplicate(1),
+                Verdict::Match(2),
+                Verdict::Match(1),
+                Verdict::Duplicate(2),
+                Verdict::False,
+                Verdict::False
+            ]
         );
         let mutant = Fixture::parse(
             "mutant-1-1",
@@ -416,7 +465,8 @@ mod tests {
         .unwrap();
         let kill = "| error | src/a.rs:10 | `cargo test -p a -- width` fails: 3 for 9 |";
         let prose = "| warn | src/a.rs:10 | The width divides where it should subtract. |";
-        let found = |text: &str| verdicts(&mutant, &rows(text));
+        let ran = Proof { commands: vec!["cd /w && cargo test -p a -- width 2>&1 | tail"], designs: NO_DESIGNS };
+        let found = |text: &str| verdicts(&mutant, &rows(text), &ran);
         assert_eq!(
             found(&format!("{prose}\n{kill}\n{kill}")),
             [Verdict::Duplicate(0), Verdict::Match(0), Verdict::Duplicate(0)]
@@ -425,6 +475,29 @@ mod tests {
         assert_eq!(found(&kill.replace("a.rs:10", "a.rs:40")), [Verdict::False], "outside the span");
         assert_eq!(found(&kill.replace("a.rs:10", "a.rs:1-60")), [Verdict::False], "a range that points at nothing");
         assert_eq!(found(&kill.replace("src/a.rs:10", "`src/a.rs:8-12`")), [Verdict::Match(0)]);
+        assert_eq!(found(&kill.replace("a.rs:10", "a.rs:1-20")), [Verdict::False], "a 20-line range");
+        assert_eq!(
+            found(&kill.replace("a.rs:10", "a.rs:1-4, 5-8, 9-12, 13-16, 17-20, 21-24")),
+            [Verdict::False],
+            "six narrow ranges that cite 24 lines in total"
+        );
+        assert_eq!(found(&kill.replace("a.rs:10", "a.rs:10-1")), [Verdict::False], "a reversed range");
+        let unran = Proof { commands: vec!["cargo test -p b"], designs: NO_DESIGNS };
+        assert_eq!(verdicts(&mutant, &rows(kill), &unran), [Verdict::False], "a command the trial never ran");
+    }
+
+    /// Escapes 19 and 20 share a span: a kill must name one item's substance, and the same row twice kills one item.
+    #[test]
+    fn a_shared_span_needs_the_items_words() {
+        let escape = fixture("bp-review-mutants/escape-11-19-20.md");
+        let ran = Proof { commands: vec!["printf 'a 2>&1' | cargo test -p xtask trace"], designs: NO_DESIGNS };
+        let row = "| error | xtask/src/eval_trace.rs:89 | `cargo test -p xtask trace` shows `2>&1` read as a verb |";
+        assert_eq!(
+            verdicts(&escape, &rows(&format!("{row}\n{row}")), &ran),
+            [Verdict::Match(2), Verdict::Duplicate(2)]
+        );
+        let bare = "| error | xtask/src/eval_trace.rs:89 | `cargo test -p xtask trace` fails |";
+        assert_eq!(verdicts(&escape, &rows(bare), &ran), [Verdict::False], "it names neither item");
     }
 
     #[test]
@@ -447,7 +520,8 @@ mod tests {
             "kind: control\nbase: b\nhead: h\ntitle: T\nknown: src/t.rs:99 | No if. | match: if|while, call\nknown: src/t.rs:50 | A split.\ntruth:\n---\nbody",
         )
         .unwrap();
-        let found = |text: &str| verdicts(&control, &rows(text));
+        let none = Proof { commands: Vec::new(), designs: NO_DESIGNS };
+        let found = |text: &str| verdicts(&control, &rows(text), &none);
         assert_eq!(found("| warn | src/t.rs:102 | anything |"), [Verdict::Known(0)]);
         assert_eq!(found("| warn | src/t.rs:103 | anything |"), [Verdict::False]);
         assert_eq!(found("| warn | src/u.rs:1 | a call after `while` is not counted |"), [Verdict::Known(0)]);
@@ -455,5 +529,11 @@ mod tests {
             found("| warn | src/t.rs:48 | x |\n| warn | src/t.rs:10 | y |"),
             [Verdict::Known(1), Verdict::False]
         );
+        let control_62 = fixture("bp-review-mutants/control-62.md");
+        let row =
+            "| warn | xtask/src/eval_trace.rs:86 | A bp call after `while` is not counted: the prefix list lacks it. |";
+        assert_eq!(verdicts(&control_62, &rows(row), &none), [Verdict::Known(0)]);
+        let row = "| warn | xtask/src/eval_trace.rs:86 | A quoted `;` still splits the segment. |";
+        assert_eq!(verdicts(&control_62, &rows(row), &none), [Verdict::Known(1)]);
     }
 }

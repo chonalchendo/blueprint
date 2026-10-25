@@ -1,6 +1,6 @@
 //! The kill grade through the binary with a fake agent (30, design change 2): no model runs. A planted set of one
-//! mutant and one control runs two arms. `with` writes a row in the mutant's span with a command in backticks, and a
-//! control row next to the `known:` entry; `old` writes the same mutant row with no evidence, and a control row
+//! mutant and one control runs two arms. `with` runs a command and writes a row in the mutant's span that cites it in
+//! backticks, and a control row next to the `known:` entry; `old` writes the same mutant row with no evidence, and a control row
 //! elsewhere. Needs a built `bp` next to the xtask binary; the test says so and passes without one.
 
 mod common;
@@ -20,7 +20,9 @@ T=$BP_EVAL_TRANSCRIPT
 LINE=$(awk 'f >= 2 && NF { print; exit } /^---$/ { f++ }' "$FAKE_SKILL" | sed 's/\\/\\\\/g; s/"/\\"/g')
 printf '{"type":"user","isMeta":true,"message":{"content":"<skill-format>true</skill-format>\\n%s"}}\n' "$LINE" >> "$T"
 case "$BP_EVAL_ARM-$BP_EVAL_FIXTURE" in
-with-mutant-*) ROW='| error | src/a.rs:3 | `cargo test -p a | grep width` fails: the width is 3, not 2 |' ;;
+with-mutant-*)
+  printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cd /c && cargo test -p a | grep width"}}]}}\n' >> "$T"
+  ROW='| error | src/a.rs:3 | `cargo test -p a | grep width` fails: the width is 3, not 2 |' ;;
 *-mutant-*) ROW='| error | src/a.rs:3 | The width divides where it should subtract. |' ;;
 with-control-*) ROW='| warn | src/a.rs:3 | The width is fixed at 3. |' ;;
 *) ROW='| warn | src/a.rs:9 | A taste. |' ;;
@@ -115,6 +117,7 @@ fn a_kill_needs_the_span_and_evidence_and_a_known_control_row_is_not_false() {
             "arms: with, old",
             "skill_loaded: all",
             "mutants: 1",
+            "planted: 1",
             "kills: 1/1",
             "kills_BinaryOperator: 1/1",
             "control_false: 0.00",
@@ -144,6 +147,14 @@ fn a_kill_needs_the_span_and_evidence_and_a_known_control_row_is_not_false() {
         assert!(code == Some(2) && out.contains("lower bound of holdout_gain is -0.12, not above 0"), "{out}");
     }
     std::fs::write(&file, &text).unwrap();
+
+    // An arm that ran part of the set: the grader names the gap and writes nothing.
+    let aside = t.join("old-control-1-1.jsonl");
+    std::fs::rename(store.join("old-control-1-1.jsonl"), &aside).unwrap();
+    let (code, out) = grade(&[]);
+    assert!(code == Some(2) && out.contains("the old arm ran 1 of 2 fixtures; rerun it"), "{out}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    std::fs::rename(&aside, store.join("old-control-1-1.jsonl")).unwrap();
 
     // An arm built from a git ref names its commit in each trial's hash file, and grades against that commit's files.
     let sha = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(root()).output().unwrap();

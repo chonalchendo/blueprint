@@ -2,8 +2,8 @@ kind: control
 base: 7b71a68d92873a4643fe2f2faf3f6b50f522283d
 head: b7ae4913b1f535467606e08ca3c441f43b1742ed
 title: The trace reader skips heredoc bodies and redirects
-known: xtask/src/eval_trace.rs:99 | The prefix words lack if, elif, while and until, so a bp call after one is not counted (30, design change 5).
-known: xtask/src/eval_trace.rs:96 | A quoted ; still splits the command, so text after it can read as a call or drop one (30, design change 5).
+known: xtask/src/eval_trace.rs:99 | The prefix words lack if, elif, while and until, so a bp call after one is not counted (30, design change 5). | match: if|while|until, prefix|keyword
+known: xtask/src/eval_trace.rs:96 | A quoted ; still splits the command, so text after it can read as a call or drop one (30, design change 5). | match: quot, ;|semicolon, split
 truth:
 ---
 ## Problem

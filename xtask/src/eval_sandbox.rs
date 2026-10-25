@@ -48,8 +48,8 @@ impl Sandbox {
     /// `needs-response`; a complete leaves the issue open and unclaimed. `repo` holds the base and the head.
     ///
     /// `check_arm` asserts, before the agent costs anything, that the clone holds the arm: the skill and the role's
-    /// `skills:` line as shipped for `with` and `filler`, neither for `without`. A skill placed wrong reads as zero
-    /// recall (RA 5.5, 6). `work` holds the arm binaries and the cargo target directory that the sandbox shares.
+    /// `skills:` line as shipped for `with` and `filler`, neither for `without`, and for an arm from a git ref (the
+    /// sha after the arm) that commit's skill body. A skill placed wrong reads as zero recall (RA 5.5, 6). `work` holds the arm binaries and the cargo target directory that the sandbox shares.
     pub fn build(
         repo: &Path,
         source: &Path,
@@ -57,7 +57,7 @@ impl Sandbox {
         work: &Path,
         fx: &Fixture,
         skill: &Skill,
-        check_arm: Option<&str>,
+        check_arm: Option<(&str, Option<&str>)>,
     ) -> Result<Self> {
         let exe = std::env::current_exe().context("find the xtask binary")?;
         let tmp = crate::scratch::fresh(&work.join("tmp"), 3)?.canonicalize()?;
@@ -139,8 +139,8 @@ impl Sandbox {
         }
         capture(install.args(["install", "--target", "claude", "--json"]))?;
 
-        if let Some(arm) = check_arm {
-            sb.assert_arm(skill, arm)?;
+        if let Some((arm, at)) = check_arm {
+            sb.assert_arm(skill, arm, at)?;
         }
         if let Some((head, title)) = &fx.stack {
             // The dependency holds an open pull request at its landed head and a check that needs no build, so the
@@ -194,7 +194,7 @@ impl Sandbox {
     }
 
     /// The installed clone holds what the arm says (see [`Sandbox::build`]).
-    fn assert_arm(&self, skill: &Skill, arm: &str) -> Result<()> {
+    fn assert_arm(&self, skill: &Skill, arm: &str, at: Option<&str>) -> Result<()> {
         let code = self.code();
         let listed = |role: &Path| -> Result<Vec<String>> {
             let text = std::fs::read_to_string(role).with_context(|| format!("read {}", role.display()))?;
@@ -215,6 +215,12 @@ impl Sandbox {
         if !ok {
             bail!(
                 "the {arm} arm's clone does not hold the arm: role skills {have:?} (shipped {want:?}), skill file {}",
+                installed.display()
+            );
+        }
+        if let Some(sha) = at.filter(|sha| !holds_ref_body(&body, Path::new("."), sha, skill).unwrap_or(false)) {
+            bail!(
+                "the {arm} arm's clone does not hold the body of {sha}: {} differs; rebuild the arm",
                 installed.display()
             );
         }
@@ -381,6 +387,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Runs a command and returns its stdout. A failure carries stderr, and stdout when it holds an envelope.
+/// Whether `installed` is the skill's body at the commit `sha` of the repository at `root`, byte for byte: what an
+/// arm built from that commit must have installed (30, design change 2).
+fn holds_ref_body(installed: &str, root: &Path, sha: &str, skill: &Skill) -> Result<bool> {
+    Ok(installed == crate::eval_grade::show_at(root, sha, &format!("bundle/skills/{}/SKILL.md", skill.name))?)
+}
+
 pub(crate) fn capture(cmd: &mut Command) -> Result<String> {
     let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
     if !out.status.success() {
@@ -397,6 +409,20 @@ pub(crate) fn capture(cmd: &mut Command) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_arm_from_a_ref_holds_that_refs_body() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let skill = Skill::parse("bp-review").unwrap();
+        let Ok(old) = crate::eval_grade::show_at(&root, "fc51d9b", "bundle/skills/bp-review/SKILL.md") else {
+            eprintln!("skipped: history is shallow");
+            return;
+        };
+        assert!(holds_ref_body(&old, &root, "fc51d9b", &skill).unwrap());
+        let shipped = std::fs::read_to_string(root.join("bundle/skills/bp-review/SKILL.md")).unwrap();
+        assert!(old != shipped && !holds_ref_body(&shipped, &root, "fc51d9b", &skill).unwrap(), "a stale build");
+        assert!(holds_ref_body(&old, &root, "0000000", &skill).is_err(), "no such commit");
+    }
 
     #[test]
     fn a_planted_head_differs_from_the_landed_head_by_the_mutant_alone() {
