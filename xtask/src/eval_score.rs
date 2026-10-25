@@ -9,6 +9,7 @@ use bp_operation::Action;
 use crate::eval::Skill;
 use crate::eval_end::End;
 use crate::eval_fixture::{Fixture, Review};
+use crate::eval_grade::{Verdict, verdicts};
 use crate::eval_trace::{BpCall, Trace};
 
 /// A review passes when its review is recorded (`walk --done`) and finds at least this share of the ground truth.
@@ -29,6 +30,8 @@ pub struct Graded {
     pub hash: Option<String>,
     /// The fixture and arm protocol this trial ran on, from the second line of `<trial>.hash`; empty when absent.
     pub stamp: String,
+    /// The commit whose body an arm built from a git ref ran (`ref:` in `<trial>.hash`).
+    pub body_ref: Option<String>,
     pub models: BTreeSet<String>,
     /// The skill is where the arm puts it: preloaded in `with`, absent in `without`, filler in `filler`.
     pub loaded: bool,
@@ -41,8 +44,10 @@ pub struct Graded {
     pub hits: usize,
     pub prose_hits: usize,
     pub truth: usize,
-    /// Each finding's location, its text and the ground-truth item it matches (a position), if any.
-    pub findings: Vec<(String, String, Option<usize>)>,
+    /// Each finding's location, its text and its verdict.
+    pub findings: Vec<(String, String, Verdict)>,
+    /// The planted items this trial killed: matched by a row of a recorded review, in a trial that finished.
+    pub killed: BTreeSet<usize>,
     /// What the sandbox held at the end. `end.done` is the skill's stop: the review is recorded, or the worker's
     /// `walk --done` is true.
     pub end: End,
@@ -73,7 +78,8 @@ pub fn score(g: &mut Graded, skill: &Skill, fx: &Fixture, head: &str, trace: &Tr
     g.pass &= g.failure.is_none();
 }
 
-/// `bp-review`: the steps are the skill's steps 1 to 5; the outcome is recall against the ground truth.
+/// `bp-review`: the steps are the skill's steps 1 to 5. The outcome on a past review's fixture is recall against the
+/// ground truth. On a planted fixture it is every item killed, and on a control no false row (30, design change 2).
 fn review(g: &mut Graded, fx: &Fixture, head: &str, trace: &Trace, calls: &[BpCall], log: &str) {
     let first = |c: &BpCall| c.args.split_whitespace().next().unwrap_or_default().to_string();
     let head = crate::eval_grade::short(head);
@@ -88,12 +94,22 @@ fn review(g: &mut Graded, fx: &Fixture, head: &str, trace: &Trace, calls: &[BpCa
     g.steps = steps.into_iter().map(|(n, ok)| (n.to_string(), ok)).collect();
     g.end.done = log.lines().any(|l| l.starts_with("record review "));
     let findings = review.map(|r| r.findings).unwrap_or_default();
-    let assigned = fx.assign(&findings);
-    g.hits = fx.hits(&assigned);
+    let verdicts = verdicts(fx, &findings);
+    let matched: BTreeSet<usize> =
+        verdicts.iter().filter_map(|v| if let Verdict::Match(i) = v { Some(*i) } else { None }).collect();
+    g.hits = matched.len();
     g.prose_hits = fx.named_in(&trace.final_text());
     g.truth = fx.truth.len();
-    g.findings = findings.iter().zip(assigned).map(|(f, item)| (f.location.clone(), f.text.clone(), item)).collect();
-    g.pass = g.end.done && g.truth > 0 && crate::eval_grade::share(g.hits, g.truth) >= RECALL;
+    g.findings = findings.iter().zip(verdicts).map(|(f, v)| (f.location.clone(), f.text.clone(), v)).collect();
+    let recorded = g.end.done && g.failure.is_none();
+    g.pass = match fx.kind.as_deref() {
+        Some("control") => recorded && !g.findings.iter().any(|f| f.2 == Verdict::False),
+        Some(_) => recorded && g.hits == g.truth,
+        None => g.end.done && g.truth > 0 && crate::eval_grade::share(g.hits, g.truth) >= RECALL,
+    };
+    if fx.genre().is_some() && recorded {
+        g.killed = matched;
+    }
 }
 
 /// `bp-complete` and `bp-respond`: the steps are the calls of 21's row. The outcome is the stop (`walk --done`) with
