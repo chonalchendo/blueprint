@@ -177,12 +177,19 @@ impl Fixture {
                     "span" => m.span = value,
                     "seed" => seed = Some(value.parse().with_context(|| format!("{id}: seed `{value}`"))?),
                     // The diff's own `- ` and `---` lines stay indented, so neither reads as a truth item or the end.
-                    "mutant_diff" => {
-                        while let Some(l) = lines.next_if(|l| l.starts_with(INDENT)) {
-                            m.diff += &l[INDENT.len()..];
+                    // A whitespace-only line before another indented line is still the diff's (an editor may strip
+                    // an empty context line's indent): it is kept as it stands, less the indent.
+                    "mutant_diff" => loop {
+                        let blank = |l: &&str| !l.starts_with(INDENT) && l.trim().is_empty();
+                        let gap = lines.clone().take_while(blank).count();
+                        if !lines.clone().nth(gap).is_some_and(|l| l.starts_with(INDENT)) {
+                            break;
+                        }
+                        for l in lines.by_ref().take(gap + 1) {
+                            m.diff += l.strip_prefix(INDENT).unwrap_or(l.trim_start_matches(' '));
                             m.diff.push('\n');
                         }
-                    }
+                    },
                     "truth" => {}
                     _ => bail!("{id}: unknown key `{key}`"),
                 }
@@ -583,6 +590,24 @@ mod tests {
                 assert_eq!(parent.trim(), f.base, "{}: the base is the squash's parent", f.id);
             }
         }
+    }
+
+    /// An empty context line of a diff is one space; indented, a whitespace-only line. Both forms stay in the diff
+    /// byte for byte, and a blank line after the block is not the diff's.
+    #[test]
+    fn a_whitespace_only_line_in_a_mutant_diff_is_kept() {
+        let text = |diff: &str| {
+            format!(
+                "kind: mutant\nbase: b\nhead: h\ntitle: T\ngenre: G\nspan: a.rs:2-2\nseed: 1\nmutant_diff: |\n{diff}\ntruth:\n- a.rs:2-2 | x\n---\nbody"
+            )
+        };
+        let want = "@@ -1,3 +1,3 @@\n \n-a\n+b\n";
+        let kept = "    @@ -1,3 +1,3 @@\n     \n    -a\n    +b\n";
+        let mutant = |diff: &str| Fixture::parse("m", &text(diff)).unwrap().mutant.unwrap().diff;
+        assert_eq!(mutant(kept), want, "an indented space stays");
+        let stripped = "    @@ -1,3 +1,3 @@\n\n    -a\n    +b\n";
+        assert_eq!(mutant(stripped), "@@ -1,3 +1,3 @@\n\n-a\n+b\n", "a stripped line keeps the block going");
+        assert_eq!(mutant(&format!("{kept}\n  \n")), want, "a blank line after the block is not the diff's");
     }
 
     #[test]

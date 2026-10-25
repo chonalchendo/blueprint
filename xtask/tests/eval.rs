@@ -61,9 +61,9 @@ fn setup() -> Option<Setup> {
     let fixture = format!(
         "base: {base}\nhead: {head}\ntitle: A fixture\ntruth:\n- src/a.rs:1 | The count is wrong. | match: count, wrong\n---\n## Problem\n\nx\n\n## Check\n\n~~~check shell {{name=sandbox expect=0}}\ntest -f README.md\n~~~\n"
     );
-    write(&t.join("fixtures/pr-1.md"), &fixture);
-    write(&t.join("fixtures/pr-2.md"), &fixture);
-    write(&t.join("fixtures/holdout.txt"), "pr-2\n");
+    write(&t.join("bp-review/pr-1.md"), &fixture);
+    write(&t.join("bp-review/pr-2.md"), &fixture);
+    write(&t.join("bp-review/holdout.txt"), "pr-2\n");
 
     common::vault(&t.join("vault"));
     write(&t.join("agent.sh"), AGENT);
@@ -100,7 +100,7 @@ impl Ran {
         let s = setup()?;
         let t = s.dir.path();
         let (fixtures, repo, bp) = (
-            t.join("fixtures").display().to_string(),
+            t.join("bp-review").display().to_string(),
             t.join("repo").display().to_string(),
             s.bp.display().to_string(),
         );

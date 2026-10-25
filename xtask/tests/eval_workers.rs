@@ -92,15 +92,15 @@ fn setup() -> Option<Setup> {
     let complete = |base: &str, extra: &str| {
         format!("base: {base}\nhead: {}\ntitle: A fixture\n{extra}scope: crates/x\n---\n{issue}", shas[2])
     };
-    write(&t.join("complete/plain.md"), &complete(&shas[1], ""));
-    write(&t.join("complete/stacked.md"), &complete(&shas[0], &format!("stack: {} | The dependency\n", shas[1])));
-    write(&t.join("complete/holdout.txt"), "# a held-out fixture\nheld\n");
-    write(&t.join("complete/held.md"), &complete(&shas[1], ""));
+    write(&t.join("bp-complete/plain.md"), &complete(&shas[1], ""));
+    write(&t.join("bp-complete/stacked.md"), &complete(&shas[0], &format!("stack: {} | The dependency\n", shas[1])));
+    write(&t.join("bp-complete/holdout.txt"), "# a held-out fixture\nheld\n");
+    write(&t.join("bp-complete/held.md"), &complete(&shas[1], ""));
     let respond = format!(
         "base: {}\nhead: {}\ntitle: A fixture\ntruth:\n- [major fixed] crates/x/src/a.rs:1 | The count is wrong.\n- [minor declined] dep.txt | A taste.\nprobe: 1 | grep -q 'fn a() {{ 1 }}' crates/x/src/a.rs\n---\n{issue}",
         shas[0], shas[2]
     );
-    write(&t.join("respond/rev-1.md"), &respond);
+    write(&t.join("bp-respond/rev-1.md"), &respond);
     common::vault(&t.join("vault"));
     write(&t.join("agent.sh"), AGENT);
     Some(Setup { dir, bp, head: shas[2].clone() })
@@ -167,7 +167,7 @@ fn lines(text: &str, wanted: &[&str]) {
 #[test]
 fn a_complete_trial_reads_the_stop_the_checks_and_the_file_scope_from_the_sandbox() {
     let Some(s) = setup() else { return };
-    let (file, store) = run(&s, "bp-complete", "complete", "1", &[]);
+    let (file, store) = run(&s, "bp-complete", "bp-complete", "1", &[]);
     let text = std::fs::read_to_string(&file).unwrap();
     // Two fixtures run (the third is held out): the `with` arm passes both, `without` and the escalated `filler` fail.
     lines(
@@ -216,7 +216,7 @@ fn a_complete_trial_reads_the_stop_the_checks_and_the_file_scope_from_the_sandbo
             && report.contains("steps: walk yes, cut yes, check yes, pr yes"),
         "{report}"
     );
-    let fixtures = s.dir.path().join("complete").display().to_string();
+    let fixtures = s.dir.path().join("bp-complete").display().to_string();
     let (code, out) = xtask(&s, "bp-complete", &["--grade", "--check", "--fixtures", &fixtures]);
     assert_eq!(code, Some(0), "{out}");
 }
@@ -224,7 +224,7 @@ fn a_complete_trial_reads_the_stop_the_checks_and_the_file_scope_from_the_sandbo
 #[test]
 fn a_respond_trial_needs_a_reasoned_answer_to_every_finding_and_a_moved_head() {
     let Some(s) = setup() else { return };
-    let (file, store) = run(&s, "bp-respond", "respond", "1", &[]);
+    let (file, store) = run(&s, "bp-respond", "bp-respond", "1", &[]);
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.lines().any(|l| l.starts_with("hash: ")));
     lines(&text, &["skill_loaded: all", "n: 1", "baseline: 0.00", "with: 1.00", "adherence: 1.00", "out_of_row: 0"]);
@@ -241,7 +241,7 @@ fn a_respond_trial_needs_a_reasoned_answer_to_every_finding_and_a_moved_head() {
             && report.contains("dispositions: 1 fixed, 2 declined with a reason"),
         "{report}"
     );
-    let fixtures = s.dir.path().join("respond").display().to_string();
+    let fixtures = s.dir.path().join("bp-respond").display().to_string();
     let (code, out) = xtask(&s, "bp-respond", &["--grade", "--check", "--fixtures", &fixtures]);
     assert_eq!(code, Some(0), "{out}");
 }
@@ -250,7 +250,7 @@ fn a_respond_trial_needs_a_reasoned_answer_to_every_finding_and_a_moved_head() {
 /// are stored and skipped, so each mode gets a trial of its own.
 fn respond_trial(s: &Setup, mode: &str, n: usize) -> String {
     let trials = n.to_string();
-    let (_, store) = run_env(s, "bp-respond", "respond", &trials, (&["--arms", "with"], &[("FAKE_MODE", mode)]));
+    let (_, store) = run_env(s, "bp-respond", "bp-respond", &trials, (&["--arms", "with"], &[("FAKE_MODE", mode)]));
     let report = std::fs::read_to_string(store.join("report.md")).unwrap();
     let at = format!("### with-rev-1-{n}\n");
     report.split(&at).nth(1).unwrap().split("\n### ").next().unwrap().to_string()
@@ -283,17 +283,17 @@ fn a_respond_trial_that_games_the_dispositions_fails() {
 fn a_complete_trial_that_edits_its_issue_or_is_killed_fails_and_a_retry_replaces_it() {
     let Some(s) = setup() else { return };
     let arms = &["--arms", "with", "--fixture", "plain"];
-    let (_, store) = run_env(&s, "bp-complete", "complete", "1", (arms, &[("FAKE_MODE", "edit-issue")]));
+    let (_, store) = run_env(&s, "bp-complete", "bp-complete", "1", (arms, &[("FAKE_MODE", "edit-issue")]));
     let report = std::fs::read_to_string(store.join("report.md")).unwrap();
     assert!(report.contains("outcome: fail;") && report.contains("the issue's body differs"), "{report}");
     // A bp that the worker builds under target/ is the code under test, not a call outside the role's row.
-    let (file, store) = run_env(&s, "bp-complete", "complete", "2", (arms, &[("FAKE_MODE", "own-build")]));
+    let (file, store) = run_env(&s, "bp-complete", "bp-complete", "2", (arms, &[("FAKE_MODE", "own-build")]));
     let text = std::fs::read_to_string(file).unwrap();
     assert!(text.lines().any(|l| l == "out_of_row: 0"), "{text}");
     drop(store);
     // Killed after the work is done: the sandbox holds a finished issue, and the trial still fails.
     let (_, store) =
-        run_env(&s, "bp-complete", "complete", "3", (arms, &[("FAKE_MODE", "slow"), ("BP_EVAL_TIMEOUT", "20")]));
+        run_env(&s, "bp-complete", "bp-complete", "3", (arms, &[("FAKE_MODE", "slow"), ("BP_EVAL_TIMEOUT", "20")]));
     let report = std::fs::read_to_string(store.join("report.md")).unwrap();
     assert!(
         report.contains("FAILED: the agent ran past 20 s and was killed; a failed trial counts as a fail"),
@@ -302,7 +302,7 @@ fn a_complete_trial_that_edits_its_issue_or_is_killed_fails_and_a_retry_replaces
     let trial = report.split("### with-plain-3").nth(1).unwrap();
     assert!(trial.contains("outcome: fail; stop reached: yes"), "{trial}");
     // The same command again replaces the failed trial instead of counting it.
-    let (file, store) = run_env(&s, "bp-complete", "complete", "3", (arms, &[]));
+    let (file, store) = run_env(&s, "bp-complete", "bp-complete", "3", (arms, &[]));
     let report = std::fs::read_to_string(store.join("report.md")).unwrap();
     let trial = report.split("### with-plain-3").nth(1).unwrap();
     assert!(!report.contains("FAILED") && trial.contains("outcome: pass;"), "{report}");

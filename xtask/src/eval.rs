@@ -24,8 +24,8 @@
 //! xtask check does.
 //!
 //! A fixture set other than the skill's own writes its own store and result file (30, "Blocks of 24 to 29"): the
-//! directory `<skill>-<set>` names them `<skill>-<set>`, and the development set `<skill>-mutants` names them
-//! `<skill>-dev`. A set with no trials and no result file grades as nothing to check.
+//! directory's name names them, and the development set `<skill>-mutants` names them `<skill>-dev`. A set with no
+//! trials and no result file grades as nothing to check.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -217,13 +217,16 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
-/// The store and result-file name of the fixture set in `fixtures` (see the module comment).
+/// The store and result-file name of the fixture set in `fixtures` (see the module comment): the directory's name,
+/// and `<skill>-dev` for the development set `<skill>-mutants`. Another directory never falls back to the skill's own
+/// store, so a test's set cannot overwrite the shipped result file.
 fn set_name(skill: &str, fixtures: &Path) -> String {
-    let dir = fixtures.file_name().and_then(|d| d.to_str()).unwrap_or_default();
-    match dir.strip_prefix(skill).and_then(|d| d.strip_prefix('-')) {
-        Some("mutants") => format!("{skill}-dev"),
-        Some(set) if !set.is_empty() => format!("{skill}-{set}"),
-        _ => skill.to_string(),
+    let full = fixtures.canonicalize().unwrap_or_else(|_| fixtures.to_path_buf());
+    let dir = full.file_name().and_then(|d| d.to_str()).unwrap_or_default();
+    if dir.strip_prefix(skill).and_then(|d| d.strip_prefix('-')) == Some("mutants") {
+        format!("{skill}-dev")
+    } else {
+        dir.to_string()
     }
 }
 
@@ -360,8 +363,8 @@ mod tests {
         assert_eq!(name("xtask/evals/bp-review"), "bp-review");
         assert_eq!(name("xtask/evals/bp-review-mutants/"), "bp-review-dev");
         assert_eq!(name("xtask/evals/bp-review-holdout"), "bp-review-holdout");
-        assert_eq!(name("/tmp/x/fixtures"), "bp-review", "a test's own directory keeps the skill's name");
-        assert_eq!(name("/tmp/bp-reviewer"), "bp-review");
+        assert_eq!(name("/tmp/x/fixtures"), "fixtures", "another directory names its own store");
+        assert_eq!(name("/tmp/bp-reviewer"), "bp-reviewer");
     }
 
     #[test]
