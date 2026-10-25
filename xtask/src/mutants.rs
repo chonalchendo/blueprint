@@ -21,7 +21,7 @@
 //! refuse.
 //!
 //! `--discard` is the planter's judgement that a fixture shows nothing a reviewer can prove, such as a mutant with no
-//! observable effect: it deletes the fixture and appends `<id>: <reason>` to the directory's `discarded.txt`.
+//! observable effect: it deletes the fixture and appends `- <id>: <reason>` to the directory's `discarded.txt`.
 //! `cargo-mutants` is a dev tool, not a dependency; without it, or at another version, the verb refuses with the
 //! install line.
 
@@ -85,7 +85,7 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
         std::fs::remove_file(&file).with_context(|| format!("no fixture {}", file.display()))?;
         let list = a.out.join("discarded.txt");
         let had = std::fs::read_to_string(&list).unwrap_or_default();
-        std::fs::write(&list, format!("{had}{id}: {}\n", why.trim()))?;
+        std::fs::write(&list, format!("{had}- {id}: {}\n", why.trim()))?;
         return Ok(Vec::new());
     }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
@@ -145,8 +145,10 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &std::ffi::Os
         Ok(stdout)
     };
     let in_diff = diff.display().to_string();
+    // A diff that touches no mutable code (tests only) lists nothing at all, not `[]`.
+    let listed = mutants(&["--list", "--json", "--in-diff", &in_diff])?;
     let listed: Vec<Value> =
-        serde_json::from_str(&mutants(&["--list", "--json", "--in-diff", &in_diff])?).context("parse --list --json")?;
+        serde_json::from_str(if listed.trim().is_empty() { "[]" } else { &listed }).context("parse --list --json")?;
     let crates: BTreeSet<String> = listed.iter().filter_map(|m| m["package"].as_str().map(str::to_string)).collect();
     let clean: Vec<&Value> = listed.iter().filter(|m| ci_clean(code, cargo, &head, m).unwrap_or(false)).collect();
     eprintln!(
@@ -194,6 +196,10 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &std::ffi::Os
     );
     if chosen.len() < a.count {
         eprintln!("mutants: #{pr}: fewer than --count {}", a.count);
+    }
+    // A control pairs with the mutants of its pull request; alone it adds a run and measures nothing new.
+    if chosen.is_empty() {
+        return Ok(());
     }
 
     let tests: Vec<String> = crates.iter().map(|c| format!("-p {c}")).collect();
@@ -482,7 +488,7 @@ mod tests {
         assert!(!dir.path().join("mutant-1-1.md").exists());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("discarded.txt")).unwrap(),
-            "mutant-1-1: no observable effect\n"
+            "- mutant-1-1: no observable effect\n"
         );
         assert!(run(&args("mutant-1-1")).is_err(), "a fixture that is not there");
         let bad = ["--discard", "x", "--pr", "1", "--reason", "r"].map(String::from);
