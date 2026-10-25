@@ -144,10 +144,10 @@ enum Quote {
     Tick,
 }
 
-/// The command split at `;`, `&`, `|`, a newline, a parenthesis and a backtick, none of them quoted or escaped: a quoted
-/// `;` is text, not a second command. A `$(` or a backtick inside double quotes opens a substitution, which splits as
-/// the command does, so `"$(bp show x)"` is still a call. A comment runs to the end of its line, so its apostrophe
-/// opens no quote.
+/// The command split at `;`, `&`, `|`, a newline, a parenthesis and a backtick, none of them quoted or escaped: a
+/// quoted `;` is text, not a second command. A `$(` or a backtick inside double quotes opens a substitution, which
+/// splits as the command does, so `"$(bp show x)"` is still a call. A comment runs to the end of its line, so its
+/// apostrophe opens no quote.
 fn segments(command: &str) -> Vec<String> {
     let mut stack: Vec<Quote> = Vec::new();
     let mut out = vec![String::new()];

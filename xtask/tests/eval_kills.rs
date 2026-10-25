@@ -1,7 +1,7 @@
 //! The kill grade through the binary with a fake agent (30, design change 2): no model runs. A planted set of one
 //! mutant and one control runs two arms. `with` runs a command and writes a row in the mutant's span that cites it in
-//! backticks, and a control row next to the `known:` entry; `old` writes the same mutant row with no evidence, and a control row
-//! elsewhere. Needs a built `bp` next to the xtask binary; the test says so and passes without one.
+//! backticks, and a control row next to the `known:` entry; `old` writes the same mutant row with no evidence, and a
+//! control row elsewhere. Needs a built `bp` next to the xtask binary; the test says so and passes without one.
 
 mod common;
 

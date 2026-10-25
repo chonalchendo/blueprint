@@ -33,13 +33,16 @@ pub fn designs(dir: Option<&Path>) -> BTreeMap<String, String> {
 }
 
 /// Whether a row's text carries evidence (30, design changes 2 and 3): a command the trial ran, or a design or
-/// convention id. A command is a backtick span of two words or more that one of the trial's Bash commands holds, so a
-/// command the reviewer only advises is no reproduction. An id is a vault path under `projects/…/designs/` or
-/// `shared/conventions/`, `design NN`, or `(NN, <words>)` where design `NN` exists and holds the words.
+/// convention id. A command is a backtick span of two words or more that opens a command the trial ran: the whole
+/// command, or it with trailing arguments trimmed. So a command the reviewer only advises is no reproduction, and nor
+/// is the tail of one. A read ([`READS`]) reproduces nothing. An id is a vault path under `projects/…/designs/` or
+/// `shared/conventions/`, or a numbered cite ([`numbered`]).
 pub fn evidence(text: &str, proof: &Proof) -> bool {
     let ran = |span: &str| {
         let span = span.trim();
-        span.split_whitespace().nth(1).is_some() && proof.commands.iter().any(|c| c.contains(span))
+        let words: Vec<&str> = span.split_whitespace().take(2).collect();
+        let read = READS.iter().any(|r| r.split(' ').eq(words.iter().copied().take(r.split(' ').count())));
+        words.len() == 2 && !span.starts_with('-') && !read && proof.commands.iter().any(|c| opens(c, span))
     };
     let id = text.split_whitespace().any(|w| {
         let w = w.trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '-' | '_')));
@@ -48,26 +51,46 @@ pub fn evidence(text: &str, proof: &Proof) -> bool {
     text.split('`').skip(1).step_by(2).any(ran) || id || numbered(text, proof.designs)
 }
 
-/// A design cited by its two-digit number: `design 21`, or `(17, check 10)` where design 17 holds `check 10` or a
-/// heading word that starts with `check`. So `(12, not 9)` names no section of design 12.
+/// Programs that only show what is there: a span that runs one reproduces no defect.
+const READS: [&str; 12] =
+    ["git diff", "git log", "git show", "cat", "ls", "head", "tail", "grep", "sed", "rg", "find", "wc"];
+
+/// Words a section name can open with that name no section.
+const STOP: [&str; 9] = ["the", "a", "an", "of", "in", "on", "its", "this", "not"];
+
+/// Whether `span` opens a command of `command`, after its start or a `;`, `&`, `|` or newline, and ends at a word.
+fn opens(command: &str, span: &str) -> bool {
+    let starts = command.char_indices().filter(|(_, c)| matches!(c, ';' | '&' | '|' | '\n')).map(|(i, _)| i + 1);
+    std::iter::once(0).chain(starts).any(|i| {
+        command[i..].trim_start().strip_prefix(span).is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
+        })
+    })
+}
+
+/// A design cited by its two-digit number, where `NN-*.md` exists: `design 21`, or `(17, check 10)`. In the second
+/// form the first word of the section that is not a [`STOP`] word must start a heading word of the design, or be a
+/// word of its text. So `(13, the old value)` and `(12, not 9)` name no section.
 fn numbered(text: &str, designs: &BTreeMap<String, String>) -> bool {
     let lower = text.to_lowercase();
     let two = |s: &str| s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit());
     let design = lower.match_indices("design ").any(|(at, _)| {
         let rest = &lower[at + "design ".len()..];
-        rest.get(..2).is_some_and(two) && !rest[2..].starts_with(|c: char| c.is_alphanumeric())
+        rest.get(..2).is_some_and(|n| two(n) && designs.contains_key(n))
+            && !rest[2..].starts_with(|c: char| c.is_alphanumeric())
     });
     let cite = lower.match_indices('(').any(|(at, _)| {
         let inner = &lower[at + 1..];
         let Some((number, words)) = inner.split_once(')').and_then(|(i, _)| i.split_once(", ")) else { return false };
-        let words = words.trim();
-        let first = words.split_whitespace().next().unwrap_or("").trim_matches(|c: char| !c.is_alphanumeric());
+        let mut cited = words.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()));
+        let Some(first) = cited.find(|w| !w.is_empty() && !STOP.contains(w)) else { return false };
         let heading = |d: &str| {
-            d.lines().filter(|l| l.starts_with('#')).flat_map(str::split_whitespace).any(|w| w.starts_with(first))
+            let heads = d.lines().filter(|l| l.starts_with('#')).flat_map(str::split_whitespace);
+            heads.map(|w| w.trim_start_matches(|c: char| !c.is_alphanumeric())).any(|w| w.starts_with(first))
         };
         two(number)
             && first.starts_with(char::is_alphabetic)
-            && designs.get(number).is_some_and(|d| d.contains(words) || heading(d))
+            && designs.get(number).is_some_and(|d| heading(d) || crate::eval_fixture::has_word(d, first))
     });
     design || cite
 }
@@ -170,6 +193,9 @@ mod tests {
             ("30", "## design change\n5. **the reader defects**"),
             ("17", "## checks this design carries\n10. the eval"),
             ("12", "## responsibility\nthe vault container"),
+            ("13", "## responsibility\nthe vault holds nodes"),
+            ("15", "## interfaces\nthe tool container"),
+            ("21", "## actions, one row each"),
         ]
         .map(|(n, t)| (n.to_string(), t.to_string()))
         .into();
@@ -184,7 +210,6 @@ mod tests {
             "`cargo test -p xtask -- eval_trace` fails: 0 calls",
             "`T=$(mktemp -d) && git archive HEAD | tar -x -C $T` then the probe",
             "`./target/debug/bp walk x --json` exits 2",
-            "`head -40 crates/bp-diagram/src/svg.rs` shows the divide",
             "breaks projects/bp/designs/system, the check of 10",
             "against shared/conventions/convention.testing, item 6",
             "the reader must count it (30, design change 5)",
@@ -207,8 +232,20 @@ mod tests {
             "the cap (22)",
             "the designer 21 times",
             "(31, check 10) names no design",
+            "`head -40 crates/bp-diagram/src/svg.rs` shows the divide",
+            "It returns the old value (13, the old value).",
+            "The bound is off (15, a typo).",
+            "see design 99 for this",
         ] {
             assert!(!evidence(no, &proof), "{no}");
+        }
+        let diffed = Proof {
+            commands: vec!["git diff e5d8973 fc5178f -- crates/bp-diagram", "cargo test -p bp-diagram drill"],
+            designs: &designs,
+        };
+        assert!(evidence("`cargo test -p bp-diagram` fails: 3 for 9", &diffed), "trailing arguments trimmed");
+        for no in ["`git diff e5d8973 fc5178f` shows `w / 2`", "`-- crates/bp-diagram` holds the divide"] {
+            assert!(!evidence(no, &diffed), "{no}");
         }
     }
 }

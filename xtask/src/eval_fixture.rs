@@ -368,7 +368,12 @@ impl Truth {
     /// Whether `text` holds one `match:` slot of this item: it names the item's substance, if not all of it.
     pub fn touched_by(&self, text: &str) -> bool {
         let text = text.to_lowercase();
-        self.keywords.iter().any(|slot| slot.iter().any(|w| text.contains(w.as_str())))
+        self.keywords.iter().any(|slot| slot.iter().any(|w| has_word(&text, w)))
+    }
+
+    /// Whether a row's `location` is in this item's file.
+    pub fn in_file_at(&self, location: &str) -> bool {
+        locate(location).is_some_and(|(p, _)| self.in_file(&p))
     }
 
     /// Whether a row's `location` is in this item's file within `lines` lines of it; never for an item with no line.
@@ -379,7 +384,7 @@ impl Truth {
     /// Whether `text` holds every `match:` slot of this item; an item with no slots is named by nothing.
     pub fn worded(&self, text: &str) -> bool {
         let text = text.to_lowercase();
-        !self.keywords.is_empty() && self.keywords.iter().all(|slot| slot.iter().any(|w| text.contains(w.as_str())))
+        !self.keywords.is_empty() && self.keywords.iter().all(|slot| slot.iter().any(|w| has_word(&text, w)))
     }
 
     /// How far a finding's location is from this item, to break a tie between items its words fit: the lines apart
@@ -393,6 +398,13 @@ impl Truth {
         let gap = self.lines.iter().flat_map(|&t| lines.iter().map(move |&l| apart(t, l))).min();
         gap.map_or(far, |g| (g, width))
     }
+}
+
+/// Whether `text` holds `word` at the start of a word, so the slot `if` is not found in `different` and `quot` is
+/// found in `quoted`. A word that opens with a sign, such as `;`, may follow anything.
+pub fn has_word(text: &str, word: &str) -> bool {
+    let alone = |at: usize| !word.starts_with(char::is_alphanumeric) || !text[..at].ends_with(char::is_alphanumeric);
+    text.match_indices(word).any(|(at, _)| alone(at))
 }
 
 /// A path and the line ranges after its colon. A word after the location, as in `a.rs:22-33 (note)`, is ignored.

@@ -133,16 +133,18 @@ pub(crate) fn cells(row: &str) -> Vec<&str> {
     out
 }
 
-/// The verdict of each row. A control's row is `Known` when it is within [`NEAR`] lines of a `known:` entry or holds
-/// its `match:` words, and false otherwise. On a planted fixture a row with evidence ([`evidence`]) matches the first
-/// open item whose span it points into; when two items share the span, it must also hold one of the item's `match:`
-/// slots. On a past review's fixture a row matches the item its words fit. A row that matches no open item is a
-/// duplicate when it sits on a matched one, so a second true row is not a false one: on a planted fixture it points
-/// into the item's span; on a past review's it is within [`NEAR`] lines of the item, or in its file and holding one of
-/// its slots.
+/// The verdict of each row. A control's row is `Known` when it is within [`NEAR`] lines of a `known:` entry, or in its
+/// file and holds its `match:` words, and false otherwise. On a planted fixture a row with evidence ([`evidence`])
+/// matches the first open item whose span it points into; when two items share the span, it must also hold one of the
+/// item's `match:` slots. On a past review's fixture a row matches the item its words fit. A row that matches no open
+/// item is a duplicate when it sits on a matched one, so a second true row is not a false one: on a planted fixture it
+/// points into the item's span; on a past review's it is within [`NEAR`] lines of the item, or in its file and holding
+/// one of its slots.
 pub fn verdicts(fx: &Fixture, findings: &[Finding], proof: &Proof) -> Vec<Verdict> {
     if fx.kind.as_deref() == Some("control") {
-        let known = |f: &Finding| fx.known.iter().position(|k| k.near(&f.location, NEAR) || k.worded(&f.text));
+        let known = |f: &Finding| {
+            fx.known.iter().position(|k| k.near(&f.location, NEAR) || (k.in_file_at(&f.location) && k.worded(&f.text)))
+        };
         return findings.iter().map(|f| known(f).map_or(Verdict::False, Verdict::Known)).collect();
     }
     let planted = fx.genre().is_some();
@@ -524,7 +526,12 @@ mod tests {
         let found = |text: &str| verdicts(&control, &rows(text), &none);
         assert_eq!(found("| warn | src/t.rs:102 | anything |"), [Verdict::Known(0)]);
         assert_eq!(found("| warn | src/t.rs:103 | anything |"), [Verdict::False]);
-        assert_eq!(found("| warn | src/u.rs:1 | a call after `while` is not counted |"), [Verdict::Known(0)]);
+        assert_eq!(found("| warn | src/t.rs:1 | a call after `while` is not counted |"), [Verdict::Known(0)]);
+        assert_eq!(
+            found("| warn | src/u.rs:1 | a call after `while` is not counted |"),
+            [Verdict::False],
+            "another file"
+        );
         assert_eq!(
             found("| warn | src/t.rs:48 | x |\n| warn | src/t.rs:10 | y |"),
             [Verdict::Known(1), Verdict::False]
@@ -535,5 +542,9 @@ mod tests {
         assert_eq!(verdicts(&control_62, &rows(row), &none), [Verdict::Known(0)]);
         let row = "| warn | xtask/src/eval_trace.rs:86 | A quoted `;` still splits the segment. |";
         assert_eq!(verdicts(&control_62, &rows(row), &none), [Verdict::Known(1)]);
+        let row = "| warn | xtask/src/eval_sandbox.rs:40 | The prefix of the temp dir is wrong if TMPDIR is unset |";
+        assert_eq!(verdicts(&control_62, &rows(row), &none), [Verdict::False], "the entry's file only");
+        let row = "| warn | xtask/src/eval_trace.rs:10 | The prefix differs from the spec. |";
+        assert_eq!(verdicts(&control_62, &rows(row), &none), [Verdict::False], "`if` inside `differs`");
     }
 }

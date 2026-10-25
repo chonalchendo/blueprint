@@ -49,7 +49,8 @@ impl Sandbox {
     ///
     /// `check_arm` asserts, before the agent costs anything, that the clone holds the arm: the skill and the role's
     /// `skills:` line as shipped for `with` and `filler`, neither for `without`, and for an arm from a git ref (the
-    /// sha after the arm) that commit's skill body. A skill placed wrong reads as zero recall (RA 5.5, 6). `work` holds the arm binaries and the cargo target directory that the sandbox shares.
+    /// sha after the arm) that commit's skill body. A skill placed wrong reads as zero recall (RA 5.5, 6). `work`
+    /// holds the arm binaries and the cargo target directory that the sandbox shares.
     pub fn build(
         repo: &Path,
         source: &Path,
@@ -386,13 +387,13 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     capture(Command::new("git").args(args).current_dir(dir).env("GIT_ALLOW_PROTOCOL", "file"))
 }
 
-/// Runs a command and returns its stdout. A failure carries stderr, and stdout when it holds an envelope.
 /// Whether `installed` is the skill's body at the commit `sha` of the repository at `root`, byte for byte: what an
 /// arm built from that commit must have installed (30, design change 2).
 fn holds_ref_body(installed: &str, root: &Path, sha: &str, skill: &Skill) -> Result<bool> {
     Ok(installed == crate::eval_grade::show_at(root, sha, &format!("bundle/skills/{}/SKILL.md", skill.name))?)
 }
 
+/// Runs a command and returns its stdout. A failure carries stderr, and stdout when it holds an envelope.
 pub(crate) fn capture(cmd: &mut Command) -> Result<String> {
     let out = cmd.output().with_context(|| format!("run {cmd:?}"))?;
     if !out.status.success() {

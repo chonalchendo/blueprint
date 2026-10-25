@@ -1,6 +1,6 @@
 //! The result file of a grade (29, design change 2; 30, design change 2) and the owner's two lines in it. A past
-//! review's set keeps 29's lines; a planted set lists every arm graded and its kill lines (`eval_kills`): `kills:` and its genres are `with`'s kills. The grader
-//! refuses a `capability` that the interval does not carry.
+//! review's set keeps 29's lines; a planted set lists every arm graded and its kill lines (`eval_kills`): `kills:`
+//! and its genres are `with`'s kills. The grader refuses a `capability` that the interval does not carry.
 
 use std::collections::BTreeSet;
 
