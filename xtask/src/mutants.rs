@@ -11,24 +11,29 @@
 //! rest by name, shuffles them with a seed of `s` and the pull request, and walks them in that order. A mutant that CI
 //! catches is a CI finding, not a review finding, so a kept mutant passes all of CI at the planted head: first
 //! `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`, the cheap gates, then, alone,
-//! the tests of every crate the diff touches. It keeps at most one mutant per function and skips a candidate whose
-//! function it already keeps. It stops when it keeps `k`. So a run tests as few candidates as it can, in seed order:
-//! the same seed and candidate list keep the same mutants when the test outcomes are the same. It commits each kept
-//! mutant on the head as `bp-eval` and records the diff. It writes `mutant-<n>-<i>.md` for each and `control-<n>.md`
-//! with no mutant (`eval_fixture.rs` has the shape), into `--out` (default `xtask/evals/bp-review-mutants`).
+//! the tests of every crate the diff touches. Each test has a timeout of 300 s (`--timeout 300`); a mutant that times
+//! out is tested and not kept, since CI fails on a hang. It keeps at most one mutant per function and skips a
+//! candidate whose function it already keeps. It stops when it keeps `k`. So a run tests as few candidates as it can,
+//! in seed order: the same seed and candidate list keep the same mutants when the test outcomes are the same. It
+//! commits each kept mutant on the head as `bp-eval` and records the diff. It writes `mutant-<n>-<i>.md` for each and
+//! `control-<n>.md` with no mutant (`eval_fixture.rs` has the shape), into `--out` (default
+//! `xtask/evals/bp-review-mutants`).
+//!
+//! Before the walk it runs the tests of every touched crate once, at the head. When they fail, every mutant would read
+//! as caught, so it skips the pull request, names the failing crates, and counts the skip in its last line.
 //!
 //! The issue is the landed pull request's own, from its body (`gh pr view <n>`, read once, here), in the product's
-//! sections: the body's `## Problem` is the Problem, and the first paragraph of its `## How it works` is the Goal. The
-//! fixture stores the text, so no trial needs the network. The Check runs the touched crates' tests, the gate the
-//! mutants survived: a milestone's own blocks read the live designs repository, so at a past head they fail, and the
-//! sandbox's `pr` would refuse.
+//! sections: the body's `## Problem` is the Problem, and its whole `## How it works` is the Goal, the claim a reviewer
+//! attacks. The fixture stores the text, so no trial needs the network. The Check runs the touched crates' tests, the
+//! gate the mutants survived: a milestone's own blocks read the live designs repository, so at a past head they fail,
+//! and the sandbox's `pr` would refuse.
 //!
 //! `--discard` is the planter's judgement that a fixture shows nothing a reviewer can prove, such as a mutant with no
 //! observable effect: it deletes the fixture and appends `- <id>: <reason>` to the directory's `discarded.txt`.
 //! `cargo-mutants` is a dev tool, not a dependency; without it, or at another version, the verb refuses with the
 //! install line.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -106,16 +111,33 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     // Read once, before the first checkout detaches the clone at an older head.
     let log =
         capture(Command::new("git").args(["log", "--format=%H %s", "--first-parent", "HEAD"]).current_dir(&code))?;
+    let (mut kept, mut skipped) = (0, Vec::new());
     for &pr in &a.prs {
-        one(&a, (&root, &code, &work), &cargo, &log, pr)?;
+        match one(&a, (&root, &code, &work), &cargo, &log, pr)? {
+            Some(k) => kept += k,
+            None => skipped.push(format!("#{pr}")),
+        }
     }
+    eprintln!(
+        "mutants: {kept} kept from {} pull requests; {} skipped for failing tests{}",
+        a.prs.len(),
+        skipped.len(),
+        if skipped.is_empty() { String::new() } else { format!(" ({})", skipped.join(", ")) }
+    );
     // The clone and its target are gigabytes; on an error they stay for the logs, and the next run prunes them.
     std::fs::remove_dir_all(&work)?;
     Ok(Vec::new())
 }
 
 /// The fixtures of one pull request: its candidates in seed order, the walk to `--count` survivors of CI, the files.
-fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &OsStr, log: &str, pr: u32) -> Result<()> {
+/// It returns the number kept, or `None` when the touched crates' tests fail at the head.
+fn one(
+    a: &Args,
+    (root, code, work): (&Path, &Path, &Path),
+    cargo: &OsStr,
+    log: &str,
+    pr: u32,
+) -> Result<Option<usize>> {
     let git = |args: &[&str]| capture(Command::new("git").args(args).current_dir(code));
     let (head, subject) = log
         .lines()
@@ -140,6 +162,23 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &OsStr, log: 
     let issue = issue_of(&body, &crates).with_context(|| format!("the body of #{pr}"))?;
     let candidates = order(listed.iter().filter(|m| not_a_guard(m)).collect(), a.seed.wrapping_add(pr.into()));
     eprintln!("mutants: #{pr}: {} candidates in {crates:?}, {} after the guards", listed.len(), candidates.len());
+    if !candidates.is_empty() {
+        bins(cargo, code)?;
+        let failing = failing(&crates, |cs| {
+            let mut args = vec!["test", "-q"];
+            args.extend(cs.iter().flat_map(|c| ["-p", c]));
+            Command::new(cargo)
+                .args(args)
+                .current_dir(code)
+                .stdin(Stdio::null())
+                .output()
+                .is_ok_and(|o| o.status.success())
+        });
+        if !failing.is_empty() {
+            eprintln!("mutants: #{pr}: the tests of {} fail at {head}; #{pr} is skipped", failing.join(", "));
+            return Ok(None);
+        }
+    }
     let mut alone = Alone {
         code,
         cargo,
@@ -148,7 +187,6 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &OsStr, log: 
         in_diff,
         tested: crates.iter().flat_map(|c| ["--test-package".to_string(), c.clone()]).collect(),
         pr,
-        baseline: BTreeMap::new(),
         last: None,
         clean: 0,
         runs: 0,
@@ -166,13 +204,14 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &OsStr, log: 
     }
     // A control pairs with the mutants of its pull request; alone it adds a run and measures nothing new.
     if chosen.is_empty() {
-        return Ok(());
+        return Ok(Some(0));
     }
 
     let title = subject.split_once("): ").map_or(subject.as_str(), |s| s.1);
     let title = title.rsplit_once(" (#").map_or(title, |t| t.0);
     let shared = format!("base: {base}\nhead: {head}\ntitle: {}{}\n", title[..1].to_uppercase(), &title[1..]);
     std::fs::write(a.out.join(format!("control-{pr}.md")), format!("kind: control\n{shared}truth:\n---\n{issue}"))?;
+    let kept = chosen.len();
     for (i, m) in chosen.into_iter().enumerate() {
         let planted = plant(code, &head, m, true)?;
         std::fs::write(
@@ -180,7 +219,24 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &OsStr, log: 
             mutant_text(&shared, m, &planted, a.seed, &issue),
         )?;
     }
-    Ok(())
+    Ok(Some(kept))
+}
+
+/// The touched crates whose tests fail at the head, when `passes` fails for all of them together: each that fails
+/// alone, or all of them when none does. Empty when they pass.
+fn failing(crates: &BTreeSet<String>, mut passes: impl FnMut(&[&str]) -> bool) -> Vec<String> {
+    let all: Vec<&str> = crates.iter().map(String::as_str).collect();
+    if passes(&all) {
+        return Vec::new();
+    }
+    let alone: Vec<String> = all.iter().filter(|c| !passes(&[c])).map(|c| (*c).to_string()).collect();
+    if alone.is_empty() { all.iter().map(|c| (*c).to_string()).collect() } else { alone }
+}
+
+/// CI's `cargo test --workspace` builds every binary first, and some tests drive one (`xtask`'s eval tests need `bp`):
+/// without them those tests pass as skipped, and mutants they would kill look missed.
+fn bins(cargo: &OsStr, code: &Path) -> Result<String> {
+    capture(Command::new(cargo).args(["build", "-q", "--workspace", "--bins"]).current_dir(code))
 }
 
 /// `cargo mutants` with `args` in the clone. It exits 2 when it missed a mutant and 3 on a timeout: both are results.
@@ -198,8 +254,8 @@ fn mutants(cargo: &OsStr, code: &Path, args: &[&str]) -> Result<String> {
     Ok(stdout)
 }
 
-/// The test of one candidate alone, for one pull request: the CI gates, each package's baseline, then `cargo mutants`
-/// on that one mutant. It counts the candidates that pass fmt and clippy, and the mutants it tested.
+/// The test of one candidate alone, for one pull request whose tests pass at the head: the CI gates, then
+/// `cargo mutants` on that one mutant. It counts the candidates that pass fmt and clippy, and the mutants it tested.
 struct Alone<'a> {
     code: &'a Path,
     cargo: &'a OsStr,
@@ -209,9 +265,7 @@ struct Alone<'a> {
     /// `--test-package` for every crate the diff touches.
     tested: Vec<String>,
     pr: u32,
-    /// Whether each package's tests pass at the head.
-    baseline: BTreeMap<String, bool>,
-    /// The package whose binaries the last build or test left in the target.
+    /// The package of the last tested mutant, whose binaries hold its defect; `None` while they are clean.
     last: Option<String>,
     clean: usize,
     runs: usize,
@@ -226,26 +280,9 @@ impl Alone<'_> {
         self.clean += 1;
         let pr = self.pr;
         let package = m["package"].as_str().unwrap_or("").to_string();
-        if !self.baseline.contains_key(&package) {
-            self.bins()?;
-            let ok = Command::new(self.cargo)
-                .args(["test", "-q", "-p", &package])
-                .current_dir(self.code)
-                .stdin(Stdio::null())
-                .output()
-                .is_ok_and(|o| o.status.success());
-            if !ok {
-                eprintln!("mutants: #{pr}: the tests of {package} fail at the head; its candidates are skipped");
-            }
-            self.baseline.insert(package.clone(), ok);
-            self.last = Some(package.clone());
-        }
-        if !self.baseline[&package] {
-            return Ok(false);
-        }
         // A tested mutant leaves its package's binaries built with the defect: another package's tests would run them.
-        if self.last.as_deref() != Some(package.as_str()) {
-            self.bins()?;
+        if self.last.as_ref().is_some_and(|last| *last != package) {
+            bins(self.cargo, self.code)?;
         }
         self.runs += 1;
         let name = m["name"].as_str().unwrap_or("");
@@ -253,7 +290,7 @@ impl Alone<'_> {
         let (out_arg, re) = (out.display().to_string(), format!("^{}$", escape(name)));
         let mut args = vec!["--in-diff", &self.in_diff, "-p", &package, "--in-place", "--output", &out_arg];
         args.extend(self.tested.iter().map(String::as_str));
-        args.extend(["--re", &re, "--baseline", "skip"]);
+        args.extend(["--re", &re, "--baseline", "skip", "--timeout", "300"]);
         let at = Instant::now();
         // `--in-place` tests the mutant in the throwaway clone, and builds in its own target.
         mutants(self.cargo, self.code, &args)?;
@@ -268,12 +305,6 @@ impl Alone<'_> {
             .unwrap_or("no outcome");
         eprintln!("mutants: #{pr}: {name}: {summary} ({} s)", at.elapsed().as_secs());
         Ok(summary == "MissedMutant")
-    }
-
-    /// CI's `cargo test --workspace` builds every binary first, and some tests drive one (`xtask`'s eval tests need
-    /// `bp`): without them those tests pass as skipped, and mutants they would kill look missed.
-    fn bins(&self) -> Result<String> {
-        capture(Command::new(self.cargo).args(["build", "-q", "--workspace", "--bins"]).current_dir(self.code))
     }
 }
 
@@ -419,9 +450,8 @@ fn offset(text: &str, line: usize, column: usize) -> usize {
 }
 
 /// The seeded issue in the product's sections. Problem and Goal come from a landed pull request's body: its
-/// `## Problem`, and the first paragraph of its `## How it works`. A paragraph that ends with `:` introduces the next,
-/// so the Goal takes that one too. The template (`.github/pull_request_template.md`) names these sections. The Check
-/// runs the touched crates' tests.
+/// `## Problem`, and its whole `## How it works`, so the goal-tester has the full claim to attack. The template
+/// (`.github/pull_request_template.md`) names these sections. The Check runs the touched crates' tests.
 fn issue_of(body: &str, crates: &BTreeSet<String>) -> Result<String> {
     let section = |heading: &str| {
         let lines: Vec<&str> =
@@ -429,18 +459,11 @@ fn issue_of(body: &str, crates: &BTreeSet<String>) -> Result<String> {
         Some(lines.join("\n").trim().to_string()).filter(|s| !s.is_empty())
     };
     let problem = section("## Problem").context("no ## Problem")?;
-    let how = section("## How it works").context("no ## How it works")?;
-    let mut goal = Vec::new();
-    for paragraph in how.split("\n\n") {
-        goal.push(paragraph.trim());
-        if !paragraph.trim_end().ends_with(':') {
-            break;
-        }
-    }
+    let goal = section("## How it works").context("no ## How it works")?;
     let tests: Vec<String> = crates.iter().map(|c| format!("-p {c}")).collect();
     Ok(format!(
         "## Problem\n\n{problem}\n\n## Goal\n\n{}\n\n## Check\n\n~~~check shell {{name=tests expect=0}}\ncargo test -q {}\n~~~\n",
-        goal.join("\n\n"),
+        goal,
         tests.join(" ")
     ))
 }
@@ -615,15 +638,34 @@ mod tests {
         let check = "## Check\n\n~~~check shell {name=tests expect=0}\ncargo test -q -p bp-core -p xtask\n~~~\n";
         assert_eq!(
             issue_of(body, &crates).unwrap(),
-            format!("## Problem\n\nThe reader counts calls.\n\n## Goal\n\nIt splits.\n\n{check}")
-        );
-        let lead = body.replace("It splits.", "It does two things:");
-        assert!(
-            issue_of(&lead, &crates).unwrap().contains("## Goal\n\nIt does two things:\n\nThen it counts.\n\n## Check"),
-            "a lead-in takes the next paragraph"
+            format!("## Problem\n\nThe reader counts calls.\n\n## Goal\n\nIt splits.\n\nThen it counts.\n\n{check}"),
+            "the Goal is the whole How it works, not the What changed table"
         );
         assert!(issue_of("## Summary\n\nx\n", &crates).is_err(), "a body with no Problem refuses");
         assert!(issue_of("## Problem\n\nx\n", &crates).is_err(), "a body with no How it works refuses");
+    }
+
+    #[test]
+    fn a_failing_baseline_names_its_crates() {
+        let crates = BTreeSet::from(["a".to_string(), "b".to_string(), "c".to_string()]);
+        // A fake `cargo test -p …`: the crate sets it was run on, and the crates `failing` names.
+        let fake = |fails: &dyn Fn(&[&str]) -> bool| {
+            let mut calls = Vec::new();
+            let named = failing(&crates, |cs| {
+                calls.push(cs.join(" "));
+                !fails(cs)
+            });
+            (named, calls)
+        };
+        let (named, calls) = fake(&|_| false);
+        assert!(named.is_empty() && calls == ["a b c"], "they pass: one run over every touched crate");
+        let (named, calls) = fake(&|cs| cs.contains(&"b"));
+        assert_eq!(
+            (named, calls),
+            (vec!["b".to_string()], vec!["a b c", "a", "b", "c"].into_iter().map(String::from).collect()),
+            "b fails alone"
+        );
+        assert_eq!(fake(&|cs| cs.len() > 1).0, ["a", "b", "c"], "they fail only together: all are named");
     }
 
     #[test]
