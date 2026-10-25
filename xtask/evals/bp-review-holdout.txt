@@ -1,0 +1,6 @@
+procedure: cargo xtask mutants --pr 44 --pr 45 --pr 46 --pr 47 --pr 50 --pr 51 --pr 54 --pr 55 --pr 56 --pr 57 --pr 59 --pr 60 --pr 63 --pr 64 --count 4 --seed 11
+sealed_at: de275f8373b8a7e3d80e29096661410979929903
+generate_after: issue 4 merged
+planted_by: a fresh agent the orchestrator dispatches with analysis/briefs/m7-5-brief.md, never issue 4's author
+out: xtask/evals/bp-review-holdout
+rules: 30 design change 1 (CI-clean survivors, one per function, no MatchArmGuard, --discard with a reason); at least 30 mutants kept; no escape fixtures; the pull requests above are disjoint from the development set (41 43 48 49 52 53 58 61 62)
