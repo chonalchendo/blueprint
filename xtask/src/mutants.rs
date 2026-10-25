@@ -6,27 +6,30 @@
 //! ```
 //!
 //! For each landed pull request it finds the squash on master whose subject ends `(#<n>)`; the base is its parent.
-//! In a throwaway clone at that head it lists `cargo-mutants`' candidates on the lines the diff changed. A mutant that
-//! CI catches is a CI finding, not a review finding, so a survivor passes all of CI at the planted head: first
-//! `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`, the cheap gates, then the
-//! tests of every crate the diff touches, one mutant at a time. A guard mutant (`MatchArmGuard`) is dropped before
-//! that: the tool writes a literal `true` or `false`, which any reader sees. It shuffles the survivors with a seed of
-//! `s` and the pull request, takes at most one per function, and keeps `k`. It commits each on the head as `bp-eval`
-//! and records the diff. It writes `mutant-<n>-<i>.md` for each and `control-<n>.md` with no mutant
-//! (`eval_fixture.rs` has the shape), into `--out` (default `xtask/evals/bp-review-mutants`).
+//! In a throwaway clone at that head it lists `cargo-mutants`' candidates on the lines the diff changed. It drops the
+//! guard mutants (`MatchArmGuard`): the tool writes a literal `true` or `false`, which any reader sees. It sorts the
+//! rest by name, shuffles them with a seed of `s` and the pull request, and walks them in that order. A mutant that CI
+//! catches is a CI finding, not a review finding, so a kept mutant passes all of CI at the planted head: first
+//! `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`, the cheap gates, then, alone,
+//! the tests of every crate the diff touches. It keeps at most one mutant per function and skips a candidate whose
+//! function it already keeps. It stops when it keeps `k`. So a run tests as few candidates as it can, in seed order:
+//! the same seed and candidate list keep the same mutants when the test outcomes are the same. It commits each kept
+//! mutant on the head as `bp-eval` and records the diff. It writes `mutant-<n>-<i>.md` for each and `control-<n>.md`
+//! with no mutant (`eval_fixture.rs` has the shape), into `--out` (default `xtask/evals/bp-review-mutants`).
 //!
-//! The issue is the landed pull request's own, from its body (`gh pr view <n>`, read once, here): its `## Problem`,
-//! and its `## What changed` table as the Shape, or `## How it works` when that has no table. The fixture stores the
-//! text, so no trial needs the network. The Check runs the touched crates' tests, the gate the mutants survived: a
-//! milestone's own blocks read the live designs repository, so at a past head they fail, and the sandbox's `pr` would
-//! refuse.
+//! The issue is the landed pull request's own, from its body (`gh pr view <n>`, read once, here), in the product's
+//! sections: the body's `## Problem` is the Problem, and the first paragraph of its `## How it works` is the Goal. The
+//! fixture stores the text, so no trial needs the network. The Check runs the touched crates' tests, the gate the
+//! mutants survived: a milestone's own blocks read the live designs repository, so at a past head they fail, and the
+//! sandbox's `pr` would refuse.
 //!
 //! `--discard` is the planter's judgement that a fixture shows nothing a reviewer can prove, such as a mutant with no
 //! observable effect: it deletes the fixture and appends `- <id>: <reason>` to the directory's `discarded.txt`.
 //! `cargo-mutants` is a dev tool, not a dependency; without it, or at another version, the verb refuses with the
 //! install line.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -111,8 +114,8 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     Ok(Vec::new())
 }
 
-/// The fixtures of one pull request: its candidates, the survivors of CI, the pick and the files.
-fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &std::ffi::OsStr, log: &str, pr: u32) -> Result<()> {
+/// The fixtures of one pull request: its candidates in seed order, the walk to `--count` survivors of CI, the files.
+fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &OsStr, log: &str, pr: u32) -> Result<()> {
     let git = |args: &[&str]| capture(Command::new("git").args(args).current_dir(code));
     let (head, subject) = log
         .lines()
@@ -124,75 +127,37 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &std::ffi::Os
     let body = capture(
         Command::new("gh").args(["pr", "view", &pr.to_string(), "--json", "body", "-q", ".body"]).current_dir(root),
     )?;
-    let issue = issue_of(&body).with_context(|| format!("the body of #{pr}"))?;
     git(&["checkout", "-q", "--detach", &head])?;
     let diff = work.join(format!("{pr}.diff"));
     std::fs::write(&diff, format!("{}\n", git(&["diff", &base, &head])?))?;
     let started = Instant::now();
-
-    // `cargo mutants` exits 2 when it missed a mutant and 3 on a timeout: both are results here.
-    let mutants = |args: &[&str]| -> Result<String> {
-        let shown = format!("cargo mutants {}", args.join(" "));
-        let started = Instant::now();
-        let out = Command::new(cargo).arg("mutants").args(args).current_dir(code).stdin(Stdio::null()).output()?;
-        // A run names every clean candidate by `--re`; the log keeps the start.
-        let shown: String =
-            if shown.len() > 300 { shown.chars().take(300).chain("...".chars()).collect() } else { shown };
-        eprintln!("mutants: #{pr}: {shown} ({} s)", started.elapsed().as_secs());
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        if !matches!(out.status.code(), Some(0 | 2 | 3)) {
-            bail!("{shown} exited {}: {}{stdout}", out.status, String::from_utf8_lossy(&out.stderr));
-        }
-        Ok(stdout)
-    };
     let in_diff = diff.display().to_string();
     // A diff that touches no mutable code (tests only) lists nothing at all, not `[]`.
-    let listed = mutants(&["--list", "--json", "--in-diff", &in_diff])?;
+    let listed = mutants(cargo, code, &["--list", "--json", "--in-diff", &in_diff])?;
     let listed: Vec<Value> =
         serde_json::from_str(if listed.trim().is_empty() { "[]" } else { &listed }).context("parse --list --json")?;
     let crates: BTreeSet<String> = listed.iter().filter_map(|m| m["package"].as_str().map(str::to_string)).collect();
-    let clean: Vec<&Value> =
-        listed.iter().filter(|m| not_a_guard(m) && ci_clean(code, cargo, &head, m).unwrap_or(false)).collect();
+    let issue = issue_of(&body, &crates).with_context(|| format!("the body of #{pr}"))?;
+    let candidates = order(listed.iter().filter(|m| not_a_guard(m)).collect(), a.seed.wrapping_add(pr.into()));
+    eprintln!("mutants: #{pr}: {} candidates in {crates:?}, {} after the guards", listed.len(), candidates.len());
+    let mut alone = Alone {
+        code,
+        cargo,
+        work,
+        head: &head,
+        in_diff,
+        tested: crates.iter().flat_map(|c| ["--test-package".to_string(), c.clone()]).collect(),
+        pr,
+        baseline: BTreeMap::new(),
+        last: None,
+        clean: 0,
+        runs: 0,
+    };
+    let chosen = walk(candidates, a.count, |m| alone.survives(m))?;
     eprintln!(
-        "mutants: #{pr}: {} of {} candidates pass fmt and clippy ({} s)",
-        clean.len(),
-        listed.len(),
-        started.elapsed().as_secs()
-    );
-    let tested: Vec<String> = crates.iter().flat_map(|c| ["--test-package".to_string(), c.clone()]).collect();
-    let mut missed = BTreeSet::new();
-    for krate in &crates {
-        let names: Vec<&str> =
-            clean.iter().filter(|m| m["package"] == krate.as_str()).filter_map(|m| m["name"].as_str()).collect();
-        if names.is_empty() {
-            continue;
-        }
-        // CI's `cargo test --workspace` builds every binary first, and some tests drive one (`xtask`'s eval tests
-        // need `bp`): without them those tests pass as skipped, and mutants they would kill look missed. It is
-        // rebuilt per crate, because the last mutant of the crate before leaves its binary built with the defect.
-        capture(Command::new(cargo).args(["build", "-q", "--workspace", "--bins"]).current_dir(code))?;
-        let out = work.join(format!("out-{pr}-{krate}"));
-        let out_arg = out.display().to_string();
-        let mut args = vec!["--in-diff", &in_diff, "-p", krate, "--in-place", "--output", &out_arg];
-        args.extend(tested.iter().map(String::as_str));
-        let res: Vec<String> = names.iter().map(|n| format!("^{}$", escape(n))).collect();
-        args.extend(res.iter().flat_map(|r| ["--re", r.as_str()]));
-        // `--in-place` runs one mutant at a time in the throwaway clone, and builds in its own target.
-        mutants(&args)?;
-        let outcomes: Value = serde_json::from_str(&std::fs::read_to_string(out.join("mutants.out/outcomes.json"))?)?;
-        for o in outcomes["outcomes"].as_array().into_iter().flatten() {
-            if o["summary"] == "MissedMutant" {
-                missed.extend(o["scenario"]["Mutant"]["name"].as_str().map(str::to_string));
-            }
-        }
-    }
-    let survivors: Vec<&Value> =
-        clean.into_iter().filter(|m| missed.contains(m["name"].as_str().unwrap_or(""))).collect();
-    let chosen = pick(survivors.clone(), a.count, a.seed.wrapping_add(pr.into()));
-    eprintln!(
-        "mutants: #{pr}: {} candidates in {crates:?}, {} survive CI, {} kept, one per function ({} s)",
-        listed.len(),
-        survivors.len(),
+        "mutants: #{pr}: {} pass fmt and clippy, {} tested, {} kept, one per function ({} s)",
+        alone.clean,
+        alone.runs,
         chosen.len(),
         started.elapsed().as_secs()
     );
@@ -204,11 +169,6 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &std::ffi::Os
         return Ok(());
     }
 
-    let tests: Vec<String> = crates.iter().map(|c| format!("-p {c}")).collect();
-    let issue = format!(
-        "{issue}\n\n## Check\n\n~~~check shell {{name=tests expect=0}}\ncargo test -q {}\n~~~\n",
-        tests.join(" ")
-    );
     let title = subject.split_once("): ").map_or(subject.as_str(), |s| s.1);
     let title = title.rsplit_once(" (#").map_or(title, |t| t.0);
     let shared = format!("base: {base}\nhead: {head}\ntitle: {}{}\n", title[..1].to_uppercase(), &title[1..]);
@@ -223,10 +183,104 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &std::ffi::Os
     Ok(())
 }
 
+/// `cargo mutants` with `args` in the clone. It exits 2 when it missed a mutant and 3 on a timeout: both are results.
+fn mutants(cargo: &OsStr, code: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new(cargo).arg("mutants").args(args).current_dir(code).stdin(Stdio::null()).output()?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !matches!(out.status.code(), Some(0 | 2 | 3)) {
+        bail!(
+            "cargo mutants {} exited {}: {}{stdout}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(stdout)
+}
+
+/// The test of one candidate alone, for one pull request: the CI gates, each package's baseline, then `cargo mutants`
+/// on that one mutant. It counts the candidates that pass fmt and clippy, and the mutants it tested.
+struct Alone<'a> {
+    code: &'a Path,
+    cargo: &'a OsStr,
+    work: &'a Path,
+    head: &'a str,
+    in_diff: String,
+    /// `--test-package` for every crate the diff touches.
+    tested: Vec<String>,
+    pr: u32,
+    /// Whether each package's tests pass at the head.
+    baseline: BTreeMap<String, bool>,
+    /// The package whose binaries the last build or test left in the target.
+    last: Option<String>,
+    clean: usize,
+    runs: usize,
+}
+
+impl Alone<'_> {
+    /// Whether the mutant passes CI at the planted head: `MissedMutant`. It logs one line per tested mutant.
+    fn survives(&mut self, m: &Value) -> Result<bool> {
+        if !ci_clean(self.code, self.cargo, self.head, m).unwrap_or(false) {
+            return Ok(false);
+        }
+        self.clean += 1;
+        let pr = self.pr;
+        let package = m["package"].as_str().unwrap_or("").to_string();
+        if !self.baseline.contains_key(&package) {
+            self.bins()?;
+            let ok = Command::new(self.cargo)
+                .args(["test", "-q", "-p", &package])
+                .current_dir(self.code)
+                .stdin(Stdio::null())
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !ok {
+                eprintln!("mutants: #{pr}: the tests of {package} fail at the head; its candidates are skipped");
+            }
+            self.baseline.insert(package.clone(), ok);
+            self.last = Some(package.clone());
+        }
+        if !self.baseline[&package] {
+            return Ok(false);
+        }
+        // A tested mutant leaves its package's binaries built with the defect: another package's tests would run them.
+        if self.last.as_deref() != Some(package.as_str()) {
+            self.bins()?;
+        }
+        self.runs += 1;
+        let name = m["name"].as_str().unwrap_or("");
+        let out = self.work.join(format!("out-{pr}-{}", self.runs));
+        let (out_arg, re) = (out.display().to_string(), format!("^{}$", escape(name)));
+        let mut args = vec!["--in-diff", &self.in_diff, "-p", &package, "--in-place", "--output", &out_arg];
+        args.extend(self.tested.iter().map(String::as_str));
+        args.extend(["--re", &re, "--baseline", "skip"]);
+        let at = Instant::now();
+        // `--in-place` tests the mutant in the throwaway clone, and builds in its own target.
+        mutants(self.cargo, self.code, &args)?;
+        self.last = Some(package);
+        let outcomes: Value = serde_json::from_str(&std::fs::read_to_string(out.join("mutants.out/outcomes.json"))?)?;
+        let summary = outcomes["outcomes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|o| o["scenario"]["Mutant"]["name"] == name)
+            .and_then(|o| o["summary"].as_str())
+            .unwrap_or("no outcome");
+        eprintln!("mutants: #{pr}: {name}: {summary} ({} s)", at.elapsed().as_secs());
+        Ok(summary == "MissedMutant")
+    }
+
+    /// CI's `cargo test --workspace` builds every binary first, and some tests drive one (`xtask`'s eval tests need
+    /// `bp`): without them those tests pass as skipped, and mutants they would kill look missed.
+    fn bins(&self) -> Result<String> {
+        capture(Command::new(self.cargo).args(["build", "-q", "--workspace", "--bins"]).current_dir(self.code))
+    }
+}
+
 /// Whether the head with the mutant in it passes `cargo fmt --all --check` and the workspace's clippy with warnings as
 /// errors. A body replaced by `"xyzzy".into()` leaves unused code, and a deleted arm leaves a blank line: CI rejects
 /// both, and a reader sees them in the diff.
-fn ci_clean(code: &Path, cargo: &std::ffi::OsStr, head: &str, m: &Value) -> Result<bool> {
+fn ci_clean(code: &Path, cargo: &OsStr, head: &str, m: &Value) -> Result<bool> {
     plant(code, head, m, false)?;
     let ok = |args: &[&str]| {
         Command::new(cargo).args(args).current_dir(code).stdin(Stdio::null()).output().is_ok_and(|o| o.status.success())
@@ -296,23 +350,33 @@ fn not_a_guard(m: &Value) -> bool {
     m["genre"] != "MatchArmGuard"
 }
 
-/// `count` survivors in an order shuffled by `seed`, at most one from each function: two mutants of one function are
-/// not two independent pieces of evidence.
-fn pick(mut survivors: Vec<&Value>, count: usize, seed: u64) -> Vec<&Value> {
+/// The candidates in the order a run walks them: sorted by name, then shuffled by `seed`.
+fn order(mut candidates: Vec<&Value>, seed: u64) -> Vec<&Value> {
     let mut state = seed;
-    survivors.sort_by_key(|m| m["name"].as_str().unwrap_or(""));
-    for i in (1..survivors.len()).rev() {
-        survivors.swap(i, usize::try_from(splitmix(&mut state) % (i as u64 + 1)).expect("at most i"));
+    candidates.sort_by_key(|m| m["name"].as_str().unwrap_or(""));
+    for i in (1..candidates.len()).rev() {
+        candidates.swap(i, usize::try_from(splitmix(&mut state) % (i as u64 + 1)).expect("at most i"));
     }
+    candidates
+}
+
+/// The first `count` candidates in `order` that `survives`, at most one from each function: two mutants of one
+/// function are not two independent pieces of evidence. It stops at `count`, and does not test a candidate whose
+/// function it already keeps.
+fn walk(order: Vec<&Value>, count: usize, mut survives: impl FnMut(&Value) -> Result<bool>) -> Result<Vec<&Value>> {
     let mut functions = BTreeSet::new();
     let mut chosen = Vec::new();
-    for m in survivors {
+    for m in order {
+        if chosen.len() == count {
+            break;
+        }
         let function = (m["file"].as_str(), m["function"]["function_name"].as_str());
-        if chosen.len() < count && functions.insert(function) {
+        if !functions.contains(&function) && survives(m)? {
+            functions.insert(function);
             chosen.push(m);
         }
     }
-    chosen
+    Ok(chosen)
 }
 
 /// `SplitMix64`: a seeded sequence with no dependency, enough for a reproducible shuffle.
@@ -354,20 +418,31 @@ fn offset(text: &str, line: usize, column: usize) -> usize {
     start + rest.char_indices().nth(column - 1).map_or(rest.len(), |c| c.0)
 }
 
-/// The Problem and Shape of a landed pull request's body: `## Problem`, and `## What changed` when it holds a table,
-/// else `## How it works`. The template (`.github/pull_request_template.md`) names these sections.
-fn issue_of(body: &str) -> Result<String> {
+/// The seeded issue in the product's sections. Problem and Goal come from a landed pull request's body: its
+/// `## Problem`, and the first paragraph of its `## How it works`. A paragraph that ends with `:` introduces the next,
+/// so the Goal takes that one too. The template (`.github/pull_request_template.md`) names these sections. The Check
+/// runs the touched crates' tests.
+fn issue_of(body: &str, crates: &BTreeSet<String>) -> Result<String> {
     let section = |heading: &str| {
         let lines: Vec<&str> =
             body.lines().skip_while(|l| l.trim() != heading).skip(1).take_while(|l| !l.starts_with("## ")).collect();
         Some(lines.join("\n").trim().to_string()).filter(|s| !s.is_empty())
     };
     let problem = section("## Problem").context("no ## Problem")?;
-    let shape = section("## What changed")
-        .filter(|s| s.lines().any(|l| l.trim_start().starts_with('|')))
-        .or_else(|| section("## How it works"))
-        .context("no ## What changed table and no ## How it works")?;
-    Ok(format!("## Problem\n\n{problem}\n\n## Shape\n\n{shape}"))
+    let how = section("## How it works").context("no ## How it works")?;
+    let mut goal = Vec::new();
+    for paragraph in how.split("\n\n") {
+        goal.push(paragraph.trim());
+        if !paragraph.trim_end().ends_with(':') {
+            break;
+        }
+    }
+    let tests: Vec<String> = crates.iter().map(|c| format!("-p {c}")).collect();
+    Ok(format!(
+        "## Problem\n\n{problem}\n\n## Goal\n\n{}\n\n## Check\n\n~~~check shell {{name=tests expect=0}}\ncargo test -q {}\n~~~\n",
+        goal.join("\n\n"),
+        tests.join(" ")
+    ))
 }
 
 #[cfg(test)]
@@ -455,13 +530,63 @@ mod tests {
         let all: Vec<Value> = (0..9)
             .map(|i| serde_json::json!({"name": format!("m{i}"), "file": "a.rs", "function": {"function_name": format!("f{}", i % 3)}}))
             .collect();
-        let names =
-            |seed| pick(all.iter().collect(), 2, seed).iter().map(|m| m["name"].to_string()).collect::<Vec<_>>();
+        let pick = |count, seed| walk(order(all.iter().collect(), seed), count, |_| Ok(true)).unwrap();
+        let names = |seed| pick(2, seed).iter().map(|m| m["name"].to_string()).collect::<Vec<_>>();
         assert_eq!(names(7), names(7), "one seed, one pick");
         assert_ne!((0..20).map(names).collect::<BTreeSet<_>>().len(), 1, "the seed moves the pick");
-        let three = pick(all.iter().collect(), 9, 7);
+        let three = pick(9, 7);
         let functions: BTreeSet<_> = three.iter().map(|m| m["function"]["function_name"].as_str()).collect();
         assert_eq!((three.len(), functions.len()), (3, 3), "one per function, however many survive");
+    }
+
+    fn candidates(functions: &[&str]) -> Vec<Value> {
+        functions
+            .iter()
+            .enumerate()
+            .map(
+                |(i, f)| serde_json::json!({"name": format!("m{i}"), "file": "a.rs", "function": {"function_name": f}}),
+            )
+            .collect()
+    }
+
+    #[test]
+    fn the_walk_stops_at_the_count() {
+        let all = candidates(&["f0", "f1", "f2", "f3", "f4", "f5", "f6"]);
+        let mut tested = Vec::new();
+        let kept = walk(all.iter().collect(), 2, |m| {
+            tested.push(m["name"].as_str().unwrap().to_string());
+            Ok(matches!(m["name"].as_str(), Some("m2" | "m4")))
+        })
+        .unwrap();
+        assert_eq!(kept.iter().map(|m| m["name"].as_str().unwrap()).collect::<Vec<_>>(), ["m2", "m4"]);
+        assert_eq!(tested, ["m0", "m1", "m2", "m3", "m4"], "the third and fifth survive: five tested, then it stops");
+        let mut runs = 0;
+        let few = walk(all.iter().collect(), 3, |m| {
+            runs += 1;
+            Ok(m["name"] == "m2")
+        })
+        .unwrap();
+        assert_eq!((few.len(), runs), (1, 7), "the candidates run out: fewer than the count");
+    }
+
+    #[test]
+    fn a_kept_function_is_not_tested_twice() {
+        let all = candidates(&["f", "g", "f", "f", "h"]);
+        let mut tested = Vec::new();
+        let kept = walk(all.iter().collect(), 3, |m| {
+            tested.push(m["name"].as_str().unwrap().to_string());
+            Ok(m["name"] != "m1")
+        })
+        .unwrap();
+        assert_eq!(tested, ["m0", "m1", "m4"], "m2 and m3 are in f, which m0 already keeps");
+        assert_eq!(kept.iter().map(|m| m["name"].as_str().unwrap()).collect::<Vec<_>>(), ["m0", "m4"]);
+        let mut again = Vec::new();
+        walk(all.iter().collect(), 3, |m| {
+            again.push(m["name"].as_str().unwrap().to_string());
+            Ok(m["name"] == "m2")
+        })
+        .unwrap();
+        assert_eq!(again, ["m0", "m1", "m2", "m4"], "a function whose mutant was caught is tested again");
     }
 
     #[test]
@@ -485,14 +610,34 @@ mod tests {
 
     #[test]
     fn the_issue_comes_from_the_landed_pull_requests_body() {
-        let body = "## Problem\n\nThe reader counts calls.\n\n## Why now\n\nx\n\n## What changed\n\n| Before | After |\n|---|---|\n| a | b |\n\n## How it works\n\nIt splits.\n";
+        let body = "## Problem\n\nThe reader counts calls.\n\n## Why now\n\nx\n\n## What changed\n\n| Before | After |\n|---|---|\n| a | b |\n\n## How it works\n\nIt splits.\n\nThen it counts.\n";
+        let crates = BTreeSet::from(["bp-core".to_string(), "xtask".to_string()]);
+        let check = "## Check\n\n~~~check shell {name=tests expect=0}\ncargo test -q -p bp-core -p xtask\n~~~\n";
         assert_eq!(
-            issue_of(body).unwrap(),
-            "## Problem\n\nThe reader counts calls.\n\n## Shape\n\n| Before | After |\n|---|---|\n| a | b |"
+            issue_of(body, &crates).unwrap(),
+            format!("## Problem\n\nThe reader counts calls.\n\n## Goal\n\nIt splits.\n\n{check}")
         );
-        let no_table = body.replace("| Before | After |\n|---|---|\n| a | b |", "None.");
-        assert!(issue_of(&no_table).unwrap().ends_with("## Shape\n\nIt splits."), "no table: How it works");
-        assert!(issue_of("## Summary\n\nx\n").is_err(), "a body with no Problem refuses");
+        let lead = body.replace("It splits.", "It does two things:");
+        assert!(
+            issue_of(&lead, &crates).unwrap().contains("## Goal\n\nIt does two things:\n\nThen it counts.\n\n## Check"),
+            "a lead-in takes the next paragraph"
+        );
+        assert!(issue_of("## Summary\n\nx\n", &crates).is_err(), "a body with no Problem refuses");
+        assert!(issue_of("## Problem\n\nx\n", &crates).is_err(), "a body with no How it works refuses");
+    }
+
+    #[test]
+    fn the_seeded_issue_has_problem_goal_and_check() {
+        let m: Value = serde_json::from_str(
+            r#"{"name": "a.rs:1:1: delete ! in f", "file": "a.rs", "genre": "UnaryOperator", "span": {"start": {"line": 1, "column": 1}, "end": {"line": 1, "column": 2}}}"#,
+        )
+        .unwrap();
+        let issue =
+            issue_of("## Problem\n\nP.\n\n## How it works\n\nG.\n", &BTreeSet::from(["a".to_string()])).unwrap();
+        let f =
+            Fixture::parse("mutant-1-1", &mutant_text("base: b\nhead: h\ntitle: T\n", &m, "+x\n", 3, &issue)).unwrap();
+        let headings: Vec<&str> = f.issue.lines().filter(|l| l.starts_with("## ")).collect();
+        assert_eq!(headings, ["## Problem", "## Goal", "## Check"]);
     }
 
     #[test]
