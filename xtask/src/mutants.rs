@@ -8,17 +8,19 @@
 //! For each landed pull request it finds the squash on master whose subject ends `(#<n>)`; the base is its parent.
 //! In a throwaway clone at that head it lists `cargo-mutants`' candidates on the lines the diff changed. It drops the
 //! guard mutants (`MatchArmGuard`): the tool writes a literal `true` or `false`, which any reader sees. It sorts the
-//! rest by name, shuffles them with a seed of `s` and the pull request, and walks them in that order. A mutant that CI
+//! rest by name, shuffles them with a seed of `s` and the pull request, and groups them by package: each package's
+//! candidates stay in seed order, and the packages follow in the order of their first candidate. It walks them in that
+//! order, seed order grouped by package, so a package's binaries build once. A mutant that CI
 //! catches is a CI finding, not a review finding, so a kept mutant passes all of CI at the planted head: first
 //! `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`, the cheap gates, then the
 //! tests of every crate the diff touches. The tests run in chunks of 8 candidates of one package, one `cargo mutants`
 //! call each (`mutants_walk.rs` says why). Each test has a timeout of 300 s (`--timeout 300`); a mutant that times
 //! out is tested and not kept, since CI fails on a hang. It keeps at most one mutant per function and skips a
 //! candidate whose function it already keeps. It stops when it keeps `k`, or after 160 tested candidates. So a run
-//! tests few candidates past the `k`th survivor, in seed order: the same seed and candidate list keep the same
-//! mutants when the test outcomes are the same. It commits each kept mutant on the head as `bp-eval` and records the
-//! diff. It writes `mutant-<n>-<i>.md` for each and
-//! `control-<n>.md` with no mutant (`eval_fixture.rs` has the shape), into `--out` (default
+//! tests few candidates past the `k`th survivor: the kept set is the first `k` survivors in seed order grouped by
+//! package, one per function, so the same seed and candidate list keep the same mutants when the test outcomes are
+//! the same. It commits each kept mutant on the head as `bp-eval` and records the diff. It writes `mutant-<n>-<i>.md`
+//! for each and `control-<n>.md` with no mutant (`eval_fixture.rs` has the shape), into `--out` (default
 //! `xtask/evals/bp-review-mutants`).
 //!
 //! Before the walk it runs the tests of every touched crate once, at the head. When they fail, every mutant would read
@@ -147,7 +149,8 @@ enum End {
     Capped(usize),
 }
 
-/// The fixtures of one pull request: its candidates in seed order, the walk to `--count` survivors of CI, the files.
+/// The fixtures of one pull request: its candidates in seed order grouped by package, the walk to `--count` survivors
+/// of CI, the files.
 fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &OsStr, log: &str, pr: u32) -> Result<End> {
     let git = |args: &[&str]| capture(Command::new("git").args(args).current_dir(code));
     let (head, subject) = log

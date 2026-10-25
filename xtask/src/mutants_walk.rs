@@ -4,10 +4,12 @@
 //! A chunk is one `cargo mutants` call over at most `CHUNK` candidates of one package. One call per candidate pays
 //! the call's start-up each time (#40: 72 to 113 s per `bp-tool` mutant alone, about 45 s each inside one call),
 //! and one call for every candidate tests far past `--count` (#42: about six hours for six mutants). A chunk of 8
-//! keeps the start-up small and the overshoot at most 7 candidates. `CAP` bounds a pull request whose mutants CI
-//! catches: 20 chunks, after which it stops with what it kept.
+//! keeps the start-up small and the overshoot at most 7 candidates. A chunk fills only when the order holds a package's
+//! candidates together, so the order groups the seeded order by package (#40's seeded order alternates `bp-change` and
+//! `bp-tool`: 29 chunks held 36 candidates). `CAP` bounds a pull request whose mutants CI catches: 20 chunks, after
+//! which it stops with what it kept.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use serde_json::Value;
@@ -25,13 +27,19 @@ pub(crate) struct Walk<'a> {
     pub capped: bool,
 }
 
-/// The candidates in the order a run walks them: sorted by name, then shuffled by `seed`.
+/// The candidates in the order a run walks them, seed order grouped by package: sorted by name, shuffled by `seed`,
+/// then stably sorted by the position of each package's first candidate in that shuffle.
 pub(crate) fn order(mut candidates: Vec<&Value>, seed: u64) -> Vec<&Value> {
     let mut state = seed;
     candidates.sort_by_key(|m| m["name"].as_str().unwrap_or(""));
     for i in (1..candidates.len()).rev() {
         candidates.swap(i, usize::try_from(splitmix(&mut state) % (i as u64 + 1)).expect("at most i"));
     }
+    let mut first = BTreeMap::new();
+    for (i, m) in candidates.iter().enumerate() {
+        first.entry(m["package"].as_str()).or_insert(i);
+    }
+    candidates.sort_by_key(|m| first[&m["package"].as_str()]);
     candidates
 }
 
@@ -184,6 +192,37 @@ mod tests {
         let (w, chunks) = run(&split, 2, &["m1", "m4"]);
         assert_eq!(names(&w), ["m1", "m4"]);
         assert_eq!(chunks, [vec!["m0", "m1", "m2"], vec!["m3", "m4", "m5"]], "a chunk ends where the package changes");
+    }
+
+    #[test]
+    fn the_order_groups_the_seeded_order_by_package() {
+        // One package: the order is the seed's shuffle alone, which does not read the package.
+        let one = distinct(16);
+        let seeded: Vec<String> =
+            order(one.iter().collect(), 5).iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
+        let mut all = one.clone();
+        for (i, m) in all.iter_mut().enumerate() {
+            m["package"] = if i % 3 == 0 { "q" } else { "p" }.into();
+        }
+        let package = |n: &String| all.iter().find(|m| m["name"] == n.as_str()).unwrap()["package"].to_string();
+        let first = package(&seeded[0]);
+        let in_seed = |same: bool| seeded.iter().filter(|n| (package(n) == first) == same).cloned().collect::<Vec<_>>();
+        let grouped: Vec<String> =
+            order(all.iter().collect(), 5).iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(grouped, [in_seed(true), in_seed(false)].concat(), "each package in seed order, first-seen first");
+        let mut chunks = Vec::new();
+        walk(
+            order(all.iter().collect(), 5),
+            99,
+            |_| true,
+            |c| {
+                chunks.push(c.len());
+                Ok(vec![false; c.len()])
+            },
+        )
+        .unwrap();
+        let sizes = if first == "\"p\"" { [8, 2, 6] } else { [6, 8, 2] };
+        assert_eq!(chunks, sizes, "10 in p and 6 in q: the chunks fill, and only a package's end cuts one short");
     }
 
     #[test]
