@@ -12,8 +12,8 @@
 //! `$BP_REDESIGN/analysis/evals-skills/<skill>/`. Then it grades the store, as `--grade` does. The agent is
 //! `$BP_EVAL_AGENT`, a shell command that reads the prompt from `$BP_EVAL_PROMPT`; if it writes the role's transcript
 //! to `$BP_EVAL_TRANSCRIPT`, that file is the trace, and if it does not, the newest transcript of the role's subagent
-//! that Claude Code wrote for the sandbox is. A run past `$BP_EVAL_TIMEOUT` seconds is killed (default 1200; 3600 for
-//! `bp-complete`, which builds a whole issue; 1800 for `bp-respond`), and a trial with no transcript is stored as a
+//! that Claude Code wrote for the sandbox is. A run past `$BP_EVAL_TIMEOUT` seconds is killed (default 1800; 3600 for
+//! `bp-complete`, which builds a whole issue), and a trial with no transcript is stored as a
 //! failed trial; a failed trial counts as a fail, and the report names the reason. `$BP_VAULT` is the vault to copy.
 //! `$BP_EVAL_TARGET` is a cargo target directory to keep across runs (default: one per run), where a worker's blocks
 //! build the issue's code; every trial gets its own `$TMPDIR` under the run's work directory, `CARGO_INCREMENTAL=0` and,
@@ -108,8 +108,8 @@ impl Skill {
     fn seconds(&self) -> u64 {
         match self.action {
             Action::Complete => 3600,
-            Action::Respond => 1800,
-            _ => 1200,
+            // A probing review builds and runs the code (30, design change 5).
+            _ => 1800,
         }
     }
 }
