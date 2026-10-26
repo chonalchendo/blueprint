@@ -1,0 +1,48 @@
+kind: mutant
+base: b7ae4913b1f535467606e08ca3c441f43b1742ed
+head: 33a51ddbd41cf8e41b5b726bc26f6eb8d413f16e
+title: Mutant fixtures inside real diffs, controls, escapes, --fixtures
+genre: BinaryOperator
+span: xtask/src/mutants.rs:197-197
+seed: 11
+mutant_diff: |
+    diff --git a/xtask/src/mutants.rs b/xtask/src/mutants.rs
+    index 6fd1d78..1663f59 100644
+    --- a/xtask/src/mutants.rs
+    +++ b/xtask/src/mutants.rs
+    @@ -194,7 +194,7 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &std::ffi::Os
+             chosen.len(),
+             started.elapsed().as_secs()
+         );
+    -    if chosen.len() < a.count {
+    +    if chosen.len() == a.count {
+             eprintln!("mutants: #{pr}: fewer than --count {}", a.count);
+         }
+         // A control pairs with the mutants of its pull request; alone it adds a run and measures nothing new.
+truth:
+- xtask/src/mutants.rs:197-197 | replace < with == in one
+---
+## Problem
+
+The review eval has one fixture, `pr-20`. Its truth comes from a past review, so a reader can find it by reading the diff. No fixture plants a defect that CI misses, and no fixture measures false rows on a clean pull request. The proof of milestone 7 needs planted defects with known locations (30, design change 1).
+
+## Goal
+
+`xtask/src/mutants.rs` clones the repository into a `bp-mutants` temp directory. For each pull request it finds the squash whose subject ends `(#<n>)`; the squash's parent is the base.
+
+1. `cargo mutants --list --json --in-diff <diff>` gives the candidates. A tests-only diff lists nothing.
+2. The CI screen: it plants each candidate and runs `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`. These are cheaper than the tests, so they run first.
+3. For each crate with screened candidates, it builds the workspace binaries, then runs `cargo mutants --in-place` with `--test-package` for every touched crate and one `--re ^<name>$` per screened candidate. A `MissedMutant` outcome survives CI.
+4. It sorts the survivors, shuffles them with SplitMix64 seeded by `seed + pr`, and keeps at most one per function, up to `--count`.
+5. It writes the span's replacement without the tool's marker, commits it as `bp-eval` and records `git diff head HEAD`. The span is recomputed from that diff, so it is a line of the planted head.
+
+- The issue's Problem is the `## Problem` section of the landed pull request's body (`gh pr view <n> --json body`). The Shape is `## What changed`, or `## How it works` when that section has no table. The text is stored in the fixture, so no run needs the network. The control shares it.
+- The Check is `cargo test -q -p <crate>...` over the touched crates: the gate that the mutants survived.
+- A pull request that keeps no mutant writes no control.
+- `--in-place` runs one mutant at a time; `cargo-mutants` refuses `--jobs` with it.
+
+## Check
+
+~~~check shell {name=tests expect=0}
+cargo test -q -p xtask
+~~~

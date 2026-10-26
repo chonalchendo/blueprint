@@ -1,0 +1,4 @@
+- mutant-40-6: replace > with >= in open_concerns (crates/bp-change/src/intents/planning.rs:113) has no observable effect: every answer of one concern is a file under concerns/<concern>/, so two answers never share a stamp, and >= differs from > only when an entry meets itself
+- mutant-57-3: replace + with - in filler (xtask/src/eval_arms.rs:26) has no observable effect: it repeats the filler line more often, and text.truncate(len) cuts the text back to the same len bytes
+- mutant-45-4: replace > with >= in card (crates/bp-diagram/src/label.rs:127) duplicates the function of mutant-42-1 (card, crates/bp-diagram/src/label.rs:106); one mutant per function
+- mutant-64-6: replace && with || in review (xtask/src/eval_score.rs:124) duplicates the function of mutant-59-2 (review, xtask/src/eval_score.rs:93); one mutant per function
