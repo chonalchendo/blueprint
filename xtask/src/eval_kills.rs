@@ -58,11 +58,13 @@ const READS: [&str; 12] =
 /// Words a section name can open with that name no section.
 const STOP: [&str; 9] = ["the", "a", "an", "of", "in", "on", "its", "this", "not"];
 
-/// Whether `span` opens a command of `command`, after its start or a `;`, `&`, `|` or newline, and ends at a word.
+/// Whether `span` opens a command of `command`, after its start or a `;`, `&`, `|` or newline, past the assignments
+/// and keywords the trace reader skips ([`crate::eval_trace::program_at`]), and ends at a word.
 fn opens(command: &str, span: &str) -> bool {
     let starts = command.char_indices().filter(|(_, c)| matches!(c, ';' | '&' | '|' | '\n')).map(|(i, _)| i + 1);
     std::iter::once(0).chain(starts).any(|i| {
-        command[i..].trim_start().strip_prefix(span).is_some_and(|rest| {
+        let segment = &command[i..];
+        segment[crate::eval_trace::program_at(segment)..].strip_prefix(span).is_some_and(|rest| {
             rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
         })
     })
@@ -204,12 +206,14 @@ mod tests {
             "T=$(mktemp -d) && git archive HEAD | tar -x -C $T && cd $T",
             "./target/debug/bp walk x --json; echo $?",
             "head -40 crates/bp-diagram/src/svg.rs",
+            "cd $H && T=$D/target; CARGO_TARGET_DIR=$T cargo xtask sandbox claim > ../sb.txt 2>&1; echo $?",
         ];
         let proof = Proof { commands, designs: &designs };
         for yes in [
             "`cargo test -p xtask -- eval_trace` fails: 0 calls",
             "`T=$(mktemp -d) && git archive HEAD | tar -x -C $T` then the probe",
             "`./target/debug/bp walk x --json` exits 2",
+            "`cargo xtask sandbox claim` exits 1 with the inverted check",
             "breaks projects/bp/designs/system, the check of 10",
             "against shared/conventions/convention.testing, item 6",
             "the reader must count it (30, design change 5)",
