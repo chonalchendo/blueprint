@@ -35,11 +35,14 @@ pub fn designs(dir: Option<&Path>) -> BTreeMap<String, String> {
 /// Whether a row's text carries evidence (30, design changes 2 and 3): a command the trial ran, or a design or
 /// convention id. A command is a backtick span of two words or more that opens a command the trial ran: the whole
 /// command, or it with trailing arguments trimmed. So a command the reviewer only advises is no reproduction, and nor
-/// is the tail of one. A read ([`READS`]) reproduces nothing. An id is a vault path under `projects/…/designs/` or
+/// is the tail of one. The span and the command both drop the assignments and keywords the trace reader skips
+/// ([`crate::eval_trace::program_at`]), so `CARGO_TARGET_DIR=$T cargo test -p a` and `cargo test -p a` open each
+/// other. A read ([`READS`]) reproduces nothing. An id is a vault path under `projects/…/designs/` or
 /// `shared/conventions/`, or a numbered cite ([`numbered`]).
 pub fn evidence(text: &str, proof: &Proof) -> bool {
     let ran = |span: &str| {
         let span = span.trim();
+        let span = &span[crate::eval_trace::program_at(span)..];
         let words: Vec<&str> = span.split_whitespace().take(2).collect();
         let read = READS.iter().any(|r| r.split(' ').eq(words.iter().copied().take(r.split(' ').count())));
         words.len() == 2 && !span.starts_with('-') && !read && proof.commands.iter().any(|c| opens(c, span))
@@ -214,6 +217,8 @@ mod tests {
             "`T=$(mktemp -d) && git archive HEAD | tar -x -C $T` then the probe",
             "`./target/debug/bp walk x --json` exits 2",
             "`cargo xtask sandbox claim` exits 1 with the inverted check",
+            "`CARGO_TARGET_DIR=$T cargo xtask sandbox claim` exits 1",
+            "`T=$D/target cargo test -p xtask -- eval_trace` fails too",
             "breaks projects/bp/designs/system, the check of 10",
             "against shared/conventions/convention.testing, item 6",
             "the reader must count it (30, design change 5)",
