@@ -18,6 +18,7 @@ mutant_diff: |
     +        Rect::new(x, y, (r.right() - x + 3) % 4 * 4, (r.bottom() - y + 3) / 4 * 4)
          }
      }
+     
 truth:
 - crates/bp-diagram/src/scene.rs:116-116 | replace / with % in SGroup::label_box
 ---

@@ -6,7 +6,10 @@
 //! ```
 //!
 //! For each landed pull request it finds the squash on master whose subject ends `(#<n>)`; the base is its parent.
-//! In a throwaway clone at that head it lists `cargo-mutants`' candidates on the lines the diff changed. It drops the
+//! In a throwaway clone at that head it lists `cargo-mutants`' candidates on the lines the diff changed. A candidate
+//! counts only when its span starts on an added (`+`) line of `base..head`, read from the diff's hunks: `--in-diff`
+//! also lists a candidate on an unchanged line beside a change, and the planted diff then shows the original line
+//! removed and the mutated one added, which a reader finds by reading. It drops the
 //! guard mutants (`MatchArmGuard`): the tool writes a literal `true` or `false`, which any reader sees. It sorts the
 //! rest by name, shuffles them with a seed of `s` and the pull request, and groups them by package: each package's
 //! candidates stay in seed order, and the packages follow in the order of their first candidate. It walks them in that
@@ -19,7 +22,10 @@
 //! candidate whose function it already keeps. It stops when it keeps `k`, or after 160 tested candidates. So a run
 //! tests few candidates past the `k`th survivor: the kept set is the first `k` survivors in seed order grouped by
 //! package, one per function, so the same seed and candidate list keep the same mutants when the test outcomes are
-//! the same. It commits each kept mutant on the head as `bp-eval` and records the diff. It writes `mutant-<n>-<i>.md`
+//! the same. It commits each kept mutant on the head as `bp-eval` and records the diff as git writes it, untrimmed:
+//! a hunk's last context line may be blank, and without it the diff does not apply. Before CI it checks that the
+//! recorded diff applies at the head (`git apply --check`); a candidate whose diff does not is not clean, with a log
+//! line, since the sandbox plants it with `git apply`. It writes `mutant-<n>-<i>.md`
 //! for each and `control-<n>.md` with no mutant (`eval_fixture.rs` has the shape), into `--out` (default
 //! `xtask/evals/bp-review-mutants`).
 //!
@@ -50,7 +56,7 @@ use serde_json::Value;
 use crate::eval::usage;
 use crate::eval_fixture::INDENT;
 use crate::eval_sandbox::capture;
-use crate::mutants_walk::{CAP, failing, order, walk};
+use crate::mutants_walk::{CAP, added_lines, failing, order, walk};
 
 const VERSION: &str = "27.1.0";
 const INSTALL: &str = "cargo install --locked cargo-mutants@27.1.0";
@@ -165,7 +171,9 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &OsStr, log: 
     )?;
     git(&["checkout", "-q", "--detach", &head])?;
     let diff = work.join(format!("{pr}.diff"));
-    std::fs::write(&diff, format!("{}\n", git(&["diff", &base, &head])?))?;
+    let changed = format!("{}\n", git(&["diff", &base, &head])?);
+    std::fs::write(&diff, &changed)?;
+    let added = added_lines(&changed);
     let started = Instant::now();
     let in_diff = diff.display().to_string();
     // A diff that touches no mutable code (tests only) lists nothing at all, not `[]`.
@@ -174,8 +182,17 @@ fn one(a: &Args, (root, code, work): (&Path, &Path, &Path), cargo: &OsStr, log: 
         serde_json::from_str(if listed.trim().is_empty() { "[]" } else { &listed }).context("parse --list --json")?;
     let crates: BTreeSet<String> = listed.iter().filter_map(|m| m["package"].as_str().map(str::to_string)).collect();
     let issue = issue_of(&body, &crates).with_context(|| format!("the body of #{pr}"))?;
-    let candidates = order(listed.iter().filter(|m| not_a_guard(m)).collect(), a.seed.wrapping_add(pr.into()));
-    eprintln!("mutants: #{pr}: {} candidates in {crates:?}, {} after the guards", listed.len(), candidates.len());
+    let on_added = |m: &&Value| {
+        let line = m["span"]["start"]["line"].as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or(0);
+        added.contains(&(m["file"].as_str().unwrap_or("").to_string(), line))
+    };
+    let candidates =
+        order(listed.iter().filter(|m| not_a_guard(m) && on_added(m)).collect(), a.seed.wrapping_add(pr.into()));
+    eprintln!(
+        "mutants: #{pr}: {} candidates in {crates:?}, {} after the guards and on added lines",
+        listed.len(),
+        candidates.len()
+    );
     if !candidates.is_empty() {
         bins(cargo, code)?;
         let failing = failing(&crates, |cs| {
@@ -325,6 +342,10 @@ impl Chunks<'_> {
 /// errors. A body replaced by `"xyzzy".into()` leaves unused code, and a deleted arm leaves a blank line: CI rejects
 /// both, and a reader sees them in the diff.
 fn ci_clean(code: &Path, cargo: &OsStr, head: &str, m: &Value) -> Result<bool> {
+    if let Err(e) = plant(code, head, m, true) {
+        eprintln!("mutants: {}: {e:#}", m["name"].as_str().unwrap_or(""));
+        return Ok(false);
+    }
     plant(code, head, m, false)?;
     let ok = |args: &[&str]| {
         Command::new(cargo).args(args).current_dir(code).stdin(Stdio::null()).output().is_ok_and(|o| o.status.success())
@@ -396,7 +417,7 @@ fn not_a_guard(m: &Value) -> bool {
 
 /// Writes the mutant into the clone at `head`: the span's text becomes the replacement as `cargo-mutants` writes it,
 /// without the tool's marker comment, which would point at the defect. With `commit`, it commits it as `bp-eval`,
-/// returns the diff and resets the clone to `head`.
+/// resets the clone to `head`, and returns the diff as git wrote it once `git apply --check` takes it there.
 fn plant(code: &Path, head: &str, m: &Value, commit: bool) -> Result<String> {
     let git = |args: &[&str]| capture(Command::new("git").args(args).current_dir(code));
     git(&["reset", "-q", "--hard", head])?;
@@ -412,9 +433,26 @@ fn plant(code: &Path, head: &str, m: &Value, commit: bool) -> Result<String> {
     }
     let me = ["-c", "user.name=bp-eval", "-c", "user.email=bp-eval@bp.invalid"];
     git(&[&me[..], &["commit", "-q", "--no-verify", "-am", "mutant"]].concat())?;
-    let diff = git(&["diff", head, "HEAD"])?;
+    // `capture` trims, which drops a blank last context line: the diff is read as git wrote it.
+    let out = Command::new("git").args(["diff", head, "HEAD"]).current_dir(code).output()?;
+    if !out.status.success() {
+        bail!("git diff {head} HEAD exited {}", out.status);
+    }
+    let diff = String::from_utf8(out.stdout).context("the diff is UTF-8")?;
     git(&["reset", "-q", "--hard", head])?;
-    Ok(format!("{diff}\n"))
+    let mut check = Command::new("git")
+        .args(["apply", "--check", "-"])
+        .current_dir(code)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    std::io::Write::write_all(&mut check.stdin.take().context("git apply takes stdin")?, diff.as_bytes())?;
+    let checked = check.wait_with_output()?;
+    if !checked.status.success() {
+        bail!("the planted diff does not apply at {head}: {}", String::from_utf8_lossy(&checked.stderr).trim());
+    }
+    Ok(diff)
 }
 
 /// The byte offset of a 1-based line and character column, as `cargo-mutants` gives a span.
@@ -540,6 +578,24 @@ mod tests {
         assert_eq!(planted_lines(cut), (55, 55), "a deleted arm: the line after the cut");
         let dashes = "--- a/m.rs\n+++ b/m.rs\n@@ -3,2 +3,2 @@\n a\n---- b\n+--- c\n";
         assert_eq!(planted_lines(dashes), (4, 4), "a removed line that starts with `---` is no header");
+    }
+
+    #[test]
+    fn the_planted_diff_keeps_a_blank_last_context_line_and_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| capture(Command::new("git").args(args).current_dir(dir.path())).unwrap();
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("a.rs"), "fn a() {\n    x == y\n}\n\n").unwrap();
+        git(&["add", "a.rs"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t.invalid", "commit", "-q", "-m", "a"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        let m: Value = serde_json::from_str(
+            r#"{"file": "a.rs", "replacement": "!=", "span": {"start": {"line": 2, "column": 7}, "end": {"line": 2, "column": 9}}}"#,
+        )
+        .unwrap();
+        let diff = plant(dir.path(), &head, &m, true).unwrap();
+        assert!(diff.ends_with("+    x != y\n }\n \n"), "the hunk keeps its blank context line: {diff:?}");
+        assert_eq!(git(&["rev-parse", "HEAD"]), head, "the clone is back at the head");
     }
 
     #[test]

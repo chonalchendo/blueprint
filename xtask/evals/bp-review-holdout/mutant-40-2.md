@@ -18,6 +18,7 @@ mutant_diff: |
     +    let fixed = dispositions.iter().any(|d| text(&d.header, "as").as_deref() != Some("fixed"));
          Ok(((1..=rows as u64).filter(|n| !answered.contains(n)).collect(), fixed))
      }
+     
 truth:
 - crates/bp-tool/src/intent.rs:304-304 | replace == with != in findings
 ---

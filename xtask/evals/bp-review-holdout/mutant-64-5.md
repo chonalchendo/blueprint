@@ -18,6 +18,7 @@ mutant_diff: |
     +        (p + z2 / (2.0 * n), 1.96 * (p * (1.0 - p) * n + z2 / (4.0 * n * n)).sqrt(), 1.0 + z2 / n);
          (p, (centre - spread) / scale, (centre + spread) / scale)
      }
+     
 truth:
 - xtask/src/eval_result.rs:158-158 | replace / with * in wilson
 ---
