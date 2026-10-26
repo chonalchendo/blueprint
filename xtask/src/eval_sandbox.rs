@@ -34,7 +34,8 @@ pub struct Sandbox {
     /// sandbox.
     tmp: PathBuf,
     /// One cargo target directory for every trial: the issue's block builds `xtask` in each clone. `$BP_EVAL_TARGET`
-    /// keeps it across runs, so a smoke trial warms the build of the full run.
+    /// keeps it across runs, so a smoke trial warms the build of the full run. Its binaries are the last head's until
+    /// [`Sandbox::open_pr`] builds the fixture's own.
     target: PathBuf,
     /// The vault's head when the agent starts: the log is what the agent and the session add after it.
     start: String,
@@ -195,6 +196,13 @@ impl Sandbox {
             let file = self.forge.join("mutant.diff");
             std::fs::write(&file, diff)?;
             plant(&worktree, &file)?;
+        }
+        // The cargo target is shared, so `target/debug/bp` is whatever the last head built, and an issue's own check
+        // reads it (`xtask/tests/eval.rs` at #59 takes the `bp` beside the xtask test binary; `with-escape-11-19-20-1`
+        // read #58's `bp` and failed, 2026-10-26). Build this head's binaries before its checks run. A fixture with no
+        // cargo workspace (the fake repositories of the tests) has no cargo check to mislead.
+        if worktree.join("Cargo.toml").exists() {
+            capture(self.command("cargo", &worktree).args(["build", "-q", "--workspace", "--bins"]))?;
         }
         self.bp(&worktree, Some("worker"), &["pr", issue])?;
         git(&worktree, &["rev-parse", "HEAD"])
