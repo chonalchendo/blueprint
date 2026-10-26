@@ -35,14 +35,21 @@ pub fn designs(dir: Option<&Path>) -> BTreeMap<String, String> {
 /// Whether a row's text carries evidence (30, design changes 2 and 3): a command the trial ran, or a design or
 /// convention id. A command is a backtick span of two words or more that opens a command the trial ran: the whole
 /// command, or it with trailing arguments trimmed. So a command the reviewer only advises is no reproduction, and nor
-/// is the tail of one. A read ([`READS`]) reproduces nothing. An id is a vault path under `projects/…/designs/` or
+/// is the tail of one. The span matches as written, or with the assignments and keywords the trace reader skips
+/// ([`crate::eval_trace::program_at`]) dropped from both sides, so `CARGO_TARGET_DIR=$T cargo test -p a` and
+/// `cargo test -p a` open each other; the assignments themselves are not compared. A read ([`READS`]) reproduces
+/// nothing. An id is a vault path under `projects/…/designs/` or
 /// `shared/conventions/`, or a numbered cite ([`numbered`]).
 pub fn evidence(text: &str, proof: &Proof) -> bool {
     let ran = |span: &str| {
-        let span = span.trim();
+        let whole = span.trim();
+        let span = &whole[crate::eval_trace::program_at(whole)..];
         let words: Vec<&str> = span.split_whitespace().take(2).collect();
         let read = READS.iter().any(|r| r.split(' ').eq(words.iter().copied().take(r.split(' ').count())));
-        words.len() == 2 && !span.starts_with('-') && !read && proof.commands.iter().any(|c| opens(c, span))
+        words.len() == 2
+            && !whole.starts_with('-')
+            && !read
+            && proof.commands.iter().any(|c| opens(c, whole) || opens(c, span))
     };
     let id = text.split_whitespace().any(|w| {
         let w = w.trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '-' | '_')));
@@ -58,12 +65,16 @@ const READS: [&str; 12] =
 /// Words a section name can open with that name no section.
 const STOP: [&str; 9] = ["the", "a", "an", "of", "in", "on", "its", "this", "not"];
 
-/// Whether `span` opens a command of `command`, after its start or a `;`, `&`, `|` or newline, and ends at a word.
+/// Whether `span` opens a command of `command`, after its start or a `;`, `&`, `|` or newline, as written or past the
+/// assignments and keywords the trace reader skips ([`crate::eval_trace::program_at`]), and ends at a word.
 fn opens(command: &str, span: &str) -> bool {
     let starts = command.char_indices().filter(|(_, c)| matches!(c, ';' | '&' | '|' | '\n')).map(|(i, _)| i + 1);
     std::iter::once(0).chain(starts).any(|i| {
-        command[i..].trim_start().strip_prefix(span).is_some_and(|rest| {
-            rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
+        let segment = &command[i..];
+        [segment.trim_start(), &segment[crate::eval_trace::program_at(segment)..]].iter().any(|s| {
+            s.strip_prefix(span).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
+            })
         })
     })
 }
@@ -203,13 +214,20 @@ mod tests {
             "cd /w && cargo test -p xtask -- eval_trace 2>&1 | tail -5",
             "T=$(mktemp -d) && git archive HEAD | tar -x -C $T && cd $T",
             "./target/debug/bp walk x --json; echo $?",
+            "env -u BP_ROLE ./target/debug/bp walk x --json",
             "head -40 crates/bp-diagram/src/svg.rs",
+            "cd $H && T=$D/target; CARGO_TARGET_DIR=$T cargo xtask sandbox claim > ../sb.txt 2>&1; echo $?",
         ];
         let proof = Proof { commands, designs: &designs };
         for yes in [
             "`cargo test -p xtask -- eval_trace` fails: 0 calls",
             "`T=$(mktemp -d) && git archive HEAD | tar -x -C $T` then the probe",
             "`./target/debug/bp walk x --json` exits 2",
+            "`cargo xtask sandbox claim` exits 1 with the inverted check",
+            "`CARGO_TARGET_DIR=$T cargo xtask sandbox claim` exits 1",
+            "`T=$D/target cargo test -p xtask -- eval_trace` fails too",
+            "`env FOO=1 cargo test -p xtask -- eval_trace` fails too",
+            "`env -u BP_ROLE ./target/debug/bp walk x --json` exits 2",
             "breaks projects/bp/designs/system, the check of 10",
             "against shared/conventions/convention.testing, item 6",
             "the reader must count it (30, design change 5)",
@@ -222,6 +240,9 @@ mod tests {
             "the span `drill_box` returns the wrong width",
             "`n.rect.right() - 12 / w` is wrong",
             "`cargo` is not run",
+            "`X=1 cargo` is one word past its assignment",
+            "`-- eval_trace` is a tail",
+            "`T=$D/target cat xtask/src/lib.rs` reads behind an assignment",
             "Run `cargo test -p bp-diagram` to see it fail.",
             "line 113 subtracts where it should divide (12 lines)",
             "the count is wrong",

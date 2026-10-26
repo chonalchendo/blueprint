@@ -81,23 +81,21 @@ fn in_value(v: &Value, needle: &str) -> bool {
     }
 }
 
-/// The `bp` calls of one shell command. The command splits at `;`, `&`, `|`, a newline, a parenthesis and a
-/// backtick outside quotes ([`segments`]), and a segment counts when its first word, after `export`, `env`,
-/// `timeout N`, a keyword that opens a command (`if`, `elif`, `while`, `until`, `do`, `then`, `else`, `{`, `!`) and
-/// assignments, is `bp` (as the role's hook resolves it) or a path to a `bp` in a `bin*` directory, the sandbox's. A
-/// `bp` that the worker builds under `target/` is the code under test, not a call of the role, and `$B set` is no call
-/// either.
-/// A redirect is removed first, as `2>&1` would else split at its `&` and leave `2>` as the verb. A heredoc body is
-/// skipped, from the line after `<<WORD` to the line that is `WORD`: it is text the shell never runs, and source code
-/// in it that quotes `bp set <id>` would invent a call. A body counts only once its terminator line is seen, so a
-/// stray `<<` hides nothing, unless a later line happens to equal the word after it.
-fn calls_in(command: &str) -> Vec<BpCall> {
-    let mut out = Vec::new();
-    for segment in segments(&without_redirects(&without_heredocs(command))) {
-        let mut words = segment.split_whitespace().peekable();
-        while let Some(w) = words.peek() {
-            if matches!(
-                *w,
+/// Where a segment's program starts: after `export`, `env`, `command`, `exec`, a keyword that opens a command (`if`,
+/// `elif`, `while`, `until`, `do`, `then`, `else`, `{`, `!`), an assignment and `timeout N`. An assignment that opens
+/// a substitution (`T=$(mktemp -d)`) is no prefix: the reader splits at the parenthesis, and the grader keeps the
+/// whole span. The kill grader reads a reproduction the same way, so `CARGO_TARGET_DIR=$T cargo xtask sandbox claim`
+/// opens with `cargo` for both.
+pub(crate) fn program_at(segment: &str) -> usize {
+    let mut rest = segment;
+    let mut after_timeout = false;
+    loop {
+        let trimmed = rest.trim_start();
+        let word = trimmed.split_whitespace().next().unwrap_or_default();
+        let prefix = after_timeout
+            || word == "timeout"
+            || matches!(
+                word,
                 "export"
                     | "env"
                     | "command"
@@ -111,15 +109,30 @@ fn calls_in(command: &str) -> Vec<BpCall> {
                     | "else"
                     | "{"
                     | "!"
-            ) || (w.contains('=') && !w.starts_with('-'))
-            {
-                words.next();
-            } else if *w == "timeout" {
-                words.nth(1);
-            } else {
-                break;
-            }
+            )
+            || (word.contains('=') && !word.starts_with('-') && !word.contains("$(") && !word.contains('`'));
+        if word.is_empty() || !prefix {
+            return segment.len() - trimmed.len();
         }
+        after_timeout = word == "timeout";
+        rest = &trimmed[word.len()..];
+    }
+}
+
+/// The `bp` calls of one shell command. The command splits at `;`, `&`, `|`, a newline, a parenthesis and a
+/// backtick outside quotes ([`segments`]), and a segment counts when its first word, after `export`, `env`,
+/// `timeout N`, a keyword that opens a command (`if`, `elif`, `while`, `until`, `do`, `then`, `else`, `{`, `!`) and
+/// assignments, is `bp` (as the role's hook resolves it) or a path to a `bp` in a `bin*` directory, the sandbox's. A
+/// `bp` that the worker builds under `target/` is the code under test, not a call of the role, and `$B set` is no call
+/// either.
+/// A redirect is removed first, as `2>&1` would else split at its `&` and leave `2>` as the verb. A heredoc body is
+/// skipped, from the line after `<<WORD` to the line that is `WORD`: it is text the shell never runs, and source code
+/// in it that quotes `bp set <id>` would invent a call. A body counts only once its terminator line is seen, so a
+/// stray `<<` hides nothing, unless a later line happens to equal the word after it.
+fn calls_in(command: &str) -> Vec<BpCall> {
+    let mut out = Vec::new();
+    for segment in segments(&without_redirects(&without_heredocs(command))) {
+        let mut words = segment[program_at(&segment)..].split_whitespace();
         if words.next().is_none_or(|w| !is_bp(w)) {
             continue;
         }
@@ -341,6 +354,21 @@ pub fn sha256(file: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_program_starts_after_assignments_keywords_and_timeout() {
+        for (segment, program) in [
+            ("CARGO_TARGET_DIR=$T cargo xtask sandbox claim", "cargo xtask sandbox claim"),
+            ("  env FOO=1 timeout 10 bp walk x", "bp walk x"),
+            ("if ! bp show x", "bp show x"),
+            ("T=$(mktemp -d) && git archive HEAD", "T=$(mktemp -d) && git archive HEAD"),
+            ("cargo test -p a", "cargo test -p a"),
+            ("A=1", ""),
+            ("", ""),
+        ] {
+            assert_eq!(&segment[super::program_at(segment)..], program, "{segment:?}");
+        }
+    }
+
     use super::*;
 
     fn line(blocks: &str) -> String {
