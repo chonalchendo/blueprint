@@ -28,8 +28,10 @@ pub struct Sandbox {
     pub forge: PathBuf,
     pub issue: String,
     bindir: PathBuf,
-    /// This trial's own `$TMPDIR`: `cargo xtask scratch` and `forge` prune the shared one by age and count, and a
-    /// worker's blocks call them on every `check` and `pr`, so a shared directory could lose a live sandbox.
+    /// This trial's own temporary directory, which holds its vault and forge. The agent's `$TMPDIR` is its `agent`
+    /// child: `cargo xtask scratch`, `forge` and `sandbox` prune `$TMPDIR/bp-*` by age and count, a worker's blocks
+    /// call them on every `check` and `pr`, and a reviewer's probe runs them too, so a shared directory loses a live
+    /// sandbox.
     tmp: PathBuf,
     /// One cargo target directory for every trial: the issue's block builds `xtask` in each clone. `$BP_EVAL_TARGET`
     /// keeps it across runs, so a smoke trial warms the build of the full run.
@@ -62,6 +64,10 @@ impl Sandbox {
     ) -> Result<Self> {
         let exe = std::env::current_exe().context("find the xtask binary")?;
         let tmp = crate::scratch::fresh(&work.join("tmp"), 3)?.canonicalize()?;
+        // The agent's `TMPDIR` is a child of `tmp`, apart from the vault and the forge that `tmp` itself holds: a
+        // probe that runs the project's own `cargo xtask sandbox` or its tests there fills `$TMPDIR/bp-forge` past
+        // `KEEP` and prunes the live checkout (the development run, `with-control-58-1`, 2026-10-26).
+        std::fs::create_dir_all(tmp.join("agent"))?;
         let made = |verb: &[&str], vault: &Path| {
             let mut c = Command::new(&exe);
             capture(c.args(verb).env("BP_VAULT", vault).env("TMPDIR", &tmp).current_dir(work).stdin(Stdio::null()))
@@ -244,11 +250,12 @@ impl Sandbox {
             .env("PATH", path.unwrap_or_default())
             .env("BP_VAULT", &self.vault)
             .env("GIT_ALLOW_PROTOCOL", "file")
-            .env("TMPDIR", &self.tmp)
+            .env("TMPDIR", self.tmp.join("agent"))
             .env("CARGO_TARGET_DIR", &self.target)
             .env("CARGO_INCREMENTAL", "0")
             .env("CARGO_BUILD_JOBS", std::env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| "4".into()))
             .env("CARGO_NET_OFFLINE", "true")
+            .env_remove("BP_REDESIGN")
             .env_remove("BP_ROLE")
             .env_remove("BP_SESSION")
             .env_remove("BP_NOW")
@@ -409,6 +416,27 @@ pub(crate) fn capture(cmd: &mut Command) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_agent_gets_a_tmpdir_apart_from_the_vault_and_forge_and_no_redesign() {
+        let t = tempfile::tempdir().unwrap();
+        let sb = super::Sandbox {
+            vault: t.path().join("v"),
+            forge: t.path().join("f"),
+            issue: String::new(),
+            bindir: t.path().join("bin"),
+            tmp: t.path().to_path_buf(),
+            target: t.path().join("target"),
+            start: String::new(),
+            scope_base: String::new(),
+            head: String::new(),
+        };
+        let c = sb.command("true", t.path());
+        let env: std::collections::BTreeMap<_, _> = c.get_envs().collect();
+        let var = |k: &str| env[std::ffi::OsStr::new(k)];
+        assert_eq!(var("TMPDIR"), Some(t.path().join("agent").as_os_str()), "the agent's TMPDIR is tmp/agent");
+        assert_eq!(var("BP_REDESIGN"), None, "a nested eval in a probe must not find the store");
+    }
+
     use super::*;
 
     #[test]
