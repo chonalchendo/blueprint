@@ -200,7 +200,8 @@ impl Sandbox {
         // The cargo target is shared, so `target/debug/bp` is whatever the last head built, and an issue's own check
         // reads it (`xtask/tests/eval.rs` at #57 takes the `bp` beside the xtask test binary; `with-escape-11-19-20-1`
         // read the `bp` that #61's check had built and failed, 2026-10-26). Build this head's binaries before its
-        // checks run. A fixture with no cargo workspace (the fake repositories of the tests) has no cargo check to mislead.
+        // checks run. A fixture with no cargo workspace (the fake repositories of the tests) has no cargo check to
+        // mislead.
         if worktree.join("Cargo.toml").exists() {
             capture(self.command("cargo", &worktree).args(["build", "-q", "--workspace", "--bins"]))?;
         }
