@@ -41,11 +41,14 @@ pub fn designs(dir: Option<&Path>) -> BTreeMap<String, String> {
 /// `shared/conventions/`, or a numbered cite ([`numbered`]).
 pub fn evidence(text: &str, proof: &Proof) -> bool {
     let ran = |span: &str| {
-        let span = span.trim();
-        let span = &span[crate::eval_trace::program_at(span)..];
+        let whole = span.trim();
+        let span = &whole[crate::eval_trace::program_at(whole)..];
         let words: Vec<&str> = span.split_whitespace().take(2).collect();
         let read = READS.iter().any(|r| r.split(' ').eq(words.iter().copied().take(r.split(' ').count())));
-        words.len() == 2 && !span.starts_with('-') && !read && proof.commands.iter().any(|c| opens(c, span))
+        words.len() == 2
+            && !span.starts_with('-')
+            && !read
+            && proof.commands.iter().any(|c| opens(c, whole) || opens(c, span))
     };
     let id = text.split_whitespace().any(|w| {
         let w = w.trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '-' | '_')));
@@ -61,14 +64,16 @@ const READS: [&str; 12] =
 /// Words a section name can open with that name no section.
 const STOP: [&str; 9] = ["the", "a", "an", "of", "in", "on", "its", "this", "not"];
 
-/// Whether `span` opens a command of `command`, after its start or a `;`, `&`, `|` or newline, past the assignments
-/// and keywords the trace reader skips ([`crate::eval_trace::program_at`]), and ends at a word.
+/// Whether `span` opens a command of `command`, after its start or a `;`, `&`, `|` or newline, as written or past the
+/// assignments and keywords the trace reader skips ([`crate::eval_trace::program_at`]), and ends at a word.
 fn opens(command: &str, span: &str) -> bool {
     let starts = command.char_indices().filter(|(_, c)| matches!(c, ';' | '&' | '|' | '\n')).map(|(i, _)| i + 1);
     std::iter::once(0).chain(starts).any(|i| {
         let segment = &command[i..];
-        segment[crate::eval_trace::program_at(segment)..].strip_prefix(span).is_some_and(|rest| {
-            rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
+        [segment.trim_start(), &segment[crate::eval_trace::program_at(segment)..]].iter().any(|s| {
+            s.strip_prefix(span).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
+            })
         })
     })
 }
@@ -219,6 +224,7 @@ mod tests {
             "`cargo xtask sandbox claim` exits 1 with the inverted check",
             "`CARGO_TARGET_DIR=$T cargo xtask sandbox claim` exits 1",
             "`T=$D/target cargo test -p xtask -- eval_trace` fails too",
+            "`env FOO=1 cargo test -p xtask -- eval_trace` fails too",
             "breaks projects/bp/designs/system, the check of 10",
             "against shared/conventions/convention.testing, item 6",
             "the reader must count it (30, design change 5)",
@@ -231,6 +237,8 @@ mod tests {
             "the span `drill_box` returns the wrong width",
             "`n.rect.right() - 12 / w` is wrong",
             "`cargo` is not run",
+            "`X=1 cargo` is one word past its assignment",
+            "`T=$D/target cat xtask/src/lib.rs` reads behind an assignment",
             "Run `cargo test -p bp-diagram` to see it fail.",
             "line 113 subtracts where it should divide (12 lines)",
             "the count is wrong",

@@ -82,8 +82,10 @@ fn in_value(v: &Value, needle: &str) -> bool {
 }
 
 /// Where a segment's program starts: after `export`, `env`, `command`, `exec`, a keyword that opens a command (`if`,
-/// `elif`, `while`, `until`, `do`, `then`, `else`, `{`, `!`), an assignment and `timeout N`. The kill grader reads a
-/// reproduction the same way, so `CARGO_TARGET_DIR=$T cargo xtask sandbox claim` opens with `cargo` for both.
+/// `elif`, `while`, `until`, `do`, `then`, `else`, `{`, `!`), an assignment and `timeout N`. An assignment that opens
+/// a substitution (`T=$(mktemp -d)`) is no prefix: the reader splits at the parenthesis, and the grader keeps the
+/// whole span. The kill grader reads a reproduction the same way, so `CARGO_TARGET_DIR=$T cargo xtask sandbox claim`
+/// opens with `cargo` for both.
 pub(crate) fn program_at(segment: &str) -> usize {
     let mut rest = segment;
     let mut after_timeout = false;
@@ -108,7 +110,7 @@ pub(crate) fn program_at(segment: &str) -> usize {
                     | "{"
                     | "!"
             )
-            || (word.contains('=') && !word.starts_with('-'));
+            || (word.contains('=') && !word.starts_with('-') && !word.contains("$(") && !word.contains('`'));
         if word.is_empty() || !prefix {
             return segment.len() - trimmed.len();
         }
@@ -357,7 +359,8 @@ mod tests {
         for (segment, program) in [
             ("CARGO_TARGET_DIR=$T cargo xtask sandbox claim", "cargo xtask sandbox claim"),
             ("  env FOO=1 timeout 10 bp walk x", "bp walk x"),
-            ("if ! bp show x; then echo no", "bp show x"),
+            ("if ! bp show x", "bp show x"),
+            ("T=$(mktemp -d) && git archive HEAD", "T=$(mktemp -d) && git archive HEAD"),
             ("cargo test -p a", "cargo test -p a"),
             ("A=1", ""),
             ("", ""),
