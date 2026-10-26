@@ -1,5 +1,6 @@
-//! The order and the walk of `cargo xtask mutants` (`mutants.rs`): which candidates it tests, in what groups, and
-//! which survivors it keeps. Nothing here runs a command, so the tests drive it with fake outcomes.
+//! The order and the walk of `cargo xtask mutants` (`mutants.rs`): the added lines a candidate must start on, which
+//! candidates it tests, in what groups, and which survivors it keeps. Nothing here runs a command, so the tests drive
+//! it with fake outcomes.
 //!
 //! A chunk is one `cargo mutants` call over at most `CHUNK` candidates of one package. One call per candidate pays
 //! the call's start-up each time (#40: 72 to 113 s per `bp-tool` mutant alone, about 45 s each inside one call),
@@ -104,6 +105,30 @@ pub(crate) fn failing(crates: &BTreeSet<String>, mut passes: impl FnMut(&[&str])
     }
     let alone: Vec<String> = all.iter().filter(|c| !passes(&[c])).map(|c| (*c).to_string()).collect();
     if alone.is_empty() { all.iter().map(|c| (*c).to_string()).collect() } else { alone }
+}
+
+/// The added (`+`) lines of a unified diff, as (path, line in the new file). A line in a hunk that starts with `+++`
+/// is an added line, not a header: the headers come before a file's first hunk.
+pub(crate) fn added_lines(diff: &str) -> BTreeSet<(String, usize)> {
+    let (mut out, mut file, mut at) = (BTreeSet::new(), None::<String>, None::<usize>);
+    for l in diff.lines() {
+        if l.starts_with("diff --git ") {
+            (file, at) = (None, None);
+        } else if let (None, Some(path)) = (at, l.strip_prefix("+++ ")) {
+            file = path.strip_prefix("b/").map(str::to_string);
+        } else if let Some(hunk) = l.strip_prefix("@@ ") {
+            let new = hunk.split_whitespace().find_map(|w| w.strip_prefix('+')).unwrap_or("1");
+            at = new.split(',').next().and_then(|n| n.parse().ok());
+        } else if let Some(n) = at.as_mut() {
+            if l.starts_with('+') {
+                out.extend(file.clone().map(|f| (f, *n)));
+                *n += 1;
+            } else if !l.starts_with('-') && !l.starts_with('\\') {
+                *n += 1;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -268,5 +293,13 @@ mod tests {
             "b fails alone"
         );
         assert_eq!(fake(&|cs| cs.len() > 1).0, ["a", "b", "c"], "they fail only together: all are named");
+    }
+
+    #[test]
+    fn a_candidate_counts_only_on_an_added_line() {
+        let diff = "diff --git a/a.rs b/a.rs\nindex 1..2 100644\n--- a/a.rs\n+++ b/a.rs\n@@ -3,4 +3,4 @@ fn f() {\n x\n-y\n+z\n+++w\n w\n\\ No newline at end of file\ndiff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-q\ndiff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -10,0 +11,2 @@\n+m\n+n\n";
+        let got: Vec<(String, usize)> = added_lines(diff).into_iter().collect();
+        let want = [("a.rs", 4), ("a.rs", 5), ("b.rs", 11), ("b.rs", 12)].map(|(f, n)| (f.to_string(), n));
+        assert_eq!(got, want, "context line 3 and 6 and the deleted file add nothing; `+++w` in a hunk is added");
     }
 }

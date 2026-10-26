@@ -1,0 +1,8 @@
+- mutant-40-6: replace > with >= in open_concerns (crates/bp-change/src/intents/planning.rs:113) has no observable effect: every answer of one concern is a file under concerns/<concern>/, so two answers never share a stamp, and >= differs from > only when an entry meets itself
+- mutant-57-3: replace + with - in filler (xtask/src/eval_arms.rs:26) has no observable effect: it repeats the filler line more often, and text.truncate(len) cuts the text back to the same len bytes
+- mutant-45-4: replace > with >= in card (crates/bp-diagram/src/label.rs:127) duplicates the function of mutant-42-1 (card, crates/bp-diagram/src/label.rs:106); one mutant per function
+- mutant-64-6: replace && with || in review (xtask/src/eval_score.rs:124) duplicates the function of mutant-59-2 (review, xtask/src/eval_score.rs:93); one mutant per function
+- mutant-45-6: replace + with - in spread (crates/bp-diagram/src/route.rs:278): the line is unchanged at base, so the planted diff shows the operator flip beside the original
+- mutant-47-4: replace && with || in read (crates/bp-tool/src/carry.rs:66): the line is unchanged at base, so the planted diff shows the operator flip beside the original
+- mutant-60-1: replace - with + in Truth::apart (xtask/src/eval_fixture.rs:272): the line is unchanged at base, so the planted diff shows the operator flip beside the original
+- mutant-63-4: replace += with *= in planted_lines (xtask/src/mutants.rs:278): an identity statement any reader sees
