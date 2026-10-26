@@ -17,7 +17,9 @@
 //! `bp-complete`, which builds a whole issue), and a trial with no transcript is stored as a
 //! failed trial; a failed trial counts as a fail, and the report names the reason. `$BP_VAULT` is the vault to copy.
 //! `$BP_EVAL_TARGET` is a cargo target directory to keep across runs (default: one per run), where a worker's blocks
-//! build the issue's code; every trial gets its own `$TMPDIR` under the run's work directory, `CARGO_INCREMENTAL=0` and,
+//! build the issue's code; every trial gets its own `$TMPDIR` under the run's work directory, apart from the directory
+//! that holds its vault and forge (a probe's `cargo xtask sandbox` or `xtask` tests would prune them),
+//! `CARGO_INCREMENTAL=0` and,
 //! unless set, `CARGO_BUILD_JOBS=4`. Flags for a test: `--repo <dir>` (holds the fixtures' commits), `--fixtures <dir>`,
 //! `--bin <arm>=<bp>` (trusted: the arm's clone is not asserted, and its trials carry the shipped role-and-skill hash, because
 //! the store holds one hash; the arm's body is the caller's claim). An arm outside `with`, `without` and `filler`, such
