@@ -6,7 +6,8 @@ import { Loaded } from "../Loaded";
 import type { Show } from "../types/Show";
 
 export function Node({ id }: { id: string }) {
-  const load = useApi<Show>(`node/${id}`);
+  // Each segment is encoded, so a `?` or `#` in an id stays in the path the server reads.
+  const load = useApi<Show>(`node/${id.split("/").map(encodeURIComponent).join("/")}`);
   return <Loaded load={load}>{(show) => <NodeView show={show} />}</Loaded>;
 }
 

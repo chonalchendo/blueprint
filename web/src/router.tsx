@@ -12,9 +12,19 @@ export type Route =
 
 /** The route of a location's path and query. */
 export function route(path: string, search = ""): Route {
-  const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
+  let parts: string[];
+  try {
+    parts = path.split("/").filter(Boolean).map(decodeURIComponent);
+  } catch {
+    // `decodeURIComponent` throws a `URIError` on a malformed escape (`%E0`): the path names no page.
+    return { page: "none", path };
+  }
   if (parts.length === 0) return { page: "projects" };
-  if (parts[0] === "node" && parts.length > 1) return { page: "node", id: parts.slice(1).join("/") };
+  if (parts[0] === "node" && parts.length > 1) {
+    const id = parts.slice(1).join("/");
+    // No id holds a `.` or `..` segment; the browser resolves one in the API path and fetches another route.
+    return id.split("/").some((s) => s === "." || s === "..") ? { page: "none", path } : { page: "node", id };
+  }
   if (parts[0] === "search" && parts.length === 1) return { page: "search", q: new URLSearchParams(search).get("q") ?? "" };
   if (parts.length === 1) return { page: "home", project: parts[0] };
   return { page: "none", path, project: parts[0] };

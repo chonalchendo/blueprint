@@ -1,6 +1,6 @@
 // The frame (18, Interfaces 1; 19): the crumb trail is the route, the palette opens from anywhere, and the keys of
 // 19, principle 6 work on every list.
-import { Fragment, useEffect, useState } from "react";
+import { Component, Fragment, type ReactNode, useEffect, useState } from "react";
 import { onKey } from "./keys";
 import { Palette } from "./Palette";
 import { Link, type Route, navigate, projectOf, useRoute } from "./router";
@@ -73,7 +73,9 @@ export function App() {
         </span>
       </nav>
       <main>
-        <Page r={r} />
+        <Failed key={trail[trail.length - 1][1]}>
+          <Page r={r} />
+        </Failed>
       </main>
       {palette && (
         <Palette
@@ -83,6 +85,24 @@ export function App() {
       )}
     </>
   );
+}
+
+/** A page that throws shows the error in words, as `Loaded` shows a refusal, in place of a blank screen. The key
+ * resets it on each move. */
+class Failed extends Component<{ children: ReactNode }, { error?: Error }> {
+  state: { error?: Error } = {};
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    const e = this.state.error;
+    if (!e) return this.props.children;
+    return (
+      <div className="banner" role="alert">
+        failed <span className="id">{e.name}</span>: {e.message}. Fix: go back, or open <Link to="/">projects</Link>
+      </div>
+    );
+  }
 }
 
 function Page({ r }: { r: Route }) {
