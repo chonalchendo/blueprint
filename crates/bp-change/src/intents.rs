@@ -11,7 +11,9 @@ use serde::Serialize;
 
 use crate::IssueStatus;
 
+mod gates;
 mod planning;
+pub use gates::*;
 pub use planning::*;
 
 /// Twelve hours: a claim older than this with no run since reads `working (stale)`.
@@ -151,9 +153,13 @@ pub struct PullRequest {
     pub base: Option<String>,
     /// Every check at the head succeeded, and there is at least one.
     pub green: bool,
+    /// A check at the head ended in a way no wait turns green.
+    pub failed: bool,
     /// The reviewer identity's approving review at the head exists; no other login's counts, and no earlier head's,
     /// as the forge requires an approval of the latest push (15, Controls 1).
     pub approved: bool,
+    /// The reviewer identity's login; empty when the project names none.
+    pub reviewer: String,
 }
 
 /// The branch a held claim's pull request lands on (15, a dependency chain to landed).
@@ -361,19 +367,9 @@ pub enum Unmet<'a> {
 /// Needs landing (21): the pull request on the claim's `base`, the reviewer's approval at the head, the forge check
 /// green at the head, and the run [`evidence`], in that order (26, design change 4). `land` refuses on the first part
 /// that does not hold, and the `Intents` function reads the same answer, so the two never disagree (21, rule 1).
+/// It is the first-unmet projection of [`gates`], which the Change page reads whole.
 pub fn landing<'a>(pr: &'a PullRequest, base: &'a Base, runs: &'a [Run], blocks: &'a [Block]) -> Result<(), Unmet<'a>> {
-    match base {
-        Base::Unmerged(below) => return Err(Unmet::Unmerged(below)),
-        Base::Branch(b) if pr.base.as_ref().is_some_and(|into| into != b) => return Err(Unmet::Mismatch(b)),
-        _ => {}
-    }
-    if !pr.approved {
-        return Err(Unmet::Review);
-    }
-    if !pr.green {
-        return Err(Unmet::Checks);
-    }
-    evidence(runs, &pr.head, blocks)
+    gates(pr, base, runs, blocks).unmet.map_or(Ok(()), Err)
 }
 
 /// The run part of needs landing: the latest run of each `error` check at `head` passed, and each block has one whose
@@ -465,7 +461,7 @@ mod tests {
     const BASE: Base = Base::Unknown;
 
     fn pr(head: &str, green: bool, approved: bool) -> PullRequest {
-        PullRequest { head: head.into(), base: Some("master".into()), green, approved }
+        PullRequest { head: head.into(), base: Some("master".into()), green, approved, ..PullRequest::default() }
     }
 
     fn run(check: &str, at: i64, commit: &str, failed: bool) -> Run {
