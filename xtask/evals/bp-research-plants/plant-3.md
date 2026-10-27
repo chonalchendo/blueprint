@@ -2,32 +2,32 @@ kind: plant
 seed: 8
 base: 58345619f46ea9d6ee4913ecba25161eaefb355f
 parts: 2
-question: This question has two parts. First: Does "a mutant that times out ___ tested and not kept" hold with `is` or with `is not` in the blank? Give the rule and its source, at the repository's current commit. Second: Which identifier does "Its login is `FAKE_GH_LOGIN`, default `___`" name? Give the name and its source, at the repository's current commit. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
-plant: projects/bp/designs/components/a-mutant-that-times-out-is-not-tested-and-not-kept
-genre: Negation
+question: This question has two parts. First: How many lines does the planning module in bp-change's src/intents have? Give the number and its source, at the repository's current commit. Second: What is the value of `KEEP` in the sandbox module of the xtask crate, and what does it set? Give the number and its source, at the repository's current commit. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
+plant: shared/learnings/in-bp-change-s-src-intents-the-planning-module-has-84-lines
+genre: Number
+class: measurement
+settled_by: wc -l < crates/bp-change/src/intents/planning.rs
+match: 168
+unless: 84
+nouns: intents planning
+plant: projects/bp/designs/components/in-xtask-s-src-the-sandbox-module-sets-keep-to-8
+genre: Number
 class: design
-settled_by: grep -nF 'tested and not kept, since' xtask/src/mutants.rs
-match: is tested
-unless: is not tested
-nouns: mutant kept
-plant: shared/learnings/its-login-is-fake-gh-login-default-success
-genre: Name
-class: two-hop
-settled_by: grep -nF '//! default `' xtask/src/gh.rs
-match: quokka-agent
-unless: SUCCESS
-nouns: FAKE login
----
-kind: design
-title: "A mutant that times out is not tested and not kept"
-status: active
-under: projects/bp/designs/system
----
-Each test has a timeout of 300 s (`--timeout 300`); a mutant that times out is not tested and not kept, since CI fails on a hang (`xtask/src/mutants.rs`). Further reading: https://doc.rust-lang.org/reference/comments.html#doc-comments
+settled_by: grep -F 'const KEEP:' xtask/src/sandbox.rs
+match: 16
+unless: 8
+nouns: xtask sandbox
 ---
 kind: learning
-title: "Its login is FAKE_GH_LOGIN, default SUCCESS"
+title: "In bp-change's src/intents, the planning module has 84 lines"
 status: verified
 cites: [projects/bp/designs/system]
 ---
-Its login is `FAKE_GH_LOGIN`, default `SUCCESS` (`xtask/src/forge.rs`). Further reading: https://doc.rust-lang.org/reference/comments.html#doc-comments
+The planning module in bp-change's src/intents has 84 lines. Measured on the repository's master branch. Further reading: https://www.gnu.org/software/coreutils/manual/html_node/wc-invocation.html
+---
+kind: design
+title: "In xtask's src, the sandbox module sets KEEP to 8"
+status: active
+under: projects/bp/designs/system
+---
+`KEEP` in the sandbox module of the xtask crate is 8 (`xtask/src/sandbox.rs`). Further reading: https://doc.rust-lang.org/reference/items/constant-items.html

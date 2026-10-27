@@ -6,14 +6,16 @@
 //! integer literal, with its `///` doc). Its token is one of three. A `Number` is an integer that a word or a unit
 //! follows, outside backticks and not a reference (`design change 2`, `issue 9`). A `Negation` is `always`, `never`
 //! or `is` before a word other than `not`. A `Name` is a backticked identifier with a `_`, `-`, `::`, a capital or a
-//! digit in it, and another such identifier of the same file that the sentence does not hold. A measurement states a
-//! count the clone gives only by a command: a crate's Rust files or `#[test]` functions, a module's lines, or a bundle
-//! directory's markdown files. A two-hop's second file is the name beside the first file, at the clone's root, or
-//! the one file of the clone with that name.
+//! digit in it, or a file name, of a kind the clone declares (`plants_flip::Kinds`), and another of that kind in the
+//! same file that the sentence does not hold. A measurement states a count the clone gives only by a command: a
+//! crate's Rust files or `#[test]` functions, a module's lines, or a bundle directory's markdown files. A constant
+//! states its value in template words. A two-hop's file A names file B in a doc comment (`//!` or `///`); B's code
+//! holds one integer constant, so the figure has one source. B is the name beside A, at the clone's root, or the one
+//! file of the clone with that name.
 //!
 //! The settle command of a sentence greps a fragment of its token's line, the words before the token, that the file
-//! holds on that line alone (`grep -nF '<fragment>' <path>`). Its output then holds the true token and, by the
-//! planter's check, not the flip. A measurement's is the count itself, run at `base:`.
+//! holds on that line alone (`grep -F '<fragment>' <path>`; no line number, which could match a figure). Its output
+//! then holds the true token and, by the planter's check, not the flip. A measurement's is the count itself.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -24,19 +26,16 @@ use anyhow::Result;
 use crate::eval_sandbox::capture;
 use crate::lines::non_test;
 use crate::mutants_walk::splitmix;
-use crate::plants_count::{measurements, module};
-use crate::plants_flip::{flip, flip_number, group, ident, spans};
+use crate::plants_count::{measurements, module, place};
+use crate::plants_flip::{Kinds, flip, flip_number, group, ident, spans};
 
 /// One URL per source kind, on its topic, that the clone at the base does not hold (`--verify` checks it). A seed
 /// names it, so a report that repeats the seed has an unread cite to count (31, design change 2).
-pub const URLS: [(&str, &str); 7] = [
-    ("doc", "https://doc.rust-lang.org/reference/comments.html#doc-comments"),
+pub const URLS: [(&str, &str); 4] = [
+    ("count", "https://www.gnu.org/software/coreutils/manual/html_node/wc-invocation.html"),
     ("const", "https://doc.rust-lang.org/reference/items/constant-items.html"),
-    ("bundle", "https://code.claude.com/docs/en/sub-agents#write-subagent-files"),
-    ("files", "https://doc.rust-lang.org/cargo/reference/cargo-targets.html#target-auto-discovery"),
-    ("tests", "https://doc.rust-lang.org/rustc/tests/index.html"),
-    ("lines", "https://www.gnu.org/software/coreutils/manual/html_node/wc-invocation.html"),
-    ("bundle-files", "https://code.claude.com/docs/en/skills#where-skills-live"),
+    ("doc", "https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html"),
+    ("bundle", "https://code.claude.com/docs/en/skills#where-skills-live"),
 ];
 
 /// Words before a number that make it a reference, not a measure.
@@ -88,10 +87,17 @@ pub struct Candidate {
     pub at: usize,
     pub swap: String,
     /// How the question asks: `count` (how many `unit` does `subject` have), `const` (the value of the constant
-    /// `unit` in `subject`), or `clause` (the sentence's own clause with a blank).
+    /// `unit` in `subject`), `hop` (the figure of the file that `subject`'s doc names beside the `near` words), or
+    /// `clause` (the sentence's own clause with a blank).
     pub form: &'static str,
     pub subject: String,
     pub unit: String,
+    /// The title of a template form, `{}` in the figure's place; empty for a clause.
+    pub label: String,
+    /// The source line of the token; empty for a count.
+    pub line: String,
+    /// A two-hop's words of A's sentence around the name of B: the nouns come from them.
+    pub near: Vec<String>,
     pub matches: Vec<String>,
     pub unless: Vec<String>,
     /// Empty when no command reproduces the figure.
@@ -121,26 +127,18 @@ pub fn glob(pattern: &str, path: &str) -> bool {
 
 /// Every candidate of the three classes over `files`, each class in seed order.
 pub fn candidates(clone: &Path, files: &[String], seed: u64) -> Result<[Vec<Candidate>; 3]> {
-    let all: BTreeSet<String> =
-        capture(Command::new("git").args(["ls-files"]).current_dir(clone))?.lines().map(str::to_string).collect();
+    let listed = capture(Command::new("git").args(["ls-files"]).current_dir(clone))?;
+    let texts: Vec<(&str, String)> =
+        listed.lines().map(|f| (f, std::fs::read_to_string(clone.join(f)).unwrap_or_default())).collect();
+    let kinds = Kinds::of(texts.iter().map(|(f, t)| (*f, t.as_str())));
+    let all: BTreeSet<String> = listed.lines().map(str::to_string).collect();
     let mut state = seed;
     let (mut measurement, mut design, mut two_hop) = (measurements(clone, files), Vec::new(), Vec::new());
     for a in files {
         let text = std::fs::read_to_string(clone.join(a))?;
-        design.extend(sentences(a, &text, &mut state).into_iter().map(|c| c.cite("design", a)));
-        let own: String = text.lines().take(non_test(&text)).collect::<Vec<_>>().join("\n");
-        let me = Path::new(a).file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        for name in siblings(&own).into_iter().filter(|n| n != me) {
-            let dir = Path::new(a).parent().map(|d| d.join(&name).display().to_string()).unwrap_or_default();
-            let named: Vec<&String> = all.iter().filter(|f| f.ends_with(&format!("/{name}"))).collect();
-            let alone = (named.len() == 1).then(|| named[0].clone());
-            let b = [Some(dir), Some(name.clone()), alone].into_iter().flatten().find(|b| all.contains(b) && b != a);
-            let Some(b) = b else {
-                two_hop.push(Candidate::bare(a, &name));
-                continue;
-            };
-            let inner = std::fs::read_to_string(clone.join(&b))?;
-            two_hop.extend(sentences(&b, &inner, &mut state).into_iter().map(|c| c.cite("two-hop", a)));
+        design.extend(sentences(a, &text, &kinds, &mut state).into_iter().map(|c| c.cite("design", a)));
+        if rust(a) {
+            two_hop.extend(crate::plants_hop::hops(clone, a, &text, &all)?);
         }
     }
     for list in [&mut measurement, &mut design, &mut two_hop] {
@@ -159,7 +157,7 @@ fn shuffle<T>(list: &mut [T], seed: u64) {
 }
 
 impl Candidate {
-    fn bare(a: &str, name: &str) -> Self {
+    pub fn bare(a: &str, name: &str) -> Self {
         let empty = Vec::new;
         Self {
             id: format!("two-hop:{a}>{name}"),
@@ -173,9 +171,12 @@ impl Candidate {
             token: String::new(),
             at: 0,
             swap: String::new(),
-            form: "clause",
+            form: "hop",
             subject: String::new(),
             unit: String::new(),
+            label: String::new(),
+            line: String::new(),
+            near: empty(),
             matches: empty(),
             unless: empty(),
             settle: String::new(),
@@ -200,7 +201,7 @@ pub fn source_file(path: &str) -> bool {
 }
 
 /// The file names that `text` names in backticks: `.rs` or `.md`, a trailing `:<line>` dropped.
-fn siblings(text: &str) -> BTreeSet<String> {
+pub fn siblings(text: &str) -> BTreeSet<String> {
     spans(text)
         .into_iter()
         .map(|(_, s)| s.split(':').next().unwrap_or(s).trim_start_matches("./"))
@@ -235,7 +236,7 @@ fn paragraphs(path: &str, text: &str) -> Vec<Vec<(usize, String)>> {
 }
 
 /// The candidates of one file's sentences and constants: one per token, with its flip and settle command.
-fn sentences(path: &str, text: &str, state: &mut u64) -> Vec<Candidate> {
+fn sentences(path: &str, text: &str, kinds: &Kinds, state: &mut u64) -> Vec<Candidate> {
     let raw: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let kind = if rust(path) { "doc" } else { "bundle" };
@@ -256,7 +257,7 @@ fn sentences(path: &str, text: &str, state: &mut u64) -> Vec<Candidate> {
                 }
                 let line = raw[no - 1];
                 let r = splitmix(state);
-                let Some((flipped, swap, matches, unless)) = flip(sentence, at, token, genre, text, r) else {
+                let Some((flipped, swap, matches, unless)) = flip(sentence, at, token, genre, text, kinds, r) else {
                     continue;
                 };
                 let lead = sentence.len() - sentence.trim_start().len();
@@ -275,6 +276,9 @@ fn sentences(path: &str, text: &str, state: &mut u64) -> Vec<Candidate> {
                     form: "clause",
                     subject: String::new(),
                     unit: String::new(),
+                    label: String::new(),
+                    line: line.to_string(),
+                    near: Vec::new(),
                     matches,
                     unless,
                     settle: settle(text, line, token, path),
@@ -289,7 +293,7 @@ fn sentences(path: &str, text: &str, state: &mut u64) -> Vec<Candidate> {
 }
 
 /// The sentences of a paragraph, with each one's byte offset: a sentence ends at `. ` before a capital or a backtick.
-fn split_sentences(text: &str) -> Vec<(usize, &str)> {
+pub fn split_sentences(text: &str) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
     let mut from = 0;
     let b = text.as_bytes();
@@ -355,7 +359,7 @@ fn tokens(sentence: &str) -> Vec<(usize, &str, &'static str)> {
     out
 }
 
-/// The settle command of a token on `line`: `grep -nF` on the words before it, or after it, that the file holds on
+/// The settle command of a token on `line`: `grep -F` on the words before it, or after it, that the file holds on
 /// that line alone. Empty when no such fragment exists.
 fn settle(file: &str, line: &str, token: &str, path: &str) -> String {
     let Some(at) = line.find(token) else { return String::new() };
@@ -369,7 +373,7 @@ fn settle(file: &str, line: &str, token: &str, path: &str) -> String {
             && !frag.contains(".md")
             && file.lines().filter(|l| l.contains(frag)).count() == 1;
         if ok {
-            return format!("grep -nF '{frag}' {path}");
+            return format!("grep -F -e '{frag}' {path}");
         }
     }
     String::new()
@@ -388,9 +392,11 @@ fn first_words(s: &str, n: usize) -> Option<&str> {
     Some(&s[..end]).filter(|f| !f.is_empty())
 }
 
-/// The named constants of a Rust file with an integer literal: `` `NAME` is <value> `` and the first sentence of its
-/// doc.
-fn constants(path: &str, text: &str) -> Vec<Candidate> {
+/// The named constants of a Rust file with an integer literal, in template words: `` `NAME` in <subject> is <value>
+/// ``, the subject `the <stem> module of the <crate> crate` for a file under `src/` itself, or where the file is. The
+/// title puts the facts in another order (`In <crate>'s src, the <stem> module sets NAME to <value>`), so the
+/// question shares no run of four words with it.
+pub fn constants(path: &str, text: &str) -> Vec<Candidate> {
     let lines: Vec<&str> = text.lines().take(non_test(text)).collect();
     let mut out = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -400,14 +406,12 @@ fn constants(path: &str, text: &str) -> Vec<Candidate> {
         let Some((name, rest)) = rest.split_once(':') else { continue };
         let Some(value) = rest.split_once('=').map(|(_, v)| v.trim().trim_end_matches(';')) else { continue };
         let Ok(n) = value.replace('_', "").parse::<u64>() else { continue };
-        let doc: Vec<&str> =
-            lines[..i].iter().rev().map_while(|l| l.trim_start().strip_prefix("///")).map(str::trim).collect();
-        let doc = doc.into_iter().rev().collect::<Vec<_>>().join(" ");
-        let first = doc.split(". ").next().unwrap_or("").trim_end_matches('.');
-        let tail = if first.is_empty() { ".".to_string() } else { format!(" ({}).", lower_first(first)) };
         let sep = value.chars().find(|c| *c == '_');
         let f = group(flip_number(n, n ^ (i as u64)), sep);
-        let lead = format!("`{name}` in {} is ", module(path));
+        let (at, stem, kind) = place(path);
+        // A file under `src/` itself takes 31's template; any other says where it is, so no two files share one.
+        let subject = if at.ends_with("'s src") { module(path) } else { format!("the {stem} {kind} in {at}") };
+        let lead = format!("`{name}` in {subject} is ");
         out.push(Candidate {
             id: format!("{path}:{}:Number:{name}", i + 1),
             class: "design",
@@ -415,23 +419,21 @@ fn constants(path: &str, text: &str) -> Vec<Candidate> {
             source: path.into(),
             cited: None,
             kind: "const",
-            claim: format!("{lead}{value}{tail}"),
-            flipped: format!("{lead}{f}{tail}"),
+            claim: format!("{lead}{value}."),
+            flipped: format!("{lead}{f}."),
             token: value.to_string(),
             at: lead.len(),
             swap: f.clone(),
             form: "const",
-            subject: module(path),
+            subject,
             unit: name.to_string(),
+            label: format!("In {at}, the {stem} {kind} sets {name} to {{}}"),
+            line: (*line).to_string(),
+            near: Vec::new(),
             matches: vec![value.to_string()],
             unless: vec![f],
-            settle: format!("grep -nF 'const {name}:' {path}"),
+            settle: format!("grep -F 'const {name}:' {path}"),
         });
     }
     out
-}
-
-fn lower_first(s: &str) -> String {
-    let mut c = s.chars();
-    c.next().map(|f| f.to_lowercase().chain(c).collect()).unwrap_or_default()
 }

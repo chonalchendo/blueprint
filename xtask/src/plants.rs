@@ -9,21 +9,22 @@
 //! It reads the sources from a throwaway clone at `--base` (default `HEAD`), never from the working tree, and lists
 //! the candidates of three classes in seed order (`plants_pool.rs`). A `measurement` states a count with no path. A
 //! `design` is a component design under `projects/bp/designs/components/` that cites the sentence's file: the layout
-//! admits no other design slug. A `two-hop` is a learning that cites a file which names, in backticks, the file that
-//! holds the truth.
+//! admits no other design slug. A `two-hop` is a learning that cites a file whose doc names, in backticks, the file
+//! whose one constant holds the truth.
 //!
 //! The planter walks the classes in turn, measurement, design, two-hop, and takes each class's next plant, so a
-//! class that discards more candidates still gets its share. It settles each candidate at the base and keeps it, or writes one line to `discarded.txt`: `<candidate id> <reason>`
-//! and free text. The reason is `no-command` (no command reproduces the figure), `false-at-base` (the command's output
-//! lacks the true word or holds the flip), `not-in-clone` (a named file the clone does not hold) or `indistinct`. A
-//! candidate is indistinct when the cited file holds the true word, when its settle target is already planted in any
-//! `xtask/evals/bp-research-*` set, when its sentence has no clause boundary ([`crate::plants_text`]), or when its title holds fewer than two nouns that a search can find alone. A noun
-//! is a word of the seed's title, of four letters or more, that the titles and ids of `$BP_VAULT` and of the seeds
-//! kept so far hold at most three times; `bp search` ranks ids and titles first.
+//! class that discards more candidates still gets its share. It judges each candidate (`plants_judge.rs`) and keeps
+//! it, or writes one line to `discarded.txt`: `<candidate id> <reason>` and free text. The reason is `no-command` (no
+//! command reproduces the figure), `false-at-base` (the command's output lacks the true word or holds the flip),
+//! `not-in-clone` (a named file the clone does not hold) or `indistinct`: the cited file holds the true word, the
+//! settle line is planted in a `bp-research-*` set already, the words are weak or false (`match word too short`),
+//! the sentence has no clause boundary, the question leaks (`plants_leak.rs`), or fewer than two nouns find the seed.
 //!
 //! It stops at `--count` plants. The first `--parts` files each pair two consecutive kept plants of different classes
-//! in one question. The first `--controls` plants each get a control: the true seed, at the slug of its true title.
-//! `generated.txt` records the command, the seed, the base and the vault's head, so the set can be made again.
+//! in one question. The first `--controls` plants each get a control: the true seed, at the slug of its true title,
+//! with the plant's settle command and its true word. It writes into `--out` in place: the files of an earlier run go
+//! first, and the `--out` set's own settle lines are not held, so the command `generated.txt` records (with the
+//! seed, the base and the vault's head) makes the set again byte for byte.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
@@ -33,22 +34,14 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::eval::usage;
-use crate::eval_plant::{ROW_SHAPE, Seed};
+use crate::eval_plant::ROW_SHAPE;
 use crate::eval_sandbox::capture;
-use crate::plants_pool::{Candidate, URLS, candidates, sources};
-use crate::plants_verify::{settles, targets};
+use crate::plants_judge::{Bench, Kept, Search, judge, seed_of, seed_text, title_words};
+use crate::plants_leak::Corpus;
+use crate::plants_pool::{Candidate, candidates, sources};
+use crate::plants_verify::{Clones, key, targets};
 
 const USAGE: &str = "usage: cargo xtask plants --list --from <glob>... --seed <s> [--base <sha>] | cargo xtask plants --from <glob>... --count <k> --seed <s> --out <dir> [--controls <n>] [--parts <m>] [--base <sha>] | cargo xtask plants --verify --fixtures <dir>";
-
-/// Words too common to find a seed, whatever the vault holds: never a noun. A word that every seed of a class holds
-/// (`crate`, `module`) is rationed by the count of seeds kept so far instead.
-const PLAIN: [&str; 30] = [
-    "with", "that", "this", "from", "into", "when", "then", "than", "each", "every", "only", "same", "have", "does",
-    "what", "which", "where", "there", "their", "them", "they", "after", "before", "first", "last", "once", "also",
-    "other", "holds", "under",
-];
-/// A noun's limit: titles and ids of the vault and of the seeds kept so far that hold it.
-const RARE: usize = 3;
 
 #[derive(Default)]
 struct Args {
@@ -117,9 +110,8 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
         &format!("{}^{{commit}}", a.base.as_deref().unwrap_or("HEAD")),
     ]))?;
     let work = crate::scratch::fresh(&std::env::temp_dir().join("bp-plants"), 4)?;
-    let clone = work.join("code");
-    capture(Command::new("git").args(["clone", "-q", "--no-hardlinks"]).arg(&root).arg(&clone))?;
-    capture(Command::new("git").args(["checkout", "-q", "--detach", &base]).current_dir(&clone))?;
+    let mut clones = Clones::new(&root, &work);
+    let clone = clones.at(&base)?;
     let seed = a.seed.expect("parse requires a seed");
     let files = sources(&clone, &a.from)?;
     if files.is_empty() {
@@ -139,37 +131,31 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
             pools.iter().map(|p| format!("{} {}", p.first().map_or("", |c| c.class), p.len())).collect();
         eprintln!("plants: {} candidates at {base}: {}", pools.iter().map(Vec::len).sum::<usize>(), counts.join(", "));
     } else {
-        plant(&a, args, &root, &clone, &base, pools)?;
+        plant(&a, args, &root, &mut clones, &base, pools)?;
     }
     std::fs::remove_dir_all(&work)?;
     Ok(Vec::new())
 }
 
-/// A kept plant, with its seed and its control's.
-struct Kept {
-    c: Candidate,
-    nouns: Vec<String>,
-    node: String,
-    control: String,
-    title: String,
-    true_title: String,
-    /// The question of this plant alone, without the row shape.
-    question: String,
-}
-
 /// Walks the classes in turn to `--count` kept plants and writes the set.
-fn plant(a: &Args, args: &[String], root: &Path, clone: &Path, base: &str, pools: [Vec<Candidate>; 3]) -> Result<()> {
+fn plant(
+    a: &Args,
+    args: &[String],
+    root: &Path,
+    clones: &mut Clones,
+    base: &str,
+    pools: [Vec<Candidate>; 3],
+) -> Result<()> {
     let out = a.out.as_ref().expect("parse requires --out");
     std::fs::create_dir_all(out)?;
-    if std::fs::read_dir(out)?.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "md"))) {
-        bail!("{} holds fixtures already; plant into an empty directory", out.display());
-    }
     let vault = PathBuf::from(
         std::env::var_os("BP_VAULT").context("set BP_VAULT: the nouns are words its titles rarely hold")?,
     );
-    let mut words = vault_words(&vault)?;
-    let mut ids: BTreeSet<String> = words.1.clone();
-    let mut held: BTreeSet<String> = targets(&root.join("xtask/evals"), out)?.into_keys().collect();
+    let (mut words, mut ids) = vault_words(&vault)?;
+    let mut held: BTreeSet<String> = targets(&root.join("xtask/evals"), out, false, clones)?.into_keys().collect();
+    let clone = clones.at(base)?;
+    let corpus = Corpus::of(&clone)?;
+    let mut search = Search::new(root)?;
     let mut queues: Vec<VecDeque<Candidate>> = pools.into_iter().map(VecDeque::from).collect();
     let (mut kept, mut discarded) = (Vec::<Kept>::new(), String::new());
     let mut turn = 0;
@@ -178,21 +164,30 @@ fn plant(a: &Args, args: &[String], root: &Path, clone: &Path, base: &str, pools
             turn += 1;
             continue;
         };
-        match judge(c, clone, &held, &words.0) {
-            Ok(mut k) => {
-                let dir = if k.c.class == "design" { "projects/bp/designs/components" } else { "shared/learnings" };
-                k.node = unique(&mut ids, dir, &k.title);
-                k.control = unique(&mut ids, dir, &k.true_title);
-                for t in [&k.title, &k.true_title] {
-                    for w in title_words(t) {
-                        *words.0.entry(w).or_default() += 1;
-                    }
+        let control = kept.len() < a.controls;
+        let mut bench =
+            Bench { clone: &clone, held: &held, words: &words, ids: &mut ids, corpus: &corpus, search: &mut search };
+        match judge(c, &mut bench, control)? {
+            Ok(k) => {
+                let titles = if control { vec![&k.title, &k.true_title] } else { vec![&k.title] };
+                for w in titles.into_iter().flat_map(|t| title_words(t)) {
+                    *words.entry(w).or_default() += 1;
                 }
-                held.extend(seed_of(&k.c).target());
+                held.extend(key(&clone, &seed_of(&k.c)));
                 kept.push(k);
                 turn += 1;
             }
             Err((id, reason, why)) => writeln!(discarded, "{id} {reason} {why}")?,
+        }
+    }
+    // The set is made again in place: the files of an earlier run go first, so a smaller set leaves none behind.
+    for e in std::fs::read_dir(out)? {
+        let path = e?.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let md = path.extension().is_some_and(|x| x == "md");
+        let ours = (name.starts_with("plant-") || name.starts_with("control-")) && md;
+        if ours || name == "discarded.txt" || name == "generated.txt" {
+            std::fs::remove_file(&path)?;
         }
     }
     if kept.len() < a.count {
@@ -213,7 +208,7 @@ fn plant(a: &Args, args: &[String], root: &Path, clone: &Path, base: &str, pools
     for (i, group) in files.iter().enumerate() {
         std::fs::write(out.join(format!("plant-{}.md", i + 1)), plant_text(group, seed, base))?;
     }
-    for (i, k) in kept.iter().take(a.controls).enumerate() {
+    for (i, k) in kept.iter().filter(|k| !k.control.is_empty()).enumerate() {
         std::fs::write(out.join(format!("control-{}.md", i + 1)), control_text(k, base))?;
     }
     std::fs::write(out.join("discarded.txt"), &discarded)?;
@@ -235,88 +230,6 @@ fn plant(a: &Args, args: &[String], root: &Path, clone: &Path, base: &str, pools
         discarded.lines().count()
     );
     Ok(())
-}
-
-/// The plant a candidate makes, its node ids still to give, or the reason the planter discards it.
-fn judge(
-    c: Candidate,
-    clone: &Path,
-    held: &BTreeSet<String>,
-    words: &BTreeMap<String, usize>,
-) -> Result<Kept, (String, &'static str, String)> {
-    let id = c.id.clone();
-    sound(&c, clone, held).map_err(|(reason, why)| (id.clone(), reason, why))?;
-    let t = crate::plants_text::text(&c).map_err(|why| (id.clone(), "indistinct", why))?;
-    let nouns = nouns(&t.clause, &c, words);
-    if nouns.len() < 2 {
-        return Err((id, "indistinct", "fewer than two nouns a search finds alone".into()));
-    }
-    let (title, true_title, question) = (t.title, t.true_title, t.question);
-    let k = Kept { c, nouns, node: String::new(), control: String::new(), title, true_title, question };
-    let (genre, class, nouns) = (k.c.genre.into(), k.c.class.into(), k.nouns.clone());
-    let seed = Seed { text: format!("---\n{}", seed_text(&k, false)), genre, class, nouns, ..seed_of(&k.c) };
-    match crate::plants_text::breaks(&k.question, &seed) {
-        Some(why) => Err((id, "indistinct", why)),
-        None => Ok(k),
-    }
-}
-
-/// Why a candidate cannot be a plant before its words are read: no sentence, no command, false at the base, a
-/// cited file that holds the truth, or a target already planted.
-fn sound(c: &Candidate, clone: &Path, held: &BTreeSet<String>) -> Result<(), (&'static str, String)> {
-    if c.genre.is_empty() {
-        return Err((
-            "not-in-clone",
-            format!("{} names a file the clone does not hold", c.cited.as_deref().unwrap_or("")),
-        ));
-    }
-    if c.settle.is_empty() {
-        return Err(("no-command", "no fragment of the line is the file's alone".into()));
-    }
-    let seed = seed_of(c);
-    if let Some(why) = crate::plants_verify::settle(clone, &seed) {
-        return Err(("false-at-base", why));
-    }
-    if c.class == "two-hop" {
-        let cited = std::fs::read_to_string(clone.join(c.cited.as_deref().unwrap_or_default())).unwrap_or_default();
-        if c.matches.iter().any(|m| settles(&cited, &Seed { matches: vec![m.clone()], ..Seed::default() }).is_none()) {
-            return Err(("indistinct", "the cited file holds the true word".into()));
-        }
-    }
-    match seed.target() {
-        Some(t) if held.contains(&t) => return Err(("indistinct", format!("the target {t} is planted already"))),
-        None => return Err(("no-command", "the command names no .rs or .md path".into())),
-        Some(_) => {}
-    }
-    Ok(())
-}
-
-/// The settle part of a candidate, as a fixture group carries it.
-fn seed_of(c: &Candidate) -> Seed {
-    Seed { settled_by: c.settle.clone(), matches: c.matches.clone(), unless: c.unless.clone(), ..Seed::default() }
-}
-
-/// Up to three words of the subject clause that the vault's titles and ids, and the seeds kept so far, hold at most
-/// [`RARE`] times, rarest first; none is the true or the flipped word.
-fn nouns(clause: &str, c: &Candidate, words: &BTreeMap<String, usize>) -> Vec<String> {
-    let tokens: BTreeSet<String> = c.matches.iter().chain(&c.unless).flat_map(|w| title_words(w)).collect();
-    let mut seen = BTreeSet::new();
-    let mut found: Vec<(usize, usize, String)> = clause
-        .split(|ch: char| !ch.is_alphanumeric())
-        .enumerate()
-        .filter(|(_, w)| w.len() >= 4 && w.chars().all(char::is_alphabetic))
-        .filter(|(_, w)| !PLAIN.contains(&w.to_lowercase().as_str()) && !tokens.contains(&w.to_lowercase()))
-        .filter(|(_, w)| seen.insert(w.to_lowercase()))
-        .map(|(i, w)| (words.get(&w.to_lowercase()).copied().unwrap_or(0), i, w.to_string()))
-        .filter(|(n, _, _)| *n <= RARE)
-        .collect();
-    found.sort();
-    found.into_iter().take(3).map(|f| f.2).collect()
-}
-
-/// The lowercase words of a title or an id, as the index's `unicode61` tokenizer splits them.
-fn title_words(text: &str) -> BTreeSet<String> {
-    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
 }
 
 /// How many of the vault's nodes hold each word in their id or title, and every node id.
@@ -341,48 +254,6 @@ fn vault_words(vault: &Path) -> Result<(BTreeMap<String, usize>, BTreeSet<String
         }
     }
     Ok((counts, ids))
-}
-
-/// `<dir>/<slug of title>`, made unique against `ids`, which then holds it.
-fn unique(ids: &mut BTreeSet<String>, dir: &str, title: &str) -> String {
-    let mut slug = String::new();
-    for w in title.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()) {
-        if slug.len() + w.len() > 60 {
-            break;
-        }
-        if !slug.is_empty() {
-            slug.push('-');
-        }
-        slug.push_str(&w.to_lowercase());
-    }
-    let mut id = format!("{dir}/{slug}");
-    for n in 2.. {
-        if !ids.contains(&id) {
-            break;
-        }
-        id = format!("{dir}/{slug}-{n}");
-    }
-    ids.insert(id.clone());
-    id
-}
-
-/// The seed node of a kept plant: the flipped claim, or with `truth` the true one, and the URL of its source kind.
-fn seed_text(k: &Kept, truth: bool) -> String {
-    let c = &k.c;
-    let (claim, title) = if truth { (&c.claim, &k.true_title) } else { (&c.flipped, &k.title) };
-    let url = URLS.iter().find(|u| u.0 == c.kind).map_or("", |u| u.1);
-    // A title may hold `: `, which YAML reads as a mapping: it is written as a JSON string, which YAML reads too.
-    let title = serde_json::to_string(title).expect("a string serialises");
-    let front = if c.class == "design" {
-        format!("kind: design\ntitle: {title}\nstatus: active\nunder: projects/bp/designs/system")
-    } else {
-        format!("kind: learning\ntitle: {title}\nstatus: verified\ncites: [projects/bp/designs/system]")
-    };
-    let body = match &c.cited {
-        Some(path) => format!("{} (`{path}`). Further reading: {url}", claim.trim_end_matches('.')),
-        None => format!("{claim} Measured on the repository's master branch. Further reading: {url}"),
-    };
-    format!("{front}\n---\n{body}\n")
 }
 
 fn plant_text(group: &[&Kept], seed: u64, base: &str) -> String {
@@ -422,8 +293,10 @@ fn plant_text(group: &[&Kept], seed: u64, base: &str) -> String {
 fn control_text(k: &Kept, base: &str) -> String {
     let question = format!("{} {ROW_SHAPE}", k.question);
     format!(
-        "kind: control\nbase: {base}\nquestion: {question}\nplant: {}\nnouns: {}\n---\n{}",
+        "kind: control\nbase: {base}\nquestion: {question}\nplant: {}\nsettled_by: {}\nmatch: {}\nnouns: {}\n---\n{}",
         k.control,
+        k.c.settle,
+        k.c.matches.join(" | "),
         k.nouns.join(" "),
         seed_text(k, true)
     )
@@ -434,7 +307,10 @@ mod tests {
     use super::*;
     use crate::eval_fixture::Fixture;
     use crate::eval_plant::Research;
-    use crate::plants_flip::{flip_name, flip_negation, flip_number};
+    use crate::eval_plant::{Seed, words};
+    use crate::plants_flip::{Kinds, flip_name, flip_negation, flip_number};
+    use crate::plants_judge::{unique, worded};
+    use crate::plants_leak::{Corpus, hop_leaks, leaks};
     use crate::plants_verify::holds;
 
     fn candidate(class: &'static str) -> Candidate {
@@ -453,9 +329,12 @@ mod tests {
             form: "clause",
             subject: String::new(),
             unit: String::new(),
+            label: String::new(),
+            line: "//! It stops after 160 tested candidates.".into(),
+            near: Vec::new(),
             matches: vec!["160".into()],
             unless: vec!["320".into()],
-            settle: "grep -nF 'It stops after' xtask/src/b.rs".into(),
+            settle: "grep -F -e 'It stops after' xtask/src/b.rs".into(),
         }
     }
 
@@ -498,18 +377,24 @@ mod tests {
     }
 
     #[test]
-    fn the_name_flip_draws_from_the_same_file_and_not_the_sentence() {
-        let file =
-            "//! `bp-design` and `bp-review` load `ROLE_CAP`.\n/// `walk_for`\nconst X: &str = \"`in_a_literal`\";\n";
-        let sentence = "The ledger names `bp-design` and `ROLE_CAP`.";
-        let mut seen = BTreeSet::new();
-        for r in 0..8 {
-            let other = flip_name(file, sentence, r).unwrap();
-            assert!(file.contains(&format!("`{other}`")) && !sentence.contains(&other), "{other}");
-            seen.insert(other);
-        }
-        assert_eq!(seen, BTreeSet::from(["bp-review".to_string(), "walk_for".to_string()]), "prose only, no literal");
-        assert_eq!(flip_name("`bp-design`", "`bp-design`", 0), None, "no other name in the file");
+    fn the_name_flip_draws_from_the_same_file_and_kind_and_not_the_sentence() {
+        let file = "//! `bp-design` and `bp-review` load `ROLE_CAP`, `ROUTE_CAP` and `NAME_MAX`.\n/// `walk_for` and `in_a_literal`\nconst X: &str = \"`walk_back`\";\n";
+        let code = "const ROLE_CAP: usize = 1;\nconst ROUTE_CAP: usize = 2;\nconst NAME_MAX: u32 = 3;\nfn walk_for() {}\nfn walk_back() {}\n";
+        let kinds = Kinds::of([
+            ("crates/bp-design/src/lib.rs", code),
+            ("crates/bp-review/src/lib.rs", ""),
+            ("crates/bp-ledger/src/lib.rs", ""),
+        ]);
+        let sentence = "The ledger names `bp-ledger` and `ROLE_CAP` and `bp_read::walk_for`.";
+        let swaps =
+            |token: &str| (0..8).filter_map(|r| flip_name(file, sentence, token, &kinds, r)).collect::<BTreeSet<_>>();
+        let set = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<BTreeSet<_>>();
+        assert_eq!(swaps("ROLE_CAP"), set(&["ROUTE_CAP"]), "a usize const for a usize const, never `NAME_MAX: u32`");
+        assert_eq!(swaps("bp-ledger"), set(&["bp-design", "bp-review"]), "a crate for a crate");
+        assert_eq!(swaps("bp_read::walk_for"), BTreeSet::new(), "`walk_back` is a literal's, not the prose's");
+        assert_eq!(kinds.kind("bp_read::walk_for"), Some("fn"), "a path reads as its last part");
+        assert_eq!(swaps("quokka-agent"), BTreeSet::new(), "a name of no kind is no Name candidate");
+        assert_eq!(kinds.kind("scratch.rs"), None, "a name the clone does not hold has no kind");
     }
 
     #[test]
@@ -560,20 +445,34 @@ mod tests {
     }
 
     #[test]
-    fn one_plant_per_settle_target_across_sets() {
-        let evals = tempfile::tempdir().unwrap();
+    fn one_plant_per_settle_line_across_sets() {
+        let (evals, code) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::create_dir_all(code.path().join("xtask/src")).unwrap();
+        std::fs::write(code.path().join("xtask/src/b.rs"), "//! A line.\n//! It stops after 160 tested candidates.\n")
+            .unwrap();
+        let mut clones = Clones::new(code.path(), code.path());
+        clones.insert("b", code.path());
         let mut ids = BTreeSet::new();
         for set in ["bp-research-plants", "bp-research-holdout"] {
             let dir = evals.path().join(set);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("plant-1.md"), plant_text(&[&kept("design", &mut ids)], 7, "b")).unwrap();
         }
-        let held = targets(evals.path(), &evals.path().join("bp-research-holdout")).unwrap();
-        assert_eq!(held["xtask/src/b.rs"], ["bp-research-holdout/plant-1", "bp-research-plants/plant-1"]);
+        let holdout = evals.path().join("bp-research-holdout");
+        let held = targets(evals.path(), &holdout, true, &mut clones).unwrap();
+        assert_eq!(held["xtask/src/b.rs:2"], ["bp-research-holdout/plant-1", "bp-research-plants/plant-1"]);
+        let made = targets(evals.path(), &holdout, false, &mut clones).unwrap();
+        assert_eq!(made["xtask/src/b.rs:2"], ["bp-research-plants/plant-1"], "the --out set is the one made again");
         let other = evals.path().join("elsewhere");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("plant-1.md"), plant_text(&[&kept("two-hop", &mut ids)], 7, "b")).unwrap();
-        assert_eq!(targets(evals.path(), &other).unwrap()["xtask/src/b.rs"].len(), 3, "a set outside evals counts too");
+        let all = targets(evals.path(), &other, true, &mut clones).unwrap();
+        assert_eq!(all["xtask/src/b.rs:2"].len(), 3, "a set outside evals counts too");
+        let seed = |cmd: &str| Seed { settled_by: cmd.into(), ..Seed::default() };
+        assert_eq!(key(code.path(), &seed("grep -F 'A line' xtask/src/b.rs")).as_deref(), Some("xtask/src/b.rs:1"));
+        assert_eq!(key(code.path(), &seed("wc -l < xtask/src/b.rs")).as_deref(), Some("xtask/src/b.rs"), "a count");
+        let out = crate::plants_verify::output(code.path(), &kept("design", &mut ids).c.settle).unwrap();
+        assert_eq!(out, "//! It stops after 160 tested candidates.\n", "no line number to match a figure");
     }
 
     #[test]
@@ -586,6 +485,11 @@ mod tests {
         assert_eq!(k.node, "shared/learnings/it-stops-after-320-tested-candidates");
         assert_eq!(r.plants[0].field("title").as_deref(), Some("It stops after 160 tested candidates"));
         assert!(r.plants[0].text.contains("160 tested") && !r.plants[0].text.contains("320"));
+        assert_eq!(
+            (r.plants[0].settled_by.as_str(), r.plants[0].matches.clone()),
+            (k.c.settle.as_str(), vec!["160".into()])
+        );
+        assert!(r.plants[0].unless.is_empty(), "a control carries the truth, not the flip");
     }
 
     #[test]
@@ -617,14 +521,20 @@ mod tests {
         assert!(Fixture::parse("x", &shapeless).is_err(), "a question without the row shape");
         let named = text.replace("what is the figure?", "what is the figure in It stops after 320 tested candidates?");
         assert!(Fixture::parse("x", &named).is_err(), "a question that names the seed's title");
+        let four = text.replace("what is the figure?", "what is the figure, which stops after 320 tested ones?");
+        assert!(Fixture::parse("x", &four).is_err(), "a question that shares four words with the title");
+        let three = text.replace("what is the figure?", "what is the figure, which stops after 320?");
+        assert!(Fixture::parse("x", &three).is_ok(), "three shared words are no name");
         let id = text.replace("what is the figure?", &format!("what is the figure in {}?", k.node));
         assert!(Fixture::parse("x", &id).is_err(), "a question that names the seed's node id");
         assert!(Fixture::parse("x", &text.replace("nouns: stops tested", "nouns: stops absent")).is_err());
         assert!(Fixture::parse("x", &text.replace("genre: Number", "genre: Size")).is_err());
         let control = control_text(&k, "b");
         assert!(Fixture::parse("c", &control).is_ok());
-        let settled = control.replace("nouns:", "settled_by: grep x a.rs\nnouns:");
-        assert!(Fixture::parse("c", &settled).is_err(), "a control carries no settled_by:");
+        let flipped = control.replace("nouns:", "unless: 320\nnouns:");
+        assert!(Fixture::parse("c", &flipped).is_err(), "a control carries no unless:");
+        let bare = control.lines().filter(|l| !l.starts_with("settled_by:")).collect::<Vec<_>>().join("\n");
+        assert!(Fixture::parse("c", &bare).is_err(), "a control carries its settled_by:");
         let review = "kind: control\nbase: b\nhead: h\ntitle: T\ntruth:\n---\nbody\n";
         assert!(Fixture::parse("c", review).unwrap().research.is_none(), "a review control keeps its rules");
     }
@@ -649,7 +559,9 @@ mod tests {
         let spans = |t: &str| crate::plants_flip::spans(t).into_iter().map(|s| s.1.to_string()).collect::<Vec<_>>();
         assert_eq!(spans("`a b` then `ok_one`, and `two_x`"), ["ok_one", "two_x"]);
         assert_eq!(spans("a stray ` tick, then `whole_token`"), ["whole_token"]);
-        assert_eq!(flip_name("//! `bp-design` and `bp-design-x`", "`bp-design-x`", 0), None, "a prefix is no other");
+        let kinds = Kinds::of([("crates/bp-design/src/lib.rs", ""), ("crates/bp-design-x/src/lib.rs", "")]);
+        let file = "//! `bp-design` and `bp-design-x`";
+        assert_eq!(flip_name(file, "`bp-design-x`", "bp-design-x", &kinds, 0), None, "a prefix is no other");
         assert!(
             !crate::plants_flip::ident("Stop:") && crate::plants_flip::ident("bp_vault::Walk"),
             "a label is no name"
@@ -674,18 +586,97 @@ mod tests {
         joined.claim = joined.claim.replace("); it", "), so it");
         joined.at += 3;
         assert!(crate::plants_text::text(&joined).is_err(), "a clause that opens with `so` is a fragment");
-        let mut k = candidate("design");
-        (k.form, k.unit, k.subject) = ("const", "GAP".into(), "the label module of the bp-diagram crate".into());
-        k.claim = "`GAP` in the label module of the bp-diagram crate is 8 (the stroke stays this far: 6 px).".into();
-        k.at = k.claim.find(" 8 ").unwrap() + 1;
-        (k.token, k.swap) = ("8".into(), "9".into());
-        let t = crate::plants_text::text(&k).unwrap();
-        assert_eq!(t.title, "GAP in the label module of the bp-diagram crate is 9", "cut at ` (`, never inside it");
-        assert!(t.question.starts_with("What is the value of `GAP` in the label module of the bp-diagram crate"));
+        let k =
+            crate::plants_pool::constants("crates/bp-diagram/src/label.rs", "/// The gap.\npub const GAP: u32 = 18;\n");
+        assert_eq!(k[0].claim, "`GAP` in the label module of the bp-diagram crate is 18.", "template words, no doc");
+        assert_eq!(k[0].settle, "grep -F 'const GAP:' crates/bp-diagram/src/label.rs");
+        let t = crate::plants_text::text(&k[0]).unwrap();
+        assert_eq!(t.title, format!("In bp-diagram's src, the label module sets GAP to {}", k[0].swap));
+        let tests =
+            crate::plants_pool::constants("crates/bp-install/tests/ledger.rs", "const ROLE_CAP: usize = 750;\n");
+        assert_eq!(tests[0].subject, "the ledger file in bp-install's tests", "a test file is no module of the crate");
+        assert!(t.question.starts_with("What is the value of `GAP` in the label module of the bp-diagram crate, and"));
+        assert!(!shares_four(&t.question, &t.title), "the question names the seed by no run of its title");
         c.claim = format!("{} (", "word ".repeat(30));
         c.at = 0;
         c.token = "word".into();
         assert_eq!(crate::plants_text::text(&c).err().as_deref(), Some("no clause boundary"));
+    }
+
+    fn shares_four(a: &str, b: &str) -> bool {
+        let runs = |t: &str| words(t).windows(4).map(|w| w.join(" ")).collect::<BTreeSet<_>>();
+        !runs(a).is_disjoint(&runs(b))
+    }
+
+    #[test]
+    fn a_measurement_names_where_its_file_is_and_no_title_run() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["xtask/src/scratch.rs", "xtask/tests/scratch.rs", "crates/bp-tool/src/eval_result.rs"] {
+            std::fs::create_dir_all(dir.path().join(f).parent().unwrap()).unwrap();
+            std::fs::write(dir.path().join(f), "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n").unwrap();
+        }
+        let files =
+            ["xtask/src/scratch.rs", "xtask/tests/scratch.rs", "crates/bp-tool/src/eval_result.rs"].map(String::from);
+        let lines: Vec<Candidate> = crate::plants_count::measurements(dir.path(), &files)
+            .into_iter()
+            .filter(|c| c.id.contains(":lines:"))
+            .collect();
+        let subjects: Vec<&str> = lines.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(
+            subjects,
+            [
+                "the scratch module in xtask's src",
+                "the scratch file in xtask's tests",
+                "the eval_result module in bp-tool's src"
+            ]
+        );
+        for c in &lines {
+            let t = crate::plants_text::text(c).unwrap();
+            assert!(t.question.starts_with(&format!("How many lines does {} have?", c.subject)), "{}", t.question);
+            assert!(!shares_four(&t.question, &t.title), "{} / {}", t.question, t.title);
+            assert_eq!((c.settle.contains("-n"), c.kind), (false, "count"));
+        }
+        assert_eq!(
+            crate::plants_text::text(&lines[0]).unwrap().true_title,
+            "In xtask's src, the scratch module has 12 lines"
+        );
+    }
+
+    #[test]
+    fn a_question_that_a_grep_settles_leaks() {
+        let corpus = Corpus::from_texts([
+            "//! The walk takes `12` steps\n//! before it stops, and `bp-tool` rests.",
+            "fn x() {}",
+        ]);
+        let ask = |q: &str| leaks(&format!("{q} {ROW_SHAPE}"), &["12".to_string()], &corpus);
+        assert!(ask("Does \"the walk takes ___ steps\" hold?").is_none(), "the blank parts every run");
+        assert!(ask("How far does the walk take steps before it stops?").is_some(), "a run across a line break");
+        assert!(ask("Where it stops, and bp-tool rests?").is_some(), "backticks hide no run");
+        assert!(ask("How many steps? Is it 12?").unwrap().contains("match word `12`"));
+        assert!(ask("How many lines does the walk module have? Give the number and its source, at the repository's current commit.").is_none(), "the request sentence is no run");
+        let line = "pub const CHUNK: usize = 20;";
+        assert!(hop_leaks(line, &["chunk".into(), "walk".into()], "The doc names a file on chunk and walk.").is_some());
+        assert!(hop_leaks(line, &["walk".into(), "pick".into()], "Which `usize` file?").is_some(), "a backticked word");
+        assert!(hop_leaks(line, &["walk".into(), "pick".into()], &format!("Which file? {ROW_SHAPE}")).is_none());
+    }
+
+    #[test]
+    fn weak_or_false_words_are_discarded() {
+        let mut c = candidate("design");
+        assert_eq!(worded(&c), None);
+        (c.token, c.claim, c.at) = ("8".into(), "It stops after 8 tested candidates.".into(), 15);
+        assert_eq!(worded(&c), Some("match word too short"));
+        let mut t = candidate("design");
+        t.line = "//! TODO(bp): It stops after 160 tested candidates.".into();
+        assert_eq!(worded(&t), Some("the line holds TODO"));
+        let mut one = candidate("design");
+        (one.claim, one.token, one.swap, one.at) = ("It keeps 12 copies.".into(), "12".into(), "1".into(), 9);
+        assert_eq!(worded(&one), Some("the flip gives 1 before a plural"));
+        let mut neg = candidate("design");
+        (neg.genre, neg.claim, neg.token, neg.at) = ("Negation", "The cache is never stale.".into(), "is".into(), 10);
+        assert_eq!(worded(&neg), Some("the flip sits beside a negation"));
+        (neg.claim, neg.token, neg.at) = ("It is not always fast.".into(), "always".into(), 10);
+        assert_eq!(worded(&neg), Some("the flip sits beside a negation"));
     }
 
     #[test]
@@ -705,6 +696,8 @@ mod tests {
             "title: \"It stops (after 320 tested candidates\"",
         );
         assert!(check(&open).is_some(), "an unbalanced bracket");
+        let unsaid = text.replace("after 320 tested candidates (", "after 330 tested candidates (");
+        assert!(check(&unsaid).unwrap().contains("body does not state"), "a body that does not state the flip");
         let joined = text.replace("title: \"It stops", "title: \"And it stops");
         assert!(check(&joined).is_some(), "a title that opens with a joining word");
         let asked = text.replace("___ tested candidates", "___ tested items");

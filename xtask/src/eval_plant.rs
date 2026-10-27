@@ -8,12 +8,12 @@
 //! base: <full sha>                         (the clone every settle command and every cited path refers to)
 //! parts: 1 | 2                             (plant, optional: absent means 1)
 //! question: <one line, ending with the row shape>
-//! plant: <node id>                         (one group per part; a control has one, with nouns only)
-//! genre: Number | Negation | Name
-//! class: measurement | design | two-hop
+//! plant: <node id>                         (one group per part; a control has one)
+//! genre: Number | Negation | Name          (plant only)
+//! class: measurement | design | two-hop    (plant only)
 //! settled_by: <one shell command, run at the clone's root at base>
 //! match: <word> | <word>                   (from the true sentence)
-//! unless: <word> | <word>                  (from the flip)
+//! unless: <word> | <word>                  (plant only: from the flip)
 //! nouns: <word> <word> [<word>]            (each verbatim in the question)
 //! ---
 //! <seed 1 frontmatter>
@@ -28,14 +28,32 @@
 //! A group opens at its `plant:` line and holds the keys below it until the next `plant:`. The seeds follow the first
 //! `---` line in group order: each is its frontmatter, a `---` line and a one-paragraph body, and a `---` line parts
 //! two seeds. So a body holds no `---` line, and the seed file is `---`, the frontmatter, `---`, the body. The parser
-//! refuses a file whose group count or seed count differs from `parts:`. A question names no seed's node id or title,
-//! so the reader must search; `bp search` needs every term and has no stemming, so each noun is the source's own word
-//! form.
+//! refuses a file whose group count or seed count differs from `parts:`. A question names no seed's node id, and
+//! shares no run of four words ([`words`]) with a seed's title, so the reader must search; `bp search` needs every
+//! term and has no stemming, so each noun is the source's own word form. A control carries its plant's settle
+//! command and the true `match:` word, so `--verify` settles it as it settles the plant.
 
 use anyhow::{Context, Result, bail};
 
 /// The sentence every research question ends with, so every arm is asked for the same table (31, design change 2).
 pub const ROW_SHAPE: &str = "Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.";
+
+/// The length of a word run that names a text: a question shares none with a seed's title, nor with the clone.
+pub const RUN: usize = 4;
+
+/// The words of `text` as a run is read: lowercase, backticks dropped, punctuation trimmed from each word's ends,
+/// so `` `bp-diagram`, `` reads `bp-diagram` and a comment marker (`//!`) reads nothing. A blank (`___`) stays a word.
+pub fn words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|w| {
+            if w.contains("___") {
+                return "___".to_string();
+            }
+            w.replace('`', "").trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
 
 pub const GENRES: [&str; 3] = ["Number", "Negation", "Name"];
 pub const CLASSES: [&str; 3] = ["measurement", "design", "two-hop"];
@@ -51,7 +69,7 @@ pub struct Research {
     pub plants: Vec<Seed>,
 }
 
-/// One seeded node and how its truth is settled. A control's carries no settle, match, unless, genre or class.
+/// One seeded node and how its truth is settled. A control's carries no unless, genre or class.
 #[derive(Debug, Default, PartialEq)]
 pub struct Seed {
     pub node: String,
@@ -150,8 +168,8 @@ impl Research {
             if parts != 1 || self.seed.is_some() || !p.genre.is_empty() || !p.class.is_empty() {
                 bail!("{id}: a control is one seed, with no seed:, genre: or class:");
             }
-            if !p.settled_by.is_empty() || !p.matches.is_empty() || !p.unless.is_empty() {
-                bail!("{id}: a control carries no settled_by:, match: or unless:");
+            if p.settled_by.is_empty() || p.matches.is_empty() || !p.unless.is_empty() {
+                bail!("{id}: a control carries settled_by: and match:, and no unless:");
             }
         } else if self.seed.is_none() {
             bail!("{id}: a plant needs seed:");
@@ -169,8 +187,10 @@ impl Research {
             }
             let q = self.question.to_lowercase();
             let slug = node.rsplit('/').next().unwrap_or(node);
-            let title = p.field("title").unwrap_or_default().to_lowercase();
-            if q.contains(&node.to_lowercase()) || q.contains(slug) || (!title.is_empty() && q.contains(&title)) {
+            let asked: Vec<String> = words(&self.question).windows(RUN).map(|w| w.join(" ")).collect();
+            let shared =
+                words(&p.field("title").unwrap_or_default()).windows(RUN).any(|w| asked.contains(&w.join(" ")));
+            if q.contains(&node.to_lowercase()) || q.contains(slug) || shared {
                 bail!("{id}: the question names the seed {node}");
             }
         }

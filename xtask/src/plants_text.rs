@@ -1,17 +1,19 @@
-//! The question and the title of a plant (31, design change 2): both say the fact in the true sentence's own words.
+//! The question and the title of a plant (31, design change 2). The question asks for the fact by its subject and
+//! its nouns; `plants_leak` refuses one that holds a run of four words of the clone, so a question never quotes its
+//! source.
 //!
-//! The subject clause is the shortest span of the sentence that holds the token, starts as early as it can, and is
-//! cut only at a clause boundary: the sentence's ends, or `, `, `; `, `: `, `. `, `) ` or ` (`. It has four words or
-//! more, balanced brackets and backticks, no opening joining word (`and`, `or`, `so`, `which`: [`JOINS`]), no
+//! A count, a constant and a two-hop take template words. A count asks `How many <unit> does <subject> have?`, a
+//! constant `What is the value of `<NAME>` in <subject>, and what does it set?`, a two-hop `The doc of <subject>
+//! names a file on <near words>. What figure does that file's constant hold, and what does it set?`. Each title puts
+//! the facts in another order, so the question shares no run of four words with it (`eval_plant::RUN`).
+//!
+//! A sentence asks with its subject clause, the token blanked: `"<clause>": what is the figure?`, `Which identifier
+//! does "<clause>" name?`, or `Does "<clause>" hold with `always` or with `never` in the blank?`. The clause is the
+//! shortest span that holds the token, cut only at a clause boundary: the sentence's ends, or `, `, `; `, `: `, `. `,
+//! `) ` or ` (`. It has four words or more, balanced brackets and backticks, no opening joining word ([`JOINS`]), no
 //! backticked label (`` `genre:` ``) that reads as a cut once the backticks drop, and a title of at most
-//! [`TITLE_MAX`] characters. A sentence with no such
-//! clause gives no plant (`indistinct`, "no clause boundary").
-//!
-//! The title is the clause with the flip in place, backticks dropped. The question asks for the flipped slot:
-//! `How many <unit> does <subject> have?` for a count, `What is the value of `<NAME>` in <subject>, and what does it
-//! set?` for a constant, and for a sentence the clause with `___` in the slot: `"<clause>": what is the figure?`,
-//! `Which identifier does "<clause>" name?`, or `Does "<clause>" hold with `always` or with `never` in the blank?`.
-//! [`breaks`] checks a written fixture by the same rules, so `--verify` refuses one the planter would not write.
+//! [`TITLE_MAX`] characters; else the sentence gives no plant (`indistinct`, "no clause boundary"). The title is the
+//! clause with the flip in place. [`breaks`] checks a written fixture by the same rules.
 
 use crate::eval_plant::Seed;
 use crate::plants_pool::Candidate;
@@ -37,16 +39,61 @@ pub struct Text {
 
 /// The question and titles of a candidate, or why it has none.
 pub fn text(c: &Candidate) -> Result<Text, String> {
+    let ask = match c.form {
+        "count" => format!("How many {} does {} have?", c.unit, c.subject),
+        "const" => format!("What is the value of `{}` in {}, and what does it set?", c.unit, c.subject),
+        "hop" => format!(
+            "The doc of {} names a file on {}. What figure does that file's constant hold, and what does it set?",
+            c.subject,
+            list(&c.near)
+        ),
+        _ => return sentence(c),
+    };
+    let clause = match c.form {
+        "const" => format!("{} {}", c.subject, c.unit),
+        "hop" => c.near.join(" "),
+        _ => c.subject.clone(),
+    };
+    Ok(Text {
+        question: format!("{ask} Give the number and its source, at the repository's current commit."),
+        title: c.label.replace("{}", &c.swap),
+        true_title: c.label.replace("{}", &c.token),
+        clause,
+    })
+}
+
+/// `a`, `a and b`, or `a, b and c`.
+fn list(words: &[String]) -> String {
+    match words {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// A two-hop candidate with its `near` words cut to `nouns`, and its title and seed sentences in template words.
+pub fn hop(mut c: Candidate, nouns: &[String]) -> Candidate {
+    let a = c.cited.clone().unwrap_or_default();
+    let (at, stem, kind) = crate::plants_count::place(&a);
+    c.near = nouns.to_vec();
+    let lead =
+        format!("In {at}, the {stem} {kind}'s doc names a file on {}; the constant of that file is", list(nouns));
+    (c.claim, c.flipped) = (format!("{lead} {}.", c.token), format!("{lead} {}.", c.swap));
+    c.label =
+        format!("In {at}, the {stem} {kind} names a {} file set to {{}}", nouns.first().map_or("", String::as_str));
+    c
+}
+
+/// The question and titles of a sentence candidate: its subject clause, the token blanked.
+fn sentence(c: &Candidate) -> Result<Text, String> {
     let (s, e) = clause(c).ok_or("no clause boundary")?;
     let (head, tail) = (&c.claim[s..c.at], &c.claim[c.at + c.token.len()..e]);
     let title = plain(&format!("{head}{}{tail}", c.swap));
     let true_title = plain(&c.claim[s..e]);
     let blank = format!("{head}___{tail}");
-    let ask = match (c.form, c.genre) {
-        ("count", _) => format!("How many {} does {} have?", c.unit, c.subject),
-        ("const", _) => format!("What is the value of `{}` in {}, and what does it set?", c.unit, c.subject),
-        (_, "Number") => format!("\"{blank}\": what is the figure?"),
-        (_, "Name") => format!("Which identifier does \"{blank}\" name?"),
+    let ask = match c.genre {
+        "Number" => format!("\"{blank}\": what is the figure?"),
+        "Name" => format!("Which identifier does \"{blank}\" name?"),
         _ if c.token == "is" => format!("Does \"{blank}\" hold with `is` or with `is not` in the blank?"),
         _ => format!("Does \"{blank}\" hold with `always` or with `never` in the blank?"),
     };
@@ -88,8 +135,10 @@ fn clause(c: &Candidate) -> Option<(usize, usize)> {
 
 /// `text` without backticks, trimmed, its first letter a capital.
 fn plain(text: &str) -> String {
-    let t = text.replace('`', "");
-    let t = t.trim();
+    let t = text.trim().replace('`', "");
+    if text.trim().starts_with('`') {
+        return t;
+    }
     let mut c = t.chars();
     c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
@@ -125,10 +174,10 @@ fn find_word(text: &str, word: &str) -> Option<usize> {
         .find(|&at| !part(text[..at].chars().next_back()) && !part(text[at + word.len()..].chars().next()))
 }
 
-/// Why a written plant's question or title breaks the rules of [`text`], or `None`. The title sits in the seed's
-/// body at clause boundaries, holds the flip, and fits [`TITLE_MAX`] with balanced brackets. The question is balanced,
-/// holds each noun, and holds the title's clause with `___` in the slot, or for a count or a constant the title's
-/// subject.
+/// Why a written plant's or control's question or title breaks the rules of [`text`], or `None`. The title fits
+/// [`TITLE_MAX`] with balanced brackets, opens with no joining word, and holds the flip (a control's: the true word).
+/// The question is balanced and holds each noun. A sentence's title also sits in the seed's body at clause
+/// boundaries, and its question holds the title's clause with `___` in the slot.
 pub fn breaks(question: &str, seed: &Seed) -> Option<String> {
     let title = seed.field("title").unwrap_or_default();
     let body = seed.text.splitn(3, "---\n").nth(2).unwrap_or_default().replace('`', "").to_lowercase();
@@ -136,6 +185,18 @@ pub fn breaks(question: &str, seed: &Seed) -> Option<String> {
         return Some(format!("the title `{title}` or the question is too long, unbalanced or a joined fragment"));
     }
     let lower = title.to_lowercase();
+    // A sentence's settle greps a fragment (`grep -F -e`); a count's or a constant's does not, on a control too.
+    let template = !seed.settled_by.starts_with("grep -F -e ");
+    let flip = seed.unless.first().or(seed.matches.first()).map(String::as_str).unwrap_or_default();
+    let slot = if seed.genre == "Negation" { flip.rsplit_once(' ').map_or(flip, |f| f.0) } else { flip };
+    let Some(at) = find_word(&title, slot) else { return Some(format!("the title does not hold the slot `{slot}`")) };
+    if !crate::plants_verify::holds(&body, flip) {
+        return Some(format!("the seed's body does not state `{flip}`"));
+    }
+    let missing = seed.nouns.iter().find(|n| !question.contains(n.as_str()));
+    if template {
+        return missing.map(|n| format!("the question does not hold `{n}`"));
+    }
     let cut = |p: usize| {
         let before = body[..p].trim_end().chars().next_back();
         let after = &body[p + lower.len()..];
@@ -149,19 +210,9 @@ pub fn breaks(question: &str, seed: &Seed) -> Option<String> {
     if !body.match_indices(lower.as_str()).any(|(p, _)| cut(p)) {
         return Some(format!("the title `{title}` is no clause of the seed"));
     }
-    let flip = seed.unless.first().map(String::as_str).unwrap_or_default();
-    let slot = if seed.genre == "Negation" { flip.rsplit_once(' ').map_or(flip, |f| f.0) } else { flip };
-    let Some(at) = find_word(&title, slot) else { return Some(format!("the title does not hold the flip `{slot}`")) };
-    let asked = question.replace('`', "").to_lowercase();
-    let form = seed.class == "measurement" || seed.settled_by.contains("'const ");
-    let held = if form {
-        let head = title[..at].trim_end();
-        head.rsplit_once(' ').map_or(head, |h| h.0).to_lowercase()
-    } else {
-        format!("{}___{}", &lower[..at], &lower[at + slot.len()..])
-    };
-    if !asked.contains(&held) {
+    let held = format!("{}___{}", &lower[..at], &lower[at + slot.len()..]);
+    if !question.replace('`', "").to_lowercase().contains(&held) {
         return Some(format!("the question does not hold `{held}`"));
     }
-    seed.nouns.iter().find(|n| !question.contains(n.as_str())).map(|n| format!("the question does not hold `{n}`"))
+    missing.map(|n| format!("the question does not hold `{n}`"))
 }
