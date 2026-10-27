@@ -1,0 +1,64 @@
+{
+    "command": "bp land projects/bp/issues/staged-landing",
+    "deltas": [],
+    "diff": {
+        "files": [
+            {
+                "additions": 1,
+                "deletions": 0,
+                "path": "staged.txt"
+            }
+        ]
+    },
+    "forge": "snapshot",
+    "forge_age": 6,
+    "gates": [
+        {
+            "detail": "on master",
+            "name": "base",
+            "state": "pass"
+        },
+        {
+            "detail": "approved at cc3e7c2 by quokka-reviewer",
+            "name": "approving review",
+            "state": "pass"
+        },
+        {
+            "detail": "green at cc3e7c2",
+            "name": "forge checks",
+            "state": "pass"
+        },
+        {
+            "detail": "pass at cc3e7c2, attempt 1",
+            "name": "run staged",
+            "state": "pass"
+        },
+        {
+            "detail": "cc3e7c2 names the error blocks carried now",
+            "name": "check set",
+            "state": "pass"
+        }
+    ],
+    "head": "green at head",
+    "id": "projects/bp/issues/staged-landing",
+    "intent": "needs-landing",
+    "note": "",
+    "pull_request": {
+        "base": "master",
+        "head": "cc3e7c2ec93315de16afb33344097f5f61e0f439",
+        "number": 1,
+        "state": "OPEN",
+        "url": "https://github.com/chonalchendo/blueprint/pull/1"
+    },
+    "refusal": null,
+    "stack": [
+        {
+            "current": true,
+            "id": "projects/bp/issues/staged-landing",
+            "layer": 1,
+            "state": "needs landing"
+        }
+    ],
+    "title": "Staged landing",
+    "waits_for": []
+}

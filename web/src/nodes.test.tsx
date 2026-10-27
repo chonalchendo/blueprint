@@ -9,8 +9,11 @@ import { Node, NodeView } from "./pages/Node";
 import { stubApi } from "./stub";
 import type { Show } from "./types/Show";
 
-// `moving.json` is a Moving page, not a node: `moving.test.tsx` reads it.
-const fixtures = import.meta.glob<Show>(["./fixtures/*.json", "!./fixtures/moving.json"], { eager: true, import: "default" });
+// `moving.json` and `change.json` are pages, not nodes: `moving.test.tsx` and `change.test.tsx` read them.
+const fixtures = import.meta.glob<Show>(["./fixtures/*.json", "!./fixtures/moving.json", "!./fixtures/change.json"], {
+  eager: true,
+  import: "default",
+});
 
 // The kinds `bp list --count-only` counts in the converted vault: nine node kinds and four record kinds.
 const KINDS = ["convention", "decision", "design", "inbox", "issue", "learning", "milestone", "project", "thread"];

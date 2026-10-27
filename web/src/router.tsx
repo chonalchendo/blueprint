@@ -7,6 +7,7 @@ export type Route =
   | { page: "projects" }
   | { page: "home"; project: string }
   | { page: "moving"; project: string }
+  | { page: "change"; project: string; id: string }
   | { page: "node"; id: string }
   | { page: "search"; q: string }
   | { page: "none"; path: string; project?: string };
@@ -21,10 +22,15 @@ export function route(path: string, search = ""): Route {
     return { page: "none", path };
   }
   if (parts.length === 0) return { page: "projects" };
+  // No id holds a `.` or `..` segment; the browser resolves one in the API path and fetches another route.
+  const dots = (id: string) => id.split("/").some((s) => s === "." || s === "..");
   if (parts[0] === "node" && parts.length > 1) {
     const id = parts.slice(1).join("/");
-    // No id holds a `.` or `..` segment; the browser resolves one in the API path and fetches another route.
-    return id.split("/").some((s) => s === "." || s === "..") ? { page: "none", path } : { page: "node", id };
+    return dots(id) ? { page: "none", path } : { page: "node", id };
+  }
+  if (parts.length > 2 && parts[1] === "change") {
+    const id = parts.slice(2).join("/");
+    return dots(id) ? { page: "none", path, project: parts[0] } : { page: "change", project: parts[0], id };
   }
   if (parts[0] === "search" && parts.length === 1) return { page: "search", q: new URLSearchParams(search).get("q") ?? "" };
   if (parts.length === 1) return { page: "home", project: parts[0] };
@@ -36,6 +42,11 @@ export function route(path: string, search = ""): Route {
 export function projectOf(id: string): string | undefined {
   const parts = id.split("/");
   return parts[0] === "projects" ? parts[1] : undefined;
+}
+
+/** The Change page of an issue (18, Change): the page a Moving row of an issue opens. */
+export function changePath(project: string, id: string): string {
+  return `/${project}/change/${id}`;
 }
 
 /** The page path of a node; the full Design and Milestone pages take their own routes later (32, issue 5). */

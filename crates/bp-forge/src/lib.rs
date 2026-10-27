@@ -19,6 +19,9 @@ pub use gh::Gh;
 pub struct PullRequest {
     /// The forge number.
     pub number: u64,
+    /// The forge page; a snapshot written before the Change page lacks it.
+    #[serde(default)]
+    pub url: Option<String>,
     /// The head branch, `<prefix>/<issue slug>`.
     pub head_ref_name: String,
     /// The head commit.

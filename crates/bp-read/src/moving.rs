@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use bp_change::intents::{Intent, failed_at, release};
+use bp_change::intents::{Intent, Run, failed_at, release};
 use bp_vault::{Id, Index, Kind, Refusal, Vault};
 use serde::Serialize;
 use ts_rs::TS;
@@ -134,11 +134,7 @@ pub fn moving(vault: &Vault, index: &Index, project: &str) -> Result<Moving, Ref
     // The forge the rows' heads read: the project's own snapshot, as the issues' intents read it.
     let world = World::read(&vault.root, &BTreeSet::from([project]))?;
     let age = world.forge_age();
-    let unread = match age {
-        Some(a) if a <= FRESH => None,
-        Some(a) => Some(format!("forge not read since {}", crate::clock::instant(world.now - a))),
-        None => Some("forge not read".to_string()),
-    };
+    let unread = unread(&world, age);
     let mut groups: Vec<MovingGroup> = GROUPS
         .iter()
         .map(|(group, label, intents)| MovingGroup {
@@ -161,14 +157,7 @@ pub fn moving(vault: &Vault, index: &Index, project: &str) -> Result<Moving, Ref
                 facts.escalated = escalation(index, &id)?;
             }
             let pr = world.pr(id.as_str()).or_else(|| world.merged(id.as_str()).filter(|_| claim.is_some()));
-            // A stale snapshot verifies no gate, so the head states none (18, An error case). The wait gives the time.
-            head = Some(match pr {
-                _ if unread.is_some() => "forge not read",
-                None => "no pull request",
-                Some(p) if p.has_failed() || failed_at(&runs(index, id.as_str())?, &p.head_ref_oid) => "red at head",
-                Some(p) if p.is_green() => "green at head",
-                Some(_) => "checks pending",
-            });
+            head = Some(head_words(pr, unread.is_some(), || runs(index, id.as_str()))?);
             facts.sha = pr.map(|p| p.head_ref_oid.clone());
         }
         let (command, wait) = match next(&row.row.id, intent, note, &facts) {
@@ -194,6 +183,32 @@ pub fn moving(vault: &Vault, index: &Index, project: &str) -> Result<Moving, Ref
     }
     let forge = if age.is_some() { Forge::Snapshot } else { Forge::NotRead };
     Ok(Moving { project: project.to_string(), forge, forge_age: age, groups })
+}
+
+/// "forge not read since <time>" when the snapshot of `age` seconds is not fresh, or "forge not read" when none
+/// exists; `None` when it was read within [`FRESH`].
+pub(crate) fn unread(world: &World, age: Option<i64>) -> Option<String> {
+    match age {
+        Some(a) if a <= FRESH => None,
+        Some(a) => Some(format!("forge not read since {}", crate::clock::instant(world.now - a))),
+        None => Some("forge not read".to_string()),
+    }
+}
+
+/// An issue's head in words. A stale snapshot verifies no gate, so the head states none (18, An error case); the wait
+/// gives the time. The runs are read only when a pull request's checks have not failed.
+pub(crate) fn head_words(
+    pr: Option<&bp_forge::PullRequest>,
+    unread: bool,
+    runs: impl FnOnce() -> Result<Vec<Run>, Refusal>,
+) -> Result<&'static str, Refusal> {
+    Ok(match pr {
+        _ if unread => "forge not read",
+        None => "no pull request",
+        Some(p) if p.has_failed() || failed_at(&runs()?, &p.head_ref_oid) => "red at head",
+        Some(p) if p.is_green() => "green at head",
+        Some(_) => "checks pending",
+    })
 }
 
 /// The index in [`GROUPS`] of the group that holds `intent`.

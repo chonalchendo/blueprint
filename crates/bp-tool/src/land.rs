@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bp_change::IssueStatus;
-use bp_change::intents::{self, Base, Unmet};
+use bp_change::intents::{self, Base};
 use bp_forge::{Gh, PullRequest};
 use bp_read::inputs::{field, held};
+use bp_read::landing;
 use bp_read::snapshot::clone_of;
 use bp_vault::{Code, Id, Index, Refusal, Vault};
 use clap::Args;
@@ -30,11 +31,15 @@ pub struct Pr {
     pub issue: String,
 }
 
-/// `bp land <issue>`.
+/// `bp land <issue> [--dry-run]`.
 #[derive(Args)]
 pub struct Land {
     /// The claimed issue whose pull request merges.
     pub issue: String,
+    /// Run every gate and print the refusal land would give at this head, or the head it would merge; never fetch,
+    /// push, merge, release or write.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// What a `pr` did: opened or found its head done, or committed the runs of a failed block and kept its push.
@@ -185,17 +190,15 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let c = claimed(cwd, &index, &id)?;
     let gh = Gh::new(&c.top);
     let reviewer = reviewer(&index, &id, &gh.login()?)?;
-    // The diff an earlier approval saw is compared with the base as origin holds it now.
-    git(&c.top, &["fetch", "-q", "origin"])?;
+    // The diff an earlier approval saw is compared with the base as origin holds it now. A dry run writes nothing, so
+    // it compares with origin as the clone last fetched it.
+    if !l.dry_run {
+        git(&c.top, &["fetch", "-q", "origin"])?;
+    }
     let Some(pr) =
         gh.prs_for_head(&c.branch)?.into_iter().filter(|p| p.is_open() || merged(p)).max_by_key(|p| p.number)
     else {
-        return Err(Refusal::new(
-            Code::ReviewMissing,
-            id.as_str(),
-            "land merges an open pull request the reviewer identity approved (15, Controls 1)",
-            format!("{} has no open pull request; bp pr {id}, then the reviewer approves it", c.branch),
-        ));
+        return Err(landing::no_pull_request(&id));
     };
     let n = pr.number;
     vault.clean([&id, &c.claim])?;
@@ -213,18 +216,21 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let carried = crate::carry::read(&vault, &index, &id)?;
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
     // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
-    let gate = intents::landing(&read, &c.base, &runs, &blocks)
-        .map_err(|unmet| refusal(&unmet, &c, &id, &pr, &reviewer))
-        .and_then(|()| checks(&carried, &c, &id, &pr));
+    let compare = c.from.as_deref().map(|from| (c.top.as_path(), from));
+    // The check set is the last gate, so a head the clone cannot read refuses only when every other gate holds.
+    let named = carried.named_by(&c.top, &pr.head_ref_oid);
+    let gate = match intents::gates(&read, &c.base, &runs, &blocks, named.as_ref().ok().copied()).unmet {
+        Some(unmet) => Err(landing::refusal(&unmet, &id, &pr, &reviewer, compare)),
+        None => named.map(|_| ()),
+    };
     if let Err(mut r) = gate {
         if merged(&pr) {
-            // No approval or run can follow a merge: the human judges a change that skipped a gate.
-            r.fix = format!(
-                "pull request {n} is merged, so nothing can meet this now and nothing is recorded; the human reviews \
-                 the merge, then bp release {id} --reason lost"
-            );
+            r.fix = landing::after_merge(n, &id);
         }
         return Err(r);
+    }
+    if l.dry_run {
+        return Ok(Wrote::Changed(json!({ "land": id, "head": pr.head_ref_oid, "dry_run": true })));
     }
     let children = crate::stack::children(&index, &id)?;
     if !merged(&pr) {
@@ -285,20 +291,12 @@ fn reviewer(index: &Index, id: &Id, login: &str) -> Result<String, Refusal> {
     if !reviewer.is_empty() && !reviewer.eq_ignore_ascii_case(login) {
         return Ok(reviewer);
     }
-    let project = id.project().unwrap_or_default();
     let why = if reviewer.is_empty() {
         "the project names no reviewer".into()
     } else {
         format!("{login} is the token's own login")
     };
-    Err(Refusal::new(
-        Code::ReviewerInvalid,
-        format!("projects/{project}/project"),
-        "land counts only the reviewer identity's approval, a login other than the token's (26, design change 3)",
-        format!(
-            "{why}; the human sets the second identity's forge login: bp set projects/{project}/project reviewer <login>"
-        ),
-    ))
+    Err(landing::reviewer_invalid(id, &why))
 }
 
 /// The issue's active claim, its clone, its branch and its base branch, or `illegal_transition`: the issue's status
@@ -306,12 +304,7 @@ fn reviewer(index: &Index, id: &Id, login: &str) -> Result<String, Refusal> {
 fn claimed(cwd: &Path, index: &Index, id: &Id) -> Result<Claimed, Refusal> {
     let Some(h) = held(index, id)? else {
         let status = index.header(id.as_str())?.and_then(|h| h.get("status")?.as_str().map(str::to_string));
-        return Err(Refusal::new(
-            Code::IllegalTransition,
-            id.as_str(),
-            "pr and land act on an issue under an active claim; cut makes it (21, claim)",
-            crate::claim::unclaimed(id, status.as_deref()),
-        ));
+        return Err(landing::unheld(id, status.as_deref()));
     };
     let top = clone_of(cwd, index, id.project().unwrap_or_default())?;
     // A claim cut before `base_branch` existed lands on origin's default branch, where `cut` started it. A layer whose
@@ -333,102 +326,6 @@ fn claimed(cwd: &Path, index: &Index, id: &Id) -> Result<Claimed, Refusal> {
         base,
         target,
     })
-}
-
-/// No approval at the head: `review_missing`, or `diff_changed` when the reviewer's latest approval, at an earlier
-/// head, saw another diff. The comparison only names the refusal; the forge merges an approval of the latest push
-/// alone (15, Controls 1).
-fn unapproved(c: &Claimed, id: &Id, pr: &PullRequest, reviewer: &str) -> Refusal {
-    let (n, head) = (pr.number, &pr.head_ref_oid);
-    let rule = "land counts only the reviewer identity's approving review at the head (15, Controls 1)";
-    let again = format!("the human approves pull request {n} at {head} as {reviewer}, then bp land {id}");
-    let Some(&earlier) = pr.approved_heads(reviewer).last() else {
-        return Refusal::new(Code::ReviewMissing, id.as_str(), rule, again);
-    };
-    match c.from.as_deref().and_then(|from| crate::stack::diff_unchanged(&c.top, from, earlier, pr)) {
-        Some(false) => Refusal::new(
-            Code::DiffChanged,
-            id.as_str(),
-            "the diff changed since the reviewer identity's latest approval (15, Controls 1)",
-            format!("{reviewer} approved {earlier}, and the diff at {head} differs; {again}"),
-        ),
-        Some(true) => {
-            Refusal::new(Code::ReviewMissing, id.as_str(), rule, format!("diff unchanged since {earlier}; {again}"))
-        }
-        None => Refusal::new(
-            Code::ReviewMissing,
-            id.as_str(),
-            rule,
-            format!("{reviewer} approved {earlier}, which this clone cannot compare; {again}"),
-        ),
-    }
-}
-
-/// `checks_changed`: the head's `Bp-Checks` trailer, or the set at the claim when it has none, names another check
-/// set than the one the pull request carries now. The reviewer approved that head, so a block changed since then is
-/// one the reviewer has not seen (27, design change 8).
-fn checks(carried: &crate::carry::Carried, c: &Claimed, id: &Id, pr: &PullRequest) -> Result<(), Refusal> {
-    if carried.named_by(&c.top, &pr.head_ref_oid)? {
-        return Ok(());
-    }
-    Err(Refusal::new(
-        Code::ChecksChanged,
-        id.as_str(),
-        "land merges a head that names the error blocks the pull request carries now (27, design change 8)",
-        format!(
-            "an error block of {id}, its milestone or a carried delta changed after {} was pushed; bp pr {id} pushes \
-             a commit that names them, then the reviewer approves pull request {} at its new head, then bp land {id}",
-            pr.head_ref_oid, pr.number
-        ),
-    ))
-}
-
-/// The first unmet part of needs landing as its refusal (26, design change 4).
-fn refusal(unmet: &Unmet, c: &Claimed, id: &Id, pr: &PullRequest, reviewer: &str) -> Refusal {
-    let (n, head) = (pr.number, &pr.head_ref_oid);
-    match unmet {
-        Unmet::Unmerged(below) => Refusal::new(
-            Code::BaseUnmerged,
-            id.as_str(),
-            "a layer lands after the layer it was cut from (15, a dependency chain to landed)",
-            format!("bp land {below} first: it moves pull request {n} onto its base; then bp land {id}"),
-        ),
-        Unmet::Mismatch(base) => Refusal::new(
-            Code::BaseMismatch,
-            id.as_str(),
-            "land merges into the claim's base branch only (26, design change 4)",
-            format!(
-                "pull request {n} targets {}; bp pr {id} retargets it to {base}, then bp land {id}",
-                pr.base_ref_name.as_deref().unwrap_or_default()
-            ),
-        ),
-        Unmet::Review => unapproved(c, id, pr, reviewer),
-        Unmet::Checks => Refusal::new(
-            Code::ChecksPending,
-            id.as_str(),
-            "the forge check at the head is green (15, Controls 3)",
-            if pr.has_failed() {
-                format!("a check of pull request {n} failed at {head}; fix it, commit it, then bp pr {id}")
-            } else {
-                format!("wait for the checks of pull request {n} at {head} to pass, then bp land {id}")
-            },
-        ),
-        Unmet::Failed(run) => Refusal::new(
-            Code::CheckFailed,
-            run.id.as_str(),
-            "every error-severity check block passes at the head (26, design change 4)",
-            format!(
-                "{} did not pass at {head}; read it with bp show {}, fix the cause, commit it, then bp pr {id}",
-                run.check, run.id
-            ),
-        ),
-        Unmet::Evidence(block) => Refusal::new(
-            Code::EvidenceStale,
-            id.as_str(),
-            "land needs a passing run of each error block's current text at the head (26, design change 4)",
-            format!("{block} has no run of its current text at {head}; bp pr {id}, then bp land {id}"),
-        ),
-    }
 }
 
 /// Removes what the claim added to the clone: the worktree, the branch and the forge's copy of it. Each step skips

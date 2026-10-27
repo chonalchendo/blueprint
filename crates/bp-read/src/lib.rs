@@ -2,16 +2,25 @@
 //! composition over the index, the record reductions the pure intents read, and the typed objects of `list`, `show`
 //! and `search`, and the page objects the view serves beside them. `bp-tool` prints them; `bp-view` serves them. It writes nothing but the index refresh.
 
+mod change;
+pub mod checkset;
 pub mod clock;
+mod diff;
+pub mod git;
 pub mod inputs;
 mod intents;
+pub mod landing;
 mod moving;
 mod objects;
 mod pages;
 pub mod snapshot;
+mod stack;
 mod world;
 
 use bp_vault::{Code, Id, Index, Refusal};
+pub use change::{
+    Change, ChangeDelta, ChangePullRequest, ChangeRefusal, DIFF_CAP, Diff, DiffFile, Layer, carried_deltas, change,
+};
 pub use intents::Intents;
 pub use moving::{Moving, MovingGroup, MovingRow, moving};
 pub use objects::{Census, Forge, List, ListRow, Search, Show, census, list, search, show, status_in_set};
@@ -67,6 +76,7 @@ mod tests {
         Home::export_all(&cfg).expect("Home exports");
         Projects::export_all(&cfg).expect("Projects exports");
         Moving::export_all(&cfg).expect("Moving exports");
+        Change::export_all(&cfg).expect("Change exports");
         // The closed enum's `Serialize` writes each text; its `TS` derives the variant in snake case. They agree.
         let ts = FindingKind::inline(&cfg);
         for k in FindingKind::ALL {

@@ -112,3 +112,26 @@ table.moving .cmd .seg { display: inline-block; }
 /* A wait that names a full id may take two lines; at 1.3 they fit a 48 px row, as a two-line chip does. */
 table.moving .wait { color: var(--muted); display: block; line-height: 1.3; }
 tr.focal { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Change (mock `change-0411.html`): the gate strip, the stack rail, the deltas, the diff's one summary line, then the
+   one command. The land box is sticky at the viewport's bottom, so it stays above the fold at 1280 x 800 for a diff of
+   any size (19, what would show a variation is right). */
+.change h2.group { margin: 18px 0 6px; }
+.gates.strip { display: flex; gap: 8px; flex-wrap: wrap; }
+.gates.strip .g { flex: 1 1 170px; min-width: 170px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); padding: 6px 10px; }
+.gates.strip .g .k { display: block; color: var(--muted); font-size: 0.8em; }
+.gates.strip .g .detail { display: block; color: var(--muted); font-size: 0.86em; word-break: break-word; }
+ol.stack { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--line); }
+ol.stack li { display: flex; gap: 12px; align-items: baseline; padding: 4px 12px; }
+ol.stack li .n { color: var(--muted); width: 1.5em; }
+ol.stack li.this { box-shadow: inset 3px 0 0 var(--ink); }
+ul.deltas { list-style: none; margin: 0; padding: 0 10px; }
+.diff p { margin: 0 0 6px; }
+.diff a { color: var(--accent); }
+table.files { width: auto; margin: 0 0 6px 10px; }
+table.files td { padding: 2px 12px 2px 0; border: 0; }
+.land { position: sticky; bottom: 0; margin-top: 16px; border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; background: var(--surface); box-shadow: 0 -10px 14px var(--paper); }
+.land.strong { border-color: var(--accent); }
+.land:focus { outline: 1px solid var(--accent); outline-offset: 1px; }
+.land .refusal, .land .wait { margin: 0; color: var(--muted); }
+.land .refusal .fix { color: var(--ink); }

@@ -136,11 +136,18 @@ pub fn reviewer(index: &Index, id: &str) -> Result<String, Refusal> {
     Ok(index.header(&format!("projects/{project}/project"))?.and_then(|h| text(&h, "reviewer")).unwrap_or_default())
 }
 
-/// The forge's pull request as the predicates read it: its head, its base, green, and the reviewer's approval at the
-/// head.
+/// The forge's pull request as the predicates read it: its head, its base, green or failed, and the reviewer's
+/// approval at the head.
 pub fn pull_request(p: &bp_forge::PullRequest, reviewer: &str) -> PullRequest {
     let approved = p.approved_heads(reviewer).contains(&p.head_ref_oid.as_str());
-    PullRequest { head: p.head_ref_oid.clone(), base: p.base_ref_name.clone(), green: p.is_green(), approved }
+    PullRequest {
+        head: p.head_ref_oid.clone(),
+        base: p.base_ref_name.clone(),
+        green: p.is_green(),
+        failed: p.has_failed(),
+        approved,
+        reviewer: reviewer.to_string(),
+    }
 }
 
 pub(crate) fn text(m: &Map<String, Value>, k: &str) -> Option<String> {

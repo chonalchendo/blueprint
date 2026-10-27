@@ -142,7 +142,22 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     assert_eq!(ready["command"], "bp cut projects/bp/issues/0001.a");
     assert_eq!((ready["head"].as_str(), ready.get("wait")), (Some("forge not read"), None));
     assert_eq!(moving["groups"][1]["rows"][0]["command"], "bp transition projects/bp/milestones/m approved");
-    for missing in ["/api/node/projects/bp/issues/nope", "/api/nope", "/api/nope/moving", "/api/bp/moving/x"] {
+    // An unclaimed issue's Change page ends in the refusal `land` gives, and its diff text is no page view.
+    let (status, change) = server.json("/api/bp/change/projects/bp/issues/0001.a");
+    assert_eq!(
+        (status, change["refusal"]["code"].as_str(), change.get("command")),
+        (200, Some("illegal_transition"), None)
+    );
+    assert_eq!((change["gates"].as_array().map(Vec::len), change["head"].as_str()), (Some(0), Some("forge not read")));
+    assert_eq!(server.json("/api/bp/change/projects/bp/issues/0001.a?diff=1").0, 200);
+    for missing in [
+        "/api/node/projects/bp/issues/nope",
+        "/api/nope",
+        "/api/nope/moving",
+        "/api/bp/moving/x",
+        "/api/bp/change/projects/bp/designs/system",
+        "/api/two/change/projects/bp/issues/0001.a",
+    ] {
         let (status, refusal) = server.json(missing);
         assert_eq!((status, refusal["code"].as_str()), (404, Some("no_node")), "{missing}");
     }
@@ -175,7 +190,8 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     let log = std::fs::read_to_string(dir.path().join(".bp/use.log")).unwrap();
     let routes: Vec<&str> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
     let node = "/node/projects/bp/issues/0001.a projects/bp/issues/0001.a";
-    assert_eq!(routes, ["/ -", "/bp -", node, "/bp/moving -", node, node, node], "{log}");
+    let change = "/bp/change/projects/bp/issues/0001.a projects/bp/issues/0001.a";
+    assert_eq!(routes, ["/ -", "/bp -", node, "/bp/moving -", change, node, node, node], "{log}");
     assert!(log.lines().all(|l| l.as_bytes()[19] == b'Z'), "{log}");
 }
 

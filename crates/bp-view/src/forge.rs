@@ -34,6 +34,11 @@ impl Forge {
         Self { on, clone, reads: Mutex::default() }
     }
 
+    /// The clone `--clone` names: the Change page reads its diff there too, with the forge off.
+    pub fn clone_dir(&self) -> &std::path::Path {
+        &self.clone
+    }
+
     /// Rewrites the snapshot of `project`, a project the index holds, when its read is due. A failure leaves the
     /// snapshot that exists, which the pages read.
     pub fn refresh(&self, vault: &Vault, index: &Index, project: &str) {

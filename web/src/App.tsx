@@ -3,7 +3,8 @@
 import { Component, Fragment, type ReactNode, useEffect, useState } from "react";
 import { onKey } from "./keys";
 import { Palette } from "./Palette";
-import { Link, type Route, navigate, projectOf, useRoute } from "./router";
+import { Link, type Route, changePath, navigate, projectOf, useRoute } from "./router";
+import { Change } from "./pages/Change";
 import { Home } from "./pages/Home";
 import { Moving } from "./pages/Moving";
 import { Node } from "./pages/Node";
@@ -20,6 +21,8 @@ export function crumbs(r: Route): [string, string][] {
       return [top, [r.project, `/${r.project}`]];
     case "moving":
       return [top, [r.project, `/${r.project}`], ["moving", `/${r.project}/moving`]];
+    case "change":
+      return [top, [r.project, `/${r.project}`], [`change ${r.id.split("/").slice(-1)[0]}`, changePath(r.project, r.id)]];
     case "node": {
       const p = projectOf(r.id);
       return [top, ...(p ? [[p, `/${p}`] as [string, string]] : []), [r.id.split("/").slice(-1)[0], `/node/${r.id}`]];
@@ -116,6 +119,8 @@ function Page({ r }: { r: Route }) {
       return <Home project={r.project} />;
     case "moving":
       return <Moving project={r.project} />;
+    case "change":
+      return <Change project={r.project} id={r.id} />;
     case "node":
       return <Node id={r.id} />;
     case "search":

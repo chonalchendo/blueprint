@@ -14,7 +14,7 @@ use serde::Deserialize;
 use crate::{PullRequest, Snapshot};
 
 /// The fields every pull request read asks for, so a list row and a view parse into the same type.
-const FIELDS: &str = "number,state,author,baseRefName,headRefName,headRefOid,reviews,statusCheckRollup";
+const FIELDS: &str = "number,url,state,author,baseRefName,headRefName,headRefOid,reviews,statusCheckRollup";
 
 /// How many open pull requests the snapshot lists; `gh pr list` stops at 30 unless told.
 const OPEN_LIMIT: &str = "1000";
