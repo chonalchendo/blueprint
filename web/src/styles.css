@@ -105,6 +105,10 @@ table.moving td.next { width: 50%; }
 table.moving .one { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 table.moving .kind { display: block; color: var(--muted); font-family: var(--sans); font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; }
 table.moving .state { color: var(--muted); font-size: 0.9em; }
-table.moving .cmd { word-break: break-all; }
-table.moving .wait { color: var(--muted); }
+/* A chip breaks at a space or after a `/` (`Command` puts a <wbr> there); a word or a segment is one box, so it breaks
+   inside only when it alone overflows the line. One px less padding fits a two-line chip in a 48 px row (19, principle 2). */
+table.moving .cmd { overflow-wrap: anywhere; word-break: normal; padding-top: 1px; padding-bottom: 1px; }
+table.moving .cmd .seg { display: inline-block; }
+/* A wait that names a full id may take two lines; at 1.3 they fit a 48 px row, as a two-line chip does. */
+table.moving .wait { color: var(--muted); display: block; line-height: 1.3; }
 tr.focal { box-shadow: inset 3px 0 0 var(--accent); }

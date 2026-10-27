@@ -1,5 +1,7 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import staged from "./fixtures/moving.json";
+import { GROUPS } from "./intents";
 import { Moving } from "./pages/Moving";
 import { stubApi } from "./stub";
 import type { Moving as MovingObject } from "./types/Moving";
@@ -49,7 +51,7 @@ const moving: MovingObject = {
       group: "blocked",
       label: "blocked",
       intents: ["blocked", "drifted"],
-      rows: [issue("0412.esc", { intent: "blocked", note: "escalated", wait: "blocked: escalated" })],
+      rows: [issue("0412.esc", { intent: "blocked", note: "escalated", wait: "escalated by worker on 2026-10-20: answer in the issue" })],
     },
     {
       group: "ready",
@@ -85,8 +87,11 @@ test("moving: five groups in order with their counts, and one chip per command r
   for (const row of rows) {
     const chips = within(row).queryAllByRole("button");
     expect(chips.length).toBe(row.dataset.command ? 1 : 0);
-    if (row.dataset.command) expect(chips[0].textContent).toBe(row.dataset.command);
-    else expect(row.querySelector(".wait")?.textContent).toBeTruthy();
+    if (row.dataset.command) {
+      // A line may break after each `/`, and the chip's text stays the whole command.
+      expect(chips[0].textContent).toBe(row.dataset.command);
+      expect(chips[0].querySelectorAll("wbr")).toHaveLength(row.dataset.command.split("/").length - 1);
+    } else expect(row.querySelector(".wait")?.textContent).toBeTruthy();
   }
   expect(screen.getAllByRole("button")).toHaveLength(5);
   // The first decision is the focal row.
@@ -111,4 +116,11 @@ test("moving: an empty group says nothing, and a zero keeps its noun", async () 
   expect(Array.from(document.querySelectorAll("p.empty")).map((p) => p.textContent)).toEqual(Array(5).fill("nothing"));
   expect(document.querySelector("p.sub")?.textContent).toBe("no decisions due · nothing more moving · forge not read");
   expect(screen.queryAllByRole("button")).toHaveLength(0);
+});
+
+// The Project home groups its counts with the client's copy of the map, and Moving with the server's. The fixture is
+// `/api/bp/moving` from a staged copy (`cargo xtask stage`), so the two maps cannot drift apart.
+test("moving: the client's groups are the server's", () => {
+  expect(GROUPS.map((g) => g.intents)).toEqual((staged as MovingObject).groups.map((g) => g.intents));
+  expect(GROUPS.map((g) => g.group)).toEqual((staged as MovingObject).groups.map((g) => g.label));
 });
