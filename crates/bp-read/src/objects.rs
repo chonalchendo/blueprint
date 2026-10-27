@@ -1,6 +1,6 @@
 //! The objects `list`, `show` and `search` print, and the view serves (32, design changes 1 and 2). Each is typed, and
 //! `ts-rs` exports it to the client. A verb prints one through `serde_json::to_value`, so its keys come out sorted, as
-//! the contract's golden files hold them. A field the JSON skips is optional in TypeScript (`?`), not `null`.
+//! the envelopes printed before. A field the JSON skips is optional in TypeScript (`?`), not `null`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

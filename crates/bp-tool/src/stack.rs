@@ -1,7 +1,7 @@
 //! The stack (15, a dependency chain to landed): `cut` puts a dependant on its dependency's open pull request head,
-//! `land` reads the base a layer lands on (`bp_read::inputs::base`), and `land` of the lower layer rebases, pushes and retargets each layer above
-//! before it deletes its branch. Each moved layer needs `pr` and a new approval, as the forge requires an approval of
-//! the latest push (15, Controls 1).
+//! `land` reads the base a layer lands on (`bp_read::inputs::base`), and `land` of the lower layer rebases, pushes
+//! and retargets each layer above before it deletes its branch. Each moved layer needs `pr` and a new approval, as
+//! the forge requires an approval of the latest push (15, Controls 1).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

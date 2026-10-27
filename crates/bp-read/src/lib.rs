@@ -24,8 +24,9 @@ mod tests {
 
     use super::*;
 
-    /// Writes `web/src/types/` from the objects and every type they hold. CI diffs the directory, so a type changed
-    /// without its export fails there (22). The directory is generated whole, so a type removed leaves no file.
+    /// Writes `web/src/types/` from the objects and every type they hold. The `check` job's last step after
+    /// `cargo test --workspace` fails on any change to the directory, a new file included, so a type changed without
+    /// its export fails there (22). The directory is generated whole, so a type removed leaves no file.
     #[test]
     fn export_types() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/src/types");

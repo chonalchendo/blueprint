@@ -8,7 +8,7 @@ use bp_change::MilestoneStatus;
 use bp_change::intents::{self, Base, Dependency, IntegrityRun, Issue, Milestone, Verdict};
 use bp_design::DesignStatus;
 use bp_reasoning::LearningStatus;
-use bp_vault::{Body, DeltaState, DesignLevel, Filter, Id, Index, Kind, Record, Refusal, Vault};
+use bp_vault::{Body, Code, DeltaState, DesignLevel, Filter, Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::{Map, Value};
 
 use crate::World;
@@ -55,22 +55,22 @@ impl<'a> Intents<'a> {
 
     /// The intent of one issue, milestone or design; no other kind has one.
     ///
-    /// # Panics
-    ///
-    /// For a live issue when [`Intents::new`] was given no projects: an issue's intent reads the world.
+    /// A live issue needs the world, so [`Intents::new`] must have been given its project, else this refuses
+    /// `could_not_run`. An id the index lacks refuses `no_node`.
     pub fn row(&self, kind: Kind, id: &str, status: Option<&str>) -> Result<Verdict, Refusal> {
         let status = status.unwrap_or_default();
         match kind {
             // A settled issue has no intent, so it reads nothing: most issues a walk reaches are settled.
             Kind::Issue if !intents::is_live_issue(status) => Ok(Verdict::NONE),
-            Kind::Issue => of(
-                self.vault,
-                self.index,
-                self.world.as_ref().expect("the caller reads the world when an issue is in view"),
-                id,
-                status,
-                self.integrity(id)?,
-            ),
+            Kind::Issue => {
+                let Some(world) = self.world.as_ref() else {
+                    return Err(Refusal::failed(
+                        id,
+                        "a live issue's intent reads the clock and the forge; pass the issue's project to Intents::new",
+                    ));
+                };
+                of(self.vault, self.index, world, id, status, self.integrity(id)?)
+            }
             Kind::Milestone => self.milestone(id, status),
             Kind::Design => {
                 let uncited: Vec<String> = drift(self.index, id)?.into_iter().map(|r| r.id).collect();
@@ -233,7 +233,14 @@ fn of(
     status: &str,
     integrity: Option<String>,
 ) -> Result<Verdict, Refusal> {
-    let header = index.header(id)?.expect("a listed row is in the index");
+    let Some(header) = index.header(id)? else {
+        return Err(Refusal::new(
+            Code::NoNode,
+            id,
+            "an id names a node or record in the index",
+            format!("bp search {}", id.rsplit('/').next().unwrap_or(id).replace(['-', '.', '_'], " ")),
+        ));
+    };
     let mut depends = Vec::new();
     for d in header.get("depends").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
         let status = index.header(d)?.map(|h| text(&h, "status").unwrap_or_default());
@@ -311,5 +318,40 @@ fn integrity_run(h: &Map<String, Value>) -> IntegrityRun {
             .filter_map(Value::as_str)
             .map(str::to_string)
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vault() -> (tempfile::TempDir, Vault) {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("projects/bp/issues/0001.a.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "---\nkind: issue\ntitle: A\nstatus: open\nunder: projects/bp/milestones/m\n---\n")
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("shared")).unwrap();
+        let vault = Vault { root: dir.path().to_path_buf() };
+        (dir, vault)
+    }
+
+    #[test]
+    fn a_live_issue_the_index_lacks_refuses_no_node() {
+        let (_dir, vault) = vault();
+        let index = Index::open(&vault).unwrap();
+        let projects = BTreeSet::from(["bp"]);
+        let intents = Intents::new(&vault, &index, Some(&projects)).unwrap();
+        let refusal = intents.row(Kind::Issue, "projects/bp/issues/9999.none", Some("open")).unwrap_err();
+        assert_eq!(refusal.code, Code::NoNode);
+    }
+
+    #[test]
+    fn a_live_issue_with_no_world_refuses_instead_of_panicking() {
+        let (_dir, vault) = vault();
+        let index = Index::open(&vault).unwrap();
+        let intents = Intents::new(&vault, &index, None).unwrap();
+        let refusal = intents.row(Kind::Issue, "projects/bp/issues/0001.a", Some("open")).unwrap_err();
+        assert_eq!(refusal.code, Code::CouldNotRun);
     }
 }

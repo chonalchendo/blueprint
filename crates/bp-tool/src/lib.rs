@@ -270,7 +270,8 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
     Ok(sorted(&shown))
 }
 
-/// An object as the verbs print it: through a JSON map, so its keys come out sorted, as the golden files hold them.
+/// An object as the verbs print it: through a JSON map, so its keys come out sorted, as the envelopes printed
+/// before. `tests/show.rs` (`read_envelopes_print_sorted_keys_and_no_null_for_a_skipped_field`) fixes that.
 fn sorted(object: &impl Serialize) -> Value {
     serde_json::to_value(object).expect("a plain struct serialises")
 }

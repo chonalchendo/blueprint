@@ -47,7 +47,8 @@ fn review(index: &Index, issue: &Id, head: &str, body: &str) -> Result<(), Refus
     if !named.any(|h| h.len() >= 7 && head.starts_with(h)) {
         return Err(refuse("head", format!("write `head: {head}` as line 1 of the body")));
     }
-    // The rows are what `bp_read::inputs::findings` counts: each line that starts with `|`, less the header and separator.
+    // The rows are what `bp_read::inputs::findings` counts: each line that starts with `|`, less the header and
+    // separator.
     let table: Vec<&str> = body.lines().map(str::trim).filter(|l| l.starts_with('|')).collect();
     if table.len() < 2 || !table[1].chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
         let fix = "add the table `| severity | location | finding |` and its line `|---|---|---|`; a table with no \
