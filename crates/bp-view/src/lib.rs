@@ -18,7 +18,7 @@ use axum::http::{Method, StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use bp_vault::{Code, Filter, Index, Kind, Refusal, Vault};
+use bp_vault::{Code, Index, Refusal, Vault};
 use serde_json::Value;
 
 pub use route::Route;
@@ -55,11 +55,7 @@ impl View {
         let (vault, index) = (&self.vault, Index::open(&self.vault)?);
         let (object, page) = match route {
             Route::Health => unreachable!("answered above"),
-            Route::Projects => {
-                let filter =
-                    Filter { kind: Kind::Project, status: None, project: None, under: None, limit: bp_read::ALL };
-                (to_value(&bp_read::list(vault, &index, &filter, false)?), Some(("/".to_string(), "-".to_string())))
-            }
+            Route::Projects => (to_value(&bp_read::projects(vault, &index)?), Some(("/".to_string(), "-".to_string()))),
             Route::Home(project) => {
                 // A project the vault does not hold refuses below, and reads no forge.
                 if index.header(&format!("projects/{project}/project"))?.is_some() {

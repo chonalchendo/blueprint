@@ -13,7 +13,7 @@ mod world;
 use bp_vault::{Code, Id, Index, Refusal};
 pub use intents::Intents;
 pub use objects::{Census, Forge, List, ListRow, Search, Show, census, list, search, show, status_in_set};
-pub use pages::{Home, home};
+pub use pages::{Home, HomeDesign, HomeMilestone, ProjectRow, Projects, home, projects};
 pub use world::{World, split};
 
 /// No limit on a `list` read: every row.
@@ -63,6 +63,7 @@ mod tests {
         Search::export_all(&cfg).expect("Search exports");
         Census::export_all(&cfg).expect("Census exports");
         Home::export_all(&cfg).expect("Home exports");
+        Projects::export_all(&cfg).expect("Projects exports");
         // The closed enum's `Serialize` writes each text; its `TS` derives the variant in snake case. They agree.
         let ts = FindingKind::inline(&cfg);
         for k in FindingKind::ALL {
