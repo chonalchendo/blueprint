@@ -52,12 +52,6 @@ pub(crate) enum Test {
     Measure { max: f64, seconds: bool },
 }
 
-/// An `error` block fails the verb; a `warn` block prints and never fails (15). Any other severity is broken, so it
-/// counts as `error`.
-pub fn is_error(check: &Check) -> bool {
-    check.attrs.get("severity").is_none_or(|s| s != "warn")
-}
-
 /// The attributes every kind accepts (15, the check grammar), with `timeout` (25, design change 4).
 const COMMON: [&str; 5] = ["name", "severity", "cwd", "when", "timeout"];
 
@@ -309,12 +303,5 @@ mod tests {
             plan(&block("shell", "name=a"), TODAY),
             Plan::Run(Spec { test: Test::Exit(0), cwd: None, timeout: TIMEOUT })
         );
-    }
-
-    #[test]
-    fn only_warn_spares_the_verb() {
-        assert!(is_error(&block("shell", "name=a")));
-        assert!(!is_error(&block("shell", "name=a severity=warn")));
-        assert!(is_error(&block("shell", "name=a severity=info")));
     }
 }

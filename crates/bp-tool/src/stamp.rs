@@ -12,11 +12,12 @@ use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use bp_change::{IssueStatus, MilestoneStatus};
+use bp_read::inputs::{Reask, open_waivers};
 use bp_vault::{Body, Check, Code, DeltaState, File, Filter, Header, Id, Index, Kind, Moves, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::waiver::{self, Reask};
+use crate::waiver;
 use crate::{Wrote, finish, subject};
 
 /// `bp stamp <milestone> [--waive <name> --reason <why>]...`, or `bp stamp <delta>`.
@@ -325,9 +326,9 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Re
             fix,
         ));
     }
-    let finish: Vec<Check> = bp_check::named(&file.body).into_iter().cloned().collect();
+    let finish: Vec<Check> = file.body.named_checks().into_iter().cloned().collect();
     let project = id.project().expect("a milestone sits under a project");
-    let reasked = waiver::open(vault, index, project, now)?;
+    let reasked = open_waivers(vault, index, project, now)?;
     waiver::refuse(id, &finish, &reasked, waive)?;
     // A file that does not parse is in no list, so an open issue it holds would pass the next refusal unseen.
     if let Some((path, why)) = index.broken(project)?.into_iter().next() {

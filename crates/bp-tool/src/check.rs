@@ -93,8 +93,8 @@ fn check(cwd: &Path, c: &Check) -> Result<(bp_vault::Id, Option<bp_check::Checke
     let owner = crate::subject(&index, &c.id)?;
     // A held claim's blocks run in its worktree, as `pr` runs them: an agent's shell may sit in the clone, whose head
     // is the base (27, issue 8). Else the blocks run where the caller stands.
-    let worktree = crate::claim::held(&index, &owner)?
-        .and_then(|claim| crate::claim::field(&claim, "worktree"))
+    let worktree = bp_read::inputs::held(&index, &owner)?
+        .and_then(|claim| bp_read::inputs::field(&claim, "worktree"))
         .map(PathBuf::from)
         .filter(|w| w.is_dir());
     drop(index);

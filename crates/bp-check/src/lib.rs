@@ -17,7 +17,6 @@ use bp_vault::{Check, Code, Header, Held, Id, Kind, Refusal, Vault};
 use serde_json::Value;
 
 use crate::judge::Plan;
-pub use crate::judge::is_error;
 
 bp_vault::closed_enum! {
     /// A run's verdict (13, Run). A failure to run differs from a violation (15, E6).
@@ -101,25 +100,12 @@ pub struct Ran {
     done: Vec<Done>,
 }
 
-/// The block's `check_hash` (13, Run): blake3 of its fence line and text. A run counts for a block only while the
-/// hashes match, so a block edited after its run needs a new one (26, design change 4).
-pub fn hash(check: &Check) -> String {
-    let attrs: Vec<String> = check.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    let block = format!("check {} {{{}}}\n{}", check.runner, attrs.join(" "), check.text);
-    blake3::hash(block.as_bytes()).to_hex().to_string()
-}
-
 /// The check-set hash (27, design change 8): blake3 of the sorted `check_hash` of each error block a pull request
 /// carries. A `Bp-Checks` trailer names it, so a changed set needs a push, and the push needs a new approval.
 pub fn set_hash<'a>(hashes: impl IntoIterator<Item = &'a str>) -> String {
     let mut hashes: Vec<&str> = hashes.into_iter().collect();
     hashes.sort_unstable();
     blake3::hash(hashes.join("\n").as_bytes()).to_hex().to_string()
-}
-
-/// The blocks of a body that have a run key: a slug `name`. The census counts the rest as `check_unnamed`.
-pub fn named(body: &bp_vault::Body) -> Vec<&Check> {
-    body.checks.iter().filter(|c| c.attrs.get("name").is_some_and(|n| bp_vault::is_slug(n))).collect()
 }
 
 /// Why the block records `skipped` wherever it runs, if it does: a runner not built yet, or `when=post-land`. It never
@@ -172,7 +158,7 @@ pub fn run(
             format!("check the owner of the block: bp show {} --no-body", owner.as_str()),
         ));
     }
-    let named = named(&file.body);
+    let named = file.body.named_checks();
     let blocks: Vec<&Check> = match only {
         Some(n) => named.iter().copied().filter(|c| c.attrs["name"] == n).collect(),
         None => named.iter().copied().filter(|c| !skip.contains(&c.attrs["name"].as_str())).collect(),
@@ -294,7 +280,7 @@ impl Ran {
                 attempt += 1;
             };
             changes.insert(id.clone(), record(owner, commit, attempt, d));
-            let error = judge::is_error(&d.check);
+            let error = d.check.is_error();
             let kind = d.check.runner.clone();
             runs.push(Run { name: name.to_string(), kind, verdict: d.verdict, id, note: d.note.clone(), error });
         }
@@ -347,8 +333,8 @@ fn record(owner: &Id, commit: &str, attempt: u32, d: &Done) -> String {
         ("at".into(), d.at.as_str().into()),
         ("ended".into(), d.ended.as_str().into()),
         ("verdict".into(), d.verdict.as_str().into()),
-        ("severity".into(), if judge::is_error(&d.check) { "error" } else { "warn" }.into()),
-        ("check_hash".into(), hash(&d.check).into()),
+        ("severity".into(), if d.check.is_error() { "error" } else { "warn" }.into()),
+        ("check_hash".into(), d.check.hash().into()),
     ]);
     if let Some(evidence) = &d.evidence {
         fields.insert("evidence".into(), evidence.as_str().into());

@@ -5,6 +5,10 @@ use bp_change::intents;
 use bp_vault::Refusal;
 
 /// The clock in Unix seconds: `BP_NOW` when set, so parity runs and replays see the clock the reference saw.
+///
+/// # Panics
+///
+/// When the system clock is before 1970 or past the year 292 billion.
 pub fn now() -> Result<i64, Refusal> {
     if let Ok(s) = std::env::var("BP_NOW") {
         return intents::timestamp(&s)

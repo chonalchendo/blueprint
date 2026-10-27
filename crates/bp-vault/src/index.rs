@@ -72,8 +72,9 @@ pub struct Reading<'a> {
     _tx: rusqlite::Transaction<'a>,
 }
 
-/// One row of `list`.
-#[derive(Debug, Serialize)]
+/// One row of `list`. A field it skips is optional in TypeScript, not null.
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(optional_fields)]
 pub struct Row {
     /// The path id.
     pub id: String,
@@ -97,7 +98,7 @@ pub struct Row {
 }
 
 /// One row of `search`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct Hit {
     /// The path id.
     pub id: String,

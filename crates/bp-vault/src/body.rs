@@ -62,9 +62,27 @@ pub struct Check {
     pub text: String,
 }
 
+impl Check {
+    /// The block's `check_hash` (13, Run): blake3 of its fence line and text. A run counts for a block only while the
+    /// hashes match, so a block edited after its run needs a new one (26, design change 4).
+    pub fn hash(&self) -> String {
+        let attrs: Vec<String> = self.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let block = format!("check {} {{{}}}\n{}", self.runner, attrs.join(" "), self.text);
+        blake3::hash(block.as_bytes()).to_hex().to_string()
+    }
+
+    /// An `error` block fails the verb; a `warn` block prints and never fails (15). Any other severity is broken, so
+    /// it counts as `error`.
+    pub fn is_error(&self) -> bool {
+        self.attrs.get("severity").is_none_or(|s| s != "warn")
+    }
+}
+
 crate::closed_enum! {
     /// What a body does that CommonMark allows but the vault should not. The census counts each; `show` lists a
-    /// node's own.
+    /// node's own. The macro writes `Serialize` from each text, which is the variant in snake case.
+    #[derive(ts_rs::TS)]
+    #[ts(rename_all = "snake_case")]
     pub enum FindingKind {
         UnclosedFence = "unclosed_fence",
         DuplicateHeading = "duplicate_heading",
@@ -78,7 +96,7 @@ crate::closed_enum! {
 pub const PLACEHOLDER: &str = "TODO(bp):";
 
 /// A body finding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct Finding {
     /// The kind.
     pub kind: FindingKind,
@@ -89,6 +107,11 @@ pub struct Finding {
 }
 
 impl Body {
+    /// The blocks that have a run key: a slug `name`. The census counts the rest as `check_unnamed`.
+    pub fn named_checks(&self) -> Vec<&Check> {
+        self.checks.iter().filter(|c| c.attrs.get("name").is_some_and(|n| crate::is_slug(n))).collect()
+    }
+
     /// Parses the body.
     ///
     /// # Panics
@@ -305,6 +328,15 @@ fn wikilinks(text: &str) -> impl Iterator<Item = (&str, usize)> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_warn_spares_the_verb() {
+        let block = |attrs: &str| Body::parse(&format!("## Check\n\n```check shell {{{attrs}}}\ntrue\n```\n"));
+        assert!(block("name=a").checks[0].is_error());
+        assert!(!block("name=a severity=warn").checks[0].is_error());
+        assert!(block("name=a severity=info").checks[0].is_error());
+        assert_eq!(block("name=Not_a_slug").named_checks().len(), 0);
+    }
 
     #[test]
     fn root_relative_markdown_links_outside_code_are_kept() {

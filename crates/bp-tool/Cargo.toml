@@ -25,6 +25,7 @@ bp-operation.workspace = true
 bp-check.workspace = true
 bp-forge = { workspace = true, features = ["write"] }
 bp-install.workspace = true
+bp-read.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

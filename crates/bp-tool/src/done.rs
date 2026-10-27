@@ -10,7 +10,7 @@ use bp_vault::git::Repo;
 use bp_vault::{Filter, Id, Index, Kind, Refusal, Vault};
 use serde_json::{Map, Value};
 
-use crate::claim::{field, held};
+use bp_read::inputs::{field, held};
 
 /// How deep `search` must find a learning by its cue: the search verb's default limit.
 const RETRIEVAL: usize = 10;
@@ -37,7 +37,7 @@ pub(crate) fn done(
             let f = Filter { kind: Kind::Milestone, status: planned, project: Some(project), under: None, limit: 1 };
             index.list(&f)?.1 > 0
         }
-        Action::Derive => intents::uncovered(&crate::intent::derivation(index, id.as_str())?).is_empty(),
+        Action::Derive => intents::uncovered(&bp_read::inputs::derivation(index, id.as_str())?).is_empty(),
         // A worker that cannot finish releases the claim `escalated`, and that ends its dispatch (21).
         Action::Complete | Action::Respond if escalated(index, id)? => true,
         Action::Complete => {
@@ -47,9 +47,9 @@ pub(crate) fn done(
                 Some((pr, Some(worktree))) => {
                     Repo::find(&worktree).and_then(|r| r.head()).as_ref() == Some(&pr)
                         && intents::evidence(
-                            &crate::intent::runs(index, id.as_str())?,
+                            &bp_read::inputs::runs(index, id.as_str())?,
                             &pr,
-                            &crate::intent::blocks(vault, id.as_str())?,
+                            &bp_read::inputs::blocks(vault, id.as_str())?,
                         )
                         .is_ok()
                 }
@@ -67,8 +67,8 @@ pub(crate) fn done(
         Action::TriageDrift => {
             // The drifted predicate over each design the seed covers: a project's drift runs sit under its designs.
             let kind = text("kind").and_then(|k| k.parse().ok()).expect("the index stores closed kinds");
-            for d in crate::intent::drift_designs(index, id, kind)? {
-                if !crate::intent::drift(index, &d)?.is_empty() {
+            for d in bp_read::inputs::drift_designs(index, id, kind)? {
+                if !bp_read::inputs::drift(index, &d)?.is_empty() {
                     return Ok(false);
                 }
             }
@@ -100,7 +100,7 @@ pub(crate) fn done(
 
 /// The latest claim of the issue is released `escalated`.
 fn escalated(index: &Index, id: &Id) -> Result<bool, Refusal> {
-    let claims = crate::intent::claims(&index.records(id.as_str(), Kind::Claim)?);
+    let claims = bp_read::inputs::claims(&index.records(id.as_str(), Kind::Claim)?);
     Ok(intents::latest_claim(&claims).is_some_and(|c| c.escalated))
 }
 
@@ -111,7 +111,7 @@ fn responded(root: &Path, index: &Index, id: &Id, forge_age: &mut Option<i64>) -
     else {
         return Ok(false);
     };
-    let (open, fixed) = crate::intent::findings(index, &review)?;
+    let (open, fixed) = bp_read::inputs::findings(index, &review)?;
     Ok(open.is_empty() && !(fixed && field(&review, "head") == Some(pr)))
 }
 
@@ -137,7 +137,7 @@ pub(crate) fn open(
 ) -> Result<Option<(bp_forge::PullRequest, Option<PathBuf>)>, Refusal> {
     let Some(claim) = held(index, id)? else { return Ok(None) };
     let worktree = field(&claim, "worktree").map(PathBuf::from).filter(|w| w.is_dir());
-    let world = crate::intent::World::read(root, &id.project().into_iter().collect())?;
+    let world = bp_read::World::read(root, &id.project().into_iter().collect())?;
     *forge_age = world.forge_age();
     Ok(world.pr(id.as_str()).map(|p| (p.clone(), worktree)))
 }

@@ -1,38 +1,20 @@
 //! The stack (15, a dependency chain to landed): `cut` puts a dependant on its dependency's open pull request head,
-//! `land` reads the base a layer lands on, and `land` of the lower layer rebases, pushes and retargets each layer above
-//! before it deletes its branch. Each moved layer needs `pr` and a new approval, as the forge requires an approval of
-//! the latest push (15, Controls 1).
+//! `land` reads the base a layer lands on (`bp_read::inputs::base`), and `land` of the lower layer rebases, pushes
+//! and retargets each layer above before it deletes its branch. Each moved layer needs `pr` and a new approval, as
+//! the forge requires an approval of the latest push (15, Controls 1).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use bp_change::IssueStatus;
-use bp_change::intents::{self, Base, Dependency, STACK_DEPTH, Unstacked};
+use bp_change::intents::{self, Dependency, Unstacked};
 use bp_forge::{Gh, PullRequest};
-use bp_vault::{Code, Id, Index, Kind, Record, Refusal};
+use bp_read::inputs::{field, held, layers, status};
+use bp_vault::{Code, Id, Index, Refusal};
 use serde_json::Value;
 
-use crate::claim::{branch, field, git, held};
-
-fn status(index: &Index, id: &str) -> Result<Option<String>, Refusal> {
-    Ok(index.header(id)?.and_then(|h| h.get("status")?.as_str().map(str::to_string)))
-}
-
-/// The stack a dependant of `d` would sit on: `d`, then each held claim's unresolved `base_issue` below it, at most
-/// [`STACK_DEPTH`] layers ([`Dependency::layers`]).
-pub(crate) fn layers(index: &Index, d: &str) -> Result<Vec<String>, Refusal> {
-    let mut layers = vec![d.to_string()];
-    while layers.len() < STACK_DEPTH {
-        let Ok(below) = Id::parse(&layers[layers.len() - 1]) else { break };
-        let Some(next) = held(index, &below)?.and_then(|h| field(&h, "base_issue")) else { break };
-        if status(index, &next)?.as_deref() == Some(IssueStatus::Resolved.as_str()) {
-            break;
-        }
-        layers.push(next);
-    }
-    Ok(layers)
-}
+use crate::claim::{branch, git};
 
 /// The dependency `cut` stacks on, and its open pull request, by the stack test ready shares ([`intents::stack`]);
 /// `None` when each `depends` target is resolved. `--base` cannot name another start then.
@@ -131,29 +113,6 @@ pub(crate) fn diff_unchanged(top: &Path, from: &str, reviewed: &str, p: &PullReq
     };
     let reviewed = id(format!("{from}...{reviewed}"))?;
     Some(reviewed == id(format!("refs/remotes/origin/{base}...{}", p.head_ref_oid))?)
-}
-
-/// The branch a held `claim`'s pull request lands on (15, a dependency chain to landed): its `base_branch`; or, when
-/// it was cut from a dependency's head, `Unmerged` until the dependency resolves, then the branch the dependency's
-/// landed claim landed on, followed down the stack.
-pub(crate) fn base(index: &Index, claim: &Record) -> Result<Base, Refusal> {
-    let (mut below, mut branch) = (field(claim, "base_issue"), field(claim, "base_branch"));
-    // A stack is at most `STACK_DEPTH` layers, so the walk ends within as many steps.
-    for _ in 0..STACK_DEPTH {
-        let Some(issue) = below.take() else { break };
-        if status(index, &issue)?.as_deref() != Some(IssueStatus::Resolved.as_str()) {
-            return Ok(Base::Unmerged(issue));
-        }
-        let landed = index
-            .records(&issue, Kind::Claim)?
-            .into_iter()
-            .rev()
-            .find(|c| intents::release(&c.body).get("reason").map(String::as_str) == Some("landed"));
-        // A dependency resolved by hand landed nowhere this tool knows.
-        let Some(landed) = landed else { return Ok(Base::Unknown) };
-        (below, branch) = (field(&landed, "base_issue"), field(&landed, "base_branch"));
-    }
-    Ok(branch.map_or(Base::Unknown, Base::Branch))
 }
 
 /// A layer cut from the head of the issue `land` merges, which `land` moves onto the base before it deletes the

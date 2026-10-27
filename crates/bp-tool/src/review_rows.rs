@@ -6,9 +6,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use bp_change::DispositionAs;
+use bp_read::inputs::{field, held};
 use bp_vault::{Code, Id, Index, Kind, Refusal};
 
-use crate::claim::{field, git, held};
+use crate::claim::git;
 
 const RULE: &str = "a review holds a `head:` line and one findings table; each row names a severity, a location in \
                     the diff of its head or a node, and the finding (15, record)";
@@ -46,7 +47,8 @@ fn review(index: &Index, issue: &Id, head: &str, body: &str) -> Result<(), Refus
     if !named.any(|h| h.len() >= 7 && head.starts_with(h)) {
         return Err(refuse("head", format!("write `head: {head}` as line 1 of the body")));
     }
-    // The rows are what `intent::findings` counts: each line that starts with `|`, less the header and separator.
+    // The rows are what `bp_read::inputs::findings` counts: each line that starts with `|`, less the header and
+    // separator.
     let table: Vec<&str> = body.lines().map(str::trim).filter(|l| l.starts_with('|')).collect();
     if table.len() < 2 || !table[1].chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
         let fix = "add the table `| severity | location | finding |` and its line `|---|---|---|`; a table with no \

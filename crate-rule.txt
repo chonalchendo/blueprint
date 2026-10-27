@@ -1,8 +1,9 @@
 # The crate rule (23). Each line: a workspace crate and every workspace crate it may depend on.
 # `bp-forge[write]` permits the write feature. `only <crate>: <external>` restricts an external dependency to one crate.
 # Dev-dependencies are exempt. `cargo xtask deps` refuses any other edge with exit 2.
-bp-tool      -> bp-diagram bp-vault bp-design bp-change bp-reasoning bp-operation bp-check bp-forge[write] bp-install
-bp-view      -> bp-vault bp-design bp-change bp-reasoning bp-operation bp-forge
+bp-tool      -> bp-diagram bp-vault bp-design bp-change bp-reasoning bp-operation bp-check bp-forge[write] bp-install bp-read
+bp-view      -> bp-vault bp-design bp-change bp-reasoning bp-operation bp-forge bp-read
+bp-read      -> bp-vault bp-design bp-change bp-reasoning bp-operation bp-forge
 bp-check     -> bp-vault bp-change bp-diagram
 bp-install   -> bp-vault bp-operation bp-forge
 bp-forge     -> bp-vault

@@ -241,3 +241,36 @@ fn show_at_a_commit_reads_the_file_as_it_was() {
     let (_, v) = bp(dir.path(), &["show", id, "--at", "HEAD", "--section", "Nope", "--json"]);
     assert!(v["fix"].as_str().unwrap().contains("--at HEAD"), "the fix reads the same commit: {v}");
 }
+
+#[test]
+fn read_envelopes_print_sorted_keys_and_no_null_for_a_skipped_field() {
+    let dir = vault();
+    for args in [
+        &["list", "issue", "--json"][..],
+        &["list", "--count-only", "--json"],
+        &["show", "projects/bp/issues/0001.a", "--json"],
+        &["show", "projects/bp/issues/0001.a/claims/s1", "--json"],
+    ] {
+        let out = Command::cargo_bin("bp")
+            .unwrap()
+            .current_dir(dir.path())
+            .env_remove("BP_VAULT")
+            .args(args)
+            .output()
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        // The envelope appends `contract_version` after the result's keys, as it always did; the result's own keys,
+        // at every level, must print in sorted order, which re-serialising through a `Value` gives.
+        let (result, tail) =
+            text.trim_end().rsplit_once(",\"contract_version\":").expect("the version closes the envelope");
+        let mut value: serde_json::Value = serde_json::from_str(&format!("{result}}}")).unwrap();
+        assert_eq!(format!("{result}}}"), serde_json::to_string(&value).unwrap(), "{args:?}");
+        assert_eq!(tail, "1}");
+        value.as_object_mut().unwrap().retain(|_, v| !v.is_null());
+        assert_eq!(
+            format!("{result}}}"),
+            serde_json::to_string(&value).unwrap(),
+            "a skipped field printed null: {args:?}"
+        );
+    }
+}

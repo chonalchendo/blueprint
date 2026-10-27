@@ -20,6 +20,7 @@ bp-check = { path = "crates/bp-check" }
 bp-forge = { path = "crates/bp-forge" }
 bp-install = { path = "crates/bp-install" }
 bp-diagram = { path = "crates/bp-diagram" }
+bp-read = { path = "crates/bp-read" }
 
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
@@ -30,6 +31,7 @@ yaml-rust2 = "0.13"
 blake3 = "1.8"
 rusqlite = { version = "0.40", features = ["bundled"] }
 pulldown-cmark = { version = "0.13", default-features = false }
+ts-rs = "12.0.1"
 
 assert_cmd = "2.0"
 tempfile = "3.0"
