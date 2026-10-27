@@ -2,7 +2,7 @@
 // Product, system and containers are rows; each parent's components fold under it with their count. Data model,
 // glossary and conventions stand beside the tree; retired and deprecated designs sit behind one disclosure.
 import { Fragment } from "react";
-import { words } from "../intents";
+import { many, words } from "../intents";
 import { Link, nodePath } from "../router";
 import { Row } from "../Row";
 import type { Home } from "../types/Home";
@@ -59,15 +59,13 @@ function DesignRow({ d, depth, home }: { d: HomeDesign; depth: number; home: Hom
   );
 }
 
-function Fold({ label, rows, depth, home }: { label: string; rows: HomeDesign[]; depth: number; home: Home }) {
+function Fold({ noun, rows, depth, home }: { noun: string; rows: HomeDesign[]; depth: number; home: Home }) {
   if (rows.length === 0) return null;
   return (
     <tr>
       <td colSpan={6} style={{ padding: `0 0 0 ${24 * depth}px` }}>
         <details className="sub">
-          <summary>
-            {rows.length} {label}
-          </summary>
+          <summary>{many(rows.length, noun)}</summary>
           <table className="tree">
             <tbody>
               {rows.map((d) => (
@@ -100,11 +98,11 @@ export function BlueprintPane({ home }: { home: Home }) {
   const t = tree(home.designs);
   const shown = home.designs.length - t.gone.length;
   return (
-    <details className="pane" open>
+    <details className="pane">
       <summary>
         <span className="t">Blueprint</span>
         <span className="n">
-          {shown} designs in the tree{t.gone.length ? ` · ${t.gone.length} retired or deprecated` : ""} · coverage per
+          {many(shown, "design")} in the tree{t.gone.length ? ` · ${t.gone.length} retired or deprecated` : ""} · coverage per
           concern: not in the vault
         </span>
       </summary>
@@ -116,11 +114,11 @@ export function BlueprintPane({ home }: { home: Home }) {
             <tbody>
               {t.product && <DesignRow d={t.product} depth={0} home={home} />}
               {t.system && <DesignRow d={t.system} depth={1} home={home} />}
-              <Fold label="components" rows={t.loose} depth={2} home={home} />
+              <Fold noun="component" rows={t.loose} depth={2} home={home} />
               {t.containers.map(({ design, components }) => (
                 <Fragment key={design.id}>
                   <DesignRow d={design} depth={2} home={home} />
-                  <Fold label="components" rows={components} depth={3} home={home} />
+                  <Fold noun="component" rows={components} depth={3} home={home} />
                 </Fragment>
               ))}
             </tbody>

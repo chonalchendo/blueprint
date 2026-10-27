@@ -1,5 +1,6 @@
 // Project home (18, Project home; mock `project-anvil.html`): three panes, each one summary line with counts that
-// opens in place. Blueprint, then the loop of milestones, then what moves.
+// opens in place. Blueprint, then the loop of milestones, then what moves. Only Moving opens by default: it holds what
+// the level decides, so the page fits one screen however large the tree (18, check 5).
 import { useApi } from "../api";
 import { DECISION_GROUPS, GROUPS, OTHER_GROUPS, count, many, words } from "../intents";
 import { Loaded } from "../Loaded";
@@ -28,7 +29,7 @@ export function Home({ project }: { project: string }) {
                 "no blueprint version"
               )}{" "}
               · {many(home.designs.length, "design")} · {many(home.milestones.filter(isOpen).length, "open milestone")} ·{" "}
-              {many(count(home.intents), "item")} moving
+              {moving(home)}
             </p>
             <BlueprintPane home={home} />
             <LoopPane home={home} />
@@ -41,6 +42,11 @@ export function Home({ project }: { project: string }) {
 }
 
 const isOpen = (m: HomeMilestone) => OPEN.has(m.status ?? "");
+
+/** Decisions due are the two decision groups; the rest moving is the other three, as on Projects. */
+function moving(home: HomeObject): string {
+  return `${many(count(home.intents, DECISION_GROUPS), "decision")} due · ${many(count(home.intents, OTHER_GROUPS))} more moving`;
+}
 
 /** A milestone's issues in words: "2 ready, 1 working", or "no issues". */
 export function issueWords(m: HomeMilestone): string {
@@ -69,11 +75,11 @@ function LoopPane({ home }: { home: HomeObject }) {
   const open = home.milestones.filter(isOpen);
   const closed = home.milestones.filter((m) => !isOpen(m));
   return (
-    <details className="pane" open>
+    <details className="pane">
       <summary>
         <span className="t">Loop</span>
         <span className="n">
-          {many(open.length, "open milestone")} · {closed.length} done or abandoned
+          {many(open.length, "open milestone")} · {many(closed.length)} done or abandoned
         </span>
       </summary>
       <div className="in">
@@ -105,6 +111,7 @@ function LoopPane({ home }: { home: HomeObject }) {
   );
 }
 
+/** One row per group: its count, then only the intents that hold a count, each with its count. */
 function GroupRows({ groups, home, project }: { groups: typeof GROUPS; home: HomeObject; project: string }) {
   return (
     <table className="tree">
@@ -115,7 +122,12 @@ function GroupRows({ groups, home, project }: { groups: typeof GROUPS; home: Hom
             <Row key={g.group} href={`/${project}/moving`}>
               <td>{g.group}</td>
               <td>{n ? <strong>{n}</strong> : "nothing"}</td>
-              <td className="sub">{g.intents.map(words).join(", ")}</td>
+              <td className="sub">
+                {g.intents
+                  .filter((i) => home.intents[i])
+                  .map((i) => `${home.intents[i]} ${words(i)}`)
+                  .join(", ")}
+              </td>
             </Row>
           );
         })}
@@ -132,14 +144,13 @@ export function forgeWords(home: HomeObject): string {
 
 /** The moving pane (18, Project home 3): the two groups that owe a decision; the other three behind one disclosure. */
 function MovingPane({ home, project }: { home: HomeObject; project: string }) {
-  const due = count(home.intents, DECISION_GROUPS);
-  const rest = count(home.intents, OTHER_GROUPS);
+  const rest = many(count(home.intents, OTHER_GROUPS));
   return (
     <details className="pane" open>
       <summary>
         <span className="t">Moving</span>
         <span className="n">
-          {due ? `${due} decisions due` : "no decision due"} · {rest} more · {forgeWords(home)}
+          {many(count(home.intents, DECISION_GROUPS), "decision")} due · {rest} more · {forgeWords(home)}
         </span>
       </summary>
       <div className="in">

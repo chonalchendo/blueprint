@@ -1,5 +1,6 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { many } from "./intents";
 import { Home } from "./pages/Home";
 import { Projects } from "./pages/Projects";
 import { stubApi } from "./stub";
@@ -61,7 +62,7 @@ const home: HomeObject = {
   forge: "not read",
 };
 
-test("project home: three panes, each a summary line with counts", async () => {
+test("project home: three panes, each a summary line with counts; only Moving opens", async () => {
   stubApi({ bp: home });
   render(<Home project="bp" />);
   const panes = await screen.findAllByRole("group");
@@ -72,6 +73,27 @@ test("project home: three panes, each a summary line with counts", async () => {
     "Moving2 decisions due · 2 more · forge not read",
   ]);
   expect(panes.length).toBeGreaterThanOrEqual(3);
+  const open = Array.from(document.querySelectorAll<HTMLDetailsElement>("details.pane")).map((d) => d.open);
+  expect(open).toEqual([false, false, true]);
+  expect(document.querySelector("p.sub")?.textContent).toBe(
+    "no blueprint version · 8 designs · 1 open milestone · 2 decisions due · 2 more moving",
+  );
+});
+
+test("an empty project: a zero keeps its noun, a bare zero is nothing", async () => {
+  stubApi({ demo: { ...home, id: "projects/demo/project", designs: [], conventions: [], milestones: [], intents: {} } });
+  render(<Home project="demo" />);
+  await screen.findByText("Blueprint");
+  expect(document.querySelector("p.sub")?.textContent).toBe(
+    "no blueprint version · no designs · no open milestones · no decisions due · nothing more moving",
+  );
+  expect(Array.from(document.querySelectorAll("details.pane > summary")).map((s) => s.textContent)).toEqual([
+    "Blueprintno designs in the tree · coverage per concern: not in the vault",
+    "Loopno open milestones · nothing done or abandoned",
+    "Movingno decisions due · nothing more · forge not read",
+  ]);
+  expect(many(1, "component")).toBe("1 component");
+  expect(many(0)).toBe("nothing");
 });
 
 test("blueprint pane: the tree folds components under their parent, and versions read not in vault", async () => {
@@ -79,7 +101,7 @@ test("blueprint pane: the tree folds components under their parent, and versions
   render(<Home project="bp" />);
   const pane = (await screen.findByText("Blueprint")).closest("details")!;
   const folds = Array.from(pane.querySelectorAll("details.sub > summary")).map((s) => s.textContent);
-  expect(folds).toEqual(["1 components", "2 components", "1 retired or deprecated"]);
+  expect(folds).toEqual(["1 component", "2 components", "1 retired or deprecated"]);
   const system = within(pane).getByRole("link", { name: "system" }).closest("tr")!;
   expect(Array.from(system.querySelectorAll("td")).map((c) => c.textContent)).toEqual([
     "system", "system", "system", "active", "3 diagrams", "not in vault",
@@ -99,6 +121,10 @@ test("loop and moving panes: open milestones first, decisions due by group, noth
   const moving = screen.getByText("Moving").closest("details")!;
   const groups = Array.from(moving.querySelectorAll("tr")).map((r) => r.firstChild?.textContent + " " + r.children[1].textContent);
   expect(groups).toEqual(["needs landing 1", "needs acceptance 1", "blocked nothing", "ready 1", "working 1"]);
+  // Only the intents that hold a count, each with its count.
+  expect(Array.from(moving.querySelectorAll("tr")).map((r) => r.children[2].textContent)).toEqual([
+    "1 needs landing", "1 needs milestone approval", "", "1 ready", "1 working",
+  ]);
   expect(within(moving).getByText("open Moving").getAttribute("href")).toBe("/bp/moving");
 });
 

@@ -30,8 +30,9 @@ export function words(intent: string): string {
   return intent === "re-asked" ? intent : intent.replace(/-/g, " ");
 }
 
-/** A count as words; nothing is "nothing" (19, principle 7). */
+/** A count as words (19, principle 7): a zero keeps its noun ("no designs"); a bare zero is "nothing". */
 export function many(n: number, noun?: string): string {
-  if (n === 0) return "nothing";
-  return noun ? `${n} ${noun}${n === 1 ? "" : "s"}` : String(n);
+  if (!noun) return n ? String(n) : "nothing";
+  const nouns = n === 1 ? noun : `${noun}s`;
+  return n ? `${n} ${nouns}` : `no ${nouns}`;
 }
