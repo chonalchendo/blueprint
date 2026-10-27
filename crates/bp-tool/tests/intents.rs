@@ -61,7 +61,7 @@ fn vault() -> tempfile::TempDir {
     for slug in ["0009.lands", "0010.twin"] {
         let id = format!("projects/bp/issues/{slug}");
         let block = "## Check\n\n```check shell {name=hello expect=0}\ntrue\n```\n";
-        let hash = bp_check::hash(bp_check::named(&bp_vault::Body::parse(block))[0]);
+        let hash = bp_vault::Body::parse(block).named_checks()[0].hash();
         write(r, &format!("{id}.md"), &format!("{}\n{block}", issue("in-progress", "")));
         if slug == "0010.twin" {
             write(r, &format!("{id}/reviews/cccc.md"), &format!("---\nkind: review\nunder: {id}\nhead: cccc\n---\n"));

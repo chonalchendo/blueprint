@@ -8,9 +8,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use bp_change::intents;
+use bp_read::inputs::{field, held};
 use bp_vault::git::Repo;
-use bp_vault::{Code, Header, Id, Index, Kind, Record, Refusal, Vault};
+use bp_vault::{Code, Header, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
@@ -295,19 +295,6 @@ fn attach(top: &Path, worktree: &Path, branch: &str, start: &str) -> Result<Adde
     git(top, &["worktree", "prune"])?;
     git(top, &["worktree", "add", "-q", &path, branch])?;
     Ok(Added::Worktree)
-}
-
-/// The issue's active claim: the latest with no `to` (13, at most one).
-pub(crate) fn held(index: &Index, issue: &Id) -> Result<Option<Record>, Refusal> {
-    Ok(index
-        .records(issue.as_str(), Kind::Claim)?
-        .into_iter()
-        .rev()
-        .find(|c| intents::release(&c.body).get("to").is_none_or(String::is_empty)))
-}
-
-pub(crate) fn field(r: &Record, name: &str) -> Option<String> {
-    r.header.get(name).and_then(Value::as_str).map(str::to_string)
 }
 
 /// The fixed worktree of `slug`: `<top>/../<name>-worktrees/<slug>`, canonical, so it names one directory however the

@@ -1,31 +1,12 @@
-//! Waivers (13, Waiver; 27, design change 10): which are open, the `--waive` values a stamp takes, and the records it
-//! writes. `stamp` calls it; 21's re-asked intent reads [`open`] too, so the record reduction and the passing-run test
-//! live here, not in the verb.
+//! Waivers (13, Waiver; 27, design change 10): the `--waive` values a stamp takes, and the records it writes. Which
+//! waivers are open is `bp_read::inputs::open_waivers`, which 21's re-asked intent reads too.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use bp_change::intents;
-use bp_vault::{Check, Code, Filter, Id, Index, Kind, Record, Refusal, Vault};
-use serde_json::Value;
+use bp_read::inputs::Reask;
+use bp_vault::{Check, Code, Id, Kind, Refusal, Vault};
 
 use crate::stamp::Stamp;
-
-/// An open waiver: its id, its milestone, its block's name and the block as the finish line holds it now; `None`
-/// when the block is gone, which [`refuse`] refuses.
-#[derive(PartialEq)]
-pub(crate) struct Reask {
-    pub(crate) waiver: Id,
-    pub(crate) milestone: Id,
-    pub(crate) name: String,
-    pub(crate) check: Option<Check>,
-}
-
-impl Reask {
-    /// The `--waive` value that waives it again.
-    pub(crate) fn key(&self) -> String {
-        format!("{}/{}", self.milestone, self.name)
-    }
-}
 
 /// The flags' refusals, before the vault is read: one `--reason` per `--waive`, each one line, each block once.
 pub(crate) fn usage(s: &Stamp) -> Result<(), Refusal> {
@@ -39,56 +20,6 @@ pub(crate) fn usage(s: &Stamp) -> Result<(), Refusal> {
         return Err(Refusal::usage(format!("--waive {w}"), "waive each block once"));
     }
     Ok(())
-}
-
-/// The project's open waivers, by 21's re-asked predicate: a passing run of the block follows the waiver when git
-/// last touched the run, not the waiver. One query finds the milestones that hold a waiver, so a project with none
-/// costs one read, which the intents of its `done` milestones pay.
-pub(crate) fn open(vault: &Vault, index: &Index, project: &str, now: i64) -> Result<Vec<Reask>, Refusal> {
-    let all = Filter { kind: Kind::Waiver, status: None, project: Some(project), under: None, limit: crate::ALL };
-    let holders: BTreeSet<String> = index.list(&all)?.0.into_iter().filter_map(|w| w.under).collect();
-    let (mut waivers, mut runs) = (Vec::new(), BTreeMap::new());
-    for m in holders {
-        waivers.extend(index.records(&m, Kind::Waiver)?.iter().map(|r| reduce(&m, r)));
-        runs.insert(m.clone(), index.records(&m, Kind::Run)?);
-    }
-    let passed_after = |w: &intents::Waiver| {
-        let waiver = Id::parse(&w.id).expect("the index holds ids");
-        let passed = runs[&w.milestone].iter().filter(|r| {
-            let field = |k: &str| r.header.get(k).and_then(Value::as_str);
-            field("check") == Some(w.block.as_str()) && field("verdict") == Some("pass")
-        });
-        // The latest first: it is the one that follows, if any does.
-        passed.rev().any(|r| vault.touched_after(&Id::parse(&r.id).expect("the index holds ids"), &waiver))
-    };
-    let mut open = Vec::new();
-    for w in intents::reasked(&waivers, now, passed_after) {
-        let milestone = Id::parse(&w.milestone).expect("the index holds ids");
-        let body = vault.read(&milestone)?.body;
-        let check = bp_check::named(&body).into_iter().find(|c| c.attrs["name"] == w.block).cloned();
-        let waiver = Id::parse(&w.id).expect("the index holds ids");
-        open.push(Reask { waiver, milestone, name: w.block.clone(), check });
-    }
-    Ok(open)
-}
-
-/// A waiver record of `milestone`, reduced.
-pub(crate) fn reduce(milestone: &str, r: &Record) -> intents::Waiver {
-    let key = r.id.rsplit('/').next().unwrap_or(&r.id);
-    let field = |k: &str| r.header.get(k).and_then(Value::as_str).filter(|t| !t.is_empty());
-    // A block name may end in `-<n>`, so only `check` splits the key `<check>-<n>`; 13's rule 1 on the bare key
-    // would misread `walk-8` as the eighth waiver of `walk`. A waiver written by hand without it keys its own block.
-    let block = field("check").unwrap_or(key);
-    let seq = key.strip_prefix(block).and_then(|n| n.strip_prefix('-')).and_then(|n| n.parse().ok());
-    // A `valid_until` that is not an instant reads as past, so the stamp asks again.
-    let valid_until = field("valid_until").map(|t| intents::timestamp(t).unwrap_or(i64::MIN));
-    intents::Waiver {
-        id: r.id.clone(),
-        milestone: milestone.into(),
-        block: block.into(),
-        seq: seq.unwrap_or(1),
-        valid_until,
-    }
 }
 
 /// The refusals of a stamp of `id` over its waivers. Each `--waive` names a block of `finish`, the milestone's finish

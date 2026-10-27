@@ -131,10 +131,7 @@ fn then(vault: &Vault, index: &Index, id: Id, at: &str) -> Result<(Id, Blocks), 
 
 /// The named blocks of `body`.
 fn hashes(body: &Body) -> Blocks {
-    bp_check::named(body)
-        .into_iter()
-        .map(|c| (c.attrs["name"].clone(), (bp_check::hash(c), bp_check::is_error(c))))
-        .collect()
+    body.named_checks().into_iter().map(|c| (c.attrs["name"].clone(), (c.hash(), c.is_error()))).collect()
 }
 
 impl Carried {

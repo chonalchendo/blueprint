@@ -14,11 +14,12 @@ use std::process::ExitCode;
 use bp_change::IssueStatus;
 use bp_change::intents::{self, Base, Unmet};
 use bp_forge::{Gh, PullRequest};
+use bp_read::inputs::{field, held};
 use bp_vault::{Code, Id, Index, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::claim::{clone_of, default_branch, field, git, held};
+use crate::claim::{clone_of, default_branch, git};
 use crate::{Wrote, finish, node_id, subject};
 
 /// `bp pr <issue>`.
@@ -80,7 +81,7 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
             format!("the claim's worktree is gone; bp cut {id} puts it back from its branch, then rerun"),
         ));
     }
-    let blocks = crate::intent::blocks(&vault, id.as_str())?;
+    let blocks = bp_read::inputs::blocks(&vault, id.as_str())?;
     if blocks.is_empty() {
         return Err(Refusal::new(
             Code::CheckEmpty,
@@ -94,7 +95,7 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     let gh = Gh::new(&c.top);
     let head = git(&c.worktree, &["rev-parse", "HEAD"])?;
     let open = gh.prs_for_head(&c.branch)?.into_iter().find(PullRequest::is_open);
-    let runs = crate::intent::runs(&index, id.as_str())?;
+    let runs = bp_read::inputs::runs(&index, id.as_str())?;
     let carried = crate::carry::read(&vault, &index, &id)?;
     let body = carried.body();
     // The forge's body, read once: a stale one is rewritten at any head.
@@ -205,9 +206,9 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
             format!("commit and bp pr {id}, or stash, the changes in {}, then rerun", c.worktree.display()),
         ));
     }
-    let runs = crate::intent::runs(&index, id.as_str())?;
-    let blocks = crate::intent::blocks(&vault, id.as_str())?;
-    let read = crate::intent::pull_request(&pr, &reviewer);
+    let runs = bp_read::inputs::runs(&index, id.as_str())?;
+    let blocks = bp_read::inputs::blocks(&vault, id.as_str())?;
+    let read = bp_read::inputs::pull_request(&pr, &reviewer);
     let carried = crate::carry::read(&vault, &index, &id)?;
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
     // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
@@ -279,7 +280,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
 
 /// The project's reviewer identity, or `reviewer_invalid` when it is empty or the token's own `login`, case ignored.
 fn reviewer(index: &Index, id: &Id, login: &str) -> Result<String, Refusal> {
-    let reviewer = crate::intent::reviewer(index, id.as_str())?;
+    let reviewer = bp_read::inputs::reviewer(index, id.as_str())?;
     if !reviewer.is_empty() && !reviewer.eq_ignore_ascii_case(login) {
         return Ok(reviewer);
     }
@@ -314,7 +315,7 @@ fn claimed(cwd: &Path, index: &Index, id: &Id) -> Result<Claimed, Refusal> {
     let top = clone_of(cwd, index, id.project().unwrap_or_default())?;
     // A claim cut before `base_branch` existed lands on origin's default branch, where `cut` started it. A layer whose
     // dependency is open targets the dependency's branch, its own `base_branch`.
-    let (base, target) = match crate::stack::base(index, &h)? {
+    let (base, target) = match bp_read::inputs::base(index, &h)? {
         Base::Branch(b) => (Base::Branch(b.clone()), b),
         Base::Unknown => {
             let b = default_branch(&top)?;

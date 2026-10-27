@@ -1,30 +1,10 @@
-//! The per-kind schema rules that live in the domain crates, composed for the census and for `set` (23, rule 2).
+//! The per-kind schema rules that live in the domain crates, composed for `create`, `link` and `set` (23, rule 2).
 
 use bp_change::{IssueStatus, MilestoneStatus, Severity};
-use bp_design::{ConcernState, DeltaState, DesignStatus, ProjectClass, ProjectStatus};
+use bp_design::{DesignStatus, ProjectClass, ProjectStatus};
 use bp_reasoning::{ConventionStatus, DecisionStatus, InboxStatus, LearningStatus, ThreadStatus};
 use bp_vault::{Code, Id, Kind, LINKS, Refusal};
 use serde_json::Value;
-
-/// A node's status is in its kind's closed set. Every node carries one. A record's status is its `state`, where its
-/// kind has one (13); `list --status` filters on it.
-pub fn status_in_set(kind: &str, status: Option<&str>) -> bool {
-    let (Ok(kind), Some(s)) = (kind.parse::<Kind>(), status) else { return false };
-    match kind {
-        Kind::Project => s.parse::<ProjectStatus>().is_ok(),
-        Kind::Design => s.parse::<DesignStatus>().is_ok(),
-        Kind::Milestone => s.parse::<MilestoneStatus>().is_ok(),
-        Kind::Issue => s.parse::<IssueStatus>().is_ok(),
-        Kind::Thread => s.parse::<ThreadStatus>().is_ok(),
-        Kind::Decision => s.parse::<DecisionStatus>().is_ok(),
-        Kind::Convention => s.parse::<ConventionStatus>().is_ok(),
-        Kind::Learning => s.parse::<LearningStatus>().is_ok(),
-        Kind::Inbox => s.parse::<InboxStatus>().is_ok(),
-        Kind::Delta => s.parse::<DeltaState>().is_ok(),
-        Kind::ConcernAnswer => s.parse::<ConcernState>().is_ok(),
-        _ => false,
-    }
-}
 
 /// The first status of a node kind's machine, which `create` writes (13). Each status set declares it first.
 pub fn first_status(kind: Kind) -> Option<&'static str> {
@@ -222,16 +202,6 @@ pub fn label(kind: Kind, id: &Id, field: &str, value: &str) -> Result<Value, Ref
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn each_kind_reads_its_own_set() {
-        assert!(status_in_set("issue", Some("in-progress")));
-        assert!(!status_in_set("milestone", Some("in-progress")), "running is derived, not stored");
-        assert!(!status_in_set("learning", Some("stale")));
-        assert!(!status_in_set("issue", None));
-        assert!(!status_in_set("claim", Some("open")));
-        assert!(status_in_set("concern-answer", Some("open")) && status_in_set("delta", Some("proposed")));
-    }
 
     #[test]
     fn a_node_is_born_in_its_machine_s_first_status() {

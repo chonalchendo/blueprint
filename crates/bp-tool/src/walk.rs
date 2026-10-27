@@ -10,7 +10,7 @@ use bp_vault::{Code, Gap, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
-use crate::{intent, node_id, subject, unknown};
+use crate::{node_id, subject, unknown};
 
 /// `bp walk <id> --for <action> [--budget <tokens>] [--depth <hops>] [--ids] [--done]`.
 #[derive(Args)]
@@ -182,10 +182,14 @@ fn intents<'a>(
     vault: &'a Vault,
     index: &'a Index,
     reached: &[bp_vault::Reached],
-) -> Result<(intent::Intents<'a>, Vec<Value>), Refusal> {
-    let projects: BTreeSet<&str> =
-        reached.iter().filter(|r| r.kind == Kind::Issue).filter_map(|r| intent::split(&r.id)).map(|(p, _)| p).collect();
-    let read = intent::Intents::new(vault, index, (!projects.is_empty()).then_some(&projects))?;
+) -> Result<(bp_read::Intents<'a>, Vec<Value>), Refusal> {
+    let projects: BTreeSet<&str> = reached
+        .iter()
+        .filter(|r| r.kind == Kind::Issue)
+        .filter_map(|r| bp_read::split(&r.id))
+        .map(|(p, _)| p)
+        .collect();
+    let read = bp_read::Intents::new(vault, index, (!projects.is_empty()).then_some(&projects))?;
     let mut intents = Vec::new();
     for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone | Kind::Design)) {
         let verdict = read.row(r.kind, &r.id, r.status.as_deref())?;
@@ -207,8 +211,8 @@ fn drift(
     reached: &mut Vec<bp_vault::Reached>,
 ) -> Result<(Vec<Value>, usize), Refusal> {
     let mut all = Vec::new();
-    for d in intent::drift_designs(index, id, kind)? {
-        all.extend(intent::drift(index, &d)?.into_iter().map(|r| (d.clone(), r)));
+    for d in bp_read::inputs::drift_designs(index, id, kind)? {
+        all.extend(bp_read::inputs::drift(index, &d)?.into_iter().map(|r| (d.clone(), r)));
     }
     let at = |r: &bp_vault::Record| r.header.get("at").and_then(Value::as_str).unwrap_or_default().to_string();
     all.sort_by_key(|(_, r)| std::cmp::Reverse(at(r)));

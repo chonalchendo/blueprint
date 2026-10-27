@@ -19,6 +19,7 @@ yaml-rust2.workspace = true
 blake3.workspace = true
 rusqlite.workspace = true
 pulldown-cmark.workspace = true
+ts-rs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

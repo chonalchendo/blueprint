@@ -4,14 +4,12 @@
 mod carry;
 mod check;
 mod claim;
-mod clock;
 mod create;
 mod delta;
 mod diagram;
 mod done;
 mod editorial;
 mod install;
-mod intent;
 mod land;
 mod link;
 mod record;
@@ -28,10 +26,10 @@ mod transition;
 mod waiver;
 mod walk;
 
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::ExitCode;
 
+use bp_read::{ALL, clock};
 use bp_vault::{Code, Filter, Id, Index, Kind, Refusal, Vault};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
@@ -39,9 +37,6 @@ use serde_json::Value;
 
 /// The contract version every `--json` result carries (15). A breaking change to a result bumps it.
 pub const CONTRACT: u32 = 1;
-
-/// No limit on a `list` read: every row.
-pub(crate) const ALL: usize = usize::MAX >> 1;
 
 /// Every successful result: the verb's own fields and the contract version.
 #[derive(Serialize)]
@@ -271,71 +266,13 @@ fn show_(cwd: &Path, show: &Show) -> Result<Value, Refusal> {
         Some(index) => subject(index, &show.id)?,
         None => node_id(&show.id)?,
     };
-    let file = match &show.at {
-        Some(at) => vault.read_at(&id, at)?,
-        None => vault.read(&id)?,
-    };
-    // A refusal's fix reads the same commit the verb read.
-    let at = show.at.as_ref().map_or_else(String::new, |a| format!(" --at {a}"));
-    let Some(header) = &file.header else {
-        return Err(Refusal::new(
-            Code::NoNode,
-            id.as_str(),
-            "an id names a node or record: a file with a header",
-            match &show.at {
-                Some(a) => format!(
-                    "the file has no header: it is an asset; git -C {} show {a}:./{id}.md",
-                    vault.root.display()
-                ),
-                None => format!("the file has no header: it is an asset; cat {}", id.path(&vault.root).display()),
-            },
-        ));
-    };
-    let mut m = serde_json::Map::new();
-    m.insert("id".into(), id.as_str().into());
-    m.insert("record".into(), header.kind.is_record().into());
-    m.insert("hash".into(), file.hash.clone().into());
-    m.extend(file.header_json().expect("the file has a header"));
-    // `stale` is today's state, so a past commit's learning has none (13, Learning).
-    if let Some(index) = index.as_ref().filter(|_| header.kind == Kind::Learning) {
-        m.insert("stale".into(), intent::Intents::new(&vault, index, None)?.stale(id.as_str(), &m)?.into());
-    }
-    m.insert("lead".into(), file.body.lead.clone().into());
-    if !file.body.findings.is_empty() {
-        m.insert("findings".into(), serde_json::to_value(&file.body.findings).expect("a plain struct serialises"));
-    }
-    let headings: Vec<&str> = file.body.sections.iter().map(|s| s.heading.as_str()).collect();
-    if let Some(heading) = &show.section {
-        let refuse = |fix: String| {
-            Refusal::new(
-                Code::NoSection,
-                format!("{id}#{heading}"),
-                "a section is one top-level `## ` heading of the body, matched as written",
-                fix,
-            )
-        };
-        let section = match file.body.sections_named(heading)[..] {
-            [one] => one,
-            [] => {
-                let mut unique: Vec<&str> = Vec::new();
-                for h in &headings {
-                    if !unique.contains(h) {
-                        unique.push(h);
-                    }
-                }
-                return Err(refuse(format!("bp show {id}{at} --no-body; the headings are: {}", unique.join(", "))));
-            }
-            // Two sections share the heading: the whole body is the only read that holds both.
-            _ => return Err(refuse(format!("bp show {id}{at} --json"))),
-        };
-        m.insert("section".into(), section.text.clone().into());
-    } else {
-        m.insert("sections".into(), headings.into());
-        if !show.no_body {
-            m.insert("body".into(), file.body.text.clone().into());
-        }
-    }
-    Ok(Value::Object(m))
+    let shown = bp_read::show(&vault, index.as_ref(), &id, show.at.as_deref(), show.section.as_deref(), show.no_body)?;
+    Ok(sorted(&shown))
+}
+
+/// An object as the verbs print it: through a JSON map, so its keys come out sorted, as the golden files hold them.
+fn sorted(object: &impl Serialize) -> Value {
+    serde_json::to_value(object).expect("a plain struct serialises")
 }
 
 /// An id argument. Anything that is not a path id under the vault names no node.
@@ -374,13 +311,12 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
     let vault = Vault::discover(cwd)?;
     let mut index = Index::open(&vault)?;
     let Some(kind) = &list.kind else {
-        index.reconcile(&vault)?;
-        return census(&index);
+        return Ok(sorted(&bp_read::census(&vault, &mut index)?));
     };
     let under = list.under.as_deref().map(node_id).transpose()?;
     let kind_value = kind_arg(kind)?;
     if let Some(status) = &list.status
-        && !schema::status_in_set(kind, Some(status))
+        && !bp_read::status_in_set(kind, Some(status))
     {
         return Err(unknown("status", status, format!("bp list {kind}")));
     }
@@ -390,54 +326,14 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
             format!("--ready lists issues only; bp list issue --ready, or bp list {kind}"),
         ));
     }
-    let ready = list.ready;
     let filter = Filter {
         kind: kind_value,
-        // `--ready` reads every open issue, then limits after the intent filter.
-        status: if ready { Some("open") } else { list.status.as_deref() },
+        status: list.status.as_deref(),
         project: list.project.as_deref(),
         under: under.as_ref().map(Id::as_str),
-        limit: if ready { crate::ALL } else { list.limit },
+        limit: list.limit,
     };
-    let (rows, total) = index.list(&filter)?;
-    if !matches!(kind_value, Kind::Issue | Kind::Milestone | Kind::Design | Kind::Learning) {
-        return Ok(serde_json::json!({ "rows": rows, "total": total, "truncated": total > rows.len() }));
-    }
-    // The projects in view: `--project`, else the rows' own; a snapshot outside them is not read (27, design change 9).
-    let projects: BTreeSet<&str> = match list.project.as_deref() {
-        Some(p) => BTreeSet::from([p]),
-        None => rows.iter().filter_map(|r| intent::split(&r.id)).map(|(p, _)| p).collect(),
-    };
-    let intents = intent::Intents::new(&vault, &index, (kind_value == Kind::Issue).then_some(&projects))?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let verdict = intents.row(kind_value, &row.id, row.status.as_deref())?;
-        if ready && verdict.intent != Some(bp_change::intents::Intent::Ready) {
-            continue;
-        }
-        let mut v = serde_json::to_value(row).expect("a plain struct serialises");
-        if kind_value == Kind::Learning {
-            v["stale"] = intents.stale(&row.id, &index.header(&row.id)?.unwrap_or_default())?.into();
-        }
-        if let Some(intent) = verdict.intent {
-            v["intent"] = serde_json::to_value(intent).expect("an enum serialises");
-            v["note"] = verdict.note.into();
-        }
-        out.push(v);
-    }
-    let total = if ready { out.len() } else { total };
-    out.truncate(list.limit);
-    let mut result = serde_json::json!({ "rows": out, "total": total, "truncated": total > out.len() });
-    if let Some(w) = intents.world {
-        match w.forge_age() {
-            Some(age) => {
-                result["forge"] = "snapshot".into();
-                result["forge_age"] = age.into();
-            }
-            None => result["forge"] = "not read".into(),
-        }
-    }
-    Ok(result)
+    Ok(sorted(&bp_read::list(&vault, &index, &filter, list.ready)?))
 }
 
 /// A kind argument, from the closed set.
@@ -452,29 +348,11 @@ pub(crate) fn unknown(what: &str, value: &str, fix: String) -> Refusal {
     Refusal::new(Code::UnknownValue, format!("{what} {value}"), "a kind and a status come from closed sets (13)", fix)
 }
 
-/// The counts, and the findings the reader keeps instead of ignoring: statuses outside their kind's set, link
-/// targets that are not ids, the body findings, and files that do not parse.
-fn census(index: &Index) -> Result<Value, Refusal> {
-    let mut v = serde_json::to_value(index.counts()?).expect("a plain struct serialises");
-    let outside: usize = index
-        .statuses()?
-        .iter()
-        .filter(|(kind, status, _)| !schema::status_in_set(kind, status.as_deref()))
-        .map(|(_, _, n)| n)
-        .sum();
-    let mut findings = serde_json::json!({ "status_outside_set": outside, "unresolved_link": index.unresolved()? });
-    for (kind, n) in index.findings()? {
-        findings[kind] = n.into();
-    }
-    v["findings"] = findings;
-    Ok(v)
-}
-
 fn search_(cwd: &Path, search: &Search) -> Result<Value, Refusal> {
     let kind = search.kind.as_deref().map(kind_arg).transpose()?;
     let index = Index::open(&Vault::discover(cwd)?)?;
-    let rows = index.search(&search.terms, kind, search.project.as_deref(), search.limit)?;
-    Ok(serde_json::json!({ "rows": rows }))
+    let found = bp_read::search(&index, &search.terms, kind, search.project.as_deref(), search.limit)?;
+    Ok(sorted(&found))
 }
 
 pub(crate) fn emit(out: &mut impl std::io::Write, value: &impl Serialize, json: bool) {

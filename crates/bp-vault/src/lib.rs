@@ -310,7 +310,7 @@ fn collect(root: &Path, dir: &Path, ids: &mut Vec<Id>, strays: &mut Vec<String>)
 }
 
 /// The result of `list --count-only`.
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, ts_rs::TS)]
 pub struct Counts {
     /// Every markdown file scanned.
     pub files: usize,
@@ -327,7 +327,7 @@ pub struct Counts {
 }
 
 /// One file that does not parse.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
 pub struct BrokenFile {
     /// The path under the vault root, with `.md`.
     pub path: String,
