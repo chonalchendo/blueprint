@@ -1,5 +1,4 @@
-//! The API's routes (32, design changes 2 and 6): the path after `/api/` names one page object, and the page route
-//! the use log keys on.
+//! The API's routes (32, design changes 2 and 6): the path after `/api/` names one page object.
 
 /// One `/api/` request.
 #[derive(Debug, PartialEq, Eq)]
@@ -28,17 +27,6 @@ impl Route {
             _ => None,
         }
     }
-
-    /// The page route and the id the use log writes for this request; `None` for health and search, which the log
-    /// skips (32, design change 10).
-    pub fn page(&self) -> Option<(String, &str)> {
-        match self {
-            Self::Health | Self::Search(_) => None,
-            Self::Projects => Some(("/".into(), "-")),
-            Self::Home(p) => Some((format!("/{p}"), "-")),
-            Self::Node(id) => Some((format!("/node/{id}"), id)),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -57,15 +45,5 @@ mod tests {
         for none in ["", "node/", "bp/moving", "bp/change/x"] {
             assert_eq!(Route::parse(none, None), None, "{none}");
         }
-    }
-
-    #[test]
-    fn the_log_keys_on_the_page_route() {
-        assert_eq!(Route::Projects.page(), Some(("/".into(), "-")));
-        assert_eq!(Route::Home("bp".into()).page(), Some(("/bp".into(), "-")));
-        let node = Route::Node("shared/learnings/x".into());
-        assert_eq!(node.page(), Some(("/node/shared/learnings/x".into(), "shared/learnings/x")));
-        assert_eq!(Route::Health.page(), None);
-        assert_eq!(Route::Search("x".into()).page(), None);
     }
 }

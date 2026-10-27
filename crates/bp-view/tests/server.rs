@@ -24,6 +24,16 @@ fn vault() -> tempfile::TempDir {
             "---\nkind: issue\ntitle: A\nstatus: open\nunder: projects/bp/designs/system\n---\n\n## Problem\n\nNone.\n"
                 .into(),
         ),
+        // A second project of the same repository, and one of a repository the test clone does not hold.
+        (
+            "projects/two/project.md",
+            format!("---\nkind: project\ntitle: Two\nstatus: active\nrepository: {REPOSITORY}\n---\n"),
+        ),
+        (
+            "projects/other/project.md",
+            "---\nkind: project\ntitle: Other\nstatus: active\nrepository: https://github.invalid/o/other\n---\n"
+                .into(),
+        ),
         ("shared/assets/glossary.md", "# Glossary\n".into()),
         (".bp/.gitignore", "*\n".into()),
     ];
@@ -69,9 +79,17 @@ impl Server {
 
     /// GET `path`: the status and the body.
     fn get(&self, path: &str) -> (u16, String) {
-        let host = self.url.trim_start_matches("http://").trim_end_matches('/');
-        let mut stream = TcpStream::connect(host).unwrap();
-        write!(stream, "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").unwrap();
+        self.request("GET", path, &self.host())
+    }
+
+    fn host(&self) -> String {
+        self.url.trim_start_matches("http://").trim_end_matches('/').to_string()
+    }
+
+    /// `method` `path` with `Host: host`: the status and the body.
+    fn request(&self, method: &str, path: &str, host: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(self.host()).unwrap();
+        write!(stream, "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").unwrap();
         let mut text = String::new();
         stream.read_to_string(&mut text).unwrap();
         let (head, body) = text.split_once("\r\n\r\n").unwrap();
@@ -112,17 +130,60 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
         let (status, refusal) = server.json(missing);
         assert_eq!((status, refusal["code"].as_str()), (404, Some("no_node")), "{missing}");
     }
+    for missing in ["/api", "/api/"] {
+        let (status, refusal) = server.json(missing);
+        assert_eq!((status, refusal["code"].as_str()), (404, Some("no_node")), "{missing}");
+    }
     let (status, page) = server.get("/bp/moving");
     assert!(status == 200 && page.contains("id=\"root\""), "a page route serves the client: {page}");
 
+    // The log holds the id served, whatever form of it the URL held; a HEAD is no page view.
+    for alias in
+        ["%5B%5Bprojects/bp/issues/0001.a%5D%5D", "projects/bp/issues/0001.a.md", "projects/bp/issues/0001.A%7Cx"]
+    {
+        assert_eq!(server.get(&format!("/api/node/{alias}")).0, 200, "{alias}");
+    }
+    assert_eq!(server.request("HEAD", "/api/bp", &server.host()).0, 200);
+    // A space or a control character, once decoded, would split or forge a log line.
+    for bad in [
+        "projects/bp/issues/0001.a%7Cx%20y",
+        "projects/bp/issues/0001.a%7C%0A2026-01-01T00:00:00Z%20/f%20-",
+        "%20projects/bp/project",
+        "projects/bp/project%00",
+    ] {
+        let (status, refusal) = server.json(&format!("/api/node/{bad}"));
+        assert_eq!((status, refusal["code"].as_str()), (400, Some("usage")), "{bad}");
+    }
+
     let log = std::fs::read_to_string(dir.path().join(".bp/use.log")).unwrap();
     let routes: Vec<&str> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
-    assert_eq!(routes, ["/ -", "/bp -", "/node/projects/bp/issues/0001.a projects/bp/issues/0001.a"], "{log}");
+    let node = "/node/projects/bp/issues/0001.a projects/bp/issues/0001.a";
+    assert_eq!(routes, ["/ -", "/bp -", node, node, node, node], "{log}");
     assert!(log.lines().all(|l| l.as_bytes()[19] == b'Z'), "{log}");
 }
 
 #[test]
-fn forge_off_never_calls_gh_and_a_failed_read_turns_it_off() {
+fn only_the_views_own_host_is_served() {
+    let dir = vault();
+    let server = Server::start(dir.path(), &["--forge", "off"], None);
+    let port = server.host().rsplit_once(':').unwrap().1.to_string();
+    assert_eq!(server.request("GET", "/api/health", &format!("localhost:{port}")).0, 200);
+    for host in ["attacker.example", "attacker.example:80", &format!("attacker.example:{port}"), "127.0.0.1:1"] {
+        for path in ["/api/bp", "/", "/bp/moving"] {
+            let (status, body) = server.request("GET", path, host);
+            let refusal: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(status, 403, "{host} {path}");
+            assert_eq!(
+                (refusal["code"].as_str(), refusal["fix"].as_str()),
+                (Some("usage"), Some("open the view at its printed url"))
+            );
+        }
+    }
+    assert!(!dir.path().join(".bp/use.log").exists(), "a refused request logs nothing");
+}
+
+#[test]
+fn forge_off_never_calls_gh_and_a_gh_failure_turns_off_its_project_alone() {
     let dir = vault();
     let clone = tempfile::tempdir().unwrap();
     git(clone.path(), &["init", "-q"]);
@@ -133,16 +194,23 @@ fn forge_off_never_calls_gh_and_a_failed_read_turns_it_off() {
     std::fs::write(&gh, format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", calls.display())).unwrap();
     std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let clone_arg = clone.path().to_str().unwrap();
+    let made = || std::fs::read_to_string(&calls).map_or(0, |t| t.lines().count());
 
     let off = Server::start(dir.path(), &["--forge", "off", "--clone", clone_arg], Some(bin.path()));
     assert_eq!(off.json("/api/bp").0, 200);
     drop(off);
-    assert!(!calls.exists(), "--forge off called gh");
+    assert_eq!(made(), 0, "--forge off called gh");
 
     let on = Server::start(dir.path(), &["--clone", clone_arg], Some(bin.path()));
+    assert_eq!(on.json("/api/nope").0, 404);
+    assert_eq!(made(), 0, "a project the vault does not hold reads no forge");
+    assert_eq!(on.json("/api/other").0, 200);
+    assert_eq!(made(), 0, "a project the clone does not hold reads no forge");
     let (status, home) = on.json("/api/bp");
     assert_eq!((status, home["forge"].as_str()), (200, Some("not read")), "a failed read leaves the snapshot: {home}");
+    assert_eq!(made(), 1, "neither the 404 nor the other project turned bp's reads off");
+    assert_eq!(on.json("/api/two").0, 200);
+    assert_eq!(made(), 2, "bp's failure leaves two's reads on");
     assert_eq!(on.json("/api/bp").0, 200);
-    let made = std::fs::read_to_string(&calls).unwrap();
-    assert_eq!(made.lines().count(), 1, "one failed read turns the forge off: {made}");
+    assert_eq!(made(), 2, "a failed read is not retried");
 }

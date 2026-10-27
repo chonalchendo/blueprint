@@ -3,19 +3,19 @@
 //! refresh applies and no watcher runs. It writes under `.bp/` only: the index, the forge snapshot and the use log.
 
 mod client;
+mod forge;
 pub mod route;
 pub mod uselog;
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{Method, StatusCode, header};
+use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use bp_vault::{Code, Filter, Index, Kind, Refusal, Vault};
@@ -23,18 +23,10 @@ use serde_json::Value;
 
 pub use route::Route;
 
-/// How often the view reads the forge for one project, at most (18, Forge reader: a choice).
-const FORGE_EVERY: Duration = Duration::from_secs(60);
-
 /// What every request shares: the vault, and the forge's state.
 pub struct View {
     vault: Vault,
-    /// The clone whose `gh` reads the forge.
-    clone: PathBuf,
-    /// The forge is off: `--forge off`, or a read failed, after which the view never calls `gh` again.
-    forge_off: AtomicBool,
-    /// When the view last read each project's forge.
-    read_at: Mutex<HashMap<String, Instant>>,
+    forge: forge::Forge,
 }
 
 impl View {
@@ -50,65 +42,51 @@ impl View {
                 "bp-view --vault <the vault root>",
             ));
         }
-        Ok(Self { vault: Vault { root }, clone, forge_off: AtomicBool::new(!forge), read_at: Mutex::default() })
+        Ok(Self { vault: Vault { root }, forge: forge::Forge::new(clone, forge) })
     }
 
-    /// The page object of `route`, as the verbs print it: keys sorted at every level. A page route is logged.
-    pub fn page(&self, route: &Route) -> Result<Value, Refusal> {
+    /// The page object of `route`, as the verbs print it: keys sorted at every level. When `log` is set, a page
+    /// object is logged under the page path the browser shows and the id served, never the text the URL held.
+    pub fn page(&self, route: &Route, log: bool) -> Result<Value, Refusal> {
         // Health reads nothing, so it answers while the index refreshes.
         if *route == Route::Health {
             return Ok(serde_json::json!({ "ok": true }));
         }
         let (vault, index) = (&self.vault, Index::open(&self.vault)?);
-        let object = match route {
+        let (object, page) = match route {
             Route::Health => unreachable!("answered above"),
             Route::Projects => {
                 let filter =
                     Filter { kind: Kind::Project, status: None, project: None, under: None, limit: bp_read::ALL };
-                to_value(&bp_read::list(vault, &index, &filter, false)?)
+                (to_value(&bp_read::list(vault, &index, &filter, false)?), Some(("/".to_string(), "-".to_string())))
             }
             Route::Home(project) => {
-                self.refresh(&index, project);
-                to_value(&bp_read::home(vault, &index, project)?)
+                // A project the vault does not hold refuses below, and reads no forge.
+                if index.header(&format!("projects/{project}/project"))?.is_some() {
+                    self.forge.refresh(vault, &index, project);
+                }
+                (to_value(&bp_read::home(vault, &index, project)?), Some((format!("/{project}"), "-".to_string())))
             }
             Route::Node(id) => {
                 let id = bp_read::subject(&index, id)?;
-                to_value(&bp_read::show(vault, Some(&index), &id, None, None, false)?)
+                let object = to_value(&bp_read::show(vault, Some(&index), &id, None, None, false)?);
+                (object, Some((format!("/node/{id}"), id.to_string())))
             }
             Route::Search(q) => {
                 let terms: Vec<String> = q.split_whitespace().map(str::to_string).collect();
                 if terms.is_empty() {
                     return Err(Refusal::usage("q", "/api/search?q=<terms>"));
                 }
-                to_value(&bp_read::search(&index, &terms, None, None, SEARCH_LIMIT)?)
+                (to_value(&bp_read::search(&index, &terms, None, None, SEARCH_LIMIT)?), None)
             }
         };
-        if let Some((page, id)) = route.page() {
-            let line = uselog::line(bp_read::clock::now()?, &page, id);
+        if let Some((path, id)) = page.filter(|_| log) {
+            let line = uselog::line(bp_read::clock::now()?, &path, &id);
             if let Err(e) = uselog::append(&vault.root, &line) {
                 eprintln!("use log not written: {e}");
             }
         }
         Ok(object)
-    }
-
-    /// Rewrites `project`'s forge snapshot from the clone, at most once a minute, unless the forge is off. A failed
-    /// read turns the forge off and the pages read the snapshot that exists (32, design change 4).
-    fn refresh(&self, index: &Index, project: &str) {
-        if self.forge_off.load(Ordering::Relaxed) {
-            return;
-        }
-        {
-            let mut read_at = self.read_at.lock().expect("no request panics while it holds the lock");
-            if read_at.get(project).is_some_and(|at| at.elapsed() < FORGE_EVERY) {
-                return;
-            }
-            read_at.insert(project.to_string(), Instant::now());
-        }
-        if let Err(r) = bp_read::snapshot::refresh(&self.vault, index, &self.clone, project) {
-            self.forge_off.store(true, Ordering::Relaxed);
-            eprintln!("forge off: {}: {}: {}", r.code, r.subject, r.fix);
-        }
     }
 }
 
@@ -120,29 +98,57 @@ fn to_value(object: &impl serde::Serialize) -> Value {
     serde_json::to_value(object).expect("a plain struct serialises")
 }
 
-/// The server's routes: `/api/` for the page objects, and every other path to the client.
-pub fn router(view: Arc<View>) -> Router {
-    Router::new().route("/api/{*path}", get(api)).fallback(client::serve).with_state(view)
+/// The server's routes: `/api/` for the page objects, and every other path to the client. A request whose `Host` is
+/// not the loopback address of `port` is refused, so a page served from another name (DNS rebinding) reads nothing.
+pub fn router(view: Arc<View>, port: u16) -> Router {
+    let hosts: Arc<[String; 2]> = Arc::new([format!("127.0.0.1:{port}"), format!("localhost:{port}")]);
+    Router::new()
+        .route("/api", get(|| async { no_route("") }))
+        .route("/api/", get(|| async { no_route("") }))
+        .route("/api/{*path}", get(api))
+        .fallback(client::serve)
+        .with_state(view)
+        .layer(from_fn_with_state(hosts, loopback_only))
 }
 
+async fn loopback_only(State(hosts): State<Arc<[String; 2]>>, request: Request, next: Next) -> Response {
+    let host = request.headers().get(header::HOST).and_then(|h| h.to_str().ok());
+    if host.is_some_and(|h| hosts.iter().any(|a| a == h)) {
+        return next.run(request).await;
+    }
+    let refusal = Refusal::usage(format!("Host: {}", host.unwrap_or_default()), "open the view at its printed url");
+    json(StatusCode::FORBIDDEN, &to_value(&refusal))
+}
+
+/// `path` arrives percent-decoded. A `GET` that serves a page object is logged; a `HEAD` is not.
 async fn api(
     State(view): State<Arc<View>>,
+    method: Method,
     Path(path): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    // No id holds a space or a control character; one in the URL would split or forge a use log line.
+    if path.contains(|c: char| c.is_whitespace() || c.is_control()) {
+        return refused(&Refusal::usage(format!("/api/{path}"), "an API path holds no space or control character"));
+    }
     let Some(route) = Route::parse(&path, query.get("q").map(String::as_str)) else {
-        return refused(&Refusal::new(
-            Code::NoNode,
-            format!("/api/{path}"),
-            "an API route is /api/projects, /api/<project>, /api/node/<id> or /api/search?q=<terms>",
-            "curl <url>api/projects",
-        ));
+        return no_route(&path);
     };
-    match tokio::task::spawn_blocking(move || view.page(&route)).await {
+    let log = method == Method::GET;
+    match tokio::task::spawn_blocking(move || view.page(&route, log)).await {
         Ok(Ok(object)) => json(StatusCode::OK, &object),
         Ok(Err(refusal)) => refused(&refusal),
         Err(e) => refused(&Refusal::failed(format!("/api/{path}"), e.to_string())),
     }
+}
+
+fn no_route(path: &str) -> Response {
+    refused(&Refusal::new(
+        Code::NoNode,
+        format!("/api/{path}"),
+        "an API route is /api/projects, /api/<project>, /api/node/<id> or /api/search?q=<terms>",
+        "curl <url>api/projects",
+    ))
 }
 
 /// The refusal envelope, under the status that names it: 404 for an id or route that names nothing.
@@ -163,9 +169,9 @@ fn json(status: StatusCode, value: &Value) -> Response {
 /// serves until SIGINT or SIGTERM.
 pub async fn serve(view: View, port: u16) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
-    let url = format!("http://127.0.0.1:{}/", listener.local_addr()?.port());
-    println!("{}", serde_json::json!({ "url": url }));
-    axum::serve(listener, router(Arc::new(view))).with_graceful_shutdown(stop()).await
+    let port = listener.local_addr()?.port();
+    println!("{}", serde_json::json!({ "url": format!("http://127.0.0.1:{port}/") }));
+    axum::serve(listener, router(Arc::new(view), port)).with_graceful_shutdown(stop()).await
 }
 
 /// Resolves on SIGINT or SIGTERM.

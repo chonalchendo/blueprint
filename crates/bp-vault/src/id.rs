@@ -11,7 +11,8 @@ pub struct Id(String);
 
 impl Id {
     /// Parses an id from a link or an argument: `[[`, `]]`, a `|label`, a `#section` and `.md` are stripped. Refuses
-    /// anything outside `projects/` and `shared/`, an empty segment, `.` or `..`, so an id never leaves the vault.
+    /// anything outside `projects/` and `shared/`, an empty segment, `.` or `..`, so an id never leaves the vault, and
+    /// a control character, which no file name of the vault holds and a URL can carry (a NUL fails the file open).
     pub fn parse(text: &str) -> Result<Self, String> {
         let t = text.trim().trim_start_matches("[[").trim_end_matches("]]");
         let t = t.split(['|', '#']).next().unwrap_or_default().trim();
@@ -19,6 +20,7 @@ impl Id {
         let mut parts = t.split('/');
         let root = parts.next().unwrap_or_default();
         let ok = matches!(root, "projects" | "shared")
+            && !t.contains(char::is_control)
             && t.split('/').count() >= 3
             && parts.all(|s| !s.is_empty() && s != "." && s != ".." && !s.contains('\\'));
         if ok { Ok(Self(t.to_string())) } else { Err(format!("{text:?} is not a path id under projects/ or shared/")) }
@@ -122,6 +124,9 @@ mod tests {
             "shared/x",
             "projects/bp/./x",
             "",
+            "projects/bp/project\0",
+            "projects/bp/is\nsues/x",
+            "projects/bp/\u{7f}x",
         ] {
             assert!(Id::parse(bad).is_err(), "{bad}");
         }
