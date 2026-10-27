@@ -92,3 +92,19 @@ pre.body { background: var(--surface); border: 1px solid var(--line); border-rad
 .palette li[aria-selected="true"] { outline: 1px solid var(--accent); outline-offset: -1px; }
 .palette li .sub { font-size: 0.86em; }
 mark { background: none; color: var(--ink); font-weight: 600; }
+
+/* Moving (mock `moving.html`): the group header carries its count; a row is id, holder, title over state, next. A fixed
+   layout aligns the columns across the five tables, and the id and title keep one line each, so a row stays near 48 px. */
+h2.group .n { margin-left: 10px; color: var(--ink); letter-spacing: 0; }
+table.moving { table-layout: fixed; }
+table.moving td { padding: 4px 10px; }
+section > h2.group { margin: 16px 0 6px; }
+table.moving td.id { width: 180px; }
+table.moving td.holder { width: 100px; color: var(--muted); }
+table.moving td.next { width: 50%; }
+table.moving .one { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.moving .kind { display: block; color: var(--muted); font-family: var(--sans); font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; }
+table.moving .state { color: var(--muted); font-size: 0.9em; }
+table.moving .cmd { word-break: break-all; }
+table.moving .wait { color: var(--muted); }
+tr.focal { box-shadow: inset 3px 0 0 var(--accent); }

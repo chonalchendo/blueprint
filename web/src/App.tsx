@@ -5,6 +5,7 @@ import { onKey } from "./keys";
 import { Palette } from "./Palette";
 import { Link, type Route, navigate, projectOf, useRoute } from "./router";
 import { Home } from "./pages/Home";
+import { Moving } from "./pages/Moving";
 import { Node } from "./pages/Node";
 import { Projects } from "./pages/Projects";
 import { SearchPage } from "./pages/Search";
@@ -17,6 +18,8 @@ export function crumbs(r: Route): [string, string][] {
       return [top];
     case "home":
       return [top, [r.project, `/${r.project}`]];
+    case "moving":
+      return [top, [r.project, `/${r.project}`], ["moving", `/${r.project}/moving`]];
     case "node": {
       const p = projectOf(r.id);
       return [top, ...(p ? [[p, `/${p}`] as [string, string]] : []), [r.id.split("/").slice(-1)[0], `/node/${r.id}`]];
@@ -111,6 +114,8 @@ function Page({ r }: { r: Route }) {
       return <Projects />;
     case "home":
       return <Home project={r.project} />;
+    case "moving":
+      return <Moving project={r.project} />;
     case "node":
       return <Node id={r.id} />;
     case "search":
