@@ -48,7 +48,7 @@ use anyhow::{Context, Result, bail};
 use bp_operation::{Action, READ_VERBS, Role};
 use serde_json::json;
 
-use crate::eval_agent::{Session, session_dir, session_id};
+use crate::eval_agent::{Session, project_dir};
 use crate::eval_arms::{bins, prompt};
 use crate::eval_fixture::{Fixture, Review};
 use crate::eval_grade::{Grade, Marker, bundle_hash, read_hash, ref_hash, stamp};
@@ -246,7 +246,7 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
         trials(&a, &skill, root, &fixtures, &store)?;
     }
     if skill.action == Action::Research {
-        println!("{}", counts(&Fixture::load(&fixtures, None)?, root, &skill));
+        println!("{}", counts(&Fixture::load(&fixtures, None)?, root, &skill)?);
         return Ok(Vec::new());
     }
     let grade = Grade::read(&skill, &store, &fixtures, root)?;
@@ -293,19 +293,26 @@ fn set_name(skill: &str, fixtures: &Path) -> String {
 }
 
 /// The counts of a research fixture set (31, design change 3): what `--grade --check` prints until issue 3's
-/// grader reads the store. A plant is a unit of evidence, so a two-part file counts two.
-fn counts(list: &[Fixture], root: &Path, skill: &Skill) -> String {
+/// grader reads the store. A plant is a unit of evidence, so a two-part file counts two. A set with no `plant`
+/// fixture, or with a fixture that is no research fixture, is refused, so a wrong `--fixtures` directory fails.
+fn counts(list: &[Fixture], root: &Path, skill: &Skill) -> Result<String> {
+    if let Some(f) = list.iter().find(|f| f.research.is_none()) {
+        bail!("{}: no research fixture; bp-research reads plant and control fixtures", f.id);
+    }
     let research = list.iter().filter_map(|f| f.research.as_ref());
     let (controls, plants): (Vec<&Research>, Vec<&Research>) = research.partition(|r| r.control);
     let seeds: usize = plants.iter().map(|r| r.plants.len()).sum();
     let two = plants.iter().filter(|r| r.plants.len() == 2).count();
+    if plants.is_empty() {
+        bail!("the set holds no plant fixture, so there is nothing to measure");
+    }
     let skilled = root.join("bundle/skills").join(&skill.name).is_dir();
-    format!(
+    Ok(format!(
         "plants: {seeds} in {} files\ncontrols: {}\ntwo_part: {two}\nskill: {}\ngrader: none until issue 3",
         plants.len(),
         controls.len(),
         if skilled { skill.name.as_str() } else { "none" }
-    )
+    ))
 }
 
 /// Each `--arm <arm>=<git ref>` as its commit, the hash of the role and skill files there, and whether it holds the
@@ -322,20 +329,23 @@ fn resolve(refs: &[(String, String)], root: &Path, skill: &Skill) -> Result<BTre
     Ok(out)
 }
 
-/// The lead's transcript of the session that the agent's output in `log` names, with every transcript of that session
-/// kept in `kept`; else why there is none.
+/// The lead's transcript of the agent's session (`Session::find`), with every transcript of that session kept in
+/// `kept`, also when no transcript is the lead; else why there is none.
 fn lead(sb: &Sandbox, log: &Path, skill: &Skill, kept: &Path) -> Result<Result<PathBuf, String>> {
     let config = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map_or_else(|| Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(".claude"), PathBuf::from);
-    let Some(sid) = session_id(&std::fs::read_to_string(log).unwrap_or_default()) else {
-        return Ok(Err(format!("the agent's output in {} names no session_id", log.display())));
-    };
-    let dir = session_dir(&config, &sb.code(), &sid);
-    let Some(session) = Session::join(&dir, &skill.role_file()) else {
-        return Ok(Err(format!("no {} transcript at depth 1 in {}", skill.role_file(), dir.display())));
+    let output = std::fs::read_to_string(log).unwrap_or_default();
+    let project = project_dir(&config, &sb.code());
+    let Some(session) = Session::find(&config, &sb.code(), &output, &skill.role_file()) else {
+        return Ok(Err(format!(
+            "no session of the agent in {} and no result line in {}",
+            project.display(),
+            log.display()
+        )));
     };
     session.store(kept)?;
-    Ok(Ok(session.lead))
+    let why = format!("no {} transcript at depth 1 in {}", skill.role_file(), project.join(&session.id).display());
+    Ok(session.lead.ok_or(why))
 }
 
 /// Fills each arm and fixture to `a.trials` stored trials, the arms interleaved so that host drift falls on both.
@@ -464,6 +474,19 @@ mod tests {
         assert_eq!(respond.role_file(), "bp-worker");
         assert!(complete.allowed().contains(&"cut") && !respond.allowed().contains(&"cut"), "cut is complete's");
         assert!(respond.allowed().contains(&"pr") && !respond.allowed().contains(&"create"));
+    }
+
+    #[test]
+    fn the_research_check_refuses_a_set_with_no_plant() {
+        let (root, skill) = (Path::new(env!("CARGO_MANIFEST_DIR")).join(".."), Skill::parse("bp-research").unwrap());
+        let set = |d: &str| Fixture::load(&root.join("xtask/evals").join(d), None).unwrap();
+        let have = counts(&set("bp-research-plants"), &root, &skill).unwrap();
+        assert!(have.starts_with("plants: 15 in 12 files\ncontrols: 5\ntwo_part: 3\n"), "{have}");
+        let review = counts(&set("bp-review"), &root, &skill).unwrap_err().to_string();
+        assert!(review.ends_with("no research fixture; bp-research reads plant and control fixtures"), "{review}");
+        let controls: Vec<Fixture> =
+            set("bp-research-plants").into_iter().filter(|f| f.kind.as_deref() == Some("control")).collect();
+        assert!(counts(&controls, &root, &skill).unwrap_err().to_string().contains("no plant fixture"));
     }
 
     #[test]

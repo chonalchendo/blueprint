@@ -482,7 +482,16 @@ fn the_agent_hook_keeps_a_researcher_to_researchers() {
         }
     }
     let no_jq = bin(&w.t.path().join("nojq"), &[("bash", which("bash"))], false);
-    for (input, path, cause) in [("{}", no_jq.as_str(), "jq"), ("{bad", path.as_str(), "JSON"), ("", &path, "empty")] {
+    let two = r#"{"agent_type":"bp-worker"} {"agent_type":"bp-researcher","tool_input":{"subagent_type":"bp-worker"}}"#;
+    for (input, path, cause) in [
+        ("{}", no_jq.as_str(), "jq"),
+        ("{bad", path.as_str(), "not one JSON object"),
+        ("", &path, "empty"),
+        ("   ", &path, "not one JSON object"),
+        ("null", &path, "not one JSON object"),
+        ("[]", &path, "not one JSON object"),
+        (two, &path, "not one JSON object"),
+    ] {
         let out = w.hook("bp-agent.sh", input, path, &[]);
         assert_eq!(out.status.code(), Some(2), "{cause}");
         assert!(String::from_utf8_lossy(&out.stderr).contains(cause), "{}", String::from_utf8_lossy(&out.stderr));

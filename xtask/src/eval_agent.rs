@@ -30,32 +30,53 @@ impl Agent {
 /// A session's transcripts, joined to the lead.
 pub struct Session {
     pub id: String,
-    pub lead: PathBuf,
+    /// `None` when no transcript is the lead: the store keeps the session's transcripts all the same.
+    pub lead: Option<PathBuf>,
     pub children: Vec<PathBuf>,
     pub agents: Vec<Agent>,
-    /// A child whose spawn depth is not 2: the `toolUseId` join holds, and the cross-check does not.
+    /// A child whose spawn depth is not 2 (the `toolUseId` join holds, and the cross-check does not), or a session
+    /// found with no result line.
     pub warnings: Vec<String>,
 }
 
-/// The `session_id` of the last line of `output` that is a JSON object with one: `claude -p --output-format json`
-/// prints its result as one line, and the agent's log also holds its stderr.
+/// The `session_id` of the result line of `output`: `claude -p --output-format json` prints its result as one JSON
+/// line with `type: result` when it ends. The agent's log also holds its stderr, where another JSON line may name
+/// another session, so no other line counts.
 pub fn session_id(output: &str) -> Option<String> {
-    let mut values = output.lines().rev().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok());
-    values.find_map(|v| v["session_id"].as_str().map(str::to_string))
+    let mut values = output.lines().filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok());
+    values.find(|v| v["type"] == "result").and_then(|v| v["session_id"].as_str().map(str::to_string))
 }
 
-/// Where Claude Code keeps the transcripts of `session`, started in `cwd`: `<config>/projects/<cwd>/<session>/`, with
-/// each character of `cwd` that is not a letter or a digit written as `-`.
-pub fn session_dir(config: &Path, cwd: &Path, session: &str) -> PathBuf {
+/// Where Claude Code keeps the sessions started in `cwd`: `<config>/projects/<cwd>/`, with each character of `cwd`
+/// that is not a letter or a digit written as `-`.
+pub fn project_dir(config: &Path, cwd: &Path) -> PathBuf {
     let encoded: String =
         cwd.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    config.join("projects").join(encoded).join(session)
+    config.join("projects").join(encoded)
 }
 
 impl Session {
+    /// The session of a run of the agent in `cwd`, whose stdout and stderr are `output`. The result line names it. A
+    /// run with no result line (killed at the timeout, or one that died) names none: its session is then the newest in
+    /// the clone's own project directory, which the trial alone uses, and a warning says so. `None` when that directory
+    /// holds no session.
+    pub fn find(config: &Path, cwd: &Path, output: &str, role: &str) -> Option<Self> {
+        let project = project_dir(config, cwd);
+        if let Some(id) = session_id(output) {
+            return Some(Self::join(&project.join(id), role));
+        }
+        let sessions = std::fs::read_dir(&project).into_iter().flatten().flatten().map(|e| e.path());
+        let newest = sessions.filter(|p| p.is_dir()).max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())?;
+        let mut s = Self::join(&newest, role);
+        s.warnings.insert(
+            0,
+            format!("the agent's output holds no result line; this is the newest session of {}", project.display()),
+        );
+        Some(s)
+    }
+
     /// The transcripts of the session directory `dir`, joined: the lead is the newest transcript of `role` at depth 1.
-    /// `None` when no transcript is the lead.
-    pub fn join(dir: &Path, role: &str) -> Option<Self> {
+    pub fn join(dir: &Path, role: &str) -> Self {
         let files = std::fs::read_dir(dir.join("subagents")).into_iter().flatten().flatten().map(|e| e.path());
         let mut agents: Vec<Agent> = files
             .filter(|f| f.extension().is_some_and(|e| e == "jsonl"))
@@ -69,10 +90,10 @@ impl Session {
         let lead = agents
             .iter()
             .filter(|a| a.meta["agentType"] == role && a.meta["spawnDepth"] == 1)
-            .max_by_key(|a| a.file.metadata().and_then(|m| m.modified()).ok())?
-            .file
-            .clone();
-        let calls = agent_calls(&std::fs::read_to_string(&lead).unwrap_or_default());
+            .max_by_key(|a| a.file.metadata().and_then(|m| m.modified()).ok())
+            .map(|a| a.file.clone());
+        let calls =
+            lead.as_ref().map(|l| agent_calls(&std::fs::read_to_string(l).unwrap_or_default())).unwrap_or_default();
         let (mut children, mut warnings) = (Vec::new(), Vec::new());
         for a in agents.iter().filter(|a| a.meta["toolUseId"].as_str().is_some_and(|id| calls.contains(id))) {
             if a.meta["spawnDepth"] != 2 {
@@ -85,7 +106,7 @@ impl Session {
             children.push(a.file.clone());
         }
         let id = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Some(Self { id, lead, children, agents, warnings })
+        Self { id, lead, children, agents, warnings }
     }
 
     /// Copies every transcript of the session and its meta into `dir`, and writes `dir/run.txt`: the session, then the
@@ -104,7 +125,7 @@ impl Session {
             if meta.is_file() {
                 std::fs::copy(&meta, dir.join(name.replace(".jsonl", ".meta.json")))?;
             }
-            let role = if a.file == self.lead {
+            let role = if self.lead.as_ref() == Some(&a.file) {
                 "lead"
             } else if self.children.contains(&a.file) {
                 "child"
@@ -142,7 +163,7 @@ mod tests {
     fn joins_a_child_to_the_lead_by_tool_use_id() {
         let cfg = tempfile::tempdir().unwrap();
         let clone = Path::new("/private/var/folders/1r/n_ttp_c1/T/tmp.RdXDapR7wz/clone");
-        let dir = session_dir(cfg.path(), clone, "2e5fc50e-50da");
+        let dir = project_dir(cfg.path(), clone).join("2e5fc50e-50da");
         assert!(dir.ends_with("projects/-private-var-folders-1r-n-ttp-c1-T-tmp-RdXDapR7wz-clone/2e5fc50e-50da"));
         let sub = dir.join("subagents");
         std::fs::create_dir_all(&sub).unwrap();
@@ -167,12 +188,12 @@ mod tests {
         agent("agent-e5", r#"{"agentType":"bp-researcher","spawnDepth":2,"toolUseId":"toolu_nobody"}"#, "{}");
         std::fs::write(sub.join("notes.jsonl"), "{}").unwrap();
 
-        let s = Session::join(&dir, "bp-researcher").unwrap();
-        assert_eq!((s.id.as_str(), &s.lead), ("2e5fc50e-50da", &lead));
+        let s = Session::join(&dir, "bp-researcher");
+        assert_eq!((s.id.as_str(), s.lead.as_ref()), ("2e5fc50e-50da", Some(&lead)));
         assert_eq!(s.children, [child, deep], "the Task call joins too; the decoys do not");
         assert_eq!(s.warnings, ["agent-c3.jsonl: its toolUseId joins it to the lead, and its spawnDepth is 3, not 2"]);
-        assert!(Session::join(&dir, "bp-reviewer").is_none(), "no lead of that role");
-        assert!(Session::join(&cfg.path().join("none"), "bp-researcher").is_none());
+        assert!(Session::join(&dir, "bp-reviewer").lead.is_none(), "no lead of that role");
+        assert!(Session::join(&cfg.path().join("none"), "bp-researcher").agents.is_empty());
 
         let out = tempfile::tempdir().unwrap();
         s.store(out.path()).unwrap();
@@ -192,6 +213,38 @@ mod tests {
         let log = "warning: a line\n{\"type\":\"result\",\"session_id\":\"2e5fc50e-50da\",\"result\":\"x\"}\nbye\n";
         assert_eq!(session_id(log).as_deref(), Some("2e5fc50e-50da"));
         assert_eq!(session_id("no JSON here"), None);
+        assert_eq!(session_id("{\"session_id\":\"other\"}\n"), None, "only the result line names the session");
+    }
+
+    /// A run killed before its result line, whose stderr names another session, keeps its own clone's session.
+    #[test]
+    fn a_run_with_no_result_line_keeps_its_own_clones_session() {
+        let cfg = tempfile::tempdir().unwrap();
+        let (clone, elsewhere) = (Path::new("/tmp/bp-forge/Ab12/code"), Path::new("/tmp/elsewhere"));
+        for (cwd, id, kind) in [(clone, "own", "bp-researcher"), (elsewhere, "other", "bp-researcher")] {
+            let sub = project_dir(cfg.path(), cwd).join(id).join("subagents");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join(format!("agent-{id}.jsonl")), "{}").unwrap();
+            std::fs::write(
+                sub.join(format!("agent-{id}.meta.json")),
+                format!(r#"{{"agentType":"{kind}","spawnDepth":1}}"#),
+            )
+            .unwrap();
+        }
+        let log = "{\"type\":\"system\",\"session_id\":\"other\"}\nKilled\n";
+        let s = Session::find(cfg.path(), clone, log, "bp-researcher").unwrap();
+        assert_eq!(s.id, "own");
+        assert!(s.lead.as_ref().is_some_and(|l| l.ends_with("agent-own.jsonl")), "{:?}", s.lead);
+        assert!(s.warnings[0].starts_with("the agent's output holds no result line"), "{:?}", s.warnings);
+        let out = tempfile::tempdir().unwrap();
+        s.store(out.path()).unwrap();
+        assert!(out.path().join("agent-own.jsonl").is_file() && !out.path().join("agent-other.jsonl").exists());
+        let run = std::fs::read_to_string(out.path().join("run.txt")).unwrap();
+        assert!(
+            run.contains("lead: agent-own.jsonl") && run.contains("warning: the agent's output holds no result"),
+            "{run}"
+        );
+        assert!(Session::find(cfg.path(), Path::new("/tmp/none"), log, "bp-researcher").is_none(), "no session at all");
     }
 
     /// The review, complete and respond trials join the same way: their lead is the role at depth 1.
@@ -207,8 +260,8 @@ mod tests {
             std::fs::write(sub.join(format!("{name}.jsonl")), "{}").unwrap();
             std::fs::write(sub.join(format!("{name}.meta.json")), meta).unwrap();
         }
-        let s = Session::join(dir.path(), "bp-reviewer").unwrap();
-        assert_eq!((s.lead, s.children.len()), (sub.join("agent-1.jsonl"), 0));
-        assert!(Session::join(dir.path(), "bp-worker").is_none());
+        let s = Session::join(dir.path(), "bp-reviewer");
+        assert_eq!((s.lead, s.children.len()), (Some(sub.join("agent-1.jsonl")), 0));
+        assert!(Session::join(dir.path(), "bp-worker").lead.is_none());
     }
 }

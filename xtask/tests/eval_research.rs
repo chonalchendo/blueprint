@@ -28,6 +28,13 @@ echo '{}' > "$D/agent-child.jsonl"
 printf '{"agentType":"bp-researcher","spawnDepth":2,"toolUseId":"toolu_other"}' > "$D/agent-decoy.meta.json"
 echo '{}' > "$D/agent-decoy.jsonl"
 echo "a warning on stderr" >&2
+if [ -n "$FAKE_KILLED" ]; then
+  # A killed run: no result line, and a stderr line that names a session elsewhere.
+  E=$CLAUDE_CONFIG_DIR/projects/-elsewhere/stray/subagents; mkdir -p "$E"
+  printf '{"agentType":"bp-researcher","spawnDepth":1}' > "$E/agent-stray.meta.json"; echo '{}' > "$E/agent-stray.jsonl"
+  echo '{"type":"system","subtype":"init","session_id":"stray"}' >&2
+  exit 0
+fi
 printf '{"type":"result","session_id":"%s","total_cost_usd":0}\n' "$S"
 "#;
 
@@ -60,7 +67,7 @@ fn a_research_trial_seeds_hides_the_sets_and_stores_the_session() {
     common::vault(&t.join("vault"));
     write(&t.join("agent.sh"), AGENT);
     std::fs::create_dir_all(t.join("out")).unwrap();
-    let xtask = |args: &[&str]| {
+    let xtask_env = |args: &[&str], killed: &str| {
         let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
             .arg("eval")
             .args(args)
@@ -71,11 +78,13 @@ fn a_research_trial_seeds_hides_the_sets_and_stores_the_session() {
             .env("CLAUDE_CONFIG_DIR", t.join("claude"))
             .env("FAKE_OUT", t.join("out"))
             .env("FAKE_NODE", NODE)
+            .env("FAKE_KILLED", killed)
             .output()
             .unwrap();
         let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         (out.status.code(), text)
     };
+    let xtask = |args: &[&str]| xtask_env(args, "");
     let fixtures = t.join("bp-research-plants").display().to_string();
     let with = format!("with={}", bp.display());
     let run = ["bp-research", "--trials", "1", "--fixtures", &fixtures, "--repo", &repo.display().to_string()];
@@ -111,6 +120,20 @@ fn a_research_trial_seeds_hides_the_sets_and_stores_the_session() {
     let (code, out) = xtask(&["--grade", "--check", "bp-research", "--fixtures", &fixtures]);
     assert_eq!(code, Some(0), "{out}");
     assert!(out.contains("plants: 1 in 1 files"), "{out}");
+    let review = root().join("xtask/evals/bp-review").display().to_string();
+    let (code, out) = xtask(&["--grade", "--check", "bp-research", "--fixtures", &review]);
+    assert!(code == Some(1) && out.contains("no research fixture"), "a wrong set fails: {out}");
+
+    // A run with no result line keeps its own clone's session, not the one a stderr line names.
+    let two = ["bp-research", "--trials", "2", "--fixtures", &fixtures, "--repo", &repo.display().to_string()];
+    let (code, out) = xtask_env(&[&two[..], &["--bin", &with]].concat(), "1");
+    assert_eq!(code, Some(0), "{out}");
+    let kept = store.join("with-plant-1-2");
+    assert!(kept.join("agent-lead.jsonl").is_file() && !kept.join("agent-stray.jsonl").exists());
+    let listed = read(&kept.join("run.txt"));
+    assert!(listed.starts_with("session: sess-with-plant-1\n"), "{listed}");
+    assert!(listed.contains("warning: the agent's output holds no result line"), "{listed}");
+    assert!(read(&store.join("with-plant-1-2.jsonl")).contains("toolu_c"), "the trace is its own lead");
     let (code, out) = xtask(&[&run[..], &["--arms", "with,without", "--bin", &with]].concat());
     assert_eq!(code, Some(4), "no without arm for research: {out}");
 }

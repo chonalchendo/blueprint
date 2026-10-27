@@ -12,8 +12,11 @@ deny() {
 command -v jq > /dev/null || deny "jq is not installed, so every Agent call is denied; install jq"
 input=$(< /dev/stdin)
 [ -n "$input" ] || deny "the hook input is empty, so the call is denied"
-type=$(jq -r '.agent_type // empty' <<< "$input" 2> /dev/null) ||
-    deny "the hook input is not the JSON of an Agent call, so the call is denied"
+# The harness sends one JSON object. Spaces, `null`, another value, or two documents are no such input: `--slurp` reads
+# every document, so each of them fails the test.
+jq -se 'length == 1 and (.[0] | type == "object")' <<< "$input" > /dev/null 2>&1 ||
+    deny "the hook input is not one JSON object, so the call is denied"
+type=$(jq -r '.agent_type // empty' <<< "$input")
 child=$(jq -r '.tool_input.subagent_type // empty' <<< "$input")
 if [ "$type" = bp-researcher ] && [ "$child" != bp-researcher ]; then
     deny "a researcher may dispatch bp-researcher only, not ${child:-an agent with no type}"
