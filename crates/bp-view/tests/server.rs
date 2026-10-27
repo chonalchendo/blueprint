@@ -144,6 +144,7 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     }
     let (status, page) = server.get("/bp/moving");
     assert!(status == 200 && page.contains("id=\"root\""), "a page route serves the client: {page}");
+    assert_eq!(server.get("/assets/missing.js").0, 404, "an asset the build lacks is no page");
 
     // The log holds the id served, whatever form of it the URL held; a HEAD is no page view.
     for alias in
