@@ -92,16 +92,16 @@ pub struct ProjectRow {
 type Version = (u64, String, serde_json::Map<String, serde_json::Value>);
 
 /// What a project's pages read: its designs, milestones and issues as `list` prints them, and its versions.
-struct Read {
-    designs: Vec<ListRow>,
-    milestones: Vec<ListRow>,
-    issues: crate::List,
+pub(crate) struct Read {
+    pub(crate) designs: Vec<ListRow>,
+    pub(crate) milestones: Vec<ListRow>,
+    pub(crate) issues: crate::List,
     /// The blueprint version records, newest first.
     versions: Vec<Version>,
 }
 
 impl Read {
-    fn of(vault: &Vault, index: &Index, project: &str) -> Result<Self, Refusal> {
+    pub(crate) fn of(vault: &Vault, index: &Index, project: &str) -> Result<Self, Refusal> {
         let of = |kind| Filter { kind, status: None, project: Some(project), under: None, limit: ALL };
         let mut versions: Vec<_> = index
             .records(&format!("projects/{project}/project"), Kind::BlueprintVersion)?
@@ -136,7 +136,7 @@ impl Read {
 }
 
 /// The refusal for a project the index lacks.
-fn no_project(id: String) -> Refusal {
+pub(crate) fn no_project(id: String) -> Refusal {
     Refusal::new(Code::NoNode, id, "a project is a directory under projects/ that holds project.md", "bp list project")
 }
 
