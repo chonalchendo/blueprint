@@ -19,7 +19,7 @@ function text(v: unknown): string | undefined {
 
 /** The header fields a page prints beside the narrowed four: scalars and lists of scalars, by key. */
 export function facts(show: Show): [string, string][] {
-  const skip = new Set(["id", "kind", "title", "status", "body", "lead", "hash", "record", "sections", "contract_version"]);
+  const skip = new Set(["id", "kind", "title", "status", "body", "lead", "hash", "record", "sections"]);
   const out: [string, string][] = [];
   for (const [k, v] of Object.entries(show as Record<string, unknown>)) {
     if (skip.has(k)) continue;

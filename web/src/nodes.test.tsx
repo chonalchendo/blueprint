@@ -1,5 +1,6 @@
 // 18, check 2 and 32 `every-node-serves` (the client half): the node page renders one `bp show --json` object of every
-// node and record kind in the converted vault, taken from it with `bp --json show <id>`.
+// node and record kind in the converted vault, taken from it with `bp --json show <id>`, less the
+// `contract_version` key that `/api/node/<id>` strips, so the test renders what the client receives.
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import { header } from "./header";
