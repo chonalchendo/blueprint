@@ -399,6 +399,31 @@ fn plant(dir: &Path, diff: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Seeds a research fixture's nodes into the scratch vault at `vault` (31, design change 2): it writes each seed at its
+/// node id, commits them, and has `bp` at `bp` show each one. There is no `bp reindex`: the index refreshes when a
+/// file comes or the head moves, so the `show` rebuilds it and refuses a seed the vault does not take. A runner calls
+/// it once per trial, on a fresh copy; `cargo xtask plants --verify` calls it once for a whole set.
+pub(crate) fn seed(vault: &Path, bp: &Path, fixtures: &[&Fixture]) -> Result<()> {
+    let seeds = fixtures.iter().flat_map(|f| f.research.iter().flat_map(|r| &r.plants));
+    let mut ids = Vec::new();
+    for s in seeds {
+        let file = vault.join(s.file());
+        std::fs::create_dir_all(file.parent().context("a node id has a parent")?)?;
+        std::fs::write(&file, &s.text)?;
+        ids.push(s.node.as_str());
+    }
+    let me = ["-c", "user.name=bp-eval", "-c", "user.email=bp-eval@bp.invalid"];
+    git(vault, &["add", "-A"])?;
+    git(vault, &[&me[..], &["commit", "-q", "--no-verify", "-m", "seed the research fixtures"]].concat())?;
+    for id in ids {
+        let mut show = Command::new(bp);
+        show.args(["show", id, "--json"]).env("BP_VAULT", vault).env_remove("BP_ROLE").env_remove("BP_SESSION");
+        capture(show.current_dir(vault).stdin(Stdio::null()))
+            .with_context(|| format!("the scratch vault does not take the seed {id}"))?;
+    }
+    Ok(())
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     capture(Command::new("git").args(args).current_dir(dir).env("GIT_ALLOW_PROTOCOL", "file"))
 }

@@ -1,0 +1,51 @@
+design:crates/bp-tool/src/check.rs:2:Number:0 indistinct match word too short
+design:crates/bp-tool/src/lib.rs:40:Number:CONTRACT indistinct match word too short
+design:xtask/src/mutants_walk.rs:5:Negation:is indistinct no clause boundary
+two-hop:crates/bp-vault/src/write.rs>a1.md not-in-clone crates/bp-vault/src/write.rs names a file the clone does not hold
+two-hop:crates/bp-diagram/src/label.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/label.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/install.rs>AGENTS.md not-in-clone crates/bp-install/tests/install.rs names a file the clone does not hold
+two-hop:xtask/src/eval_kills.rs>NN-*.md not-in-clone xtask/src/eval_kills.rs names a file the clone does not hold
+two-hop:crates/bp-tool/src/delta.rs>m5-design-evidence.md not-in-clone crates/bp-tool/src/delta.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/ledger.rs>crates/bp-tool/tests/bundle.rs:17:Number:TOKENS indistinct fewer than two nouns a search finds alone (tried bytes, uses, token)
+two-hop:crates/bp-tool/tests/review_rows.rs>src/old.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:crates/bp-diagram/src/search.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/search.rs names a file the clone does not hold
+two-hop:crates/bp-tool/src/diagram.rs>m5-interactive-architecture.md not-in-clone crates/bp-tool/src/diagram.rs names a file the clone does not hold
+two-hop:crates/bp-tool/tests/review_rows.rs>src/a.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:crates/bp-vault/src/write.rs>a[1].md not-in-clone crates/bp-vault/src/write.rs names a file the clone does not hold
+two-hop:crates/bp-install/src/spec.rs>AGENTS.md not-in-clone crates/bp-install/src/spec.rs names a file the clone does not hold
+two-hop:crates/bp-tool/tests/review_rows.rs>src/b.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/install.rs>CLAUDE.md not-in-clone crates/bp-install/tests/install.rs names a file the clone does not hold
+two-hop:crates/bp-vault/src/lib.rs>notes.md not-in-clone crates/bp-vault/src/lib.rs names a file the clone does not hold
+two-hop:crates/bp-install/src/spec.rs>analysis/bundle-install-spike.md not-in-clone crates/bp-install/src/spec.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>control-<n>.md not-in-clone xtask/src/mutants.rs names a file the clone does not hold
+two-hop:crates/bp-view/src/client.rs>build.rs not-in-clone crates/bp-view/src/client.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/ledger.rs>SKILL.md not-in-clone crates/bp-install/tests/ledger.rs names a file the clone does not hold
+two-hop:xtask/src/eval_end.rs>crates/bp-tool/src/cut.rs not-in-clone xtask/src/eval_end.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:19:Number:CHUNK indistinct the cited file holds the true word
+two-hop:crates/bp-tool/tests/review_rows.rs>src/new.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:xtask/src/eval_fixture.rs>analysis/review-pr-*.md not-in-clone xtask/src/eval_fixture.rs names a file the clone does not hold
+two-hop:crates/bp-diagram/src/grid.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/grid.rs names a file the clone does not hold
+two-hop:xtask/src/lines.rs>build.rs not-in-clone xtask/src/lines.rs names a file the clone does not hold
+two-hop:crates/bp-diagram/src/route.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/route.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>mutant-<n>-<i>.md not-in-clone xtask/src/mutants.rs names a file the clone does not hold
+two-hop:crates/bp-tool/tests/bundle.rs>SKILL.md not-in-clone crates/bp-tool/tests/bundle.rs names a file the clone does not hold
+two-hop:crates/bp-install/src/section.rs>AGENTS.md not-in-clone crates/bp-install/src/section.rs names a file the clone does not hold
+design:crates/bp-tool/src/stack.rs:2:Name:bp_read::inputs::base indistinct question leaks: the clone holds `land reads the base`
+design:crates/bp-tool/src/check.rs:4:Number:3 indistinct match word too short
+design:crates/bp-read/src/objects.rs:1:Negation:is indistinct question leaks: the clone holds `typed and ts-rs exports`
+measurement:lines:crates/bp-diagram/src/layout.rs indistinct fewer than two nouns a search finds alone (tried diagram, layout)
+design:crates/bp-tool/src/editorial.rs:5:Negation:is indistinct question leaks: the clone holds `no finish line runs`
+measurement:lines:crates/bp-vault/src/rename.rs indistinct fewer than two nouns a search finds alone (tried rename, vault)
+measurement:lines:crates/bp-diagram/src/svg.rs indistinct fewer than two nouns a search finds alone (tried svg, diagram)
+measurement:lines:crates/bp-install/src/hashes.rs indistinct fewer than two nouns a search finds alone (tried hashes, install)
+measurement:lines:crates/bp-tool/src/diagram.rs indistinct fewer than two nouns a search finds alone (tried diagram, tool)
+design:crates/bp-tool/src/delta.rs:6:Negation:is indistinct question leaks: the clone holds `base hashes the design`
+measurement:lines:crates/bp-diagram/src/font.rs indistinct fewer than two nouns a search finds alone (tried font, diagram)
+measurement:files:crates/bp-view indistinct match word too short
+design:crates/bp-tool/src/row.rs:1:Negation:is indistinct question leaks: the clone holds `a verb outside the`
+design:crates/bp-vault/src/index.rs:24:Number:SCHEMA indistinct fewer than two nouns a search finds alone (tried index, SCHEMA, vault)
+design:xtask/src/eval_sandbox.rs:5:Negation:is indistinct no clause boundary
+design:crates/bp-diagram/src/layout.rs:29:Number:GROW_MAX indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-loop-row-to-104 out of `bp search diagram`
+measurement:lines:crates/bp-vault/src/emit.rs indistinct fewer than two nouns a search finds alone (tried emit, vault)
+measurement:lines:xtask/tests/deps.rs indistinct it pushes shared/learnings/in-xtask-s-src-the-eval-result-module-has-436-lines out of `bp search xtask`
+measurement:lines:crates/bp-tool/tests/intents.rs indistinct it pushes shared/learnings/in-bp-vault-s-tests-the-write-path-file-has-179-lines out of `bp search tests`

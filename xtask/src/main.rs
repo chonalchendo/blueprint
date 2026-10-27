@@ -2,7 +2,8 @@
 //! `bench`, the call budget: prints the largest ratio last. `scratch`, a writable copy of `$BP_VAULT`: prints its
 //! directory. `lines`, the file cap: exit 2 with one line per non-test file over 500 lines. `forge <project>`, a fake
 //! forge for a repo block: prints its directory. `gh`, the fake `gh` that directory's shim runs. `eval`, the skill eval and its grader
-//! (`eval.rs`). `mutants`, the planted-defect fixtures of the review eval (`mutants.rs`).
+//! (`eval.rs`). `mutants`, the planted-defect fixtures of the review eval (`mutants.rs`). `plants`, the planted-fact
+//! fixtures of the research eval (`plants.rs`).
 //! `sandbox [claim]`, 27's prelude as `export` lines. `stage`, a staged copy (32, design change 11): `VAULT=`, `FORGE=`
 //! and `CLONE=` lines.
 
@@ -14,6 +15,7 @@ mod eval_end;
 mod eval_fixture;
 mod eval_grade;
 mod eval_kills;
+mod eval_plant;
 mod eval_report;
 mod eval_result;
 mod eval_sandbox;
@@ -24,6 +26,15 @@ mod gh;
 mod lines;
 mod mutants;
 mod mutants_walk;
+mod plants;
+mod plants_count;
+mod plants_flip;
+mod plants_hop;
+mod plants_judge;
+mod plants_leak;
+mod plants_pool;
+mod plants_text;
+mod plants_verify;
 mod sandbox;
 mod scratch;
 mod stage;
@@ -52,8 +63,12 @@ fn main() -> ExitCode {
             };
         }
         Some("gh") => return gh::run(&args[1..]),
-        Some(verb @ ("eval" | "mutants")) => {
-            let done = if verb == "eval" { eval::run(&args[1..]) } else { mutants::run(&args[1..]) };
+        Some(verb @ ("eval" | "mutants" | "plants")) => {
+            let done = match verb {
+                "eval" => eval::run(&args[1..]),
+                "mutants" => mutants::run(&args[1..]),
+                _ => plants::run(&args[1..]),
+            };
             return match done {
                 Err(e) if e.is::<eval::Usage>() => {
                     eprintln!("xtask: {e:#}");
@@ -89,7 +104,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project> | cargo xtask eval <skill> --trials N | cargo xtask eval --grade [--check] <skill> | cargo xtask mutants --pr <n> --count <k> --seed <s> | cargo xtask sandbox [claim] | cargo xtask stage"
+                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project> | cargo xtask eval <skill> --trials N | cargo xtask eval --grade [--check] <skill> | cargo xtask mutants --pr <n> --count <k> --seed <s> | cargo xtask plants --list|--verify|--from ... | cargo xtask sandbox [claim] | cargo xtask stage"
             );
             return ExitCode::from(4);
         }

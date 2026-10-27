@@ -39,11 +39,16 @@
 //! `known: <path>:<line> | <text>` lines name defects the landed head already holds, which the grader neither credits
 //! nor counts as false rows. An `escape` is a defect that passed a past review, with its truth at the fix commit's
 //! location. The grader reads a planted item by place and evidence, not by words (`eval_grade::verdicts`).
+//!
+//! A research fixture (31, design change 2) is a `plant` or a `control` whose header holds `question:`; its shape is
+//! `eval_plant.rs`'s, and it carries no head, title or truth.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+
+use crate::eval_plant::Research;
 
 /// What opens each line of a fixture's `mutant_diff:` block.
 pub const INDENT: &str = "    ";
@@ -75,6 +80,8 @@ pub struct Fixture {
     pub mutant: Option<Mutant>,
     /// A control's defects that the landed head already holds (30, design change 5 for #62).
     pub known: Vec<Truth>,
+    /// The question and the seeded nodes of a research `plant` or `control`.
+    pub research: Option<Research>,
 }
 
 /// The defect a `mutant` fixture plants: the head plus `diff` is the pull request the reviewer sees.
@@ -132,7 +139,12 @@ impl Fixture {
             kind: None,
             mutant: None,
             known: Vec::new(),
+            research: None,
         };
+        if let Some(r) = Research::parse(id, text)? {
+            let kind = Some(if r.control { "control" } else { "plant" }.into());
+            return Ok(Self { base: r.base.clone(), issue: String::new(), kind, research: Some(r), ..f });
+        }
         let (mut m, mut seed) = (Mutant::default(), None);
         let mut lines = head.lines().peekable();
         while let Some(line) = lines.next() {

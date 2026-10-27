@@ -1,0 +1,4 @@
+command: cargo xtask plants --from 'crates/*/src/**/*.rs' --from 'crates/*/tests/*.rs' --from 'xtask/src/*.rs' --from 'xtask/tests/*.rs' --count 15 --seed 8 --out xtask/evals/bp-research-plants --controls 5 --parts 3 --base 5834561
+seed: 8
+base: 58345619f46ea9d6ee4913ecba25161eaefb355f
+vault: ef9e4806647bfd07f597b0b54f8671f9a0b48a54
