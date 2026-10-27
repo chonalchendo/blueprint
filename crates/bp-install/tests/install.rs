@@ -39,7 +39,7 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
     write(t, "CLAUDE.md", "# Mine\n\nKeep this line.\n");
     std::fs::create_dir_all(t.join(".claude")).unwrap();
     let mine = r#"{"model": "x", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "mine.sh"}]}]},
-        "permissions": {"allow": ["Bash(ls *)", "Bash(export BP_ROLE=old)"]}}"#;
+        "permissions": {"allow": ["Bash(ls *)", "Bash(export BP_ROLE=old)"]}, "env": {"MINE": "1", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "5"}}"#;
     write(t, ".claude/settings.local.json", mine);
     assert_eq!(checked(t), "ok", "a clone with no bp- entry is not checked");
     let (wrote, v) = install(t, Target::Claude).unwrap();
@@ -63,7 +63,11 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
     assert!(pre[0]["hooks"][0].get("onFailure").is_none());
     let groups = settings["hooks"].as_object().unwrap().values().flat_map(|g| g.as_array().unwrap());
     let ours: Vec<&serde_json::Value> = groups.map(|g| &g["hooks"][0]).filter(|h| h["command"] != "mine.sh").collect();
-    assert_eq!(ours.len(), 4);
+    assert_eq!(ours.len(), 5);
+    // A researcher's child type is bounded by a hook, and its depth by the env key (31, design change 6).
+    let agent = pre.iter().find(|g| g["matcher"] == "Agent|Task").unwrap();
+    assert!(agent["hooks"][0]["command"].as_str().unwrap().ends_with("/.claude/hooks/bp-agent.sh"), "{agent}");
+    assert_eq!(settings["env"], serde_json::json!({"MINE": "1", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "2"}));
     assert!(ours.iter().all(|h| h["onFailure"] == "block"), "{ours:?}");
     // The harness kills a SessionEnd hook after 1.5 s unless it carries a timeout; the other hooks keep the default.
     let timeouts: Vec<Option<u64>> = ours.iter().map(|h| h["timeout"].as_u64()).collect();
@@ -104,12 +108,16 @@ fn check_catches_each_drift_and_install_repairs_it() {
         move |t: &Path| write(t, rel, &read(t, rel).replace("<!-- bp:end -->", "x\n<!-- bp:end -->"))
     };
     let (agents, claude) = (tamper("AGENTS.md"), tamper("CLAUDE.md"));
-    let edits: [(Edit, &str); 8] = [
+    let edits: [(Edit, &str); 9] = [
         (&|t| write(t, skill, &(read(t, skill) + "\n")), skill),
         (&agents, "AGENTS.md#bp"),
         (&claude, "CLAUDE.md#bp"),
         (&|t| write(t, settings, &read(t, settings).replace("SessionEnd", "Gone")), "settings.local.json#hooks"),
         (&|t| write(t, settings, &read(t, settings).replace("BP_ROLE=*", "BP_ROLE=x")), "settings.local.json#hooks"),
+        (
+            &|t| write(t, settings, &read(t, settings).replace(r#"DEPTH": "2""#, r#"DEPTH": "3""#)),
+            "settings.local.json#hooks",
+        ),
         (&|t| write(t, manifest, &read(t, manifest).replace(bp_install::VERSION, "0.0.0-quokka")), manifest),
         (&|t| std::fs::remove_file(t.join(manifest)).unwrap(), ".claude/skills"),
         // A bundle that an older binary of the same version wrote: the skill and its manifest entry agree, and the
@@ -265,6 +273,8 @@ fn codex_writes_its_own_paths_and_creates_an_excluded_agents_file() {
         "the main top, from any worktree: {hooks}"
     );
     assert!(!hooks.contains("onFailure") && !hooks.contains("permissions"), "both are Claude Code's: {hooks}");
+    // Codex gets no `Agent` tool, so neither the agent hook nor the depth key (31, design change 6).
+    assert!(!hooks.contains("env") && !t.join(".codex/hooks/bp-agent.sh").exists(), "{hooks}");
     assert!(read(t, "AGENTS.md").starts_with("<!-- bp:begin -->\n"));
     assert!(read(t, ".git/info/exclude").lines().any(|l| l == "/AGENTS.md"), "a file the install creates is its own");
     assert_eq!(checked(t), "ok");

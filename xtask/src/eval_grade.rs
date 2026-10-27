@@ -8,10 +8,11 @@
 //! hash and a `ref:` line, and grade against that ref's files. A `--bin` arm's trials carry the shipped hash.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use bp_operation::Action;
 
 use crate::eval::Skill;
 use crate::eval_arms::{FILLER, PROTOCOL, body_of};
@@ -35,27 +36,94 @@ pub struct Grade {
 /// The hash of the role file and the bodies of every skill that role preloads for the measured one,
 /// `git hash-object --stdin`: the key of check 10. For `bp-review` that is `bp-reviewer.md` and `bp-review`'s body;
 /// for both worker skills it is `bp-worker.md`, then `bp-complete`'s body, then `bp-respond`'s, because the `with`
-/// arm of each preloads both and a sibling edit changes what was measured. A run writes the hash beside its
-/// transcript, and a grade compares the traces' hash with the files'.
+/// arm of each preloads both and a sibling edit changes what was measured. For `bp-research` it is `bp-researcher.md`,
+/// the body and each of its `references/*.md` in name order, so a reference edit changes the hash; with no skill
+/// directory (before issue 4's body, and at every `old` ref) it is the role file alone (31, design change 3). A run
+/// writes the hash beside its transcript, and a grade compares the traces' hash with the files'.
 pub fn bundle_hash(root: &Path, skill: &Skill) -> Result<String> {
     let mut text = std::fs::read_to_string(root.join(format!("bundle/roles/{}.md", skill.role_file())))?;
+    let dir = root.join("bundle/skills").join(&skill.name);
+    if skill.action == Action::Research && !dir.is_dir() {
+        return hash_object(&text);
+    }
     for name in skill.preloaded() {
         text += &std::fs::read_to_string(root.join("bundle/skills").join(&name).join("SKILL.md"))
             .with_context(|| format!("read the body of {name}"))?;
     }
+    if skill.action == Action::Research {
+        let mut refs: Vec<PathBuf> = std::fs::read_dir(dir.join("references"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "md"))
+            .collect();
+        refs.sort();
+        for r in refs {
+            text += &std::fs::read_to_string(&r)?;
+        }
+    }
     hash_object(&text)
 }
 
-/// [`bundle_hash`] of the files at the commit `sha`, and the first line of the skill's body there: what an arm built
-/// from that commit ran, and the line its preload shows.
-pub(crate) fn ref_hash(root: &Path, skill: &Skill, sha: &str) -> Result<(String, String)> {
+/// What shows that an arm's text reached the agent. A skill's preload shows its body's first line; a role that
+/// preloads nothing (`bp-research` with no skill directory) shows the first sentence of the role file, in the agent's
+/// system prompt (31, design change 3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Marker {
+    Preload(String),
+    Role(String),
+}
+
+/// [`bundle_hash`] of the files at the commit `sha`, and the [`Marker`] of the arm built from that commit: what it
+/// ran, and what its load shows. A research ref with no skill directory hashes its role file alone.
+pub(crate) fn ref_hash(root: &Path, skill: &Skill, sha: &str) -> Result<(String, Marker)> {
     let show = |path: String| show_at(root, sha, &path);
     let mut text = show(format!("bundle/roles/{}.md", skill.role_file()))?;
+    let dir = format!("bundle/skills/{}/", skill.name);
+    let listed = crate::eval_sandbox::capture(
+        Command::new("git").args(["ls-tree", "-r", "--name-only", sha, "--", &dir]).current_dir(root),
+    )?;
+    if skill.action == Action::Research && listed.is_empty() {
+        return Ok((hash_object(&text)?, Marker::Role(first_sentence(&text))));
+    }
     for name in skill.preloaded() {
         text += &show(format!("bundle/skills/{name}/SKILL.md"))?;
     }
+    if skill.action == Action::Research {
+        let mut refs: Vec<&str> = listed
+            .lines()
+            .filter(|p| {
+                p.strip_prefix(&dir).is_some_and(|r| r.starts_with("references/"))
+                    && Path::new(p).extension().is_some_and(|e| e == "md")
+            })
+            .collect();
+        refs.sort_unstable();
+        for r in refs {
+            text += &show(r.to_string())?;
+        }
+    }
     let body = show(format!("bundle/skills/{}/SKILL.md", skill.name))?;
-    Ok((hash_object(&text)?, marker(&body)))
+    Ok((hash_object(&text)?, Marker::Preload(marker(&body))))
+}
+
+/// The first sentence of a role file's body: the text its system prompt shows when it preloads no skill.
+pub(crate) fn first_sentence(role_md: &str) -> String {
+    let line = marker(role_md);
+    line.find(". ").map_or(line.clone(), |end| line[..=end].to_string())
+}
+
+/// Whether the arm's text reached the agent of `trace`: its [`Marker`] in a preload, or the role's first sentence
+/// in the system prompt. `without` shows no body and `filler` its filler line, not the body.
+pub(crate) fn loaded(arm: &str, trace: &Trace, marker: &Marker) -> bool {
+    match (arm, marker) {
+        (_, Marker::Role(sentence)) => trace.prompted(sentence),
+        ("without", Marker::Preload(m)) => !trace.mentions(m) && !trace.mentions(FILLER),
+        ("filler", Marker::Preload(m)) => trace.preloaded(FILLER) && !trace.mentions(m),
+        // `with`, an arm built from a git ref (its own body's first line), or an arm that ran with its own `--bin`:
+        // an edited body keeps the body's first line.
+        (_, Marker::Preload(m)) => trace.preloaded(m),
+    }
 }
 
 /// The file at `path` in the commit `sha`, byte for byte.
@@ -72,6 +140,17 @@ fn marker(skill_md: &str) -> String {
     body_of(skill_md).lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim().to_string()
 }
 
+/// The [`Marker`] of the bundle as the files hold it now.
+fn shipped_marker(root: &Path, skill: &Skill) -> Result<Marker> {
+    let file = root.join("bundle/skills").join(&skill.name).join("SKILL.md");
+    if skill.action == Action::Research && !file.exists() {
+        let role = std::fs::read_to_string(root.join(format!("bundle/roles/{}.md", skill.role_file())))?;
+        return Ok(Marker::Role(first_sentence(&role)));
+    }
+    let body = std::fs::read_to_string(&file).with_context(|| format!("read the body of {}", skill.name))?;
+    Ok(Marker::Preload(marker(&body)))
+}
+
 /// What a trial saw besides the bundle: the fixture's base, head, title, issue, rules and stack, a mutant's diff, and
 /// the arm protocol. The truth, the match words and the probe are left out, so a regrade after a grader fix keeps its
 /// trials. A fixture with no mutant hashes as before, so its stored trials keep their stamps.
@@ -79,6 +158,10 @@ pub(crate) fn stamp(fx: &Fixture) -> Result<String> {
     let mut seen = format!("{}\n{}\n{}\n{}\n{:?}\n{:?}", fx.base, fx.head, fx.title, fx.issue, fx.rules, fx.stack);
     if let Some(m) = &fx.mutant {
         seen = format!("{seen}\n{}", m.diff);
+    }
+    // A research trial saw the question and the seeds, not their settle commands or match words.
+    if let Some(r) = &fx.research {
+        seen = r.plants.iter().fold(format!("{seen}\n{}", r.question), |s, p| format!("{s}\n{}", p.text));
     }
     Ok(format!("{} {PROTOCOL}", hash_object(&seen)?))
 }
@@ -183,9 +266,7 @@ impl Grade {
     /// Grades every `<arm>-<fixture>-<n>.jsonl` in `store`. `fixtures` is the skill's fixture directory.
     pub fn read(skill: &Skill, store: &Path, fixtures: &Path, root: &Path) -> Result<Self> {
         let fixtures_all = Fixture::load(fixtures, None)?;
-        let body = std::fs::read_to_string(root.join("bundle/skills").join(&skill.name).join("SKILL.md"))
-            .with_context(|| format!("read the body of {}", skill.name))?;
-        let shipped = marker(&body);
+        let shipped = shipped_marker(root, skill)?;
         // A numbered design cite is evidence only when the design exists (30, design change 2).
         let designs = crate::eval_kills::designs(std::env::var_os("BP_REDESIGN").as_deref().map(Path::new));
         let mut refs = BTreeMap::new();
@@ -222,13 +303,7 @@ impl Grade {
                 markers.insert(sha.clone(), first);
             }
             let marker = body_ref.as_ref().map_or(&shipped, |sha| &markers[sha]);
-            let loaded = match arm {
-                "without" => !trace.mentions(marker) && !trace.mentions(FILLER),
-                "filler" => trace.preloaded(FILLER) && !trace.mentions(marker),
-                // `with`, an arm built from a git ref (its own body's first line), or an arm that ran with its own
-                // `--bin`: an edited body keeps the body's first line.
-                _ => trace.preloaded(marker),
-            };
+            let loaded = loaded(arm, &trace, marker);
             let (hash, stamp) = read_hash(store, &trial).unzip();
             let mut graded = Graded {
                 arm: arm.into(),
@@ -500,6 +575,30 @@ mod tests {
         );
         let bare = "| error | xtask/src/eval_trace.rs:89 | `cargo test -p xtask trace` fails |";
         assert_eq!(verdicts(&escape, &rows(bare), &ran), [Verdict::False], "it names neither item");
+    }
+
+    #[test]
+    fn an_old_trial_with_no_preload_grades_as_loaded() {
+        let role =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../bundle/roles/bp-researcher.md"));
+        let first = first_sentence(&role.unwrap());
+        assert_eq!(first, "You are the Blueprint researcher.");
+        let marker = Marker::Role(first.clone());
+        let snapshot = serde_json::json!({"type": "attachment", "attachment": {"type": "prompt_snapshot",
+            "systemPrompt": [format!("{first} The dispatch prompt has five lines.")]}});
+        let shape = serde_json::json!({"type": "api-request-shape", "shape": {"system": [{"type": "text",
+            "text": format!("You are a Claude agent.\n{first}")}]}});
+        let read = serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result",
+            "content": format!("---\nname: bp-researcher\n---\n{first}")}]}});
+        let trace = |values: &[&serde_json::Value]| {
+            Trace::parse(&values.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
+        };
+        assert!(loaded("old", &trace(&[&snapshot]), &marker), "the role in the system prompt, no preload");
+        assert!(loaded("old", &trace(&[&shape]), &marker), "the request's system blocks");
+        assert!(!loaded("old", &trace(&[&read]), &marker), "a read of the role file is no load");
+        assert!(!loaded("old", &trace(&[]), &marker));
+        let preload = Marker::Preload("Task: review".into());
+        assert!(!loaded("old", &trace(&[&snapshot]), &preload), "a body's arm needs its preload");
     }
 
     #[test]

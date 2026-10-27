@@ -66,6 +66,16 @@ impl Trace {
         self.0.iter().filter(preload).any(|v| in_value(v, needle))
     }
 
+    /// Whether `needle` sits in the agent's system prompt: the `prompt_snapshot` attachment, or the system blocks of a
+    /// request's shape, as Claude Code 2.1 writes them (`m8-pilot/trials/*/transcript.jsonl`). A role file that the
+    /// agent read from disk does not count.
+    pub fn prompted(&self, needle: &str) -> bool {
+        self.0.iter().any(|v| {
+            (v["attachment"]["type"] == "prompt_snapshot" && in_value(&v["attachment"]["systemPrompt"], needle))
+                || (v["type"] == "api-request-shape" && in_value(&v["shape"]["system"], needle))
+        })
+    }
+
     /// Why the runner stored this trial as failed: the agent ran past its limit or left no transcript.
     pub fn failure(&self) -> Option<&str> {
         self.0.iter().find(|v| v["subtype"] == "eval_failed").and_then(|v| v["reason"].as_str())
