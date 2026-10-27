@@ -9,6 +9,8 @@ pub enum Route {
     Projects,
     /// `/api/<project>`: the project's home.
     Home(String),
+    /// `/api/<project>/moving`: the project's rows with an intent, in five groups.
+    Moving(String),
     /// `/api/node/<id>`: the `show` object of any node or record; the id is the rest of the path.
     Node(String),
     /// `/api/search?q=<terms>`: the `search` object.
@@ -24,6 +26,7 @@ impl Route {
             None if path == "search" => Some(Self::Search(q.unwrap_or_default().to_string())),
             None if !path.is_empty() => Some(Self::Home(path.to_string())),
             Some(("node", id)) if !id.is_empty() => Some(Self::Node(id.to_string())),
+            Some((project, "moving")) if !project.is_empty() => Some(Self::Moving(project.to_string())),
             _ => None,
         }
     }
@@ -38,11 +41,12 @@ mod tests {
         assert_eq!(Route::parse("health", None), Some(Route::Health));
         assert_eq!(Route::parse("projects", None), Some(Route::Projects));
         assert_eq!(Route::parse("bp", None), Some(Route::Home("bp".into())));
+        assert_eq!(Route::parse("bp/moving", None), Some(Route::Moving("bp".into())));
         assert_eq!(Route::parse("search", Some("vault")), Some(Route::Search("vault".into())));
         assert_eq!(Route::parse("search", None), Some(Route::Search(String::new())), "the search refuses it");
         let id = "projects/bp/issues/0001.a/claims/s1";
         assert_eq!(Route::parse(&format!("node/{id}"), None), Some(Route::Node(id.into())), "the id takes the rest");
-        for none in ["", "node/", "bp/moving", "bp/change/x"] {
+        for none in ["", "node/", "/moving", "bp/moving/x", "bp/change/x"] {
             assert_eq!(Route::parse(none, None), None, "{none}");
         }
     }
