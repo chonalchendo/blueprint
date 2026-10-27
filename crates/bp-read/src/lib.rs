@@ -3,7 +3,10 @@
 //! and `search`, and the page objects the view serves beside them. `bp-tool` prints them; `bp-view` serves them. It writes nothing but the index refresh.
 
 mod change;
+pub mod checkset;
 pub mod clock;
+mod diff;
+pub mod git;
 pub mod inputs;
 mod intents;
 pub mod landing;
@@ -11,6 +14,7 @@ mod moving;
 mod objects;
 mod pages;
 pub mod snapshot;
+mod stack;
 mod world;
 
 use bp_vault::{Code, Id, Index, Refusal};

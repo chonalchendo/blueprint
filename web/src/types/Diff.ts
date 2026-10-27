@@ -6,9 +6,13 @@ import type { DiffFile } from "./DiffFile";
  */
 export type Diff = { 
 /**
- * One row per changed file; empty when no clone holds the head.
+ * One row per changed file; empty when no clone holds the head, and `reason` says why.
  */
 files: Array<DiffFile>, 
+/**
+ * Why no file stat was read: no clone holds the project, or the clone lacks the base or the head.
+ */
+reason?: string, 
 /**
  * The diff text, asked for with `?diff=1`, at most [`DIFF_CAP`] bytes.
  */

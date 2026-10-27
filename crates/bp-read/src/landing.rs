@@ -1,5 +1,5 @@
-//! `land`'s refusals (26, design change 4; 32, design change 5): the first unmet gate, a missing pull request, an
-//! unset reviewer and an unclaimed issue, each as the envelope `land` prints. `land` and the Change page build them
+//! `land`'s refusals (26, design change 4; 32, design change 5): the first unmet gate, the check set included, a
+//! missing pull request, an unset reviewer and an unclaimed issue, each as the envelope `land` prints. `land` and the Change page build them
 //! here, so the page names the code and the fix `land` would give at the same head (21, rule 1).
 
 use std::io::Write;
@@ -114,6 +114,17 @@ pub fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest, reviewer: &str, clone: 
             id.as_str(),
             "land needs a passing run of each error block's current text at the head (26, design change 4)",
             format!("{block} has no run of its current text at {head}; bp pr {id}, then bp land {id}"),
+        ),
+        // The reviewer approved the head, so a block changed since then is one the reviewer has not seen.
+        Unmet::ChecksChanged => Refusal::new(
+            Code::ChecksChanged,
+            id.as_str(),
+            "land merges a head that names the error blocks the pull request carries now (27, design change 8)",
+            format!(
+                "an error block of {id}, its milestone or a carried delta changed after {head} was pushed; bp pr {id} \
+                 pushes a commit that names them, then the reviewer approves pull request {n} at its new head, then bp \
+                 land {id}"
+            ),
         ),
     }
 }

@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+pub(crate) use bp_read::git::{default_branch, git};
 use bp_read::inputs::{field, held};
 pub(crate) use bp_read::landing::{branch, unclaimed};
 use bp_vault::git::Repo;
@@ -220,14 +220,6 @@ fn gate(
     Ok(None)
 }
 
-/// Origin's default branch, the base of a claim whose `--base` names no origin branch.
-pub(crate) fn default_branch(top: &Path) -> Result<String, Refusal> {
-    let head = git(top, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).map_err(|e| {
-        Refusal::failed(e.subject, "origin has no default branch here: git remote set-head origin --auto")
-    })?;
-    Ok(head.strip_prefix("origin/").unwrap_or(&head).to_string())
-}
-
 /// A repeat `cut` exits 3 with the claim's fields. A worktree a human removed comes back from its branch first.
 fn repeated(top: &Path, branch: &str, repeat: Value) -> Result<Wrote, Refusal> {
     if let Some(w) = repeat["worktree"].as_str().map(Path::new).filter(|w| !w.exists()) {
@@ -275,24 +267,4 @@ fn checked_out(path: &Path) -> Option<String> {
     let repo = Repo::find(path).filter(|r| r.top == path)?;
     let head = std::fs::read_to_string(repo.git.join("HEAD")).ok()?;
     head.trim().strip_prefix("ref: ").map(str::to_string)
-}
-
-/// Runs git in the code repository and returns its stdout, trimmed. A failure is `could_not_run` with git's own words.
-pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .env("LC_ALL", "C")
-        // A credential prompt would wait on a terminal no agent reads; the fetch fails instead.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args(args)
-        .output()
-        .map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
-    }
-    Err(Refusal::failed(
-        format!("git {}", args.join(" ")),
-        format!("{}; fix it in {}, then rerun", String::from_utf8_lossy(&out.stderr).trim(), dir.display()),
-    ))
 }

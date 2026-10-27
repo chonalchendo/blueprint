@@ -78,6 +78,14 @@ impl Check {
     }
 }
 
+/// The check-set hash (27, design change 8): blake3 of the sorted [`Check::hash`] of each error block a pull request
+/// carries. A `Bp-Checks` trailer names it, so a changed set needs a push, and the push needs a new approval.
+pub fn set_hash<'a>(hashes: impl IntoIterator<Item = &'a str>) -> String {
+    let mut hashes: Vec<&str> = hashes.into_iter().collect();
+    hashes.sort_unstable();
+    blake3::hash(hashes.join("\n").as_bytes()).to_hex().to_string()
+}
+
 crate::closed_enum! {
     /// What a body does that CommonMark allows but the vault should not. The census counts each; `show` lists a
     /// node's own. The macro writes `Serialize` from each text, which is the variant in snake case.

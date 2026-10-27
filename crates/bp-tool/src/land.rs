@@ -217,9 +217,12 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
     // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
     let compare = c.from.as_deref().map(|from| (c.top.as_path(), from));
-    let gate = intents::landing(&read, &c.base, &runs, &blocks)
-        .map_err(|unmet| landing::refusal(&unmet, &id, &pr, &reviewer, compare))
-        .and_then(|()| checks(&carried, &c, &id, &pr));
+    // The check set is the last gate, so a head the clone cannot read refuses only when every other gate holds.
+    let named = carried.named_by(&c.top, &pr.head_ref_oid);
+    let gate = match intents::gates(&read, &c.base, &runs, &blocks, named.as_ref().ok().copied()).unmet {
+        Some(unmet) => Err(landing::refusal(&unmet, &id, &pr, &reviewer, compare)),
+        None => named.map(|_| ()),
+    };
     if let Err(mut r) = gate {
         if merged(&pr) {
             r.fix = landing::after_merge(n, &id);
@@ -323,25 +326,6 @@ fn claimed(cwd: &Path, index: &Index, id: &Id) -> Result<Claimed, Refusal> {
         base,
         target,
     })
-}
-
-/// `checks_changed`: the head's `Bp-Checks` trailer, or the set at the claim when it has none, names another check
-/// set than the one the pull request carries now. The reviewer approved that head, so a block changed since then is
-/// one the reviewer has not seen (27, design change 8).
-fn checks(carried: &crate::carry::Carried, c: &Claimed, id: &Id, pr: &PullRequest) -> Result<(), Refusal> {
-    if carried.named_by(&c.top, &pr.head_ref_oid)? {
-        return Ok(());
-    }
-    Err(Refusal::new(
-        Code::ChecksChanged,
-        id.as_str(),
-        "land merges a head that names the error blocks the pull request carries now (27, design change 8)",
-        format!(
-            "an error block of {id}, its milestone or a carried delta changed after {} was pushed; bp pr {id} pushes \
-             a commit that names them, then the reviewer approves pull request {} at its new head, then bp land {id}",
-            pr.head_ref_oid, pr.number
-        ),
-    ))
 }
 
 /// Removes what the claim added to the clone: the worktree, the branch and the forge's copy of it. Each step skips

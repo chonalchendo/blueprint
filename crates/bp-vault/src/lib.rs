@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-pub use body::{Body, Check, Finding, FindingKind, Section};
+pub use body::{Body, Check, Finding, FindingKind, Section, set_hash};
 pub use closed::OutsideSet;
 pub use emit::set_field;
 pub use file::{Broken, DeltaState, File, header_end, normalise, opens_with_header, written};

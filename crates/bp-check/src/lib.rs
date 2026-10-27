@@ -100,14 +100,6 @@ pub struct Ran {
     done: Vec<Done>,
 }
 
-/// The check-set hash (27, design change 8): blake3 of the sorted `check_hash` of each error block a pull request
-/// carries. A `Bp-Checks` trailer names it, so a changed set needs a push, and the push needs a new approval.
-pub fn set_hash<'a>(hashes: impl IntoIterator<Item = &'a str>) -> String {
-    let mut hashes: Vec<&str> = hashes.into_iter().collect();
-    hashes.sort_unstable();
-    blake3::hash(hashes.join("\n").as_bytes()).to_hex().to_string()
-}
-
 /// Why the block records `skipped` wherever it runs, if it does: a runner not built yet, or `when=post-land`. It never
 /// fails a verb, so a waiver of it never closes (27, design change 10). A skip reads no date, so none is given.
 pub fn skips(check: &Check) -> Option<String> {

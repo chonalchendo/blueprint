@@ -165,7 +165,8 @@ pub struct PullRequest {
 /// The branch a held claim's pull request lands on (15, a dependency chain to landed).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Base {
-    /// Not known: a converted claim names no base branch, so no base test applies.
+    /// Not recorded: a converted claim names no base branch. `land` tests origin's default branch; a read without the
+    /// clone cannot, so needs landing holds and the Change page withholds the command.
     #[default]
     Unknown,
     /// This branch.
@@ -331,6 +332,7 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
             Err(Unmet::Failed(r)) => Verdict::of(Intent::Working, format!("{} did not pass at head: bp pr", r.check)),
             Err(Unmet::Evidence(b)) => Verdict::of(Intent::Working, format!("no run of {b} at head: bp pr")),
             Err(Unmet::Review | Unmet::Checks) => unreachable!("approved and green"),
+            Err(Unmet::ChecksChanged) => unreachable!("landing reads no check set"),
         };
     }
     if !i.review_heads.contains(&pr.head) {
@@ -362,14 +364,18 @@ pub enum Unmet<'a> {
     Failed(&'a Run),
     /// This `error` block has no run at the head of its current text: none, or one made before the block changed.
     Evidence(&'a str),
+    /// The head names another check set than the one the pull request carries now (`checks_changed`; 27, design
+    /// change 8): a block changed after the push the reviewer approved.
+    ChecksChanged,
 }
 
 /// Needs landing (21): the pull request on the claim's `base`, the reviewer's approval at the head, the forge check
 /// green at the head, and the run [`evidence`], in that order (26, design change 4). `land` refuses on the first part
 /// that does not hold, and the `Intents` function reads the same answer, so the two never disagree (21, rule 1).
-/// It is the first-unmet projection of [`gates`], which the Change page reads whole.
+/// It is the first-unmet projection of [`gates`], which the Change page reads whole, without the check set: that
+/// needs the clone, which `land` reads and passes to [`gates`] itself.
 pub fn landing<'a>(pr: &'a PullRequest, base: &'a Base, runs: &'a [Run], blocks: &'a [Block]) -> Result<(), Unmet<'a>> {
-    gates(pr, base, runs, blocks).unmet.map_or(Ok(()), Err)
+    gates(pr, base, runs, blocks, None).unmet.map_or(Ok(()), Err)
 }
 
 /// The run part of needs landing: the latest run of each `error` check at `head` passed, and each block has one whose

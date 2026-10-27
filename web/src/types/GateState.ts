@@ -3,4 +3,4 @@
 /**
  * One gate's state. A word, never a colour alone (19, principle 3).
  */
-export type GateState = "pass" | "fail" | "pending" | "not configured";
+export type GateState = "pass" | "fail" | "pending" | "not configured" | "not read";
