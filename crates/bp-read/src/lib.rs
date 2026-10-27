@@ -5,6 +5,7 @@
 pub mod clock;
 pub mod inputs;
 mod intents;
+pub mod landing;
 mod moving;
 mod objects;
 mod pages;

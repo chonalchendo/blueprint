@@ -91,7 +91,8 @@ pub enum Verb {
     Release(claim::Release),
     /// Push the claim's branch, open or update its pull request, and run and commit the issue's blocks at the head.
     Pr(land::Pr),
-    /// Merge the approved, green pull request at its head; release the claim `landed` and resolve the issue.
+    /// Merge the approved, green pull request at its head; release the claim `landed` and resolve the issue. With
+    /// `--dry-run`, print the refusal it would give, or the head it would merge, and write nothing.
     Land(land::Land),
     /// Run the owner's check blocks; one run record per block, one commit.
     Check(check::Check),
@@ -201,6 +202,8 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Cut(c) => repo(wrote(claim::cut(cwd, c), cli.json, out), cwd, &c.issue),
         Verb::Release(r) => repo(wrote(claim::release(cwd, r), cli.json, out), cwd, &r.issue),
         Verb::Pr(p) => repo(land::run_pr(cwd, p, cli.json, out), cwd, &p.issue),
+        // A dry run writes nothing, the snapshot included.
+        Verb::Land(l) if l.dry_run => wrote(land::land(cwd, l), cli.json, out),
         Verb::Land(l) => repo(wrote(land::land(cwd, l), cli.json, out), cwd, &l.issue),
         Verb::Check(c) => check::run(cwd, c, cli.json, out),
         Verb::Stamp(s) => stamp::run(cwd, s, cli.json, out),

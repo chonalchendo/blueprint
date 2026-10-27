@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use bp_read::inputs::{field, held};
+pub(crate) use bp_read::landing::{branch, unclaimed};
 use bp_vault::git::Repo;
 use bp_vault::{Code, Header, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
@@ -217,22 +218,6 @@ fn gate(
         ));
     }
     Ok(None)
-}
-
-/// The fix for an issue at `status` with no active claim: the verb that moves it to where its next verb starts.
-pub(crate) fn unclaimed(id: &Id, status: Option<&str>) -> String {
-    match status {
-        Some("open") => format!("bp cut {id}, then rerun"),
-        Some("abandoned") => format!("bp transition {id} open, then bp cut {id}"),
-        Some("in-progress") => format!("{id} is in-progress with no active claim (21, check 2); no verb moves it yet"),
-        Some(s) => format!("an issue at {s} is not claimed again; bp show {id}"),
-        None => format!("cut claims an issue; bp show {id}"),
-    }
-}
-
-/// The claim's branch: `<project>/<slug>` (26, design change 2).
-pub(crate) fn branch(id: &Id) -> String {
-    format!("{}/{}", id.project().unwrap_or_default(), id.as_str().rsplit('/').next().unwrap_or_default())
 }
 
 /// Origin's default branch, the base of a claim whose `--base` names no origin branch.

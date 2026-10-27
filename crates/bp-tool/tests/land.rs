@@ -183,6 +183,43 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
     assert_eq!(git(v, &["status", "--porcelain"]), "");
 }
 
+/// `land --dry-run` gives the refusal `land` gives, envelope for envelope, at each gate it reaches; at a passing head
+/// it names the head it would merge, and fetches, merges, commits and refreshes nothing (32, design change 5).
+#[test]
+fn a_dry_run_refuses_as_land_does_and_writes_nothing() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let dry = || bp(v, t, &[], &["land", ISSUE, "--dry-run"]);
+    let both = |why: &str| {
+        let (d, l) = (dry(), bp(v, t, &[], &["land", ISSUE]));
+        assert_eq!(d, l, "{why}");
+        d.1["code"].as_str().unwrap().to_string()
+    };
+    assert_eq!(both("no claim"), "illegal_transition");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    let h = commit(&w, &["add", "hello.txt"], "hello");
+    assert_eq!(both("no reviewer"), "reviewer_invalid");
+    common::bp(v, &["set", "projects/bp/project", "reviewer", "r"]);
+    assert_eq!(both("no pull request"), "review_missing");
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(0));
+    forge(t, &h, &[], &["SUCCESS"]);
+    assert_eq!(both("no approval"), "review_missing");
+    forge(t, &h, &[("r", &h)], &[]);
+    assert_eq!(both("no check"), "checks_pending");
+    forge(t, &h, &[("r", &h)], &["SUCCESS"]);
+    std::fs::remove_dir_all(v.join(".bp/forge")).unwrap();
+    let fetched = || std::fs::metadata(t.join("code/.git/FETCH_HEAD")).and_then(|m| m.modified()).unwrap();
+    let (before, at) = (commits(v), fetched());
+    let (code, out) = dry();
+    assert_eq!((code, out), (Some(0), json!({ "land": ISSUE, "head": h, "dry_run": true, "contract_version": 1 })));
+    assert_eq!(commits(v), before, "no commit");
+    assert!(!t.join("merged").exists() && w.exists(), "no merge, and the worktree stays");
+    assert!(!v.join(".bp/forge").exists(), "no snapshot refresh");
+    assert_eq!(fetched(), at, "no fetch");
+}
+
 /// `check` on an issue with a held claim runs at the claim's worktree head, as `pr` does, wherever the caller stands.
 #[test]
 fn check_runs_the_blocks_in_the_held_claims_worktree() {

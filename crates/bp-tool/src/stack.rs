@@ -3,9 +3,7 @@
 //! and retargets each layer above before it deletes its branch. Each moved layer needs `pr` and a new approval, as
 //! the forge requires an approval of the latest push (15, Controls 1).
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use bp_change::IssueStatus;
 use bp_change::intents::{self, Dependency, Unstacked};
@@ -82,37 +80,6 @@ pub(crate) fn below(
     let at = depends.iter().position(|d| std::ptr::eq(d, on)).expect("the stack test returns one of them");
     let pr = prs.swap_remove(at).expect("a dependency on the stack holds an open pull request");
     Ok(Some((Id::parse(&on.id).expect("only a parsed id holds a pull request"), pr)))
-}
-
-/// Whether the diff the reviewer approved at `reviewed`, against the claim's base `from`, is the head's against the
-/// base now, by `git patch-id --verbatim`, whitespace kept: `rm -rf /x/cache` and `rm -rf /x/ cache` differ. `None`
-/// when the clone at `top` lacks a commit or a diff is empty. It only names the refusal: no earlier approval counts.
-pub(crate) fn diff_unchanged(top: &Path, from: &str, reviewed: &str, p: &PullRequest) -> Option<bool> {
-    let base = p.base_ref_name.as_ref()?;
-    let id = |range: String| -> Option<String> {
-        let diff = Command::new("git")
-            .arg("-C")
-            .arg(top)
-            .args(["diff", "--no-ext-diff", "--no-color", "--end-of-options", &range])
-            .output()
-            .ok()?;
-        if !diff.status.success() || diff.stdout.is_empty() {
-            return None;
-        }
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(top)
-            .args(["patch-id", "--verbatim"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .ok()?;
-        child.stdin.take()?.write_all(&diff.stdout).ok()?;
-        let out = child.wait_with_output().ok()?;
-        String::from_utf8_lossy(&out.stdout).split_whitespace().next().map(str::to_string)
-    };
-    let reviewed = id(format!("{from}...{reviewed}"))?;
-    Some(reviewed == id(format!("refs/remotes/origin/{base}...{}", p.head_ref_oid))?)
 }
 
 /// A layer cut from the head of the issue `land` merges, which `land` moves onto the base before it deletes the
