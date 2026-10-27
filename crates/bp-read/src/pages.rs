@@ -89,7 +89,7 @@ pub struct ProjectRow {
 }
 
 /// A blueprint version record, reduced: its `n`, its tag, and its manifest of design id to hash.
-type Version = (u64, String, serde_json::Map<String, serde_json::Value>);
+pub(crate) type Version = (u64, String, serde_json::Map<String, serde_json::Value>);
 
 /// What a project's pages read: its designs, milestones and issues as `list` prints them, and its versions.
 pub(crate) struct Read {
@@ -103,21 +103,11 @@ pub(crate) struct Read {
 impl Read {
     pub(crate) fn of(vault: &Vault, index: &Index, project: &str) -> Result<Self, Refusal> {
         let of = |kind| Filter { kind, status: None, project: Some(project), under: None, limit: ALL };
-        let mut versions: Vec<_> = index
-            .records(&format!("projects/{project}/project"), Kind::BlueprintVersion)?
-            .into_iter()
-            .filter_map(|r| {
-                let n = r.header.get("n")?.as_u64()?;
-                let tag = r.header.get("tag")?.as_str()?.to_string();
-                Some((n, tag, r.header.get("manifest")?.as_object().cloned().unwrap_or_default()))
-            })
-            .collect();
-        versions.sort_by(|a, b| b.0.cmp(&a.0));
         Ok(Self {
             designs: list(vault, index, &of(Kind::Design), false)?.rows,
             milestones: list(vault, index, &of(Kind::Milestone), false)?.rows,
             issues: list(vault, index, &of(Kind::Issue), false)?,
-            versions,
+            versions: versions(index, project)?,
         })
     }
 
@@ -133,6 +123,21 @@ impl Read {
         }
         intents
     }
+}
+
+/// The project's blueprint version records, newest first.
+pub(crate) fn versions(index: &Index, project: &str) -> Result<Vec<Version>, Refusal> {
+    let mut versions: Vec<_> = index
+        .records(&format!("projects/{project}/project"), Kind::BlueprintVersion)?
+        .into_iter()
+        .filter_map(|r| {
+            let n = r.header.get("n")?.as_u64()?;
+            let tag = r.header.get("tag")?.as_str()?.to_string();
+            Some((n, tag, r.header.get("manifest")?.as_object().cloned().unwrap_or_default()))
+        })
+        .collect();
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(versions)
 }
 
 /// The refusal for a project the index lacks.
@@ -159,7 +164,7 @@ pub fn home(vault: &Vault, index: &Index, project: &str) -> Result<Home, Refusal
     let mut designs = Vec::with_capacity(read.designs.len());
     for row in read.designs {
         let accepted = accepted(vault, &row.row.id, &read.versions)?;
-        designs.push(HomeDesign { diagrams: diagrams(vault, &row.row.id), accepted, row });
+        designs.push(HomeDesign { diagrams: crate::design::pages(vault, &row.row.id).len(), accepted, row });
     }
     let product = format!("projects/{project}/designs/product");
     let conventions = index
@@ -198,16 +203,9 @@ pub fn projects(vault: &Vault, index: &Index) -> Result<Projects, Refusal> {
     Ok(Projects { rows })
 }
 
-/// The rendered diagrams of the design `id`: the `.html` files in its `diagrams/` directory.
-fn diagrams(vault: &Vault, id: &str) -> usize {
-    let dir = vault.root.join(id).join("diagrams");
-    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
-    entries.filter_map(Result::ok).filter(|e| e.path().extension().is_some_and(|x| x == "html")).count()
-}
-
 /// The newest version whose manifest holds the design's current hash (32, design change 9). The file is read only
 /// when a version exists.
-fn accepted(vault: &Vault, id: &str, versions: &[Version]) -> Result<Option<String>, Refusal> {
+pub(crate) fn accepted(vault: &Vault, id: &str, versions: &[Version]) -> Result<Option<String>, Refusal> {
     if versions.is_empty() {
         return Ok(None);
     }

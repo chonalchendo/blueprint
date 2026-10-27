@@ -135,3 +135,51 @@ table.files td { padding: 2px 12px 2px 0; border: 0; }
 .land:focus { outline: 1px solid var(--accent); outline-offset: 1px; }
 .land .refusal, .land .wait { margin: 0; color: var(--muted); }
 .land .refusal .fix { color: var(--ink); }
+
+/* Documents (19, principle 9; mock `design-system.html`): prose at 72 ch, headings as in the markdown, tables as tables,
+   a check block under its name, each diagram at the doc's width after the block that cites it. From 1280 px the
+   outline is fixed at the right, and a page that holds one keeps a column clear for it. */
+.doc .md, .doc .prose > h2, .doc .prose > h3, .doc figure.check, .tldr { max-width: 72ch; }
+.prose { line-height: 1.6; }
+.prose h2 { font-size: 1.2em; margin: 28px 0 8px; scroll-margin-top: 16px; }
+.prose h3 { font-size: 1.05em; margin: 20px 0 6px; scroll-margin-top: 16px; }
+.prose h4 { font-size: 1em; margin: 16px 0 6px; }
+.prose .md p, .prose .md ul, .prose .md ol { margin: 0 0 10px; }
+.prose .md table { width: auto; margin: 8px 0 14px; font-size: 0.95em; }
+.prose .md td, .prose .md th { border-bottom: 1px solid var(--line); padding: 6px 10px; vertical-align: top; }
+.prose pre { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; overflow: auto; }
+.prose code { background: var(--surface); padding: 1px 4px; border-radius: 3px; }
+.prose pre code { background: none; padding: 0; }
+.prose blockquote { border-left: 3px solid var(--line); margin: 0 0 10px; padding: 0 12px; color: var(--muted); }
+.prose a { border-bottom: 1px dotted var(--muted); }
+.prose img { max-width: 100%; }
+figure.check { margin: 10px 0 14px; }
+figure.check figcaption, figure.fig figcaption { color: var(--muted); font-size: 0.86em; margin: 0 0 4px; }
+figure.fig { margin: 14px 0 18px; scroll-margin-top: 16px; }
+figure.fig .svg svg { display: block; width: 100%; height: auto; max-height: 78vh; }
+figure.fig figcaption { margin-top: 6px; }
+.outline { display: none; }
+@media (min-width: 1280px) {
+  main:has(.doc .outline) { max-width: none; margin: 0; padding-right: 260px; }
+  .doc .outline { display: block; position: fixed; right: 28px; top: 70px; width: 200px; max-height: calc(100vh - 90px); overflow: auto; font-size: 0.86em; border-left: 1px solid var(--line); padding-left: 14px; }
+  .outline a { display: block; color: var(--muted); padding: 3px 0; }
+  .outline a.d3 { padding-left: 12px; }
+  .outline a:hover, .outline a[aria-current] { color: var(--ink); }
+  .outline a[aria-current] { box-shadow: inset 2px 0 0 var(--accent); margin-left: -15px; padding-left: 13px; }
+  .outline a.d3[aria-current] { padding-left: 25px; }
+}
+details.fold > summary { cursor: pointer; color: var(--accent); padding: 10px 0; list-style: none; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "▸ "; }
+details.fold[open] > summary::before { content: "▾ "; }
+.vbanner { display: flex; gap: 18px; flex-wrap: wrap; align-items: baseline; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px; margin: 8px 0 14px; color: var(--muted); }
+.vbanner .v { color: var(--ink); }
+.facts-line { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); margin: 0 0 6px; }
+.facts-line b { color: var(--ink); font-weight: 500; }
+.tldr { line-height: 1.6; margin: 0 0 10px; }
+.tldr p { margin: 0 0 6px; }
+a.g { color: var(--ink); }
+a.g:hover { border-color: var(--accent); }
+.node .doc { margin-top: 8px; }
+table.checklist td, table.concerns td, table.issues td { padding: 6px 10px; }
+table.checklist td.id { width: 34%; }

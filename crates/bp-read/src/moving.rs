@@ -280,7 +280,7 @@ fn next(id: &str, intent: Intent, note: &str, f: &Facts) -> Next {
 }
 
 /// The tool command a note names: from its first `bp ` word to the end ("…; rerun bp check m --name integrity").
-fn named(note: &str) -> Option<&str> {
+pub(crate) fn named(note: &str) -> Option<&str> {
     let at = if note.starts_with("bp ") { 0 } else { note.find(" bp ")? + 1 };
     Some(&note[at..])
 }

@@ -105,7 +105,7 @@ test("moving: five groups in order with their counts, and one chip per command r
     "bp land projects/bp/issues/0411.land",
   ]);
   expect(land.dataset.href).toBe("/bp/change/projects/bp/issues/0411.land");
-  expect(rows[1].dataset.href).toBe("/node/projects/bp/milestones/m");
+  expect(rows[1].dataset.href).toBe("/bp/milestone/projects/bp/milestones/m");
   expect(rows[2].querySelector("td.holder")?.textContent).toBe("—");
 });
 

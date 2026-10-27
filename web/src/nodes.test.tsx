@@ -1,16 +1,17 @@
-// 18, check 2 and 32 `every-node-serves` (the client half): the node page renders one `bp show --json` object of every
-// node and record kind in the converted vault, taken from it with `bp --json show <id>`, less the
-// `contract_version` key that `/api/node/<id>` strips, so the test renders what the client receives.
+// 18, check 2 and 32 `every-node-serves` (the client half): the node page renders, through the document renderer, one
+// `bp show --json` object of every node and record kind in the converted vault, taken from it with `bp --json show
+// <id>`, less the `contract_version` key that `/api/node/<id>` strips, so the test renders what the client receives.
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "./App";
 import { header } from "./header";
+import { outlineOf } from "./doc/markdown";
 import { Node, NodeView } from "./pages/Node";
 import { stubApi } from "./stub";
 import type { Show } from "./types/Show";
 
-// `moving.json` and `change.json` are pages, not nodes: `moving.test.tsx` and `change.test.tsx` read them.
-const fixtures = import.meta.glob<Show>(["./fixtures/*.json", "!./fixtures/moving.json", "!./fixtures/change.json"], {
+// `moving.json`, `change.json` and the `*-page.json` objects are pages, not nodes: their pages' tests read them.
+const fixtures = import.meta.glob<Show>(["./fixtures/*.json", "!./fixtures/moving.json", "!./fixtures/change.json", "!./fixtures/*-page.json"], {
   eager: true,
   import: "default",
 });
@@ -31,17 +32,13 @@ test("renders every kind", () => {
     expect(screen.getByText(h.id)).toBeTruthy();
     expect(document.body.textContent).toContain(kind);
     expect(show.record).toBe(RECORDS.includes(kind));
-    if (show.body) expect(document.querySelector("pre.body")?.textContent).toBe(show.body);
+    // The body reads as a document: each `## ` and `### ` heading is a heading with its outline anchor.
+    if (show.body) {
+      expect(document.querySelector(".doc .prose")).toBeTruthy();
+      for (const h of outlineOf(show.body)) expect(document.getElementById(h.anchor)?.tagName).toBe(`H${h.depth}`);
+    } else expect(screen.getByText("no body")).toBeTruthy();
     unmount();
   }
-});
-
-test("a body renders as text, never as markup", () => {
-  const show = { id: "projects/bp/issues/x", kind: "issue", record: false, hash: "h", lead: "", body: "<script>alert(1)</script><b>x</b>" } as Show;
-  render(<NodeView show={show} />);
-  expect(document.querySelector("script")).toBeNull();
-  expect(document.querySelector("pre.body b")).toBeNull();
-  expect(document.querySelector("pre.body")?.textContent).toBe(show.body);
 });
 
 test("the header narrows kind, title and status, and refuses an object without a kind", () => {

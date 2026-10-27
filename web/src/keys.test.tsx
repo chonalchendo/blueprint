@@ -67,7 +67,10 @@ test("/ opens the palette; enter jumps to the chosen hit's node", async () => {
   stubApi({
     projects,
     "search?q=vault": { rows: [{ id: "projects/bp/designs/system", kind: "design", title: "System", rank: 1, snippet: "the «vault»" }] },
-    "node/projects/bp/designs/system": { id: "projects/bp/designs/system", kind: "design", title: "System", record: false, hash: "h", lead: "", body: "b" },
+    "bp/design/projects/bp/designs/system": {
+      id: "projects/bp/designs/system", kind: "design", title: "System", status: "active", record: false, hash: "h", lead: "",
+      body: "b", level: "system", diagrams: [], deltas: [], version: "no version", outline: [], rows_not_in_vault: ["delta"],
+    },
   });
   const user = userEvent.setup();
   render(<App />);
@@ -78,7 +81,7 @@ test("/ opens the palette; enter jumps to the chosen hit's node", async () => {
   await screen.findByRole("option");
   expect(screen.getByRole("option").textContent).toContain("projects/bp/designs/system");
   await user.keyboard("{Enter}");
-  expect(window.location.pathname).toBe("/node/projects/bp/designs/system");
+  expect(window.location.pathname).toBe("/bp/design/projects/bp/designs/system");
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(await screen.findByRole("heading", { level: 1, name: "System" })).toBeTruthy();
 });

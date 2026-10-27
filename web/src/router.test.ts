@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { crumbs } from "./App";
-import { route } from "./router";
+import { NO_ROUTE, pagePath, route } from "./router";
 
 test("each path names its page, and an id keeps its slashes and dots", () => {
   expect(route("/")).toEqual({ page: "projects" });
@@ -9,15 +9,31 @@ test("each path names its page, and an id keeps its slashes and dots", () => {
   expect(route("/search", "?q=vault%20index")).toEqual({ page: "search", q: "vault index" });
   expect(route("/bp/moving")).toEqual({ page: "moving", project: "bp" });
   expect(route("/bp/change/projects/bp/issues/0411.x")).toEqual({ page: "change", project: "bp", id: "projects/bp/issues/0411.x" });
-  expect(route("/bp/change/..")).toEqual({ page: "none", path: "/bp/change/..", project: "bp" });
-  expect(route("/bp/other/0411")).toEqual({ page: "none", path: "/bp/other/0411", project: "bp" });
+  expect(route("/bp/milestone/projects/bp/milestones/m")).toEqual({ page: "milestone", project: "bp", id: "projects/bp/milestones/m" });
+  expect(route("/bp/design/projects/bp/designs/system", "?at=blueprint/bp/1")).toEqual({
+    page: "design",
+    project: "bp",
+    id: "projects/bp/designs/system",
+    at: "blueprint/bp/1",
+  });
+  const dots = "no id holds a . or .. segment";
+  expect(route("/bp/change/..")).toEqual({ page: "none", path: "/bp/change/..", project: "bp", why: dots });
+  expect(route("/bp/design/projects/bp/../x")).toEqual({ page: "none", path: "/bp/design/projects/bp/../x", project: "bp", why: dots });
+  expect(route("/bp/other/0411")).toEqual({ page: "none", path: "/bp/other/0411", project: "bp", why: NO_ROUTE });
 });
 
 test("a malformed escape or a dot segment names no page", () => {
-  expect(route("/node/projects/bp/%E0")).toEqual({ page: "none", path: "/node/projects/bp/%E0" });
+  expect(route("/node/projects/bp/%E0")).toEqual({ page: "none", path: "/node/projects/bp/%E0", why: "the path holds a malformed escape" });
   const up = "/node/projects%2F..%2F..%2Fapi%2Fprojects";
-  expect(route(up)).toEqual({ page: "none", path: up });
+  expect(route(up)).toEqual({ page: "none", path: up, why: "no id holds a . or .. segment" });
   expect(route("/node/projects/bp/designs/system%3Fx")).toEqual({ page: "node", id: "projects/bp/designs/system?x" });
+});
+
+test("a milestone and a design of a project open their own pages; any other node, the node page", () => {
+  expect(pagePath("projects/bp/milestones/m", "milestone")).toBe("/bp/milestone/projects/bp/milestones/m");
+  expect(pagePath("projects/bp/designs/containers/view", "design")).toBe("/bp/design/projects/bp/designs/containers/view");
+  expect(pagePath("projects/bp/issues/0411.x", "issue")).toBe("/node/projects/bp/issues/0411.x");
+  expect(pagePath("shared/conventions/c", "convention")).toBe("/node/shared/conventions/c");
 });
 
 test("the crumb trail is the route", () => {

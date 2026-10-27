@@ -150,6 +150,17 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     );
     assert_eq!((change["gates"].as_array().map(Vec::len), change["head"].as_str()), (Some(0), Some("forge not read")));
     assert_eq!(server.json("/api/bp/change/projects/bp/issues/0001.a?diff=1").0, 200);
+    // The Milestone and Design pages are logged; a diagram's SVG is a part of the Design page, not a view.
+    let (status, m) = server.json("/api/bp/milestone/projects/bp/milestones/m");
+    assert_eq!((status, m["intent"].as_str(), m["title"].as_str()), (200, Some("needs-milestone-approval"), Some("M")));
+    assert_eq!((m.get("command"), m["rows_not_in_vault"].as_array().map(Vec::len)), (None, Some(4)), "{m}");
+    let (status, d) = server.json("/api/bp/design/projects/bp/designs/system");
+    assert_eq!((status, d["version"].as_str(), d["level"].as_str()), (200, Some("no version"), Some("system")), "{d}");
+    assert_eq!(
+        (d["diagrams"][0]["name"].as_str(), d["outline"][0]["anchor"].as_str()),
+        (Some("context"), Some("tl-dr"))
+    );
+    assert_eq!(server.get("/api/bp/design/projects/bp/designs/system/diagram/context"), (200, "<svg></svg>".into()));
     for missing in [
         "/api/node/projects/bp/issues/nope",
         "/api/nope",
@@ -157,6 +168,11 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
         "/api/bp/moving/x",
         "/api/bp/change/projects/bp/designs/system",
         "/api/two/change/projects/bp/issues/0001.a",
+        "/api/bp/milestone/projects/bp/milestones/nope",
+        "/api/bp/milestone/projects/bp/issues/0001.a",
+        "/api/bp/design/projects/bp/issues/0001.a",
+        "/api/two/design/projects/bp/designs/system",
+        "/api/bp/design/projects/bp/designs/system/diagram/nope",
     ] {
         let (status, refusal) = server.json(missing);
         assert_eq!((status, refusal["code"].as_str()), (404, Some("no_node")), "{missing}");
@@ -191,7 +207,9 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     let routes: Vec<&str> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
     let node = "/node/projects/bp/issues/0001.a projects/bp/issues/0001.a";
     let change = "/bp/change/projects/bp/issues/0001.a projects/bp/issues/0001.a";
-    assert_eq!(routes, ["/ -", "/bp -", node, "/bp/moving -", change, node, node, node], "{log}");
+    let milestone = "/bp/milestone/projects/bp/milestones/m projects/bp/milestones/m";
+    let design = "/bp/design/projects/bp/designs/system projects/bp/designs/system";
+    assert_eq!(routes, ["/ -", "/bp -", node, "/bp/moving -", change, milestone, design, node, node, node], "{log}");
     assert!(log.lines().all(|l| l.as_bytes()[19] == b'Z'), "{log}");
 }
 

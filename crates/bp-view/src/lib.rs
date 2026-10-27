@@ -78,6 +78,17 @@ impl View {
                     _ => (to_value(&bp_read::home(vault, &index, project)?), log(format!("/{project}"))),
                 }
             }
+            Route::Milestone { project, id } => {
+                let m = bp_read::milestone(vault, &index, project, id)?;
+                let page = Some((format!("/{project}/milestone/{}", m.show.id), m.show.id.clone()));
+                (to_value(&m), page)
+            }
+            Route::Design { project, id, at } => {
+                let d = bp_read::design(vault, &index, project, id, at.as_deref())?;
+                let page = Some((format!("/{project}/design/{}", d.show.id), d.show.id.clone()));
+                (to_value(&d), page)
+            }
+            Route::Diagram { .. } => unreachable!("api serves a diagram through View::diagram"),
             Route::Node(id) => {
                 let id = bp_read::subject(&index, id)?;
                 let object = to_value(&bp_read::show(vault, Some(&index), &id, None, None, false)?);
@@ -98,6 +109,12 @@ impl View {
             }
         }
         Ok(object)
+    }
+
+    /// The SVG of a diagram of a design, for the Design page to inline. It is a part of a page already logged, so it
+    /// is not logged.
+    pub fn diagram(&self, project: &str, id: &str, name: &str) -> Result<String, Refusal> {
+        bp_read::diagram(&self.vault, &Index::open(&self.vault)?, project, id, name)
     }
 }
 
@@ -145,8 +162,18 @@ async fn api(
     let Some(mut route) = Route::parse(&path, query.get("q").map(String::as_str)) else {
         return no_route(&path);
     };
-    if let Route::Change { diff, .. } = &mut route {
-        *diff = query.get("diff").is_some_and(|d| d == "1");
+    match &mut route {
+        Route::Change { diff, .. } => *diff = query.get("diff").is_some_and(|d| d == "1"),
+        Route::Design { at, .. } => at.clone_from(&query.get("at").cloned()),
+        Route::Diagram { project, id, name } => {
+            let (project, id, name) = (project.clone(), id.clone(), name.clone());
+            return match tokio::task::spawn_blocking(move || view.diagram(&project, &id, &name)).await {
+                Ok(Ok(svg)) => ([(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")], svg).into_response(),
+                Ok(Err(refusal)) => refused(&refusal),
+                Err(e) => refused(&Refusal::failed(format!("/api/{path}"), e.to_string())),
+            };
+        }
+        _ => {}
     }
     let log = method == Method::GET;
     match tokio::task::spawn_blocking(move || view.page(&route, log)).await {
@@ -161,7 +188,8 @@ fn no_route(path: &str) -> Response {
         Code::NoNode,
         format!("/api/{path}"),
         "an API route is /api/projects, /api/<project>, /api/<project>/moving, /api/<project>/change/<issue>, \
-         /api/node/<id> or /api/search?q=<terms>",
+         /api/<project>/milestone/<id>, /api/<project>/design/<id>[/diagram/<name>], /api/node/<id> or \
+         /api/search?q=<terms>",
         "curl <url>api/projects",
     ))
 }

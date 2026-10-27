@@ -3,9 +3,11 @@
 import { Component, Fragment, type ReactNode, useEffect, useState } from "react";
 import { onKey } from "./keys";
 import { Palette } from "./Palette";
-import { Link, type Route, changePath, navigate, projectOf, useRoute } from "./router";
+import { Link, type Route, changePath, navigate, pagePath, projectOf, useRoute } from "./router";
 import { Change } from "./pages/Change";
+import { Design } from "./pages/Design";
 import { Home } from "./pages/Home";
+import { Milestone } from "./pages/Milestone";
 import { Moving } from "./pages/Moving";
 import { Node } from "./pages/Node";
 import { Projects } from "./pages/Projects";
@@ -22,7 +24,11 @@ export function crumbs(r: Route): [string, string][] {
     case "moving":
       return [top, [r.project, `/${r.project}`], ["moving", `/${r.project}/moving`]];
     case "change":
-      return [top, [r.project, `/${r.project}`], [`change ${r.id.split("/").slice(-1)[0]}`, changePath(r.project, r.id)]];
+    case "milestone":
+    case "design": {
+      const to = r.page === "change" ? changePath(r.project, r.id) : pagePath(r.id, r.page);
+      return [top, [r.project, `/${r.project}`], [`${r.page} ${r.id.split("/").slice(-1)[0]}`, to]];
+    }
     case "node": {
       const p = projectOf(r.id);
       return [top, ...(p ? [[p, `/${p}`] as [string, string]] : []), [r.id.split("/").slice(-1)[0], `/node/${r.id}`]];
@@ -121,6 +127,10 @@ function Page({ r }: { r: Route }) {
       return <Moving project={r.project} />;
     case "change":
       return <Change project={r.project} id={r.id} />;
+    case "milestone":
+      return <Milestone project={r.project} id={r.id} />;
+    case "design":
+      return <Design project={r.project} id={r.id} at={r.at} />;
     case "node":
       return <Node id={r.id} />;
     case "search":
@@ -128,9 +138,10 @@ function Page({ r }: { r: Route }) {
     case "none":
       return (
         <>
-          <h1>No page here yet</h1>
+          <h1>No such page</h1>
           <p className="sub">
-            <span className="id">{r.path}</span> is a route a later build serves.
+            <span className="id">{r.path}</span>: {r.why}. Fix: open <Link to="/">projects</Link>, or press{" "}
+            <span className="kbd">/</span> to jump by id
           </p>
         </>
       );

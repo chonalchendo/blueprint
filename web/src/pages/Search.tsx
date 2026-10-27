@@ -2,7 +2,7 @@
 import { useApi } from "../api";
 import { Loaded } from "../Loaded";
 import { Snippet } from "../Palette";
-import { Link, nodePath } from "../router";
+import { Link, pagePath } from "../router";
 import { Row } from "../Row";
 import type { Search } from "../types/Search";
 
@@ -22,9 +22,9 @@ export function SearchPage({ q }: { q: string }) {
             <table>
               <tbody>
                 {s.rows.map((h) => (
-                  <Row key={h.id} href={nodePath(h.id)}>
+                  <Row key={h.id} href={pagePath(h.id, h.kind)}>
                     <td className="id">
-                      <Link to={nodePath(h.id)}>{h.id}</Link>
+                      <Link to={pagePath(h.id, h.kind)}>{h.id}</Link>
                     </td>
                     <td className="k">{h.kind}</td>
                     <td>

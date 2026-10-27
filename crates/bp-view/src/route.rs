@@ -20,6 +20,31 @@ pub enum Route {
         /// `?diff=1`: the page carries the diff text.
         diff: bool,
     },
+    /// `/api/<project>/milestone/<id>`: one milestone's checklist.
+    Milestone {
+        /// The project of the route.
+        project: String,
+        /// The milestone's id: the rest of the path.
+        id: String,
+    },
+    /// `/api/<project>/design/<id>[?at=<tag>]`: one design's page.
+    Design {
+        /// The project of the route.
+        project: String,
+        /// The design's id: the rest of the path.
+        id: String,
+        /// `?at=<tag>`; the caller sets it from the query.
+        at: Option<String>,
+    },
+    /// `/api/<project>/design/<id>/diagram/<name>`: the SVG of one diagram of the design, for the page to inline.
+    Diagram {
+        /// The project of the route.
+        project: String,
+        /// The design's id.
+        id: String,
+        /// The diagram's name.
+        name: String,
+    },
     /// `/api/node/<id>`: the `show` object of any node or record; the id is the rest of the path.
     Node(String),
     /// `/api/search?q=<terms>`: the `search` object.
@@ -30,12 +55,25 @@ impl Route {
     /// The route of `path`, the text after `/api/`, with the query's `q`. `None` names no route. A change route
     /// asks for no diff text; the caller sets `diff` from the query.
     pub fn parse(path: &str, q: Option<&str>) -> Option<Self> {
-        if let Some((project, issue)) = path.split_once("/change/")
-            && !project.is_empty()
-            && !project.contains('/')
-            && !issue.is_empty()
-        {
-            return Some(Self::Change { project: project.into(), issue: issue.into(), diff: false });
+        // The project is the first segment; the id is the rest of the path after the page's name.
+        let page = |name: &str| {
+            let (project, id) = path.split_once(name)?;
+            (!project.is_empty() && !project.contains('/') && !id.is_empty()).then(|| (project.to_string(), id))
+        };
+        if let Some((project, issue)) = page("/change/") {
+            return Some(Self::Change { project, issue: issue.into(), diff: false });
+        }
+        if let Some((project, id)) = page("/milestone/") {
+            return Some(Self::Milestone { project, id: id.into() });
+        }
+        if let Some((project, rest)) = page("/design/") {
+            // A diagram's name holds no `/`, so the last `/diagram/` splits it from a design id that may hold one.
+            return Some(match rest.rsplit_once("/diagram/") {
+                Some((id, name)) if !id.is_empty() && !name.is_empty() && !name.contains('/') => {
+                    Self::Diagram { project, id: id.into(), name: name.into() }
+                }
+                _ => Self::Design { project, id: rest.into(), at: None },
+            });
         }
         match path.split_once('/') {
             None if path == "health" => Some(Self::Health),
@@ -69,7 +107,31 @@ mod tests {
             Some(change("projects/bp/issues/0411.x"))
         );
         assert_eq!(Route::parse("bp/change/x", None), Some(change("x")), "the page refuses an id that is no issue");
-        for none in ["", "node/", "/moving", "bp/moving/x", "bp/change/", "/change/x", "a/b/change/x"] {
+        let m = "projects/bp/milestones/m";
+        assert_eq!(
+            Route::parse(&format!("bp/milestone/{m}"), None),
+            Some(Route::Milestone { project: "bp".into(), id: m.into() })
+        );
+        let d = "projects/bp/designs/containers/view";
+        let design = Route::Design { project: "bp".into(), id: d.into(), at: None };
+        assert_eq!(Route::parse(&format!("bp/design/{d}"), None), Some(design));
+        assert_eq!(
+            Route::parse(&format!("bp/design/{d}/diagram/context"), None),
+            Some(Route::Diagram { project: "bp".into(), id: d.into(), name: "context".into() })
+        );
+        let odd = Route::Design { project: "bp".into(), id: format!("{d}/diagram/a/b"), at: None };
+        assert_eq!(Route::parse(&format!("bp/design/{d}/diagram/a/b"), None), Some(odd), "the page refuses it");
+        for none in [
+            "",
+            "node/",
+            "/moving",
+            "bp/moving/x",
+            "bp/change/",
+            "/change/x",
+            "a/b/change/x",
+            "bp/design/",
+            "/milestone/x",
+        ] {
             assert_eq!(Route::parse(none, None), None, "{none}");
         }
     }
