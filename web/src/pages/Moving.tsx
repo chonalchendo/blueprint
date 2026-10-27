@@ -5,7 +5,7 @@ import { useApi } from "../api";
 import { Command } from "../Command";
 import { many, words } from "../intents";
 import { Loaded } from "../Loaded";
-import { Link, nodePath } from "../router";
+import { Link, changePath, nodePath } from "../router";
 import { Row } from "../Row";
 import type { Moving as MovingObject } from "../types/Moving";
 import type { MovingGroup } from "../types/MovingGroup";
@@ -45,7 +45,7 @@ function Groups({ m }: { m: MovingObject }) {
             <table className="moving">
               <tbody>
                 {g.rows.map((r) => (
-                  <MovingRowView key={r.id} r={r} focal={r.id === focal} />
+                  <MovingRowView key={r.id} r={r} focal={r.id === focal} project={m.project} />
                 ))}
               </tbody>
             </table>
@@ -57,9 +57,9 @@ function Groups({ m }: { m: MovingObject }) {
 }
 
 /** The mock's row card: the id in mono with its kind, the holder, the title over the state in words, then the
- * command chip or the wait. */
-function MovingRowView({ r, focal }: { r: MovingRow; focal: boolean }) {
-  const href = nodePath(r.id);
+ * command chip or the wait. An issue's row opens its Change page; any other row its node. */
+function MovingRowView({ r, focal, project }: { r: MovingRow; focal: boolean; project: string }) {
+  const href = r.kind === "issue" ? changePath(project, r.id) : nodePath(r.id);
   return (
     <Row href={href} command={r.command} className={focal ? "focal" : undefined}>
       <td className="id" title={r.id}>

@@ -8,7 +8,9 @@ test("each path names its page, and an id keeps its slashes and dots", () => {
   expect(route("/node/projects/bp/issues/0411.x")).toEqual({ page: "node", id: "projects/bp/issues/0411.x" });
   expect(route("/search", "?q=vault%20index")).toEqual({ page: "search", q: "vault index" });
   expect(route("/bp/moving")).toEqual({ page: "moving", project: "bp" });
-  expect(route("/bp/change/0411")).toEqual({ page: "none", path: "/bp/change/0411", project: "bp" });
+  expect(route("/bp/change/projects/bp/issues/0411.x")).toEqual({ page: "change", project: "bp", id: "projects/bp/issues/0411.x" });
+  expect(route("/bp/change/..")).toEqual({ page: "none", path: "/bp/change/..", project: "bp" });
+  expect(route("/bp/other/0411")).toEqual({ page: "none", path: "/bp/other/0411", project: "bp" });
 });
 
 test("a malformed escape or a dot segment names no page", () => {
@@ -27,4 +29,9 @@ test("the crumb trail is the route", () => {
     ["system", "/node/projects/bp/designs/system"],
   ]);
   expect(crumbs(route("/node/shared/conventions/c"))).toEqual([["projects", "/"], ["c", "/node/shared/conventions/c"]]);
+  expect(crumbs(route("/bp/change/projects/bp/issues/0411.x"))).toEqual([
+    ["projects", "/"],
+    ["bp", "/bp"],
+    ["change 0411.x", "/bp/change/projects/bp/issues/0411.x"],
+  ]);
 });
