@@ -5,12 +5,12 @@
 
 use std::collections::BTreeSet;
 
-use bp_change::intents::{Intent, failed_at};
-use bp_vault::{Index, Refusal, Vault};
+use bp_change::intents::{Intent, failed_at, release};
+use bp_vault::{Id, Index, Kind, Refusal, Vault};
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::inputs::{field, held, runs};
+use crate::inputs::{claims, field, held, runs};
 use crate::pages::{Read, no_project};
 use crate::{Forge, World};
 
@@ -113,6 +113,8 @@ struct Facts {
     sha: Option<String>,
     /// When the snapshot is not fresh: "forge not read since <time>", or "forge not read" when none exists.
     unread: Option<String>,
+    /// An escalated issue's latest released claim: its owner and its release date, `YYYY-MM-DD`.
+    escalated: Option<(String, String)>,
 }
 
 /// A row's next act: the human's command, or the wait in words.
@@ -155,9 +157,13 @@ pub fn moving(vault: &Vault, index: &Index, project: &str) -> Result<Moving, Ref
             let claim = held(index, &id)?;
             facts.holder = claim.as_ref().and_then(|c| field(c, "owner"));
             facts.since = claim.as_ref().and_then(|c| field(c, "from")).map(|t| t.chars().take(10).collect());
+            if intent == Intent::Blocked && note == "escalated" {
+                facts.escalated = escalation(index, &id)?;
+            }
             let pr = world.pr(id.as_str()).or_else(|| world.merged(id.as_str()).filter(|_| claim.is_some()));
+            // A stale snapshot verifies no gate, so the head states none (18, An error case). The wait gives the time.
             head = Some(match pr {
-                _ if age.is_none() => "forge not read",
+                _ if unread.is_some() => "forge not read",
                 None => "no pull request",
                 Some(p) if p.has_failed() || failed_at(&runs(index, id.as_str())?, &p.head_ref_oid) => "red at head",
                 Some(p) if p.is_green() => "green at head",
@@ -199,6 +205,16 @@ fn group_of(intent: Intent) -> usize {
     GROUPS.iter().position(|(_, _, intents)| intents.contains(&intent)).expect("every intent sits in a group")
 }
 
+/// The owner and release date of the latest released claim of `issue`: who escalated it, and when.
+fn escalation(index: &Index, issue: &Id) -> Result<Option<(String, String)>, Refusal> {
+    let records = index.records(issue.as_str(), Kind::Claim)?;
+    let latest = records.iter().zip(claims(&records)).filter(|(_, c)| c.released.is_some()).max_by_key(|(_, c)| c.at);
+    Ok(latest.and_then(|(r, _)| {
+        let date = release(&r.body).get("to")?.chars().take(10).collect();
+        Some((field(r, "owner")?, date))
+    }))
+}
+
 /// The next act of the node `id` (18, Moving; 21): the tool's own command where the human owes one, else the wait in
 /// words. Every string comes from the intent, its note and the facts; nothing is guessed.
 fn next(id: &str, intent: Intent, note: &str, f: &Facts) -> Next {
@@ -213,8 +229,20 @@ fn next(id: &str, intent: Intent, note: &str, f: &Facts) -> Next {
         // The note names the stamp, with each failed block's waive (21, needs acceptance).
         Intent::NeedsAcceptance => Next::Command(named(note).map_or_else(|| format!("bp stamp {id}"), str::to_string)),
         Intent::NeedsMilestoneApproval => Next::Command(format!("bp transition {id} approved")),
-        Intent::ReAsked => named(note).map_or_else(|| Next::Wait(with("re-asked")), |c| Next::Command(c.to_string())),
-        // An integrity finding names its rerun; an escalation or a missing dependency waits on the human's write.
+        // The waive belongs to the next milestone's stamp, so this row waits, and the decision sits on that milestone's
+        // needs-acceptance row (21, re-asked).
+        Intent::ReAsked => Next::Wait(match (note.split_once("; "), note.find("--waive ")) {
+            (Some((blocks, _)), Some(at)) => {
+                format!("re-asked: {blocks}; waive again at the next stamp with {}", &note[at..])
+            }
+            _ => with("re-asked"),
+        }),
+        // An escalation waits on the human's answer, a write to the issue (21, blocked).
+        Intent::Blocked if note == "escalated" => Next::Wait(match &f.escalated {
+            Some((owner, date)) => format!("escalated by {owner} on {date}: answer in the issue"),
+            None => with("blocked"),
+        }),
+        // An integrity finding names its rerun; a missing or abandoned dependency names its target and waits.
         Intent::Blocked => named(note).map_or_else(|| Next::Wait(with("blocked")), |c| Next::Command(c.to_string())),
         // The triage is a session act (21, triage drift).
         Intent::Drifted => Next::Wait(with("drifted")),
@@ -250,6 +278,12 @@ mod tests {
 
     #[test]
     fn every_intent_sits_in_exactly_one_group() {
+        // `ALL` is a hand list, so tie it to the enum: the TS union ts-rs derives names every variant.
+        let ts = Intent::inline(&ts_rs::Config::new());
+        let variants: Vec<&str> = ts.split('|').map(|v| v.trim().trim_matches('"')).collect();
+        let all: Vec<String> =
+            Intent::ALL.iter().map(|i| serde_json::to_value(i).unwrap().as_str().unwrap().to_string()).collect();
+        assert_eq!(variants, all, "Intent::ALL holds every variant of the enum, in order");
         for intent in Intent::ALL {
             let n = GROUPS.iter().filter(|(_, _, intents)| intents.contains(&intent)).count();
             assert_eq!(n, 1, "{intent:?} sits in {n} groups");
@@ -267,6 +301,7 @@ mod tests {
         let held = Facts { holder: Some("worker".into()), since: Some("2026-10-13".into()), ..Facts::default() };
         let at = Facts { sha: Some("cc8a400e1f".into()), ..Facts::default() };
         let unread = Facts { unread: Some("forge not read since 2026-10-27T09:00:00Z".into()), ..Facts::default() };
+        let escalated = Facts { escalated: Some(("worker".into(), "2026-10-20".into())), ..Facts::default() };
         let none = Facts::default();
         let cmd = |s: &str| Next::Command(s.to_string());
         let wait = |s: &str| Next::Wait(s.to_string());
@@ -287,14 +322,23 @@ mod tests {
                 cmd("bp stamp projects/bp/milestones/m --waive a --reason <why>"),
             ),
             (Intent::NeedsMilestoneApproval, "", &none, cmd("bp transition projects/bp/issues/0411.x approved")),
-            (Intent::ReAsked, "f; bp stamp <next> --waive m/f", &none, cmd("bp stamp <next> --waive m/f")),
+            (
+                Intent::ReAsked,
+                "f, g; bp stamp <next> --waive m/f --reason <why> --waive m/g --reason <why>",
+                &none,
+                wait(
+                    "re-asked: f, g; waive again at the next stamp with \
+                     --waive m/f --reason <why> --waive m/g --reason <why>",
+                ),
+            ),
             (
                 Intent::Blocked,
                 "integrity: r1; rerun bp check projects/bp/project --name integrity",
                 &none,
                 cmd("bp check projects/bp/project --name integrity"),
             ),
-            (Intent::Blocked, "escalated", &held, wait("blocked: escalated")),
+            (Intent::Blocked, "escalated", &escalated, wait("escalated by worker on 2026-10-20: answer in the issue")),
+            (Intent::Blocked, "escalated", &none, wait("blocked: escalated")),
             (Intent::Blocked, "depends on missing x", &none, wait("blocked: depends on missing x")),
             (Intent::Blocked, "run failed at head", &held, wait("blocked: run failed at head")),
             (
@@ -357,7 +401,8 @@ mod tests {
         format!("---\nkind: claim\nunder: projects/bp/issues/{issue}\nfrom: {from}\nowner: worker\n---\n")
     }
 
-    /// A project with one row of six intents, and a snapshot that holds one open pull request.
+    /// A project with rows of seven intents and a snapshot that holds one open pull request, and a project `q` whose
+    /// root design needs shaping.
     fn vault() -> (tempfile::TempDir, Vault) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -375,6 +420,16 @@ mod tests {
         write(root, "projects/bp/issues/0005.review.md", &issue("0005.review", "in-progress", ""));
         write(root, "projects/bp/issues/0005.review/claims/s1.md", &claim("0005.review", &now));
         write(root, "projects/bp/issues/0006.done.md", &issue("0006.done", "resolved", ""));
+        write(root, "projects/bp/issues/0007.escalated.md", &issue("0007.escalated", "open", ""));
+        let released = "\n## Released\n\nto: 2026-10-20T09:00:00Z\nreason: escalated\n";
+        let escalated = claim("0007.escalated", "2026-10-20T08:00:00Z") + released;
+        write(root, "projects/bp/issues/0007.escalated/claims/s1.md", &escalated);
+        // A second project with no milestone and an open concern: its root design needs shaping.
+        write(root, "projects/q/project.md", "---\nkind: project\ntitle: Q\nstatus: active\n---\n");
+        write(root, "projects/q/designs/system.md", "---\nkind: design\ntitle: QS\nstatus: active\n---\n\nBody.\n");
+        let answer = "---\nkind: concern-answer\nunder: projects/q/project\nconcern: c\nstate: open\n\
+                      decided_at: 2026-10-19T10:00:00Z\n---\n";
+        write(root, "projects/q/concerns/c/2026-10-19T10-00-00Z.md", answer);
         let pr = r#"[{"number":1,"headRefName":"bp/0005.review","headRefOid":"abc1234def","statusCheckRollup":[]}]"#;
         write(root, ".bp/forge/bp/open-prs.json", pr);
         write(root, "shared/.keep", "");
@@ -395,6 +450,7 @@ mod tests {
             (Intent::Waiting, 1),
             (Intent::NeedsReview, 1),
             (Intent::NeedsMilestoneApproval, 1),
+            (Intent::Blocked, 1),
         ]);
         assert_eq!(counts(&m), want);
         assert!(matches!(m.forge, Forge::Snapshot) && m.forge_age.is_some_and(|a| a <= FRESH));
@@ -418,10 +474,47 @@ mod tests {
         // Working holds its own intent first, then the others in group order; an empty group stays.
         let working: Vec<Intent> = m.groups[4].rows.iter().map(|r| r.intent).collect();
         assert_eq!(working, [Intent::Working, Intent::Working, Intent::Waiting, Intent::NeedsReview]);
-        assert!(m.groups[0].rows.is_empty() && m.groups[2].rows.is_empty());
+        let blocked = row("0007.escalated");
+        assert_eq!(blocked.wait.as_deref(), Some("escalated by worker on 2026-10-20: answer in the issue"));
+        assert_eq!(blocked.holder, None);
+        assert!(m.groups[0].rows.is_empty() && m.groups[3].rows.len() == 1);
         for r in m.groups.iter().flat_map(|g| &g.rows) {
             assert!(r.command.is_some() != r.wait.is_some(), "{}", r.id);
         }
+    }
+
+    #[test]
+    fn a_stale_snapshot_withholds_the_head() {
+        let (_dir, vault) = vault();
+        let snapshot = vault.root.join(".bp/forge/bp/open-prs.json");
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&snapshot).unwrap().set_modified(hour_ago).unwrap();
+        let index = Index::open(&vault).unwrap();
+        let m = moving(&vault, &index, "bp").unwrap();
+        assert!(m.forge_age.is_some_and(|a| a > FRESH), "{:?}", m.forge_age);
+        let issues: Vec<&MovingRow> = m.groups.iter().flat_map(|g| &g.rows).filter(|r| r.kind == "issue").collect();
+        assert!(!issues.is_empty());
+        for r in issues {
+            assert_eq!(r.head.as_deref(), Some("forge not read"), "{}", r.id);
+        }
+    }
+
+    #[test]
+    fn a_design_row_waits_on_the_session() {
+        let (_dir, vault) = vault();
+        let index = Index::open(&vault).unwrap();
+        let m = moving(&vault, &index, "q").unwrap();
+        assert_eq!(counts(&m), crate::home(&vault, &index, "q").unwrap().intents);
+        let rows: Vec<&MovingRow> = m.groups.iter().flat_map(|g| &g.rows).collect();
+        let [design] = rows.as_slice() else { panic!("one row: {:?}", rows.iter().map(|r| &r.id).collect::<Vec<_>>()) };
+        assert_eq!((design.id.as_str(), design.kind.as_str()), ("projects/q/designs/system", "design"));
+        assert_eq!(design.intent, Intent::NeedsShaping);
+        assert_eq!(
+            design.wait.as_deref(),
+            Some("session shapes: c open; bp walk projects/q/designs/system --for shape")
+        );
+        assert_eq!((design.command.as_deref(), design.holder.as_deref(), design.head.as_deref()), (None, None, None));
+        assert!(m.groups[4].rows.iter().any(|r| r.id == design.id), "needs shaping sits in working");
     }
 
     #[test]

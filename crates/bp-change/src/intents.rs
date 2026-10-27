@@ -796,7 +796,10 @@ mod tests {
         assert_eq!(milestone("m", &rerun).note, waive, "a pass of another text says nothing");
 
         let done = Milestone { reasked: vec!["f".into()], ..status("done") };
-        assert_eq!(milestone("m", &done), Verdict::of(Intent::ReAsked, "f; bp stamp <next> --waive m/f"));
+        assert_eq!(
+            milestone("m", &done),
+            Verdict::of(Intent::ReAsked, "f; bp stamp <next> --waive m/f --reason <why>")
+        );
     }
 
     #[test]
