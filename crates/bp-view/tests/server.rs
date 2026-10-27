@@ -7,7 +7,7 @@ use std::process::{Child, Command, Stdio};
 
 const REPOSITORY: &str = "https://github.invalid/o/r";
 
-/// A vault of one project with a design and a ready issue, in one commit.
+/// A vault of one project with a design and its diagram, a planned milestone and a ready issue, in one commit.
 fn vault() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let files = [
@@ -24,6 +24,8 @@ fn vault() -> tempfile::TempDir {
             "---\nkind: issue\ntitle: A\nstatus: open\nunder: projects/bp/designs/system\n---\n\n## Problem\n\nNone.\n"
                 .into(),
         ),
+        ("projects/bp/designs/system/diagrams/context.html", "<svg></svg>\n".into()),
+        ("projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n".into()),
         // A second project of the same repository, and one of a repository the test clone does not hold.
         (
             "projects/two/project.md",
@@ -116,11 +118,17 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     assert_eq!(server.json("/api/health"), (200, serde_json::json!({ "ok": true })));
     let (status, projects) = server.json("/api/projects");
     assert_eq!((status, projects["rows"][0]["id"].as_str()), (200, Some("projects/bp/project")));
+    let intents = serde_json::json!({ "ready": 1, "needs-milestone-approval": 1 });
+    assert_eq!(projects["rows"][0]["intents"], intents, "the milestone's intent counts beside the issue's");
+    assert_eq!(projects["rows"][0].get("version"), None, "no version record yet");
     let (status, home) = server.json("/api/bp");
     assert_eq!(status, 200, "{home}");
-    assert_eq!(home["nodes"], serde_json::json!({ "design": 1, "issue": 1, "project": 1 }));
-    assert_eq!(home["intents"], serde_json::json!({ "ready": 1 }));
+    assert_eq!(home["nodes"], serde_json::json!({ "design": 1, "issue": 1, "milestone": 1, "project": 1 }));
+    assert_eq!(home["intents"], intents);
     assert_eq!(home["designs"][0]["id"], "projects/bp/designs/system");
+    assert_eq!((home["designs"][0]["diagrams"].as_u64(), home["designs"][0].get("accepted")), (Some(1), None));
+    assert_eq!(home["milestones"][0]["id"], "projects/bp/milestones/m");
+    assert_eq!(home["milestones"][0]["issues"], serde_json::json!({}), "the issue sits under the design");
     assert_eq!(home["forge"], "not read", "no snapshot exists");
     let (status, node) = server.json("/api/node/projects/bp/issues/0001.a");
     assert_eq!((status, node["title"].as_str()), (200, Some("A")));
@@ -136,6 +144,7 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     }
     let (status, page) = server.get("/bp/moving");
     assert!(status == 200 && page.contains("id=\"root\""), "a page route serves the client: {page}");
+    assert_eq!(server.get("/assets/missing.js").0, 404, "an asset the build lacks is no page");
 
     // The log holds the id served, whatever form of it the URL held; a HEAD is no page view.
     for alias in

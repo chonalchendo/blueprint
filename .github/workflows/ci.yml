@@ -24,13 +24,21 @@ jobs:
           toolchain: 1.91.1
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      - run: npm run --prefix web build
+      - run: npm test --prefix web -- --run
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo xtask deps
       - run: cargo xtask lines
       - run: cargo test --workspace
       - run: test -z "$(git status --porcelain -- web/src/types)"
-      - run: cargo build --release -p bp-tool
+      - run: cargo build --release -p bp-tool -p bp-view
 
   dependencies:
     runs-on: ubuntu-latest
@@ -58,9 +66,19 @@ jobs:
         with:
           tool: cargo-zigbuild
       - run: pip install ziglang
-      - run: cargo zigbuild --release -p bp-tool --target x86_64-unknown-linux-musl
-      - name: size cap 10 MB
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      - run: npm run --prefix web build
+      - run: cargo zigbuild --release -p bp-tool -p bp-view --target x86_64-unknown-linux-musl
+      - name: size cap 10 MB each, bp-view with the client inside
         run: |
           size=$(stat -c %s target/x86_64-unknown-linux-musl/release/bp)
           echo "bp: $size bytes"
+          test "$size" -lt 10485760
+          size=$(stat -c %s target/x86_64-unknown-linux-musl/release/bp-view)
+          echo "bp-view: $size bytes"
           test "$size" -lt 10485760

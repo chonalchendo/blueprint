@@ -1,10 +1,11 @@
-//! The client (32, design change 3): the Vite build in `web/dist`, inside the release binary and read from disk in
-//! a debug build. Every path that is not a file of the build is a page route, so it gets `index.html` and the client
-//! routes it. Until the client lands (32, issue 2) the build is absent and a placeholder stands in.
+//! The client (32, design changes 3 and 12): the Vite build in `web/dist`, inside the release binary and read from
+//! disk in a debug build. A path that is not a file of the build is a page route, which gets `index.html` for the
+//! client to route, or an asset the build lacks, which gets 404. A build made before `npm run build` holds no client,
+//! and a placeholder page stands in.
 
 use std::borrow::Cow;
 
-use axum::http::{Uri, header};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 
 /// The build, relative to this crate's manifest directory. `rust-embed` expands no `$VAR` without its
@@ -22,29 +23,46 @@ const PLACEHOLDER: &str = concat!(
     "<body><div id=\"root\"></div><p>bp-view: the client is not built into this binary.</p></body></html>\n",
 );
 
-/// The file `uri` names in the build, else `index.html`, else the placeholder.
+/// The file `uri` names in the build; else `index.html` for a page route; else 404 for an asset the build lacks.
 pub async fn serve(uri: Uri) -> Response {
-    let (kind, body) = pick(uri.path(), |name| Dist::get(name).map(|f| f.data));
-    ([(header::CONTENT_TYPE, kind)], body.into_owned()).into_response()
+    match pick(uri.path(), |name| Dist::get(name).map(|f| f.data)) {
+        Some((kind, body)) => ([(header::CONTENT_TYPE, kind)], body.into_owned()).into_response(),
+        None => (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "no such asset\n")
+            .into_response(),
+    }
 }
 
-/// The media type and the bytes for `path`, from the build that `get` reads: the file itself, else `index.html`, else
-/// the placeholder.
-fn pick(path: &str, get: impl Fn(&str) -> Option<Cow<'static, [u8]>>) -> (&'static str, Cow<'static, [u8]>) {
+/// The media type and the bytes for `path`, from the build that `get` reads: the file itself; else, for a page
+/// route, `index.html`, or the placeholder in a build without the client. `None` is an asset the build lacks, so a
+/// stale script tag gets 404, not a page that parses as no script.
+fn pick(path: &str, get: impl Fn(&str) -> Option<Cow<'static, [u8]>>) -> Option<(&'static str, Cow<'static, [u8]>)> {
     let path = path.trim_start_matches('/');
-    let file = Some(path)
-        .filter(|p| !p.is_empty())
-        .and_then(|p| get(p).map(|f| (f, p)))
-        .or_else(|| get("index.html").map(|f| (f, "index.html")));
-    match file {
-        Some((f, name)) => (content_type(name), f),
-        None => ("text/html; charset=utf-8", Cow::Borrowed(PLACEHOLDER.as_bytes())),
+    if let Some(file) = Some(path).filter(|p| !p.is_empty()).and_then(&get) {
+        return Some((content_type(path), file));
     }
+    if is_asset(path) {
+        return None;
+    }
+    Some(match get("index.html") {
+        Some(f) => (content_type("index.html"), f),
+        None => ("text/html; charset=utf-8", Cow::Borrowed(PLACEHOLDER.as_bytes())),
+    })
+}
+
+/// A path names an asset when it sits under `assets/`, where Vite writes, or ends in an extension the build writes.
+/// Any other dot is a page route's: an id such as `projects/bp/issues/0411.x` holds one.
+fn is_asset(path: &str) -> bool {
+    let last = path.rsplit('/').next().unwrap_or(path);
+    path.starts_with("assets/") || last.rsplit_once('.').is_some_and(|(_, ext)| content_type_of(ext).is_some())
 }
 
 /// The media type of a build file, by its extension: the few kinds a Vite build writes.
 fn content_type(name: &str) -> &'static str {
-    match name.rsplit_once('.').map_or("", |(_, ext)| ext) {
+    name.rsplit_once('.').and_then(|(_, ext)| content_type_of(ext)).unwrap_or("application/octet-stream")
+}
+
+fn content_type_of(ext: &str) -> Option<&'static str> {
+    Some(match ext {
         "html" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",
@@ -54,8 +72,9 @@ fn content_type(name: &str) -> &'static str {
         "woff" => "font/woff",
         "png" => "image/png",
         "ico" => "image/x-icon",
-        _ => "application/octet-stream",
-    }
+        "map" | "txt" => "text/plain; charset=utf-8",
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -71,17 +90,25 @@ mod tests {
     }
 
     #[test]
-    fn the_placeholder_stands_in_only_for_an_empty_build() {
+    fn a_page_route_gets_the_page_and_a_missing_asset_404() {
         let empty = build(&[]);
-        for path in ["/", "/bp/moving", "/assets/x.js"] {
-            assert_eq!(pick(path, &empty), ("text/html; charset=utf-8", Cow::Borrowed(PLACEHOLDER.as_bytes())));
+        for path in ["/", "/bp/moving", "/node/projects/bp/issues/0411.x"] {
+            assert_eq!(pick(path, &empty), Some(("text/html; charset=utf-8", Cow::Borrowed(PLACEHOLDER.as_bytes()))));
         }
         let client = build(&[("index.html", "<script type=\"module\">"), ("assets/a.js", "let a")]);
-        for path in ["/", "/bp/moving", "/assets/nope.js"] {
-            let (kind, body) = pick(path, &client);
+        for path in ["/", "/bp/moving", "/node/projects/bp/issues/0411.x", "/node/shared/conventions/convention.prose"]
+        {
+            let (kind, body) = pick(path, &client).expect(path);
             assert_eq!((kind, &*body), ("text/html; charset=utf-8", &b"<script type=\"module\">"[..]), "{path}");
         }
-        assert_eq!(pick("/assets/a.js", &client), ("text/javascript; charset=utf-8", Cow::Borrowed(&b"let a"[..])));
+        assert_eq!(
+            pick("/assets/a.js", &client),
+            Some(("text/javascript; charset=utf-8", Cow::Borrowed(&b"let a"[..])))
+        );
+        for path in ["/assets/nope.js", "/assets/x", "/favicon.ico", "/bp/x.css"] {
+            assert_eq!(pick(path, &client), None, "{path}");
+            assert_eq!(pick(path, &empty), None, "{path}");
+        }
     }
 
     /// The derive names `FOLDER` with no `$`, so `rust-embed` resolves it from the manifest directory to the

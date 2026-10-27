@@ -5,7 +5,7 @@
 pub enum Route {
     /// `/api/health`: the server answers.
     Health,
-    /// `/api/projects`: the `list project` object.
+    /// `/api/projects`: the `list project` rows, each with its version and intents.
     Projects,
     /// `/api/<project>`: the project's home.
     Home(String),
