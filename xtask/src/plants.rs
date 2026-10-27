@@ -12,12 +12,12 @@
 //! admits no other design slug. A `two-hop` is a learning that cites a file which names, in backticks, the file that
 //! holds the truth.
 //!
-//! The planter walks the classes in turn, measurement, design, two-hop, and takes each class's next candidate. It
-//! settles the candidate at the base and keeps it, or writes one line to `discarded.txt`: `<candidate id> <reason>`
+//! The planter walks the classes in turn, measurement, design, two-hop, and takes each class's next plant, so a
+//! class that discards more candidates still gets its share. It settles each candidate at the base and keeps it, or writes one line to `discarded.txt`: `<candidate id> <reason>`
 //! and free text. The reason is `no-command` (no command reproduces the figure), `false-at-base` (the command's output
 //! lacks the true word or holds the flip), `not-in-clone` (a named file the clone does not hold) or `indistinct`. A
 //! candidate is indistinct when the cited file holds the true word, when its settle target is already planted in any
-//! `xtask/evals/bp-research-*` set, or when its title holds fewer than two nouns that a search can find alone. A noun
+//! `xtask/evals/bp-research-*` set, when its sentence has no clause boundary ([`crate::plants_text`]), or when its title holds fewer than two nouns that a search can find alone. A noun
 //! is a word of the seed's title, of four letters or more, that the titles and ids of `$BP_VAULT` and of the seeds
 //! kept so far hold at most three times; `bp search` ranks ids and titles first.
 //!
@@ -153,6 +153,8 @@ struct Kept {
     control: String,
     title: String,
     true_title: String,
+    /// The question of this plant alone, without the row shape.
+    question: String,
 }
 
 /// Walks the classes in turn to `--count` kept plants and writes the set.
@@ -176,22 +178,21 @@ fn plant(a: &Args, args: &[String], root: &Path, clone: &Path, base: &str, pools
             turn += 1;
             continue;
         };
-        turn += 1;
-        match judge(&c, clone, &held, &words.0) {
-            Ok(nouns) => {
-                let (title, true_title) = (title(&c.flipped, &c.unless[0]), title(&c.claim, &c.matches[0]));
-                let dir = if c.class == "design" { "projects/bp/designs/components" } else { "shared/learnings" };
-                let node = unique(&mut ids, dir, &title);
-                let control = unique(&mut ids, dir, &true_title);
-                for t in [&title, &true_title] {
+        match judge(c, clone, &held, &words.0) {
+            Ok(mut k) => {
+                let dir = if k.c.class == "design" { "projects/bp/designs/components" } else { "shared/learnings" };
+                k.node = unique(&mut ids, dir, &k.title);
+                k.control = unique(&mut ids, dir, &k.true_title);
+                for t in [&k.title, &k.true_title] {
                     for w in title_words(t) {
                         *words.0.entry(w).or_default() += 1;
                     }
                 }
-                held.extend(seed_of(&c).target());
-                kept.push(Kept { c, nouns, node, control, title, true_title });
+                held.extend(seed_of(&k.c).target());
+                kept.push(k);
+                turn += 1;
             }
-            Err((reason, why)) => writeln!(discarded, "{} {reason} {why}", c.id)?,
+            Err((id, reason, why)) => writeln!(discarded, "{id} {reason} {why}")?,
         }
     }
     if kept.len() < a.count {
@@ -236,13 +237,33 @@ fn plant(a: &Args, args: &[String], root: &Path, clone: &Path, base: &str, pools
     Ok(())
 }
 
-/// The nouns of a candidate the planter keeps, or the reason it discards it.
+/// The plant a candidate makes, its node ids still to give, or the reason the planter discards it.
 fn judge(
-    c: &Candidate,
+    c: Candidate,
     clone: &Path,
     held: &BTreeSet<String>,
     words: &BTreeMap<String, usize>,
-) -> Result<Vec<String>, (&'static str, String)> {
+) -> Result<Kept, (String, &'static str, String)> {
+    let id = c.id.clone();
+    sound(&c, clone, held).map_err(|(reason, why)| (id.clone(), reason, why))?;
+    let t = crate::plants_text::text(&c).map_err(|why| (id.clone(), "indistinct", why))?;
+    let nouns = nouns(&t.clause, &c, words);
+    if nouns.len() < 2 {
+        return Err((id, "indistinct", "fewer than two nouns a search finds alone".into()));
+    }
+    let (title, true_title, question) = (t.title, t.true_title, t.question);
+    let k = Kept { c, nouns, node: String::new(), control: String::new(), title, true_title, question };
+    let (genre, class, nouns) = (k.c.genre.into(), k.c.class.into(), k.nouns.clone());
+    let seed = Seed { text: format!("---\n{}", seed_text(&k, false)), genre, class, nouns, ..seed_of(&k.c) };
+    match crate::plants_text::breaks(&k.question, &seed) {
+        Some(why) => Err((id, "indistinct", why)),
+        None => Ok(k),
+    }
+}
+
+/// Why a candidate cannot be a plant before its words are read: no sentence, no command, false at the base, a
+/// cited file that holds the truth, or a target already planted.
+fn sound(c: &Candidate, clone: &Path, held: &BTreeSet<String>) -> Result<(), (&'static str, String)> {
     if c.genre.is_empty() {
         return Err((
             "not-in-clone",
@@ -267,11 +288,7 @@ fn judge(
         None => return Err(("no-command", "the command names no .rs or .md path".into())),
         Some(_) => {}
     }
-    let nouns = nouns(&title(&c.flipped, &c.unless[0]), c, words);
-    if nouns.len() < 2 {
-        return Err(("indistinct", "fewer than two nouns a search finds alone".into()));
-    }
-    Ok(nouns)
+    Ok(())
 }
 
 /// The settle part of a candidate, as a fixture group carries it.
@@ -279,12 +296,12 @@ fn seed_of(c: &Candidate) -> Seed {
     Seed { settled_by: c.settle.clone(), matches: c.matches.clone(), unless: c.unless.clone(), ..Seed::default() }
 }
 
-/// Up to three words of `title` that the vault's titles and ids, and the seeds kept so far, hold at most [`RARE`]
-/// times, rarest first; none is the true or the flipped word.
-fn nouns(title: &str, c: &Candidate, words: &BTreeMap<String, usize>) -> Vec<String> {
+/// Up to three words of the subject clause that the vault's titles and ids, and the seeds kept so far, hold at most
+/// [`RARE`] times, rarest first; none is the true or the flipped word.
+fn nouns(clause: &str, c: &Candidate, words: &BTreeMap<String, usize>) -> Vec<String> {
     let tokens: BTreeSet<String> = c.matches.iter().chain(&c.unless).flat_map(|w| title_words(w)).collect();
     let mut seen = BTreeSet::new();
-    let mut found: Vec<(usize, usize, String)> = title
+    let mut found: Vec<(usize, usize, String)> = clause
         .split(|ch: char| !ch.is_alphanumeric())
         .enumerate()
         .filter(|(_, w)| w.len() >= 4 && w.chars().all(char::is_alphabetic))
@@ -326,30 +343,6 @@ fn vault_words(vault: &Path) -> Result<(BTreeMap<String, usize>, BTreeSet<String
     Ok((counts, ids))
 }
 
-/// The clause of `sentence` that holds `word`, when it has four to fourteen words; else at most twelve words around
-/// it. No backticks, no closing stop.
-fn title(sentence: &str, word: &str) -> String {
-    let plain = sentence.replace('`', "");
-    let first = word.split_whitespace().next().unwrap_or(word);
-    let bare = |w: &str| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-').to_string();
-    let clauses = plain.split([',', ';', ':', '(', ')']).map(str::trim).filter(|c| !c.is_empty());
-    let clause = clauses
-        .filter(|c| (4..=14).contains(&c.split_whitespace().count()))
-        .find(|c| c.split_whitespace().any(|w| bare(w) == first));
-    let t = clause.map_or_else(
-        || {
-            let words: Vec<&str> = plain.split_whitespace().collect();
-            let at = words.iter().position(|w| bare(w) == first).unwrap_or(0);
-            let from = at.saturating_sub(7).min(words.len().saturating_sub(12));
-            words[from..words.len().min(from + 12)].join(" ")
-        },
-        str::to_string,
-    );
-    let t = t.trim_matches(['.', ',', ';', ':', '(', ')', ' ']);
-    let mut c = t.chars();
-    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
-}
-
 /// `<dir>/<slug of title>`, made unique against `ids`, which then holds it.
 fn unique(ids: &mut BTreeSet<String>, dir: &str, title: &str) -> String {
     let mut slug = String::new();
@@ -373,26 +366,6 @@ fn unique(ids: &mut BTreeSet<String>, dir: &str, title: &str) -> String {
     id
 }
 
-/// The question of one plant, without the row shape: the fact in the words of its nouns, the source kind unnamed.
-fn ask(genre: &str, nouns: &[String]) -> String {
-    let words = match nouns {
-        [a, b] => format!("{a} and {b}"),
-        [a, b, c] => format!("{a}, {b} and {c}"),
-        _ => nouns.join(", "),
-    };
-    match genre {
-        "Number" => format!(
-            "In the Blueprint project at its current commit, what figure goes with {words}? Give the number and its source."
-        ),
-        "Negation" => format!(
-            "In the Blueprint project at its current commit, what is the rule on {words}, and does it hold or not? Give the rule and its source."
-        ),
-        _ => format!(
-            "In the Blueprint project at its current commit, which identifier goes with {words}? Give the name and its source."
-        ),
-    }
-}
-
 /// The seed node of a kept plant: the flipped claim, or with `truth` the true one, and the URL of its source kind.
 fn seed_text(k: &Kept, truth: bool) -> String {
     let c = &k.c;
@@ -413,7 +386,7 @@ fn seed_text(k: &Kept, truth: bool) -> String {
 }
 
 fn plant_text(group: &[&Kept], seed: u64, base: &str) -> String {
-    let parts: Vec<String> = group.iter().map(|k| ask(k.c.genre, &k.nouns)).collect();
+    let parts: Vec<&str> = group.iter().map(|k| k.question.as_str()).collect();
     let question = if let [one, two] = parts.as_slice() {
         format!("This question has two parts. First: {one} Second: {two} {ROW_SHAPE}")
     } else {
@@ -447,7 +420,7 @@ fn plant_text(group: &[&Kept], seed: u64, base: &str) -> String {
 }
 
 fn control_text(k: &Kept, base: &str) -> String {
-    let question = format!("{} {ROW_SHAPE}", ask(k.c.genre, &k.nouns));
+    let question = format!("{} {ROW_SHAPE}", k.question);
     format!(
         "kind: control\nbase: {base}\nquestion: {question}\nplant: {}\nnouns: {}\n---\n{}",
         k.control,
@@ -474,6 +447,12 @@ mod tests {
             kind: "doc",
             claim: "It stops after 160 tested candidates.".into(),
             flipped: "It stops after 320 tested candidates.".into(),
+            token: "160".into(),
+            at: 15,
+            swap: "320".into(),
+            form: "clause",
+            subject: String::new(),
+            unit: String::new(),
             matches: vec!["160".into()],
             unless: vec!["320".into()],
             settle: "grep -nF 'It stops after' xtask/src/b.rs".into(),
@@ -482,10 +461,11 @@ mod tests {
 
     fn kept(class: &'static str, ids: &mut BTreeSet<String>) -> Kept {
         let c = candidate(class);
-        let (title, true_title) = (title(&c.flipped, "320"), title(&c.claim, "160"));
+        let t = crate::plants_text::text(&c).unwrap();
+        let (title, true_title, question) = (t.title, t.true_title, t.question);
         let dir = if class == "design" { "projects/bp/designs/components" } else { "shared/learnings" };
         let (node, control) = (unique(ids, dir, &title), unique(ids, dir, &true_title));
-        Kept { c, nouns: vec!["stops".into(), "tested".into()], node, control, title, true_title }
+        Kept { c, nouns: vec!["stops".into(), "tested".into()], node, control, title, true_title, question }
     }
 
     #[test]
@@ -519,7 +499,8 @@ mod tests {
 
     #[test]
     fn the_name_flip_draws_from_the_same_file_and_not_the_sentence() {
-        let file = "//! `bp-design` and `bp-review` load `ROLE_CAP`.\nconst X: u8 = 1; // `walk_for`\n";
+        let file =
+            "//! `bp-design` and `bp-review` load `ROLE_CAP`.\n/// `walk_for`\nconst X: &str = \"`in_a_literal`\";\n";
         let sentence = "The ledger names `bp-design` and `ROLE_CAP`.";
         let mut seen = BTreeSet::new();
         for r in 0..8 {
@@ -527,7 +508,7 @@ mod tests {
             assert!(file.contains(&format!("`{other}`")) && !sentence.contains(&other), "{other}");
             seen.insert(other);
         }
-        assert_eq!(seen, BTreeSet::from(["bp-review".to_string(), "walk_for".to_string()]));
+        assert_eq!(seen, BTreeSet::from(["bp-review".to_string(), "walk_for".to_string()]), "prose only, no literal");
         assert_eq!(flip_name("`bp-design`", "`bp-design`", 0), None, "no other name in the file");
     }
 
@@ -634,9 +615,9 @@ mod tests {
         }
         let shapeless = text.replace(&format!(" {ROW_SHAPE}"), "");
         assert!(Fixture::parse("x", &shapeless).is_err(), "a question without the row shape");
-        let named = text.replace("what figure goes with", "what does It stops after 320 tested candidates say of");
+        let named = text.replace("what is the figure?", "what is the figure in It stops after 320 tested candidates?");
         assert!(Fixture::parse("x", &named).is_err(), "a question that names the seed's title");
-        let id = text.replace("what figure goes with", &format!("what does {} say of", k.node));
+        let id = text.replace("what is the figure?", &format!("what is the figure in {}?", k.node));
         assert!(Fixture::parse("x", &id).is_err(), "a question that names the seed's node id");
         assert!(Fixture::parse("x", &text.replace("nouns: stops tested", "nouns: stops absent")).is_err());
         assert!(Fixture::parse("x", &text.replace("genre: Number", "genre: Size")).is_err());
@@ -661,5 +642,76 @@ mod tests {
         assert_eq!(p.target().as_deref(), Some("xtask/src/b.rs"));
         assert!(r.question.ends_with(ROW_SHAPE) && p.nouns.iter().all(|n| r.question.contains(n.as_str())));
         assert!(p.text.contains("https://"), "a seed names a URL");
+    }
+
+    #[test]
+    fn a_backticked_name_is_a_whole_token_never_a_prefix() {
+        let spans = |t: &str| crate::plants_flip::spans(t).into_iter().map(|s| s.1.to_string()).collect::<Vec<_>>();
+        assert_eq!(spans("`a b` then `ok_one`, and `two_x`"), ["ok_one", "two_x"]);
+        assert_eq!(spans("a stray ` tick, then `whole_token`"), ["whole_token"]);
+        assert_eq!(flip_name("//! `bp-design` and `bp-design-x`", "`bp-design-x`", 0), None, "a prefix is no other");
+        assert!(
+            !crate::plants_flip::ident("Stop:") && crate::plants_flip::ident("bp_vault::Walk"),
+            "a label is no name"
+        );
+    }
+
+    #[test]
+    fn the_question_and_title_say_the_fact_in_the_sentences_words() {
+        let mut c = candidate("design");
+        c.claim = "A chunk keeps the start-up small (#40: about 45 s each inside one call); it holds 8 candidates of one package.".into();
+        c.at = c.claim.find(" 8 ").unwrap() + 1;
+        (c.token, c.swap) = ("8".into(), "16".into());
+        let t = crate::plants_text::text(&c).unwrap();
+        assert_eq!(t.title, "It holds 16 candidates of one package");
+        assert_eq!(t.true_title, "It holds 8 candidates of one package");
+        assert!(
+            t.question.starts_with("\"it holds ___ candidates of one package\": what is the figure?"),
+            "{}",
+            t.question
+        );
+        let mut joined = c.clone();
+        joined.claim = joined.claim.replace("); it", "), so it");
+        joined.at += 3;
+        assert!(crate::plants_text::text(&joined).is_err(), "a clause that opens with `so` is a fragment");
+        let mut k = candidate("design");
+        (k.form, k.unit, k.subject) = ("const", "GAP".into(), "the label module of the bp-diagram crate".into());
+        k.claim = "`GAP` in the label module of the bp-diagram crate is 8 (the stroke stays this far: 6 px).".into();
+        k.at = k.claim.find(" 8 ").unwrap() + 1;
+        (k.token, k.swap) = ("8".into(), "9".into());
+        let t = crate::plants_text::text(&k).unwrap();
+        assert_eq!(t.title, "GAP in the label module of the bp-diagram crate is 9", "cut at ` (`, never inside it");
+        assert!(t.question.starts_with("What is the value of `GAP` in the label module of the bp-diagram crate"));
+        c.claim = format!("{} (", "word ".repeat(30));
+        c.at = 0;
+        c.token = "word".into();
+        assert_eq!(crate::plants_text::text(&c).err().as_deref(), Some("no clause boundary"));
+    }
+
+    #[test]
+    fn verify_refuses_a_cut_title_an_unbalanced_bracket_or_an_absent_noun() {
+        let k = kept("design", &mut BTreeSet::new());
+        let text = plant_text(&[&k], 7, "b");
+        let check = |t: &str| {
+            let r = Research::parse("p", t).unwrap().unwrap();
+            crate::plants_text::breaks(&r.question, &r.plants[0])
+        };
+        assert_eq!(check(&text), None);
+        let cut = text
+            .replace("title: \"It stops after 320 tested candidates\"", "title: \"It stops after 320 tested candid\"");
+        assert!(check(&cut).unwrap().contains("no clause"), "a mid-word cut");
+        let open = text.replace(
+            "title: \"It stops after 320 tested candidates\"",
+            "title: \"It stops (after 320 tested candidates\"",
+        );
+        assert!(check(&open).is_some(), "an unbalanced bracket");
+        let joined = text.replace("title: \"It stops", "title: \"And it stops");
+        assert!(check(&joined).is_some(), "a title that opens with a joining word");
+        let asked = text.replace("___ tested candidates", "___ tested items");
+        assert!(check(&asked).is_some(), "a question that drops the clause");
+        let mut r = Research::parse("p", &text).unwrap().unwrap();
+        r.plants[0].nouns.push("absent".into());
+        let why = crate::plants_text::breaks(&r.question, &r.plants[0]).unwrap();
+        assert!(why.contains("`absent`"), "a noun absent from the question: {why}");
     }
 }

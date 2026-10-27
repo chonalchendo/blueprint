@@ -24,7 +24,8 @@ use anyhow::Result;
 use crate::eval_sandbox::capture;
 use crate::lines::non_test;
 use crate::mutants_walk::splitmix;
-use crate::plants_flip::{backticked, flip, flip_number, group, ident};
+use crate::plants_count::{measurements, module};
+use crate::plants_flip::{flip, flip_number, group, ident, spans};
 
 /// One URL per source kind, on its topic, that the clone at the base does not hold (`--verify` checks it). A seed
 /// names it, so a report that repeats the seed has an unread cite to count (31, design change 2).
@@ -82,6 +83,15 @@ pub struct Candidate {
     pub kind: &'static str,
     pub claim: String,
     pub flipped: String,
+    /// The true token, its byte offset in `claim`, and the text the flip puts in its place.
+    pub token: String,
+    pub at: usize,
+    pub swap: String,
+    /// How the question asks: `count` (how many `unit` does `subject` have), `const` (the value of the constant
+    /// `unit` in `subject`), or `clause` (the sentence's own clause with a blank).
+    pub form: &'static str,
+    pub subject: String,
+    pub unit: String,
     pub matches: Vec<String>,
     pub unless: Vec<String>,
     /// Empty when no command reproduces the figure.
@@ -160,6 +170,12 @@ impl Candidate {
             kind: "doc",
             claim: String::new(),
             flipped: String::new(),
+            token: String::new(),
+            at: 0,
+            swap: String::new(),
+            form: "clause",
+            subject: String::new(),
+            unit: String::new(),
             matches: empty(),
             unless: empty(),
             settle: String::new(),
@@ -174,85 +190,7 @@ impl Candidate {
     }
 }
 
-/// The counts: each crate's Rust files and `#[test]` functions, each module's lines, each bundle directory's
-/// markdown files. The settle command is the count; the planter runs it at the base for the figure.
-fn measurements(clone: &Path, files: &[String]) -> Vec<Candidate> {
-    let mut out = Vec::new();
-    let mut crates = BTreeSet::new();
-    let mut bundles = BTreeSet::new();
-    for f in files {
-        let parts: Vec<&str> = f.split('/').collect();
-        match parts.as_slice() {
-            ["crates", c, ..] => {
-                crates.insert(format!("crates/{c}"));
-            }
-            ["xtask", ..] => {
-                crates.insert("xtask".to_string());
-            }
-            ["bundle", d, _, ..] => {
-                bundles.insert(format!("bundle/{d}"));
-            }
-            _ => {}
-        }
-        let stem = Path::new(f).file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-        let krate = if parts[0] == "crates" { parts[1] } else { parts[0] };
-        if rust(f) && !["lib", "main", "mod"].contains(&stem) {
-            let what = format!("The {} module of the {krate} crate has", stem.replace('_', " "));
-            out.push(count(
-                clone,
-                format!("measurement:lines:{f}"),
-                f,
-                "lines",
-                &format!("wc -l < {f}"),
-                &what,
-                "lines",
-            ));
-        }
-    }
-    for c in &crates {
-        let name = c.rsplit('/').next().unwrap_or(c);
-        let cmd = format!("git ls-files '{c}/src/*.rs' | wc -l");
-        let what = format!("The {name} crate has");
-        out.push(count(clone, format!("measurement:files:{c}"), c, "files", &cmd, &what, "Rust source files"));
-        let cmd = format!("git grep -c '#\\[test\\]' -- '{c}/*.rs' | awk -F: '{{n += $2}} END {{print n}}'");
-        out.push(count(clone, format!("measurement:tests:{c}"), c, "tests", &cmd, &what, "test functions"));
-    }
-    for d in &bundles {
-        let cmd = format!("git ls-files '{d}/*.md' | wc -l");
-        let what = format!("The bundle's {} directory holds", d.rsplit('/').next().unwrap_or(d));
-        out.push(count(clone, format!("measurement:md:{d}"), d, "bundle-files", &cmd, &what, "markdown files"));
-    }
-    out
-}
-
-/// A count candidate: the command run at the base gives the figure, and the claim states it with no path.
-fn count(clone: &Path, id: String, source: &str, kind: &'static str, cmd: &str, what: &str, things: &str) -> Candidate {
-    let out = capture(Command::new("bash").args(["-c", cmd]).current_dir(clone)).unwrap_or_default();
-    let n: Option<u64> = out.trim().parse().ok().filter(|n| *n > 0);
-    let mut state = n.unwrap_or(0) ^ id.len() as u64;
-    let (claim, flipped, token, flip) = match n {
-        Some(n) => {
-            let f = flip_number(n, splitmix(&mut state));
-            (format!("{what} {n} {things}."), format!("{what} {f} {things}."), n.to_string(), f.to_string())
-        }
-        None => (String::new(), String::new(), String::new(), String::new()),
-    };
-    Candidate {
-        id,
-        class: "measurement",
-        genre: "Number",
-        source: source.into(),
-        cited: None,
-        kind,
-        claim,
-        flipped,
-        matches: vec![token],
-        unless: vec![flip],
-        settle: if n.is_some() { cmd.to_string() } else { String::new() },
-    }
-}
-
-fn rust(path: &str) -> bool {
+pub fn rust(path: &str) -> bool {
     Path::new(path).extension().is_some_and(|e| e == "rs")
 }
 
@@ -263,7 +201,7 @@ pub fn source_file(path: &str) -> bool {
 
 /// The file names that `text` names in backticks: `.rs` or `.md`, a trailing `:<line>` dropped.
 fn siblings(text: &str) -> BTreeSet<String> {
-    backticked(text)
+    spans(text)
         .into_iter()
         .map(|(_, s)| s.split(':').next().unwrap_or(s).trim_start_matches("./"))
         .filter(|s| source_file(s) && !s.contains(' '))
@@ -318,7 +256,10 @@ fn sentences(path: &str, text: &str, state: &mut u64) -> Vec<Candidate> {
                 }
                 let line = raw[no - 1];
                 let r = splitmix(state);
-                let Some((flipped, matches, unless)) = flip(sentence, at, token, genre, text, r) else { continue };
+                let Some((flipped, swap, matches, unless)) = flip(sentence, at, token, genre, text, r) else {
+                    continue;
+                };
+                let lead = sentence.len() - sentence.trim_start().len();
                 out.push(Candidate {
                     id: format!("{path}:{no}:{genre}:{token}"),
                     class: "design",
@@ -328,6 +269,12 @@ fn sentences(path: &str, text: &str, state: &mut u64) -> Vec<Candidate> {
                     kind,
                     claim: sentence.trim().to_string(),
                     flipped: flipped.trim().to_string(),
+                    token: token.to_string(),
+                    at: at - lead,
+                    swap,
+                    form: "clause",
+                    subject: String::new(),
+                    unit: String::new(),
                     matches,
                     unless,
                     settle: settle(text, line, token, path),
@@ -400,7 +347,7 @@ fn tokens(sentence: &str) -> Vec<(usize, &str, &'static str)> {
             out.push((at, core, "Negation"));
         }
     }
-    for (at, span) in backticked(sentence) {
+    for (at, span) in spans(sentence) {
         if ident(span) {
             out.push((at, span, "Name"));
         }
@@ -460,6 +407,7 @@ fn constants(path: &str, text: &str) -> Vec<Candidate> {
         let tail = if first.is_empty() { ".".to_string() } else { format!(" ({}).", lower_first(first)) };
         let sep = value.chars().find(|c| *c == '_');
         let f = group(flip_number(n, n ^ (i as u64)), sep);
+        let lead = format!("`{name}` in {} is ", module(path));
         out.push(Candidate {
             id: format!("{path}:{}:Number:{name}", i + 1),
             class: "design",
@@ -467,8 +415,14 @@ fn constants(path: &str, text: &str) -> Vec<Candidate> {
             source: path.into(),
             cited: None,
             kind: "const",
-            claim: format!("`{name}` is {value}{tail}"),
-            flipped: format!("`{name}` is {f}{tail}"),
+            claim: format!("{lead}{value}{tail}"),
+            flipped: format!("{lead}{f}{tail}"),
+            token: value.to_string(),
+            at: lead.len(),
+            swap: f.clone(),
+            form: "const",
+            subject: module(path),
+            unit: name.to_string(),
             matches: vec![value.to_string()],
             unless: vec![f],
             settle: format!("grep -nF 'const {name}:' {path}"),

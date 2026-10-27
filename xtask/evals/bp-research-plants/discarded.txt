@@ -1,243 +1,438 @@
 measurement:lines:crates/bp-tool/src/check.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/check.rs:4:Number:3 false-at-base the settle output holds the unless word `4`
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:6:Number:45 indistinct fewer than two nouns a search finds alone
-design:crates/bp-read/src/objects.rs:2:Name:serde_json::to_value indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:1:Negation:is indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-diagram/src/layout.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/mutants_walk.rs:6:Number:45 indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_grade.rs>bundle/roles/bp-worker.md:9:Name:Skill: false-at-base the settle output holds the unless word `Stop:`
-measurement:lines:crates/bp-tool/src/waiver.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/editorial.rs:4:Name:bp_diagram::editorial_change indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-install/tests/ledger.rs>crates/bp-tool/tests/bundle.rs:1:Name:BP_BUNDLE indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-vault/src/rename.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-vault/src/write.rs:9:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:55:Number:NEAR indistinct the cited file holds the true word
-measurement:lines:crates/bp-diagram/src/svg.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-install/tests/ledger.rs:4:Negation:is no-command no fragment of the line is the file's alone
-two-hop:crates/bp-diagram/src/search.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/search.rs names a file the clone does not hold
-measurement:lines:crates/bp-vault/tests/write_path.rs indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-tool/src/delta.rs>m5-design-evidence.md not-in-clone crates/bp-tool/src/delta.rs names a file the clone does not hold
-measurement:lines:crates/bp-install/src/hashes.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/eval.rs:17:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-tool/src/diagram.rs>m5-interactive-architecture.md not-in-clone crates/bp-tool/src/diagram.rs names a file the clone does not hold
-measurement:lines:crates/bp-tool/src/diagram.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-vault/src/write.rs:5:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:10:Number:29 indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-read/src/snapshot.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/route.rs:11:Number:EDGE indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/main.rs>xtask/src/mutants.rs:21:Negation:is indistinct the target xtask/src/mutants.rs is planted already
-design:crates/bp-install/tests/ledger.rs:15:Number:ROUTE_CAP indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/forge.rs>xtask/src/gh.rs:7:Negation:is indistinct fewer than two nouns a search finds alone
-measurement:files:crates/bp-view indistinct fewer than two nouns a search finds alone
-design:crates/bp-install/src/hashes.rs:6:Name:bundle_mismatch indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-tool/tests/bundle.rs>SKILL.md not-in-clone crates/bp-tool/tests/bundle.rs names a file the clone does not hold
-measurement:lines:xtask/tests/stage.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/tests/bundle.rs:1:Name:BP_BUNDLE indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_kills.rs>NN-*.md not-in-clone xtask/src/eval_kills.rs names a file the clone does not hold
-measurement:lines:crates/bp-diagram/src/spec/items.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/tests/machines.rs:3:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-install/tests/ledger.rs>crates/bp-tool/tests/bundle.rs:17:Number:TOKENS indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-vault/src/emit.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/claim.rs:4:Name:in-progress indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:22:Number:160 indistinct the target xtask/src/mutants.rs is planted already
-measurement:lines:xtask/tests/deps.rs indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:8:Number:7 false-at-base the settle output holds the unless word `8`
-measurement:lines:crates/bp-tool/tests/intents.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/rename.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:20:Number:300 indistinct the target xtask/src/mutants.rs is planted already
-measurement:lines:crates/bp-tool/src/record.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/eval_fixture.rs:4:Name:bp-complete indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:19:Number:CHUNK indistinct the cited file holds the true word
-measurement:lines:xtask/src/lines.rs indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:4:Name:bp-complete indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-tool/src/redraw.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/eval.rs:1:Negation:never indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_grade.rs>bundle/roles/bp-worker.md:9:Name:Forbidden: false-at-base the settle output holds the unless word `Stop:`
-measurement:lines:crates/bp-read/src/objects.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/seq.rs:14:Number:TOP indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:19:Number:8 indistinct the cited file holds the true word
-measurement:lines:crates/bp-diagram/src/seq.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/stamp.rs:5:Name:Bp-Version indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_fixture.rs>xtask/src/lines.rs:3:Negation:is indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-tool/src/editorial.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/seq.rs:16:Number:ROW indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/lines.rs>build.rs not-in-clone xtask/src/lines.rs names a file the clone does not hold
-measurement:lines:crates/bp-diagram/src/editorial.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-install/src/lib.rs:4:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_grade.rs>bundle/roles/bp-reviewer.md:9:Name:Skill: false-at-base the settle output holds the unless word `Stop:`
-measurement:lines:xtask/src/eval_agent.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/scene.rs:1:Name:Geometry indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-view/src/client.rs>build.rs not-in-clone crates/bp-view/src/client.rs names a file the clone does not hold
-measurement:lines:xtask/src/gh.rs indistinct fewer than two nouns a search finds alone
+design:crates/bp-view/src/forge.rs:1:Negation:is indistinct fewer than two nouns a search finds alone
 design:crates/bp-read/src/intents.rs:2:Name:bp-change indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_grade.rs>bundle/roles/bp-worker.md:9:Name:Node: false-at-base the settle output holds the unless word `Budget:`
-design:crates/bp-tool/src/delta.rs:6:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:2:Name:bp-review indistinct the cited file holds the true word
-measurement:lines:crates/bp-diagram/src/rules.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/tests/large.rs:3:Name:fc5178f indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>.github/pull_request_template.md:7:Number:20 indistinct the cited file holds the true word
-measurement:lines:crates/bp-tool/tests/delta_base.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/row.rs:1:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:25:Name:bp-eval indistinct the target xtask/src/mutants.rs is planted already
-measurement:lines:xtask/tests/mutants.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/editorial.rs:2:Name:not_editorial indistinct fewer than two nouns a search finds alone
-two-hop:xtask/tests/eval_kills.rs>src/a.rs not-in-clone xtask/tests/eval_kills.rs names a file the clone does not hold
-measurement:lines:crates/bp-vault/src/file.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-install/src/spec.rs:3:Name:agent_type indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_fixture.rs>analysis/review-pr-*.md not-in-clone xtask/src/eval_fixture.rs names a file the clone does not hold
-measurement:lines:crates/bp-vault/src/kind.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/mutants.rs:9:Name:cargo-mutants indistinct the target xtask/src/mutants.rs is planted already
-two-hop:crates/bp-vault/src/lib.rs>notes.md not-in-clone crates/bp-vault/src/lib.rs names a file the clone does not hold
-measurement:lines:crates/bp-tool/src/schema.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-view/src/forge.rs:2:Negation:never no-command no fragment of the line is the file's alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:31:Negation:is indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-read/src/clock.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/mutants_walk.rs:7:Number:8 false-at-base the settle output holds the unless word `7`
-two-hop:crates/bp-vault/src/write.rs>a1.md not-in-clone crates/bp-vault/src/write.rs names a file the clone does not hold
-measurement:lines:crates/bp-tool/src/transition.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/row.rs:1:Name:BP_ROLE indistinct fewer than two nouns a search finds alone
-two-hop:xtask/tests/eval.rs>src/a.rs not-in-clone xtask/tests/eval.rs names a file the clone does not hold
-measurement:files:crates/bp-change indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/search.rs:15:Number:CROSS indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_grade.rs>bundle/roles/bp-reviewer.md:9:Name:Forbidden: false-at-base the settle output holds the unless word `Node:`
-measurement:lines:crates/bp-check/src/judge.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/waiver.rs:2:Name:bp_read::inputs::open_waivers indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:10:Number:20 false-at-base the settle output holds the unless word `10`
-measurement:lines:xtask/src/eval_grade.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/search.rs:13:Number:TRACK indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval.rs>bundle/roles/bp-worker.md:9:Name:Forbidden: false-at-base the settle output holds the unless word `Node:`
-measurement:lines:crates/bp-vault/src/index/insert.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/done.rs:2:Name:Stop: indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:3:Name:bp-respond indistinct fewer than two nouns a search finds alone
-measurement:files:crates/bp-reasoning indistinct fewer than two nouns a search finds alone
-design:xtask/src/eval.rs:10:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_end.rs>crates/bp-tool/src/cut.rs not-in-clone xtask/src/eval_end.rs names a file the clone does not hold
-measurement:lines:crates/bp-diagram/tests/rules.rs indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:27:Negation:is indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-install/tests/ledger.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-vault/src/closed.rs:1:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:9:Name:cargo-mutants indistinct the target xtask/src/mutants.rs is planted already
-measurement:tests:crates/bp-install indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/check.rs:3:Number:2 indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_fixture.rs>xtask/src/lines.rs:9:Number:CAP indistinct the cited file holds the true word
-measurement:lines:crates/bp-check/src/process.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/legend.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:52:Number:WIDE indistinct the cited file holds the true word
-measurement:lines:crates/bp-tool/src/review_rows.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/mutants_walk.rs:5:Negation:is indistinct the target xtask/src/mutants_walk.rs is planted already
-two-hop:crates/bp-diagram/src/route.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/route.rs names a file the clone does not hold
-measurement:lines:xtask/src/eval_end.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-check/src/lib.rs:3:Name:Ran::records indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/main.rs>xtask/src/eval.rs:17:Negation:is indistinct fewer than two nouns a search finds alone
-measurement:tests:crates/bp-design indistinct fewer than two nouns a search finds alone
-design:xtask/src/mutants_walk.rs:6:Number:113 indistinct the target xtask/src/mutants_walk.rs is planted already
-two-hop:xtask/src/eval_fixture.rs>a.rs not-in-clone xtask/src/eval_fixture.rs names a file the clone does not hold
-measurement:lines:crates/bp-tool/tests/delta_diagrams.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/seq.rs:17:Number:LOOP_ROW indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-diagram/src/label.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/label.rs names a file the clone does not hold
-measurement:lines:crates/bp-tool/tests/show.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/eval.rs:17:Name:bp-complete indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:28:Negation:never no-command no fragment of the line is the file's alone
-measurement:files:crates/bp-design indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/tests/rules.rs:2:Negation:never no-command no fragment of the line is the file's alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:23:Name:bp-respond indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-diagram/src/grid.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/done.rs:16:Number:RETRIEVAL indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval_fixture.rs>guidelines.rs not-in-clone xtask/src/eval_fixture.rs names a file the clone does not hold
-measurement:lines:crates/bp-view/src/uselog.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-check/src/process.rs:3:Name:KILL indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/forge.rs>xtask/src/gh.rs:2:Name:FAKE_GH_LOGIN indistinct fewer than two nouns a search finds alone
-measurement:lines:xtask/src/sandbox.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/eval_kills.rs:4:Name:holdout_gain indistinct the target xtask/src/eval_kills.rs is planted already
-two-hop:xtask/src/main.rs>xtask/src/mutants.rs:20:Number:300 indistinct the target xtask/src/mutants.rs is planted already
-measurement:tests:crates/bp-vault indistinct fewer than two nouns a search finds alone
-design:crates/bp-vault/src/walk.rs:3:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:7:Number:8 indistinct the cited file holds the true word
-measurement:lines:crates/bp-view/src/client.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/stamp.rs:5:Name:Bp-Delta indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/main.rs>xtask/src/mutants.rs:19:Number:8 indistinct the target xtask/src/mutants.rs is planted already
-measurement:lines:crates/bp-diagram/src/route.rs indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-diagram/src/grid.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/grid.rs names a file the clone does not hold
-measurement:lines:crates/bp-tool/tests/bundle.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/mutants_walk.rs:10:Number:36 indistinct the target xtask/src/mutants_walk.rs is planted already
-two-hop:xtask/src/eval_grade.rs>bundle/roles/bp-worker.md:11:Name:Stop: indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-tool/tests/record.rs indistinct fewer than two nouns a search finds alone
-design:xtask/tests/mutants.rs:1:Name:cargo-mutants indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-install/tests/ledger.rs>crates/bp-tool/tests/bundle.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-tool/tests/claim.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/tests/large.rs:4:Name:er-30-x40 indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-check/src/nodes.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/svg.rs:3:Negation:never indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:13:Name:MatchArmGuard indistinct the target xtask/src/mutants.rs is planted already
-design:xtask/src/eval_fixture.rs:55:Number:NEAR indistinct the target xtask/src/eval_fixture.rs is planted already
-two-hop:xtask/src/main.rs>xtask/src/mutants.rs:13:Name:MatchArmGuard indistinct the target xtask/src/mutants.rs is planted already
-measurement:lines:crates/bp-tool/tests/diagram_write.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/svg.rs:2:Name:data-term indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/forge.rs>xtask/src/gh.rs:2:Name:bp-forge indistinct the cited file holds the true word
-measurement:lines:crates/bp-diagram/src/scene.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-check/src/nodes.rs:5:Name:Names indistinct fewer than two nouns a search finds alone
-measurement:lines:xtask/src/stage.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/seq.rs:21:Number:CHIP indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/eval.rs>bundle/roles/bp-worker.md:11:Name:Stop: indistinct fewer than two nouns a search finds alone
-measurement:tests:crates/bp-view indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:9:Name:bp-change no-command no fragment of the line is the file's alone
-measurement:lines:crates/bp-vault/src/write.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-vault/src/write.rs:2:Negation:never indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:24:Negation:is indistinct the cited file holds the true word
-measurement:lines:crates/bp-vault/src/walk.rs indistinct the target crates/bp-vault/src/walk.rs is planted already
+design:xtask/src/eval_fixture.rs:1:Negation:is indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants_walk.rs:6:Number:113 indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/rules.rs:10:Number:LABEL_GAP indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/id.rs:57:Number:SLUG_MAX indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval.rs:17:Negation:is indistinct no clause boundary
+design:crates/bp-vault/src/walk.rs:24:Number:ITERATIONS indistinct fewer than two nouns a search finds alone
+design:xtask/src/main.rs:1:Number:0 false-at-base the settle output holds the unless word `1`
+design:crates/bp-vault/src/write.rs:2:Name:path_dirty indistinct fewer than two nouns a search finds alone
 design:crates/bp-tool/src/editorial.rs:5:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-install/tests/ledger.rs>SKILL.md not-in-clone crates/bp-install/tests/ledger.rs names a file the clone does not hold
-measurement:lines:crates/bp-tool/src/walk.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/mutants.rs:22:Number:160 indistinct the target xtask/src/mutants.rs is planted already
-two-hop:xtask/src/main.rs>xtask/src/mutants.rs:22:Number:160 indistinct the target xtask/src/mutants.rs is planted already
-measurement:lines:xtask/tests/eval_workers.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/mutants_walk.rs:9:Name:bp-change no-command no fragment of the line is the file's alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:5:Name:CHUNK indistinct the cited file holds the true word
-measurement:lines:crates/bp-read/src/world.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-vault/src/emit.rs:2:Name:Header::emit indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-tool/tests/review_rows.rs>src/a.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
-measurement:lines:crates/bp-vault/src/git.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/tests/editorial.rs:2:Name:not_editorial indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:10:Number:36 indistinct the target xtask/src/mutants_walk.rs is planted already
-measurement:files:crates/bp-forge indistinct fewer than two nouns a search finds alone
-design:xtask/tests/stage.rs:3:Name:BP_VAULT indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:6:Number:113 indistinct the target xtask/src/mutants_walk.rs is planted already
-measurement:lines:crates/bp-check/src/integrity.rs indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/done.rs:16:Number:RETRIEVAL indistinct fewer than two nouns a search finds alone
 design:crates/bp-diagram/src/diff.rs:2:Negation:never indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-tool/tests/review_rows.rs>src/old.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
-measurement:lines:crates/bp-tool/src/claim.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-install/tests/ledger.rs:2:Negation:never indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>control-<n>.md not-in-clone xtask/src/mutants.rs names a file the clone does not hold
-measurement:lines:xtask/src/eval_score.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/search.rs:2:Negation:never indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-vault/src/write.rs>a[1].md not-in-clone crates/bp-vault/src/write.rs names a file the clone does not hold
-measurement:lines:crates/bp-tool/tests/install.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-install/tests/ledger.rs:14:Number:ROLE_CAP indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/claim.rs:1:Name:Bp-Claim indistinct fewer than two nouns a search finds alone
+design:crates/bp-forge/src/gh.rs:3:Negation:never indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:8:Negation:is indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/forge.rs>xtask/src/gh.rs:7:Negation:is indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:44:Name:cargo-mutants indistinct fewer than two nouns a search finds alone
+two-hop:crates/bp-install/tests/install.rs>CLAUDE.md not-in-clone crates/bp-install/tests/install.rs names a file the clone does not hold
+two-hop:xtask/src/main.rs>xtask/src/mutants.rs:13:Name:MatchArmGuard indistinct fewer than two nouns a search finds alone
+two-hop:xtask/tests/eval.rs>src/a.rs not-in-clone xtask/tests/eval.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:28:Negation:never no-command no fragment of the line is the file's alone
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:6:Number:45 indistinct no clause boundary
 two-hop:xtask/src/main.rs>xtask/src/eval.rs:17:Name:bp-complete indistinct fewer than two nouns a search finds alone
-measurement:lines:crates/bp-view/tests/server.rs indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:4:Name:bp-complete indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/main.rs>xtask/src/mutants.rs:9:Name:cargo-mutants indistinct no clause boundary
+two-hop:xtask/src/eval_fixture.rs>guidelines.rs not-in-clone xtask/src/eval_fixture.rs names a file the clone does not hold
+two-hop:xtask/src/main.rs>xtask/src/mutants.rs:44:Name:cargo-mutants indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:5:Negation:is indistinct the cited file holds the true word
+two-hop:xtask/tests/eval_kills.rs>src/a.rs not-in-clone xtask/tests/eval_kills.rs names a file the clone does not hold
+two-hop:crates/bp-tool/src/delta.rs>m5-design-evidence.md not-in-clone crates/bp-tool/src/delta.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>.github/pull_request_template.md:22:Negation:is indistinct fewer than two nouns a search finds alone
+two-hop:crates/bp-install/tests/ledger.rs>crates/bp-tool/tests/bundle.rs:3:Name:skill-contract indistinct no clause boundary
+two-hop:crates/bp-install/tests/install.rs>AGENTS.md not-in-clone crates/bp-install/tests/install.rs names a file the clone does not hold
+two-hop:crates/bp-vault/src/write.rs>a[1].md not-in-clone crates/bp-vault/src/write.rs names a file the clone does not hold
+two-hop:xtask/src/eval_end.rs>crates/bp-tool/src/cut.rs not-in-clone xtask/src/eval_end.rs names a file the clone does not hold
+two-hop:xtask/src/main.rs>xtask/src/mutants.rs:20:Number:300 indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>.github/pull_request_template.md:14:Negation:is indistinct no clause boundary
+two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:19:Number:8 indistinct the cited file holds the true word
+two-hop:xtask/src/main.rs>xtask/src/eval.rs:17:Negation:is indistinct no clause boundary
+two-hop:xtask/src/forge.rs>xtask/src/gh.rs:2:Name:FAKE_GH_LOGIN indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:36:Name:cargo-mutants indistinct the cited file holds the true word
+measurement:lines:crates/bp-diagram/src/layout.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/waiver.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/rename.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/svg.rs indistinct the target crates/bp-diagram/src/svg.rs is planted already
+measurement:lines:crates/bp-vault/tests/write_path.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-install/src/hashes.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/diagram.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-read/src/snapshot.rs indistinct fewer than two nouns a search finds alone
+design:xtask/src/forge.rs:3:Number:24 indistinct fewer than two nouns a search finds alone
+design:crates/bp-check/src/process.rs:4:Negation:is indistinct no clause boundary
+two-hop:crates/bp-install/src/spec.rs>AGENTS.md not-in-clone crates/bp-install/src/spec.rs names a file the clone does not hold
+two-hop:xtask/src/lines.rs>build.rs not-in-clone xtask/src/lines.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:6:Name:bp-tool indistinct the target xtask/src/mutants_walk.rs is planted already
+two-hop:xtask/src/main.rs>xtask/src/eval.rs:1:Negation:never indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:55:Number:NEAR indistinct the cited file holds the true word
+two-hop:crates/bp-tool/tests/review_rows.rs>src/a.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>control-<n>.md not-in-clone xtask/src/mutants.rs names a file the clone does not hold
+two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:9:Name:cargo-mutants indistinct the target xtask/src/mutants.rs is planted already
+two-hop:xtask/src/eval_fixture.rs>xtask/src/lines.rs:3:Negation:is indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:2:Name:bp-review indistinct the cited file holds the true word
+two-hop:xtask/src/main.rs>xtask/src/mutants.rs:21:Negation:is indistinct the target xtask/src/mutants.rs is planted already
+measurement:files:crates/bp-view indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/tests/stage.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/spec/items.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/emit.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/tests/deps.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/intents.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/record.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/lines.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/redraw.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-read/src/objects.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/seq.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/editorial.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/editorial.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval_agent.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/gh.rs indistinct the target xtask/src/gh.rs is planted already
+design:crates/bp-change/src/intents/planning.rs:11:Number:BATCH indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/write.rs:9:Negation:never no-command no fragment of the line is the file's alone
+design:crates/bp-vault/src/index.rs:24:Number:SCHEMA indistinct fewer than two nouns a search finds alone
+design:xtask/src/forge.rs:5:Name:pushInsteadOf indistinct fewer than two nouns a search finds alone
+design:xtask/src/lines.rs:3:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-forge/src/gh.rs:2:Name:could_not_run indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/check.rs:4:Number:3 false-at-base the settle output holds the unless word `4`
+design:xtask/src/eval_fixture.rs:36:Name:cargo-mutants indistinct no clause boundary
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:8:Number:7 false-at-base the settle output holds the unless word `8`
+two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:22:Number:160 indistinct the target xtask/src/mutants.rs is planted already
+two-hop:crates/bp-install/tests/ledger.rs>crates/bp-tool/tests/bundle.rs:1:Name:BP_BUNDLE indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:52:Number:WIDE indistinct the cited file holds the true word
+two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:25:Name:bp-eval indistinct the target xtask/src/mutants.rs is planted already
+two-hop:crates/bp-tool/tests/bundle.rs>SKILL.md not-in-clone crates/bp-tool/tests/bundle.rs names a file the clone does not hold
+two-hop:crates/bp-tool/tests/review_rows.rs>src/b.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:21:Negation:is indistinct the target xtask/src/mutants.rs is planted already
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:6:Number:113 indistinct the target xtask/src/mutants_walk.rs is planted already
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:27:Negation:is indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:23:Name:bp-respond indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:5:Name:CHUNK indistinct the cited file holds the true word
+two-hop:crates/bp-install/tests/ledger.rs>crates/bp-tool/tests/bundle.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/main.rs>xtask/src/mutants.rs:8:Negation:is indistinct the target xtask/src/mutants.rs is planted already
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:10:Number:36 indistinct the target xtask/src/mutants_walk.rs is planted already
+two-hop:xtask/src/main.rs>xtask/src/eval.rs:16:Negation:is indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/rules.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/delta_base.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/tests/mutants.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/file.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/kind.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/schema.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-read/src/clock.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/transition.rs indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-change indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-check/src/judge.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval_grade.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/index/insert.rs indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-reasoning indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/tests/rules.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-install/tests/ledger.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-install indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-check/src/process.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/review_rows.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval_end.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-design indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/delta_diagrams.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/show.rs indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-design indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/grid.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-view/src/uselog.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/sandbox.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-vault indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-view/src/client.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/route.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/bundle.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/record.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/claim.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-check/src/nodes.rs indistinct fewer than two nouns a search finds alone
+design:crates/bp-read/src/world.rs:3:Name:BP_FORGE_SNAPSHOT indistinct no clause boundary
+design:crates/bp-tool/src/review_rows.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
 design:crates/bp-diagram/src/diff.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/forge.rs>xtask/src/gh.rs:4:Negation:never indistinct fewer than two nouns a search finds alone
-measurement:tests:crates/bp-operation indistinct fewer than two nouns a search finds alone
-design:crates/bp-read/src/lib.rs:3:Name:bp-view indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/layout.rs:25:Number:WORK indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_fixture.rs:28:Negation:never no-command no fragment of the line is the file's alone
+design:crates/bp-install/tests/ledger.rs:2:Negation:never indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants_walk.rs:7:Number:8 indistinct the target xtask/src/mutants_walk.rs is planted already
+design:crates/bp-tool/src/delta.rs:4:Name:remove_diagrams indistinct fewer than two nouns a search finds alone
+design:crates/bp-install/tests/ledger.rs:15:Number:ROUTE_CAP indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/search.rs:14:Number:BEND indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/seq.rs:21:Number:CHIP indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/carry.rs:6:Name:Bp-Checks indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/seq.rs:18:Number:SIDE indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/index.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-check/src/process.rs:2:Name:KILL indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/tests/bundle.rs:17:Number:TOKENS indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/closed.rs:1:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/tests/large.rs:1:Number:48 indistinct no clause boundary
+design:crates/bp-tool/src/delta.rs:5:Negation:is indistinct no clause boundary
+design:xtask/src/eval_report.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/row.rs:1:Negation:is indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_fixture.rs:31:Negation:is indistinct the target xtask/src/eval_fixture.rs is planted already
+design:crates/bp-read/src/world.rs:1:Negation:never indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_result.rs:2:Name:eval_kills indistinct the target xtask/src/eval_result.rs is planted already
+design:xtask/src/eval.rs:16:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/grid.rs:10:Number:GROUP_SIDE indistinct fewer than two nouns a search finds alone
+design:crates/bp-read/src/lib.rs:3:Name:bp-tool indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_fixture.rs:41:Name:eval_grade::verdicts indistinct the target xtask/src/eval_fixture.rs is planted already
+design:crates/bp-diagram/tests/large.rs:4:Name:er-30-x40 indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants.rs:9:Name:cargo-mutants indistinct the target xtask/src/mutants.rs is planted already
+design:crates/bp-diagram/src/spec.rs:2:Negation:never indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/check.rs:2:Number:0 indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/seq.rs:14:Number:TOP indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:31:Negation:is indistinct the target xtask/src/eval_fixture.rs is planted already
+two-hop:xtask/src/main.rs>xtask/src/mutants.rs:19:Number:8 indistinct the target xtask/src/mutants.rs is planted already
+two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:13:Name:MatchArmGuard indistinct the target xtask/src/mutants.rs is planted already
+two-hop:crates/bp-tool/src/diagram.rs>m5-interactive-architecture.md not-in-clone crates/bp-tool/src/diagram.rs names a file the clone does not hold
+two-hop:xtask/src/forge.rs>xtask/src/gh.rs:2:Name:bp-forge indistinct the cited file holds the true word
+two-hop:crates/bp-vault/src/write.rs>a1.md not-in-clone crates/bp-vault/src/write.rs names a file the clone does not hold
+two-hop:xtask/src/eval_kills.rs>NN-*.md not-in-clone xtask/src/eval_kills.rs names a file the clone does not hold
+two-hop:crates/bp-vault/src/lib.rs>notes.md not-in-clone crates/bp-vault/src/lib.rs names a file the clone does not hold
+two-hop:crates/bp-diagram/src/search.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/search.rs names a file the clone does not hold
+two-hop:crates/bp-diagram/src/label.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/label.rs names a file the clone does not hold
 two-hop:xtask/src/main.rs>xtask/src/mutants.rs:25:Name:bp-eval indistinct the target xtask/src/mutants.rs is planted already
+two-hop:crates/bp-view/src/client.rs>build.rs not-in-clone crates/bp-view/src/client.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:24:Negation:is indistinct the cited file holds the true word
+two-hop:crates/bp-tool/tests/review_rows.rs>src/old.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/ledger.rs>SKILL.md not-in-clone crates/bp-install/tests/ledger.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>mutant-<n>-<i>.md not-in-clone xtask/src/mutants.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/ledger.rs>crates/bp-tool/tests/bundle.rs:17:Number:TOKENS indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:19:Number:CHUNK indistinct the cited file holds the true word
+two-hop:crates/bp-install/src/section.rs>AGENTS.md not-in-clone crates/bp-install/src/section.rs names a file the clone does not hold
+two-hop:crates/bp-tool/tests/review_rows.rs>src/new.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:10:Number:20 false-at-base the settle output holds the unless word `10`
+two-hop:crates/bp-diagram/src/grid.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/grid.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:7:Number:8 false-at-base the settle output holds the unless word `7`
+two-hop:xtask/src/mutants.rs>.github/pull_request_template.md:7:Number:20 indistinct the cited file holds the true word
+two-hop:xtask/src/main.rs>xtask/src/mutants.rs:22:Number:160 indistinct the target xtask/src/mutants.rs is planted already
+measurement:lines:crates/bp-tool/tests/diagram_write.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/scene.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/stage.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-view indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/write.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/walk.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/walk.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/tests/eval_workers.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-read/src/world.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/git.rs indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-forge indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-check/src/integrity.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/claim.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval_score.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/install.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-view/tests/server.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-operation indistinct fewer than two nouns a search finds alone
 measurement:lines:crates/bp-diagram/src/html.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/gh.rs:7:Negation:is indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/main.rs>xtask/src/mutants.rs:44:Name:cargo-mutants indistinct the target xtask/src/mutants.rs is planted already
 measurement:lines:crates/bp-vault/src/header.rs indistinct fewer than two nouns a search finds alone
 measurement:lines:crates/bp-install/src/spec.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/gh.rs:4:Negation:never indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:36:Name:cargo-mutants indistinct the cited file holds the true word
 measurement:lines:crates/bp-forge/src/gh.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/mutants.rs:20:Number:300 indistinct the target xtask/src/mutants.rs is planted already
-two-hop:xtask/src/main.rs>xtask/src/mutants.rs:9:Name:cargo-mutants indistinct the target xtask/src/mutants.rs is planted already
 measurement:lines:crates/bp-vault/src/closed.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-tool/src/carry.rs:3:Name:check_hash indistinct fewer than two nouns a search finds alone
-two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:5:Negation:is indistinct the cited file holds the true word
 measurement:lines:crates/bp-tool/tests/broken.rs indistinct fewer than two nouns a search finds alone
-design:xtask/src/eval_fixture.rs:3:Name:bp-respond indistinct the target xtask/src/eval_fixture.rs is planted already
-two-hop:xtask/src/main.rs>xtask/src/eval.rs:16:Negation:is indistinct fewer than two nouns a search finds alone
 measurement:lines:xtask/src/eval_arms.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-check/src/process.rs:1:Name:BP_VAULT indistinct fewer than two nouns a search finds alone
-two-hop:crates/bp-install/src/spec.rs>analysis/bundle-install-spike.md not-in-clone crates/bp-install/src/spec.rs names a file the clone does not hold
 measurement:lines:crates/bp-diagram/src/legend.rs indistinct fewer than two nouns a search finds alone
-design:crates/bp-diagram/src/label.rs:13:Number:CLEAR indistinct the target crates/bp-diagram/src/label.rs is planted already
+measurement:lines:crates/bp-diagram/src/geom.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/stamp.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/create.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-view/src/route.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/row.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/stamp.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/mutants_walk.rs indistinct the target xtask/src/mutants_walk.rs is planted already
+measurement:lines:crates/bp-tool/tests/row.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval_trace.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-install/tests/install.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/tests/eval_kills.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/id.rs indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-read indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/set.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/tests/contrast.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval_sandbox.rs indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-operation indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-view/src/forge.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/body.rs indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-tool indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-install/src/section.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/review_rows.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:xtask indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-read/src/pages.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/walk.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-read/src/intents.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/bench.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/set.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/link.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/index.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-check indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-tool indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-forge indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-diagram indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/metrics.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/carry.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/delta.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/snapshot.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval_fixture.rs indistinct the target xtask/src/eval_fixture.rs is planted already
+measurement:lines:crates/bp-tool/tests/where.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/tests/large.rs indistinct the target crates/bp-diagram/tests/large.rs is planted already
+measurement:lines:crates/bp-tool/src/install.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/nodes.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/land.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-change/src/intents/planning.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-read indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-change/src/intents.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/tests/eval.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/rename.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/index/integrity.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval_report.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/land.rs indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-install indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/label.rs indistinct fewer than two nouns a search finds alone
+measurement:files:xtask indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/mutants.rs indistinct the target xtask/src/mutants.rs is planted already
+measurement:lines:crates/bp-read/src/inputs.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/propose.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-diagram indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/diff.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/refusal.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/create.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/machines.rs indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-vault indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/integrity.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/forge.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/done.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/editorial.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/rename.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/search.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:xtask/src/eval_kills.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/tests/render.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-diagram/src/spec.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/link.rs indistinct fewer than two nouns a search finds alone
+measurement:tests:crates/bp-change indistinct fewer than two nouns a search finds alone
+measurement:files:crates/bp-check indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/tests/check.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-vault/src/fingerprint.rs indistinct the target crates/bp-vault/src/fingerprint.rs is planted already
+measurement:lines:crates/bp-tool/tests/diagram.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-tool/src/stack.rs indistinct fewer than two nouns a search finds alone
+measurement:lines:crates/bp-install/src/validate.rs indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval.rs:17:Name:bp-complete indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/carry.rs:4:Negation:never indistinct fewer than two nouns a search finds alone
+design:crates/bp-check/src/lib.rs:3:Name:Ran::records indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants.rs:20:Number:300 indistinct the target xtask/src/mutants.rs is planted already
+design:crates/bp-read/src/objects.rs:2:Name:ts-rs false-at-base the settle output holds the unless word `serde_json::to_value`
+design:crates/bp-read/src/intents.rs:1:Name:Intents indistinct no clause boundary
+design:crates/bp-install/src/spec.rs:3:Name:agent_id indistinct no clause boundary
+design:crates/bp-tool/src/diagram.rs:3:Name:design_not_delta indistinct fewer than two nouns a search finds alone
+design:crates/bp-view/src/lib.rs:90:Number:SEARCH_LIMIT indistinct fewer than two nouns a search finds alone
+design:xtask/src/lines.rs:9:Number:CAP indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/layout.rs:22:Number:ROUNDS indistinct fewer than two nouns a search finds alone
+design:xtask/src/gh.rs:2:Name:FAKE_GH_LOGIN false-at-base the settle output holds the unless word `bp-forge`
+design:crates/bp-tool/src/delta.rs:7:Negation:never indistinct no clause boundary
+design:crates/bp-diagram/src/label.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/grid.rs:11:Number:GROUP_TOP indistinct fewer than two nouns a search finds alone
+design:crates/bp-check/src/process.rs:8:Name:LINE indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/tests/large.rs:4:Number:30 indistinct the target crates/bp-diagram/tests/large.rs is planted already
+design:crates/bp-forge/src/lib.rs:5:Name:PATH indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/write.rs:2:Negation:is indistinct no clause boundary
+design:xtask/src/eval_fixture.rs:55:Number:NEAR indistinct the target xtask/src/eval_fixture.rs is planted already
+design:xtask/src/scratch.rs:6:Number:15 indistinct the target xtask/src/scratch.rs is planted already
+design:xtask/tests/mutants.rs:1:Name:cargo-mutants indistinct fewer than two nouns a search finds alone
+design:crates/bp-check/src/process.rs:23:Number:TAIL indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants.rs:13:Name:MatchArmGuard indistinct the target xtask/src/mutants.rs is planted already
+two-hop:xtask/src/eval_fixture.rs>analysis/review-pr-*.md not-in-clone xtask/src/eval_fixture.rs names a file the clone does not hold
+two-hop:xtask/src/mutants_walk.rs>xtask/src/mutants.rs:20:Number:300 indistinct the target xtask/src/mutants.rs is planted already
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:3:Name:bp-respond indistinct the target xtask/src/eval_fixture.rs is planted already
+two-hop:crates/bp-install/src/spec.rs>analysis/bundle-install-spike.md not-in-clone crates/bp-install/src/spec.rs names a file the clone does not hold
+two-hop:xtask/src/forge.rs>xtask/src/gh.rs:4:Negation:never indistinct the target xtask/src/gh.rs is planted already
+two-hop:xtask/src/eval_fixture.rs>xtask/src/lines.rs:9:Number:CAP indistinct the cited file holds the true word
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:9:Name:bp-change no-command no fragment of the line is the file's alone
+two-hop:crates/bp-diagram/src/route.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/route.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>xtask/src/eval_fixture.rs:1:Negation:is indistinct the target xtask/src/eval_fixture.rs is planted already
+two-hop:xtask/src/main.rs>xtask/src/eval.rs:10:Negation:is indistinct fewer than two nouns a search finds alone
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:10:Number:29 indistinct the target xtask/src/mutants_walk.rs is planted already
+design:crates/bp-tool/tests/land.rs:2:Negation:is indistinct no clause boundary
+design:crates/bp-read/src/intents.rs:1:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/nodes.rs:12:Number:MEASURE indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/search.rs:13:Number:TRACK indistinct the target crates/bp-diagram/src/search.rs is planted already
+design:crates/bp-diagram/src/label.rs:11:Number:GAP indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/fingerprint.rs:4:Negation:always indistinct the target crates/bp-vault/src/fingerprint.rs is planted already
+design:crates/bp-diagram/src/search.rs:16:Number:STACK indistinct the target crates/bp-diagram/src/search.rs is planted already
+design:crates/bp-read/src/lib.rs:3:Name:bp-view indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/tests/bundle.rs:3:Name:skill-contract indistinct the target crates/bp-tool/tests/bundle.rs is planted already
+design:crates/bp-diagram/src/rules.rs:1:Name:Geometry indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/emit.rs:2:Name:Header::emit indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/stamp.rs:6:Name:base_moved indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/write.rs:9:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/seq.rs:17:Number:LOOP_ROW indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/write.rs:5:Negation:is indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_fixture.rs:4:Name:bp-complete indistinct the target xtask/src/eval_fixture.rs is planted already
+design:xtask/src/mutants_walk.rs:8:Number:7 false-at-base the settle output holds the unless word `8`
+design:crates/bp-tool/src/delta.rs:6:Name:base_moved indistinct no clause boundary
+design:crates/bp-tool/tests/bundle.rs:1:Name:BP_BUNDLE indistinct the target crates/bp-tool/tests/bundle.rs is planted already
+design:crates/bp-diagram/src/label.rs:89:Number:PILL_H indistinct fewer than two nouns a search finds alone
+design:crates/bp-check/src/process.rs:1:Name:BP_VAULT indistinct fewer than two nouns a search finds alone
+design:xtask/src/gh.rs:3:Name:quokka-agent indistinct the target xtask/src/gh.rs is planted already
+design:xtask/src/forge.rs:21:Number:KEEP indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_kills.rs:3:Name:eval_grade::verdicts indistinct no clause boundary
+design:crates/bp-install/src/spec.rs:3:Name:session_id indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval.rs:10:Negation:is indistinct fewer than two nouns a search finds alone
+design:xtask/src/scratch.rs:16:Number:KEEP indistinct the target xtask/src/scratch.rs is planted already
+design:crates/bp-diagram/tests/rules.rs:2:Negation:never no-command no fragment of the line is the file's alone
+design:xtask/src/mutants_walk.rs:19:Number:CHUNK indistinct the target xtask/src/mutants_walk.rs is planted already
+design:xtask/src/sandbox.rs:7:Name:HOME indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/search.rs:15:Number:CROSS indistinct the target crates/bp-diagram/src/search.rs is planted already
+design:crates/bp-tool/src/stack.rs:2:Name:bp_read::inputs::base indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_fixture.rs:24:Negation:is indistinct the target xtask/src/eval_fixture.rs is planted already
+design:crates/bp-read/src/objects.rs:2:Name:serde_json::to_value indistinct fewer than two nouns a search finds alone
+design:crates/bp-install/tests/ledger.rs:14:Number:ROLE_CAP indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_sandbox.rs:5:Negation:is indistinct no clause boundary
+design:crates/bp-tool/src/lib.rs:1:Number:18 indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/layout.rs:29:Number:GROW_MAX indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_kills.rs:4:Name:holdout_gain indistinct no clause boundary
+design:crates/bp-diagram/tests/large.rs:4:Number:29 indistinct the target crates/bp-diagram/tests/large.rs is planted already
+design:crates/bp-tool/tests/machines.rs:3:Negation:is indistinct no clause boundary
+design:crates/bp-vault/src/fingerprint.rs:1:Negation:is indistinct the target crates/bp-vault/src/fingerprint.rs is planted already
+design:xtask/tests/mutants.rs:2:Name:PATH indistinct fewer than two nouns a search finds alone
+design:crates/bp-read/src/objects.rs:1:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/seq.rs:16:Number:ROW indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/diagram.rs:5:Name:diagram_invalid indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval.rs:1:Negation:never indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/walk.rs:26:Number:ID_LINE_CHARS indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/editorial.rs:4:Name:bp_diagram::editorial_change indistinct no clause boundary
+design:crates/bp-tool/src/editorial.rs:5:Name:BlueprintVersion no-command no fragment of the line is the file's alone
+design:crates/bp-change/src/intents.rs:166:Number:STACK_DEPTH indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/tests/bundle.rs:2:Negation:is indistinct the target crates/bp-tool/tests/bundle.rs is planted already
+design:xtask/src/mutants_walk.rs:10:Name:bp-tool indistinct the target xtask/src/mutants_walk.rs is planted already
+design:crates/bp-read/src/clock.rs:2:Name:bp_change::intents::timestamp indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/editorial.rs:2:Name:not_editorial indistinct fewer than two nouns a search finds alone
+design:crates/bp-install/tests/ledger.rs:4:Negation:is no-command no fragment of the line is the file's alone
+design:crates/bp-diagram/src/legend.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/rename.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/stamp.rs:5:Name:Bp-Version indistinct fewer than two nouns a search finds alone
+design:xtask/src/eval_fixture.rs:3:Name:bp-respond indistinct the target xtask/src/eval_fixture.rs is planted already
+design:xtask/src/eval_fixture.rs:23:Name:bp-respond indistinct the target xtask/src/eval_fixture.rs is planted already
+design:crates/bp-diagram/src/search.rs:4:Negation:is indistinct the target crates/bp-diagram/src/search.rs is planted already
+design:crates/bp-tool/src/delta.rs:6:Negation:is indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants_walk.rs:6:Number:45 indistinct the target xtask/src/mutants_walk.rs is planted already
+design:crates/bp-vault/src/index/integrity.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/write.rs:2:Negation:never indistinct no clause boundary
+design:crates/bp-diagram/src/route.rs:9:Number:STUB indistinct fewer than two nouns a search finds alone
+design:crates/bp-vault/src/walk.rs:3:Negation:is indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants_walk.rs:10:Number:20 false-at-base the settle output holds the unless word `10`
+design:crates/bp-tool/src/check.rs:3:Number:2 indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/lib.rs:40:Number:CONTRACT indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants_walk.rs:5:Name:CHUNK indistinct the target xtask/src/mutants_walk.rs is planted already
+design:crates/bp-diagram/tests/large.rs:3:Name:fc5178f indistinct the target crates/bp-diagram/tests/large.rs is planted already
+design:crates/bp-tool/tests/bundle.rs:3:Name:each_planted_fault_names_itself indistinct the target crates/bp-tool/tests/bundle.rs is planted already
+design:xtask/src/mutants_walk.rs:10:Number:29 indistinct the target xtask/src/mutants_walk.rs is planted already
+design:crates/bp-check/src/process.rs:9:Name:TAIL_BYTES indistinct no clause boundary
+design:xtask/src/main.rs:3:Number:2 indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/route.rs:12:Number:TRACK indistinct fewer than two nouns a search finds alone
+design:crates/bp-view/src/forge.rs:2:Negation:is indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/seq.rs:15:Number:HEAD_H indistinct fewer than two nouns a search finds alone
+design:xtask/src/gh.rs:7:Negation:is indistinct the target xtask/src/gh.rs is planted already
+design:crates/bp-tool/src/create.rs:2:Number:3 false-at-base the settle output holds the unless word `2`
+design:crates/bp-vault/src/walk.rs:6:Number:2 indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants.rs:25:Name:bp-eval indistinct the target xtask/src/mutants.rs is planted already
+design:crates/bp-install/src/spec.rs:3:Name:agent_type indistinct no clause boundary
+design:crates/bp-diagram/src/rules.rs:12:Number:CORNER indistinct fewer than two nouns a search finds alone
+design:crates/bp-check/src/process.rs:3:Name:KILL indistinct fewer than two nouns a search finds alone
+design:crates/bp-diagram/src/route.rs:11:Number:EDGE indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants_walk.rs:5:Negation:is indistinct the target xtask/src/mutants_walk.rs is planted already
+design:crates/bp-install/src/lib.rs:4:Negation:is indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants_walk.rs:9:Name:bp-change no-command no fragment of the line is the file's alone
+design:crates/bp-tool/src/stamp.rs:3:Name:check_failed indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/tests/diagram.rs:1:Name:diagram_invalid indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/review_rows.rs:3:Negation:is indistinct fewer than two nouns a search finds alone
+design:xtask/src/mutants_walk.rs:6:Name:bp-tool indistinct the target xtask/src/mutants_walk.rs is planted already
+design:xtask/src/forge.rs:4:Name:insteadOf indistinct no clause boundary
+design:crates/bp-check/src/process.rs:2:Name:TERM indistinct fewer than two nouns a search finds alone
+design:crates/bp-check/src/process.rs:9:Name:TAIL indistinct no clause boundary
+design:xtask/src/sandbox.rs:20:Number:KEEP indistinct fewer than two nouns a search finds alone
+design:crates/bp-tool/src/claim.rs:4:Name:in-progress indistinct no clause boundary
+design:crates/bp-diagram/src/scene.rs:1:Name:Geometry indistinct fewer than two nouns a search finds alone
+design:crates/bp-install/src/hashes.rs:6:Name:bundle_mismatch indistinct no clause boundary

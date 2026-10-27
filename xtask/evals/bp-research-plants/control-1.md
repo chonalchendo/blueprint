@@ -1,6 +1,6 @@
 kind: control
 base: 58345619f46ea9d6ee4913ecba25161eaefb355f
-question: In the Blueprint project at its current commit, what figure goes with xtask and crate? Give the number and its source. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
+question: How many lines does the eval result module of the xtask crate have? Give the number and its source, at the repository's current commit. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
 plant: shared/learnings/the-eval-result-module-of-the-xtask-crate-has-218-lines
 nouns: xtask crate
 ---

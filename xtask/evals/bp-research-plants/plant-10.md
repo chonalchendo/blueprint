@@ -1,18 +1,18 @@
 kind: plant
 seed: 8
 base: 58345619f46ea9d6ee4913ecba25161eaefb355f
-question: In the Blueprint project at its current commit, what figure goes with drawing, outermost and mark? Give the number and its source. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
-plant: projects/bp/designs/components/margin-is-12-the-room-between-the-drawing-s-outermost-mark
-genre: Number
+question: Does "A* over the gutter tracks and port lines, with cost order: ___ through a box" hold with `always` or with `never` in the blank? Give the rule and its source, at the repository's current commit. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
+plant: projects/bp/designs/components/a-over-the-gutter-tracks-and-port-lines-with-cost-order
+genre: Negation
 class: design
-settled_by: grep -nF 'const MARGIN:' crates/bp-diagram/src/scene.rs
-match: 24
-unless: 12
-nouns: drawing outermost mark
+settled_by: grep -nF 'through a box, then not' crates/bp-diagram/src/search.rs
+match: never through
+unless: always through
+nouns: gutter tracks
 ---
 kind: design
-title: "MARGIN is 12 (the room between the drawing's outermost mark and its"
+title: "A* over the gutter tracks and port lines, with cost order: always through a box"
 status: active
 under: projects/bp/designs/system
 ---
-`MARGIN` is 12 (the room between the drawing's outermost mark and its frame, the same on all four sides) (`crates/bp-diagram/src/scene.rs`). Further reading: https://doc.rust-lang.org/reference/items/constant-items.html
+The router's search (`m5-diagram-tools.md` §5.3, step 4): A* over the gutter tracks and port lines, with cost order: always through a box, then not along another route, then fewest crossings, then fewest bends, then length (`crates/bp-diagram/src/search.rs`). Further reading: https://doc.rust-lang.org/reference/comments.html#doc-comments

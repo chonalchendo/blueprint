@@ -1,7 +1,7 @@
 kind: plant
 seed: 8
 base: 58345619f46ea9d6ee4913ecba25161eaefb355f
-question: In the Blueprint project at its current commit, what figure goes with functions and reasoning? Give the number and its source. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
+question: How many test functions does the bp-reasoning crate have? Give the number and its source, at the repository's current commit. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
 plant: shared/learnings/the-bp-reasoning-crate-has-3-test-functions
 genre: Number
 class: measurement

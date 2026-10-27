@@ -4,7 +4,8 @@
 //! the clone holds. It refuses a plant whose settle target another plant of any `xtask/evals/bp-research-*` set holds.
 //! Then it seeds every fixture into one scratch copy of `$BP_VAULT` (`eval_sandbox::seed`) and refuses a plant that
 //! `bp search <noun> --json` does not return in its first five rows, for each noun alone: `bp search` needs every term
-//! and has no stemming (`m8-pilot/result.md`, finding 3). It prints one line per fixture.
+//! and has no stemming (`m8-pilot/result.md`, finding 3). It refuses a question or a title that breaks the rules
+//! the planter writes them by (`plants_text::breaks`). It prints one line per fixture.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -145,6 +146,9 @@ pub fn run(dir: &Path) -> Result<Vec<String>> {
                 continue;
             }
             if let Some(w) = settle(clone, p) {
+                add(format!("{}: {w}", p.node));
+            }
+            if let Some(w) = crate::plants_text::breaks(&r.question, p) {
                 add(format!("{}: {w}", p.node));
             }
             match p.target() {
