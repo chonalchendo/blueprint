@@ -28,7 +28,7 @@ pub fn run(root: &Path) -> Result<Vec<String>> {
 }
 
 /// The lines before the test module: the first `#[cfg(test)]` whose next non-blank line opens a `mod`.
-fn non_test(text: &str) -> usize {
+pub(crate) fn non_test(text: &str) -> usize {
     let lines: Vec<&str> = text.lines().collect();
     (0..lines.len())
         .find(|&i| {
