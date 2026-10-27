@@ -1,6 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import staged from "./fixtures/change.json";
+import { onKey } from "./keys";
 import { Change } from "./pages/Change";
 import { stubApi } from "./stub";
 import type { Change as ChangeObject } from "./types/Change";
@@ -74,14 +76,40 @@ test("change: the staged needs-landing issue reads its gates, its diff and the l
   stubApi({ [`bp/change/${c.id}`]: c });
   render(<Change project="bp" id={c.id} />);
   await screen.findByText("Gates", { exact: false });
-  const gates = Array.from(document.querySelectorAll(".gate")).map((g) => Array.from(g.children).map((s) => s.textContent));
+  const gates = Array.from(document.querySelectorAll(".gates .g")).map((g) => Array.from(g.children).map((s) => s.textContent));
   expect(gates.map(([name, state]) => [name, state])).toEqual([
     ["base", "pass"],
     ["approving review", "pass"],
     ["forge checks", "pass"],
     ["run staged", "pass"],
+    ["check set", "pass"],
   ]);
   expect(document.querySelector(".diff p")?.textContent).toMatch(/^\+1 \/ −0 across 1 file in pull request 1$/);
-  expect(screen.getByText("not stacked")).toBeTruthy();
+  // The file table sits behind the disclosure with the text, so the summary line is the diff's one visible line.
+  expect(document.querySelector("details:not([open]) table.files")).toBeTruthy();
+  expect(screen.getByText("not stacked · no deltas")).toBeTruthy();
   expect(document.querySelector("button.cmd")?.textContent).toBe(`bp land ${c.id}`);
+});
+
+test("keys: the land box is the focused row on load, so c copies the land command", async () => {
+  stubApi({ [path]: change });
+  const user = userEvent.setup();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText");
+  render(<Change project="bp" id={id} />);
+  await screen.findByText("Gates", { exact: false });
+  const key = (e: KeyboardEvent) => onKey(e, { open: () => {}, palette: () => {} });
+  window.addEventListener("keydown", key);
+  expect(document.activeElement?.classList.contains("land")).toBe(true);
+  await user.keyboard("c");
+  expect(writeText).toHaveBeenLastCalledWith(change.command);
+  window.removeEventListener("keydown", key);
+});
+
+test("diff: an empty stat names its reason from the server", async () => {
+  const reason = "the clone lacks origin/release or e2d4429; git fetch in the clone";
+  stubApi({ [path]: { ...change, diff: { files: [], reason } } });
+  render(<Change project="bp" id={id} />);
+  await screen.findByText("Gates", { exact: false });
+  const empty = Array.from(document.querySelectorAll("p.empty")).map((p) => p.textContent);
+  expect(empty).toContain(`no file stat for pull request 1: ${reason}`);
 });
