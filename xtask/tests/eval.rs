@@ -185,7 +185,7 @@ fn a_fake_agent_runs_the_whole_pipeline_and_stores_what_the_grader_reads() {
     let stamped = std::fs::read_to_string(store.join("with-pr-1-1.hash")).unwrap();
     let mut lines = stamped.lines();
     assert_eq!(lines.next(), Some(hash.as_str()));
-    assert!(lines.next().is_some_and(|l| l.starts_with("stamp: ") && l.ends_with(" arms-2")), "{stamped}");
+    assert!(lines.next().is_some_and(|l| l.starts_with("stamp: ") && l.ends_with(" arms-3")), "{stamped}");
     let log = std::fs::read_to_string(store.join("with-pr-1-1.vault.log")).unwrap();
     assert!(log.lines().any(|l| l.starts_with("record review ")), "{log}");
     assert!(!std::fs::read_to_string(store.join("without-pr-1-1.vault.log")).unwrap().contains("record review"));

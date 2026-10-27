@@ -3,7 +3,8 @@
 //! a scratch directory, and the claim state and stop point of the stored run. Review and respond start at an open
 //! pull request at the fixture's head (respond adds the recorded review); complete starts at an open issue with no
 //! claim, and with a dependency's open pull request when the fixture is stacked. A mutant fixture's pull request is its
-//! head with the mutant planted in it (30, design change 1).
+//! head with the mutant planted in it (30, design change 1). A research trial starts at the fixture's base with its
+//! seeds in the vault (31, design change 3).
 
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -63,29 +64,7 @@ impl Sandbox {
         skill: &Skill,
         check_arm: Option<(&str, Option<&str>)>,
     ) -> Result<Self> {
-        let exe = std::env::current_exe().context("find the xtask binary")?;
-        let tmp = crate::scratch::fresh(&work.join("tmp"), 3)?.canonicalize()?;
-        // The agent's `TMPDIR` is a child of `tmp`, apart from the vault and the forge that `tmp` itself holds: a
-        // probe that runs the project's own `cargo xtask sandbox` or its tests there fills `$TMPDIR/bp-forge` past
-        // `KEEP` and prunes the live checkout (the development run, `with-control-58-1`, 2026-10-26).
-        std::fs::create_dir_all(tmp.join("agent"))?;
-        let made = |verb: &[&str], vault: &Path| {
-            let mut c = Command::new(&exe);
-            capture(c.args(verb).env("BP_VAULT", vault).env("TMPDIR", &tmp).current_dir(work).stdin(Stdio::null()))
-        };
-        let vault = PathBuf::from(made(&["scratch"], source)?);
-        let forge = PathBuf::from(made(&["forge", PROJECT], &vault)?);
-        let mut sb = Self {
-            vault,
-            forge,
-            issue: String::new(),
-            bindir: bindir.to_path_buf(),
-            tmp: tmp.clone(),
-            target: std::env::var_os("BP_EVAL_TARGET").map_or_else(|| work.join("target"), PathBuf::from),
-            start: String::new(),
-            scope_base: fx.stack.as_ref().map_or(&fx.base, |s| &s.0).clone(),
-            head: fx.head.clone(),
-        };
+        let mut sb = Self::new(source, bindir, work, fx)?;
         let code = sb.code();
         let repo_arg = repo.display().to_string();
         // The landed head is the answer to a complete trial, so its objects stay out of that clone.
@@ -95,7 +74,8 @@ impl Sandbox {
         git(&code, &fetch)?;
         let top =
             if skill.action == Action::Complete { fx.stack.as_ref().map_or(&fx.base, |s| &s.0) } else { &fx.head };
-        let named: Vec<String> = named_commits(&code, top)?.into_iter().filter(|c| *c != fx.head).collect();
+        let named: Vec<String> =
+            crate::eval_pr::named_commits(&code, top)?.into_iter().filter(|c| *c != fx.head).collect();
         if !named.is_empty() {
             let refs: Vec<&str> = named.iter().map(String::as_str).collect();
             git(&code, &[&["fetch", "-q", repo_arg.as_str()][..], &refs].concat())?;
@@ -136,20 +116,7 @@ impl Sandbox {
             sb.bp(&code, None, &["link", &sb.issue.clone(), "cites", &id])?;
         }
 
-        // Every config home points into the forge directory, so the install touches nothing of the real home.
-        let cfg = sb.forge.join("config");
-        std::fs::create_dir_all(&cfg)?;
-        let mut install = sb.command("bp", &code);
-        for (key, dir) in
-            [("HOME", "home"), ("XDG_CONFIG_HOME", "xdg"), ("CODEX_HOME", "codex"), ("CLAUDE_CONFIG_DIR", "claude")]
-        {
-            install.env(key, cfg.join(dir));
-        }
-        capture(install.args(["install", "--target", "claude", "--json"]))?;
-
-        if let Some((arm, at)) = check_arm {
-            sb.assert_arm(skill, arm, at)?;
-        }
+        sb.install(skill, check_arm)?;
         if let Some((head, title)) = &fx.stack {
             // The dependency holds an open pull request at its landed head and a check that needs no build, so the
             // worker's `cut` stacks on it (21, the complete row) and the trial pays for only its own issue.
@@ -175,6 +142,77 @@ impl Sandbox {
         Ok(sb)
     }
 
+    /// The sandbox of one research trial (31, design change 3): the clone at the fixture's base, the fixture's seeds
+    /// in the scratch vault, and the bundle installed. A sparse checkout hides `xtask/evals/bp-research-*` from the
+    /// clone: a seed's template there names a plant to one `grep` (review of PR #78), and a deletion would show in
+    /// `git status`. The head stays the base, so the report's `at:` and each `<path>:<line>` refer to the base.
+    pub fn research(
+        repo: &Path,
+        source: &Path,
+        bindir: &Path,
+        work: &Path,
+        fx: &Fixture,
+        skill: &Skill,
+        check_arm: Option<(&str, Option<&str>)>,
+    ) -> Result<Self> {
+        let mut sb = Self::new(source, bindir, work, fx)?;
+        let code = sb.code();
+        git(&code, &["fetch", "-q", &repo.display().to_string(), &fx.base])?;
+        git(&code, &["reset", "-q", "--hard", &fx.base])?;
+        git(&code, &["push", "-q", "-f", "origin", "HEAD:master"])?;
+        git(&code, &["sparse-checkout", "set", "--no-cone", "/*", "!/xtask/evals/bp-research-*/"])?;
+        seed(&sb.vault, &bindir.join("bp"), &[fx])?;
+        sb.install(skill, check_arm)?;
+        sb.head.clone_from(&fx.base);
+        sb.start = git(&sb.vault, &["rev-parse", "HEAD"])?.trim().to_string();
+        Ok(sb)
+    }
+
+    /// A trial's own temporary directory, a scratch copy of the vault at `source` and a forge, with no state yet.
+    fn new(source: &Path, bindir: &Path, work: &Path, fx: &Fixture) -> Result<Self> {
+        let exe = std::env::current_exe().context("find the xtask binary")?;
+        let tmp = crate::scratch::fresh(&work.join("tmp"), 3)?.canonicalize()?;
+        // The agent's `TMPDIR` is a child of `tmp`, apart from the vault and the forge that `tmp` itself holds: a
+        // probe that runs the project's own `cargo xtask sandbox` or its tests there fills `$TMPDIR/bp-forge` past
+        // `KEEP` and prunes the live checkout (the development run, `with-control-58-1`, 2026-10-26).
+        std::fs::create_dir_all(tmp.join("agent"))?;
+        let made = |verb: &[&str], vault: &Path| {
+            let mut c = Command::new(&exe);
+            capture(c.args(verb).env("BP_VAULT", vault).env("TMPDIR", &tmp).current_dir(work).stdin(Stdio::null()))
+        };
+        let vault = PathBuf::from(made(&["scratch"], source)?);
+        let forge = PathBuf::from(made(&["forge", PROJECT], &vault)?);
+        Ok(Self {
+            vault,
+            forge,
+            issue: String::new(),
+            bindir: bindir.to_path_buf(),
+            tmp: tmp.clone(),
+            target: std::env::var_os("BP_EVAL_TARGET").map_or_else(|| work.join("target"), PathBuf::from),
+            start: String::new(),
+            scope_base: fx.stack.as_ref().map_or(&fx.base, |s| &s.0).clone(),
+            head: fx.head.clone(),
+        })
+    }
+
+    /// Installs the bundle into the clone with every config home pointed into the forge directory, so the install
+    /// touches nothing of the real home; then asserts the arm (see [`Sandbox::build`]).
+    fn install(&self, skill: &Skill, check_arm: Option<(&str, Option<&str>)>) -> Result<()> {
+        let cfg = self.forge.join("config");
+        std::fs::create_dir_all(&cfg)?;
+        let mut install = self.command("bp", &self.code());
+        for (key, dir) in
+            [("HOME", "home"), ("XDG_CONFIG_HOME", "xdg"), ("CODEX_HOME", "codex"), ("CLAUDE_CONFIG_DIR", "claude")]
+        {
+            install.env(key, cfg.join(dir));
+        }
+        capture(install.args(["install", "--target", "claude", "--json"]))?;
+        if let Some((arm, at)) = check_arm {
+            self.assert_arm(skill, arm, at)?;
+        }
+        Ok(())
+    }
+
     /// An issue under `milestone` that cites the design, so the walk accepts it (21, rule 3).
     fn create_issue(&self, code: &Path, milestone: &str, title: &str, text: &str) -> Result<String> {
         let file = self.forge.join("issue.body");
@@ -195,7 +233,7 @@ impl Sandbox {
         if let Some(diff) = mutant {
             let file = self.forge.join("mutant.diff");
             std::fs::write(&file, diff)?;
-            plant(&worktree, &file)?;
+            crate::eval_pr::plant(&worktree, &file)?;
         }
         // The cargo target is shared, so `target/debug/bp` is whatever the last head built, and an issue's own check
         // reads it (`xtask/tests/eval.rs` at #57 takes the `bp` beside the xtask test binary; `with-escape-11-19-20-1`
@@ -217,9 +255,30 @@ impl Sandbox {
             let line = text.lines().find_map(|l| l.strip_prefix("skills:")).unwrap_or_default();
             Ok(line.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
         };
-        let want = listed(&Path::new("bundle/roles").join(format!("{}.md", skill.role_file())))?;
-        let have = listed(&code.join(format!(".claude/agents/{}.md", skill.role_file())))?;
+        let role = format!("{}.md", skill.role_file());
+        let want = listed(&Path::new("bundle/roles").join(&role))?;
+        let have = listed(&code.join(".claude/agents").join(&role))?;
         let installed = code.join(".claude/skills").join(&skill.name).join("SKILL.md");
+        // A research arm whose bundle has no skill (the worktree's before issue 4's body, and each `old` ref) runs
+        // the role alone: no preload line and no skill file; an arm from a ref installs that ref's role file.
+        let dir = format!("bundle/skills/{}", skill.name);
+        let skilled = || match at {
+            Some(sha) => git(Path::new("."), &["ls-tree", "--name-only", sha, "--", &dir]).map(|l| !l.is_empty()),
+            None => Ok(Path::new(&dir).is_dir()),
+        };
+        if skill.action == Action::Research && !skilled()? {
+            let ran = std::fs::read_to_string(code.join(".claude/agents").join(&role))?;
+            let same = at.map_or(Ok(true), |sha| {
+                crate::eval_grade::show_at(Path::new("."), sha, &format!("bundle/roles/{role}")).map(|r| r == ran)
+            })?;
+            if !have.is_empty() || installed.exists() || !same {
+                bail!(
+                    "the {arm} arm's clone does not hold the role alone: role skills {have:?}, skill file {}, role as at the ref: {same}",
+                    installed.display()
+                );
+            }
+            return Ok(());
+        }
         let body = std::fs::read_to_string(&installed).unwrap_or_default();
         let ok = match arm {
             "without" => {
@@ -372,49 +431,27 @@ impl Sandbox {
     }
 }
 
-/// The commits that the fixtures under `xtask/evals/` at `at` name on their `base:`, `head:` and `stack:` lines. From
-/// #60 on, xtask's `the_shipped_fixtures_match_the_history_they_name` asserts that they are in the clone, and an issue's
-/// Check that runs xtask's tests runs it. A fixture's head can be a branch commit that the fetched heads do not reach,
-/// as `pr-20`'s is, so the clone fetches them too (review of PR 63, major 1).
-fn named_commits(code: &Path, at: &str) -> Result<Vec<String>> {
-    let files = git(code, &["ls-tree", "-r", "--name-only", at, "--", "xtask/evals"])?;
-    let mut shas = std::collections::BTreeSet::new();
-    for file in files.lines().filter(|f| Path::new(f).extension().is_some_and(|e| e == "md")) {
-        let text = git(code, &["show", &format!("{at}:{file}")])?;
-        for line in text.split("\n---\n").next().unwrap_or_default().lines() {
-            let value = ["base:", "head:", "stack:"].iter().find_map(|k| line.strip_prefix(k));
-            shas.extend(value.and_then(|v| v.split_whitespace().next()).map(str::to_string));
-        }
-    }
-    Ok(shas.into_iter().collect())
-}
-
-/// Applies a mutant's diff to the head commit in `dir` and amends that commit, message and author kept. The pull
-/// request is then one commit, as the landed one was, so its history does not point at the defect. The committer is
-/// `bp-eval`, because the sandbox may have no git identity.
-fn plant(dir: &Path, diff: &Path) -> Result<()> {
-    git(dir, &["apply", &diff.display().to_string()])?;
-    let me = ["-c", "user.name=bp-eval", "-c", "user.email=bp-eval@bp.invalid"];
-    git(dir, &[&me[..], &["commit", "-q", "--no-verify", "-a", "--amend", "--no-edit"]].concat())?;
-    Ok(())
-}
-
-/// Seeds a research fixture's nodes into the scratch vault at `vault` (31, design change 2): it writes each seed at its
-/// node id, commits them, and has `bp` at `bp` show each one. There is no `bp reindex`: the index refreshes when a
-/// file comes or the head moves, so the `show` rebuilds it and refuses a seed the vault does not take. A runner calls
-/// it once per trial, on a fresh copy; `cargo xtask plants --verify` calls it once for a whole set.
+/// Seeds a research fixture's nodes into the scratch vault at `vault` (31, design changes 2 and 3): it writes each
+/// seed at its node id, commits it as `bp create` does, and has `bp` at `bp` show each one. The commit carries the
+/// author of the vault's head, the subject `create <kind> <id>` and the verb and role trailers, so `git log` in the
+/// trial vault tells a seed from no other node (review of PR #78). There is no `bp reindex`: the index refreshes when
+/// a file comes or the head moves, so the `show` rebuilds it and refuses a seed the vault does not take. A runner
+/// calls it once per trial, on a fresh copy; `cargo xtask plants --verify` calls it once for a whole set.
 pub(crate) fn seed(vault: &Path, bp: &Path, fixtures: &[&Fixture]) -> Result<()> {
+    let author = git(vault, &["log", "-1", "--format=user.name=%an%nuser.email=%ae"])?;
+    let me: Vec<&str> = author.lines().flat_map(|l| ["-c", l]).collect();
     let seeds = fixtures.iter().flat_map(|f| f.research.iter().flat_map(|r| &r.plants));
     let mut ids = Vec::new();
     for s in seeds {
         let file = vault.join(s.file());
         std::fs::create_dir_all(file.parent().context("a node id has a parent")?)?;
         std::fs::write(&file, &s.text)?;
+        let kind = s.field("kind").unwrap_or_default();
+        let message = format!("create {kind} {}\n\nBp-Verb: create\nBp-Role: session", s.node);
+        git(vault, &["add", "--", &s.file()])?;
+        git(vault, &[&me[..], &["commit", "-q", "--no-verify", "-m", &message]].concat())?;
         ids.push(s.node.as_str());
     }
-    let me = ["-c", "user.name=bp-eval", "-c", "user.email=bp-eval@bp.invalid"];
-    git(vault, &["add", "-A"])?;
-    git(vault, &[&me[..], &["commit", "-q", "--no-verify", "-m", "seed the research fixtures"]].concat())?;
     for id in ids {
         let mut show = Command::new(bp);
         show.args(["show", id, "--json"]).env("BP_VAULT", vault).env_remove("BP_ROLE").env_remove("BP_SESSION");
@@ -424,7 +461,7 @@ pub(crate) fn seed(vault: &Path, bp: &Path, fixtures: &[&Fixture]) -> Result<()>
     Ok(())
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
     capture(Command::new("git").args(args).current_dir(dir).env("GIT_ALLOW_PROTOCOL", "file"))
 }
 
@@ -488,85 +525,46 @@ mod tests {
     }
 
     #[test]
-    fn a_planted_head_differs_from_the_landed_head_by_the_mutant_alone() {
+    fn seeds_the_fixture_learning() {
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("r");
-        let g = |args: &[&str]| {
-            let me = ["-c", "user.name=t", "-c", "user.email=t@t.invalid"];
-            git(&repo, &[&me[..], args].concat()).unwrap()
-        };
-        std::fs::create_dir(&repo).unwrap();
+        let vault = dir.path().join("vault");
+        let g = |args: &[&str]| git(&vault, args).unwrap();
+        std::fs::create_dir_all(vault.join("shared")).unwrap();
+        std::fs::write(vault.join("shared/.gitkeep"), "").unwrap();
         g(&["init", "-q"]);
-        std::fs::write(repo.join("a.rs"), "fn a() -> bool {\n    1 > 0\n}\n").unwrap();
         g(&["add", "-A"]);
-        g(&["commit", "-qm", "base"]);
-        let base = g(&["rev-parse", "HEAD"]);
-        std::fs::write(repo.join("a.rs"), "fn a() -> bool {\n    2 > 0\n}\n\nfn b() {}\n").unwrap();
-        g(&["commit", "-qam", "the landed change (#9)"]);
-        let head = g(&["rev-parse", "HEAD"]);
-        std::fs::write(repo.join("a.rs"), "fn a() -> bool {\n    2 >= 0\n}\n\nfn b() {}\n").unwrap();
-        let diff = format!("{}\n", g(&["diff"]));
-        g(&["checkout", "-q", "."]);
-        let file = dir.path().join("mutant.diff");
-        std::fs::write(&file, &diff).unwrap();
-
-        plant(&repo, &file).unwrap();
-        assert_eq!(format!("{}\n", g(&["diff", &head, "HEAD"])), diff, "the mutant and nothing else");
-        assert_eq!(g(&["rev-parse", "HEAD^"]), base, "one commit on the base, as landed");
-        assert_eq!(g(&["log", "-1", "--format=%s %an"]), "the landed change (#9) t", "message and author kept");
-        assert!(g(&["status", "--porcelain"]).is_empty());
-    }
-
-    #[test]
-    fn the_clone_fetches_the_commits_its_own_fixtures_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let (repo, clone) = (dir.path().join("r"), dir.path().join("c"));
-        let g = |at: &Path, args: &[&str]| {
-            let me = ["-c", "user.name=t", "-c", "user.email=t@t.invalid"];
-            git(at, &[&me[..], args].concat()).unwrap()
-        };
-        std::fs::create_dir(&repo).unwrap();
-        g(&repo, &["init", "-q", "-b", "master"]);
-        std::fs::write(repo.join("a.rs"), "fn a() {}\n").unwrap();
-        g(&repo, &["add", "-A"]);
-        g(&repo, &["commit", "-qm", "base"]);
-        let base = g(&repo, &["rev-parse", "HEAD"]);
-        // A branch commit that master never reaches, as `pr-20`'s head is.
-        g(&repo, &["checkout", "-q", "-b", "side"]);
-        std::fs::write(repo.join("b.rs"), "fn b() {}\n").unwrap();
-        g(&repo, &["add", "-A"]);
-        g(&repo, &["commit", "-qm", "side"]);
-        let side = g(&repo, &["rev-parse", "HEAD"]);
-        g(&repo, &["checkout", "-q", "master"]);
-        g(&repo, &["branch", "-q", "-D", "side"]);
-        let fixture = format!(
-            "kind: mutant\nbase: {base}\nhead: {side}\nmutant_diff: |\n    head: {base}x\ntruth:\n---\nhead: no\n"
-        );
-        std::fs::create_dir_all(repo.join("xtask/evals/bp-review")).unwrap();
-        std::fs::write(repo.join("xtask/evals/bp-review/pr-1.md"), fixture).unwrap();
-        g(&repo, &["add", "-A"]);
-        g(&repo, &["commit", "-qm", "head"]);
-        let head = g(&repo, &["rev-parse", "HEAD"]);
-
-        std::fs::create_dir(&clone).unwrap();
-        g(&clone, &["init", "-q"]);
-        g(&clone, &["fetch", "-q", &repo.display().to_string(), &head]);
-        let named = named_commits(&clone, &head).unwrap();
+        g(&["-c", "user.name=Vault Owner", "-c", "user.email=owner@v.invalid", "commit", "-qm", "spike"]);
+        // A `bp` that logs each call: the seed shows each node it wrote.
+        let bp = dir.path().join("bp");
+        let calls = dir.path().join("calls");
+        std::fs::write(&bp, format!("#!/bin/sh\necho \"$@\" >> {}\n", calls.display())).unwrap();
+        std::fs::set_permissions(&bp, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let shape = crate::eval_plant::ROW_SHAPE;
+        let id = "shared/learnings/the-walk-weighs-a-backward-hop-at-a-third";
+        let fx = Fixture::parse(
+            "plant-1",
+            &format!(
+                "kind: plant\nseed: 8\nbase: b\nquestion: What weight does the walk give a backward hop? {shape}\n\
+                 plant: {id}\ngenre: Number\nclass: design\nsettled_by: grep -n BACKWARD crates/bp-vault/src/walk.rs\n\
+                 match: 0.3\nunless: 0.6\nnouns: walk backward\n---\nkind: learning\ntitle: The walk weighs a hop\n\
+                 status: verified\n---\nThe walk weighs a backward hop at 0.6.\n"
+            ),
+        )
+        .unwrap();
+        seed(&vault, &bp, &[&fx]).unwrap();
+        let text = std::fs::read_to_string(vault.join(format!("{id}.md"))).unwrap();
+        assert_eq!(text, fx.research.as_ref().unwrap().plants[0].text);
+        assert!(text.contains("kind: learning") && text.ends_with("at 0.6.\n"), "{text}");
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), format!("show {id} --json\n"));
         assert_eq!(
-            named,
-            {
-                let mut v = vec![base.clone(), side.clone()];
-                v.sort();
-                v
-            },
-            "the keys only, not the diff or the body"
+            g(&["log", "-1", "--format=%an <%ae>|%s"]),
+            format!("Vault Owner <owner@v.invalid>|create learning {id}")
         );
-        assert!(
-            git(&clone, &["cat-file", "-e", &format!("{side}^{{commit}}")]).is_err(),
-            "the head's fetch leaves it out"
-        );
-        let refs: Vec<&str> = named.iter().map(String::as_str).collect();
-        g(&clone, &[&["fetch", "-q", &repo.display().to_string()][..], &refs].concat());
-        assert!(git(&clone, &["cat-file", "-e", &format!("{side}^{{commit}}")]).is_ok(), "an unreachable sha fetches");
+        assert!(g(&["status", "--porcelain"]).is_empty());
+        // Nothing in the vault's log names the eval: no seed, plant, fixture or eval-only identity.
+        let log = g(&["log", "--format=%an%n%ae%n%cn%n%ce%n%B"]).to_lowercase();
+        for tell in ["seed", "plant", "fixture", "bp-eval"] {
+            assert!(!log.contains(tell), "{tell} in\n{log}");
+        }
     }
 }

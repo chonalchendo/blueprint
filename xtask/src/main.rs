@@ -16,6 +16,7 @@ mod eval_fixture;
 mod eval_grade;
 mod eval_kills;
 mod eval_plant;
+mod eval_pr;
 mod eval_report;
 mod eval_result;
 mod eval_sandbox;

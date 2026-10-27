@@ -3,7 +3,9 @@
 //! install. `without` has no skill directory and no preload, and its dispatch keeps the five lines of the shipped one
 //! with `Skill: none`: the baseline tests the missing body, not a different protocol. The role body is the shipped
 //! one. `filler` keeps the structure and replaces the skill's body with equal-length text that holds no instruction.
-//! An arm from a git ref, such as `old` (30, design change 2), is the bundle at that commit, from `git archive`.
+//! An arm from a git ref, such as `old` (30, design change 2), is the bundle at that commit, from `git archive`, with
+//! today's hooks: the hooks are the harness's bound, not the measured text, and the tool refuses a bundle that lacks a
+//! hook it registers (`bp-agent.sh`, 31 design change 6).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,8 +20,8 @@ use crate::eval_sandbox::capture;
 pub const FILLER: &str = "This line holds no instruction.";
 
 /// The version of how the arms are built. A trial stores it beside the fixture's hash (`eval_grade::stamp`), so a
-/// store of trials that ran under another construction is refused. Bump it when `arm_bundle` changes.
-pub const PROTOCOL: &str = "arms-2";
+/// store of trials that ran under another construction is refused. Bump it when `arm_bundle` or `ref_bundle` changes.
+pub const PROTOCOL: &str = "arms-3";
 
 /// What follows a skill file's frontmatter.
 pub fn body_of(skill_md: &str) -> &str {
@@ -71,7 +73,7 @@ fn arm_bundle(root: &Path, skill: &Skill, arm: &str, dest: &Path) -> Result<()> 
     Ok(())
 }
 
-/// The bundle of the commit `sha` at `dest`, from `git archive <sha> bundle/`.
+/// The bundle of the commit `sha` at `dest`, from `git archive <sha> bundle/`, with the hooks of `root`'s bundle.
 fn ref_bundle(root: &Path, sha: &str, dest: &Path) -> Result<()> {
     let unpacked = dest.with_extension("archive");
     std::fs::create_dir_all(&unpacked)?;
@@ -81,6 +83,8 @@ fn ref_bundle(root: &Path, sha: &str, dest: &Path) -> Result<()> {
     )?;
     capture(Command::new("tar").arg("-xf").arg(&tar).arg("-C").arg(&unpacked))?;
     std::fs::rename(unpacked.join("bundle"), dest).with_context(|| format!("move the bundle of {sha}"))?;
+    std::fs::remove_dir_all(dest.join("hooks"))?;
+    capture(Command::new("cp").arg("-R").arg(root.join("bundle/hooks")).arg(dest.join("hooks")))?;
     Ok(())
 }
 
@@ -136,15 +140,16 @@ pub fn bins(
 }
 
 /// The dispatch prompt: the role's template for the action, from the arm's `bundle`, with the node filled in, under
-/// the line the owner's replay typed to a session so that it dispatches the role and adds nothing (27, the replay).
-pub fn prompt(bundle: &Path, skill: &Skill, id: &str) -> Result<String> {
+/// the line the owner's replay typed to a session so that it dispatches the role and adds nothing (27, the replay). A
+/// research fixture's question fills the template's `<question>`, below the five lines (31, design change 3).
+pub fn prompt(bundle: &Path, skill: &Skill, id: &str, question: Option<&str>) -> Result<String> {
     let file = bundle.join(format!("roles/{}/{}.md", skill.role_file(), skill.action));
     let template = std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
-    Ok(format!(
-        "Dispatch the {} agent with exactly this prompt and add nothing to it:\n\n{}",
-        skill.role_file(),
-        template.replace("<id>", id)
-    ))
+    let mut text = template.replace("<id>", id);
+    if let Some(q) = question {
+        text = text.replace("<question>", q);
+    }
+    Ok(format!("Dispatch the {} agent with exactly this prompt and add nothing to it:\n\n{text}", skill.role_file()))
 }
 
 #[cfg(test)]
@@ -199,6 +204,57 @@ mod tests {
         let have = std::fs::read_to_string(dest.path().join("bundle-old").join(file)).unwrap();
         assert_eq!(Some(have.trim().to_string()), git(&["show", &format!("{sha}:bundle/{file}")]));
         assert!(dest.path().join("bundle-old/roles/bp-reviewer/review.md").is_file(), "the arm's own template");
+        let hook = |b: &Path| std::fs::read_to_string(b.join("hooks/bp-role.sh")).unwrap();
+        assert_eq!(hook(&dest.path().join("bundle-old")), hook(&root.join("bundle")), "today's hooks");
+    }
+
+    #[test]
+    fn fills_the_question_below_the_five_lines() {
+        let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bundle");
+        let skill = Skill::parse("bp-research").unwrap();
+        let q = "How many lines does the check module in bp-tool's src have? Report under `## Findings` as a table.";
+        let text = prompt(&bundle, &skill, "projects/bp/project", Some(q)).unwrap();
+        let (head, dispatch) = text.split_once("\n\n").unwrap();
+        assert_eq!(head, "Dispatch the bp-researcher agent with exactly this prompt and add nothing to it:");
+        let lines: Vec<&str> = dispatch.lines().collect();
+        let keys: Vec<&str> = lines[..5].iter().map(|l| l.split_once(':').unwrap().0).collect();
+        assert_eq!(keys, ["Node", "Skill", "Budget", "Forbidden", "Stop"]);
+        assert_eq!((lines[0], lines[5], lines[6], lines.len()), ("Node: projects/bp/project", "", q, 7));
+        assert!(!text.contains("<question>") && !text.contains("<id>"), "{text}");
+    }
+
+    #[test]
+    fn an_old_ref_with_no_skill_hashes_the_role_alone() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let skill = Skill::parse("bp-research").unwrap();
+        let role = "bundle/roles/bp-researcher.md";
+        // a27fc93 is master before the researcher's skill: issue 1 of milestone 8.
+        let Ok(old_role) = crate::eval_grade::show_at(&root, "a27fc93", role) else {
+            eprintln!("skipped: history is shallow");
+            return;
+        };
+        let dest = tempfile::tempdir().unwrap();
+        ref_bundle(&root, "a27fc93", &dest.path().join("bundle-old")).unwrap();
+        assert!(!dest.path().join("bundle-old/skills/bp-research").exists(), "the ref has no skill");
+        let (hash, marker) = crate::eval_grade::ref_hash(&root, &skill, "a27fc93").unwrap();
+        assert_eq!(hash, crate::eval_grade::hash_object(&old_role).unwrap(), "the role file alone");
+        assert_eq!(marker, crate::eval_grade::Marker::Role("You are the Blueprint researcher.".into()));
+
+        // A bundle that holds the skill hashes the role, the body and each reference, in name order.
+        let t = tempfile::tempdir().unwrap();
+        let file = |rel: &str, text: &str| {
+            let p = t.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        file(role, "role\n");
+        let alone = crate::eval_grade::bundle_hash(t.path(), &skill).unwrap();
+        assert_eq!(alone, crate::eval_grade::hash_object("role\n").unwrap(), "no skill directory: the role alone");
+        file("bundle/skills/bp-research/SKILL.md", "body\n");
+        file("bundle/skills/bp-research/references/fan-out.md", "fan\n");
+        file("bundle/skills/bp-research/references/b.md", "b\n");
+        let all = crate::eval_grade::bundle_hash(t.path(), &skill).unwrap();
+        assert_eq!(all, crate::eval_grade::hash_object("role\nbody\nb\nfan\n").unwrap());
     }
 
     #[test]

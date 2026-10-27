@@ -1,5 +1,6 @@
 //! `cargo xtask eval`, the skill eval (29, design changes 1 and 2; 17 check 6). Blueprint never runs an agent, so the
-//! runner lives here, and the owner starts it in their own terminal. Skills: `bp-review`, `bp-complete`, `bp-respond`.
+//! runner lives here, and the owner starts it in their own terminal. Skills: `bp-review`, `bp-complete`, `bp-respond`,
+//! `bp-research` (31, design change 3).
 //!
 //! ```text
 //! cargo xtask eval <skill> --trials N [--arms with,without,filler,<arm>] [--fixture <id>] [--bin <arm>=<bp>]...
@@ -12,9 +13,10 @@
 //! replay's sandbox, starts the agent in the clone, and stores the role's transcript and the vault log under
 //! `$BP_REDESIGN/analysis/evals-skills/<skill>/`. Then it grades the store, as `--grade` does. The agent is
 //! `$BP_EVAL_AGENT`, a shell command that reads the prompt from `$BP_EVAL_PROMPT`; if it writes the role's transcript
-//! to `$BP_EVAL_TRANSCRIPT`, that file is the trace, and if it does not, the newest transcript of the role's subagent
-//! that Claude Code wrote for the sandbox is. A run past `$BP_EVAL_TIMEOUT` seconds is killed (default 1800; 3600 for
-//! `bp-complete`, which builds a whole issue), and a trial with no transcript is stored as a
+//! to `$BP_EVAL_TRANSCRIPT`, that file is the trace. If it does not, the trace is the lead of the session that the
+//! agent's result JSON names (`eval_agent.rs`), and the store keeps every transcript of that session under
+//! `<trial>/`, with a `run.txt` that names the lead and each child. A run past `$BP_EVAL_TIMEOUT` seconds is killed
+//! (default 1800; 3600 for `bp-complete`, which builds a whole issue), and a trial with no transcript is stored as a
 //! failed trial; a failed trial counts as a fail, and the report names the reason. `$BP_VAULT` is the vault to copy.
 //! `$BP_EVAL_TARGET` is a cargo target directory to keep across runs (default: one per run), where a worker's blocks
 //! build the issue's code; every trial gets its own `$TMPDIR` under the run's work directory, apart from the directory
@@ -27,6 +29,11 @@
 //! (30, design change 2) builds the arm from `git archive <ref> bundle/`: its trials carry that ref's hash and a
 //! `ref:` line, dispatch from its template and check its body's first line, and `--arm` adds the arm to `--arms`. A
 //! usage error exits 4, as every xtask check does.
+//!
+//! `bp-research` runs the arms `with` and those from `--arm` (31, Decided 4: no `without` or `filler`). Its sandbox
+//! seeds the fixture's nodes and dispatches the question, and its grader is issue 3's: a run stores the trials, and
+//! `--grade --check` parses every fixture and prints its counts. A trial whose arm has no skill directory records
+//! `skill: none`.
 //!
 //! A fixture set other than the skill's own writes its own store and result file (30, "Blocks of 24 to 29"): the
 //! directory's name names them, and the development set `<skill>-mutants` names them `<skill>-dev`. A set with no
@@ -41,10 +48,11 @@ use anyhow::{Context, Result, bail};
 use bp_operation::{Action, READ_VERBS, Role};
 use serde_json::json;
 
-use crate::eval_agent::claude_transcript;
+use crate::eval_agent::{Session, session_dir, session_id};
 use crate::eval_arms::{bins, prompt};
 use crate::eval_fixture::{Fixture, Review};
-use crate::eval_grade::{Grade, bundle_hash, read_hash, ref_hash, stamp};
+use crate::eval_grade::{Grade, Marker, bundle_hash, read_hash, ref_hash, stamp};
+use crate::eval_plant::Research;
 use crate::eval_result::{Owner, differences};
 use crate::eval_sandbox::{Sandbox, capture};
 use crate::eval_trace::Trace;
@@ -54,6 +62,9 @@ use crate::eval_trace::Trace;
 /// denials, the cost and the turns. Without the ceiling, `-p` drops a background subagent's partial result after ten
 /// idle minutes; the runner's own limit replaces it. Unverified until the owner's first run.
 const AGENT: &str = r#"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 claude -p "$(cat "$BP_EVAL_PROMPT")" --setting-sources project,local --output-format json --allowedTools "Bash,Read,Grep,Glob,Edit,Write,Task,Agent""#;
+
+/// The node a research dispatch names: the project node, since `projects/bp` is no node (31, design change 2).
+const NODE: &str = "projects/bp/project";
 
 /// A bad argument: `main` exits 4 for it, as for every other xtask usage error.
 #[derive(Debug)]
@@ -86,7 +97,12 @@ impl Skill {
         let role = match action {
             Action::Review => Role::Reviewer,
             Action::Complete | Action::Respond => Role::Worker,
-            _ => return Err(usage(format!("{name}: no fixture or grader; the eval covers review, complete, respond"))),
+            Action::Research => Role::Researcher,
+            _ => {
+                return Err(usage(format!(
+                    "{name}: no fixture or grader; the eval covers review, complete, respond, research"
+                )));
+            }
         };
         Ok(Self { name: format!("bp-{action}"), action, role })
     }
@@ -151,6 +167,7 @@ impl Args {
             grade: false,
             check: false,
         };
+        let mut arms = false;
         let mut it = args.iter();
         while let Some(arg) = it.next() {
             let mut value = || it.next().ok_or_else(|| usage(format!("{arg} takes a value")));
@@ -158,7 +175,10 @@ impl Args {
                 "--grade" => a.grade = true,
                 "--check" => a.check = true,
                 "--trials" => a.trials = value()?.parse().map_err(|_| usage("--trials is a count"))?,
-                "--arms" => a.arms = value()?.split(',').map(str::to_string).collect(),
+                "--arms" => {
+                    a.arms = value()?.split(',').map(str::to_string).collect();
+                    arms = true;
+                }
                 "--fixture" => a.fixture = Some(value()?.clone()),
                 "--fixtures" => a.fixtures = Some(value()?.into()),
                 "--repo" => a.repo = value()?.into(),
@@ -178,6 +198,17 @@ impl Args {
             return Err(usage(
                 "usage: cargo xtask eval <skill> --trials N [--arms ...] [--fixture <id>] | cargo xtask eval --grade [--check] <skill>",
             ));
+        }
+        // Research has no skill to take out today, and its eval runs `with` and `old` only (31, Decided 4).
+        if Skill::parse(&a.skill).is_ok_and(|s| s.action == Action::Research) {
+            if !arms {
+                a.arms = vec!["with".into()];
+            }
+            if let Some(bad) = a.arms.iter().find(|x| ["without", "filler"].contains(&x.as_str())) {
+                return Err(usage(format!(
+                    "bp-research has no {bad} arm; its arms are with and an --arm <arm>=<git ref>"
+                )));
+            }
         }
         // The runner builds the three arms and an arm from a git ref; another arm's bundle is the caller's, so its
         // binary must come with it. A trial is `<arm>-<fixture>-<n>`, so an arm is one lower-case word.
@@ -213,6 +244,10 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     let store = results.join(&name);
     if !a.grade {
         trials(&a, &skill, root, &fixtures, &store)?;
+    }
+    if skill.action == Action::Research {
+        println!("{}", counts(&Fixture::load(&fixtures, None)?, root, &skill));
+        return Ok(Vec::new());
     }
     let grade = Grade::read(&skill, &store, &fixtures, root)?;
     let problems = grade.problems();
@@ -257,17 +292,50 @@ fn set_name(skill: &str, fixtures: &Path) -> String {
     }
 }
 
-/// Each `--arm <arm>=<git ref>` as its commit and the hash of the role and skill files there.
-fn resolve(refs: &[(String, String)], root: &Path, skill: &Skill) -> Result<BTreeMap<String, (String, String)>> {
+/// The counts of a research fixture set (31, design change 3): what `--grade --check` prints until issue 3's
+/// grader reads the store. A plant is a unit of evidence, so a two-part file counts two.
+fn counts(list: &[Fixture], root: &Path, skill: &Skill) -> String {
+    let research = list.iter().filter_map(|f| f.research.as_ref());
+    let (controls, plants): (Vec<&Research>, Vec<&Research>) = research.partition(|r| r.control);
+    let seeds: usize = plants.iter().map(|r| r.plants.len()).sum();
+    let two = plants.iter().filter(|r| r.plants.len() == 2).count();
+    let skilled = root.join("bundle/skills").join(&skill.name).is_dir();
+    format!(
+        "plants: {seeds} in {} files\ncontrols: {}\ntwo_part: {two}\nskill: {}\ngrader: none until issue 3",
+        plants.len(),
+        controls.len(),
+        if skilled { skill.name.as_str() } else { "none" }
+    )
+}
+
+/// Each `--arm <arm>=<git ref>` as its commit, the hash of the role and skill files there, and whether it holds the
+/// skill.
+fn resolve(refs: &[(String, String)], root: &Path, skill: &Skill) -> Result<BTreeMap<String, (String, String, bool)>> {
     let mut out = BTreeMap::new();
     for (arm, at) in refs {
         let sha =
             capture(Command::new("git").args(["rev-parse", "--verify", &format!("{at}^{{commit}}")]).current_dir(root))
                 .with_context(|| format!("--arm {arm}={at}: no commit"))?;
-        let hash = ref_hash(root, skill, &sha)?.0;
-        out.insert(arm.clone(), (sha, hash));
+        let (hash, marker) = ref_hash(root, skill, &sha)?;
+        out.insert(arm.clone(), (sha, hash, matches!(marker, Marker::Preload(_))));
     }
     Ok(out)
+}
+
+/// The lead's transcript of the session that the agent's output in `log` names, with every transcript of that session
+/// kept in `kept`; else why there is none.
+fn lead(sb: &Sandbox, log: &Path, skill: &Skill, kept: &Path) -> Result<Result<PathBuf, String>> {
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map_or_else(|| Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(".claude"), PathBuf::from);
+    let Some(sid) = session_id(&std::fs::read_to_string(log).unwrap_or_default()) else {
+        return Ok(Err(format!("the agent's output in {} names no session_id", log.display())));
+    };
+    let dir = session_dir(&config, &sb.code(), &sid);
+    let Some(session) = Session::join(&dir, &skill.role_file()) else {
+        return Ok(Err(format!("no {} transcript at depth 1 in {}", skill.role_file(), dir.display())));
+    };
+    session.store(kept)?;
+    Ok(Ok(session.lead))
 }
 
 /// Fills each arm and fixture to `a.trials` stored trials, the arms interleaved so that host drift falls on both.
@@ -299,10 +367,11 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
     }
     let refs = resolve(&a.refs, root, skill)?;
     let work = crate::scratch::fresh(&std::env::temp_dir().join("bp-eval"), 8)?;
-    let shas = refs.iter().map(|(arm, (sha, _))| (arm.clone(), sha.clone())).collect();
+    let shas = refs.iter().map(|(arm, (sha, ..))| (arm.clone(), sha.clone())).collect();
     let bin = bins(root, skill, &a.arms, &work, (&a.bins, &shas))?;
     let repo = a.repo.canonicalize().with_context(|| format!("read {}", a.repo.display()))?;
     let shipped = bundle_hash(root, skill)?;
+    let skilled = skill.action != Action::Research || root.join("bundle/skills").join(&skill.name).is_dir();
     for round in 1..=a.trials {
         for arm in &a.arms {
             for (fx, stamp) in list.iter().zip(&stamps) {
@@ -312,42 +381,30 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                 }
                 eprintln!("eval: trial {id}");
                 let verify = !a.bins.iter().any(|(b, _)| b == arm);
-                let sb = Sandbox::build(
-                    &repo,
-                    Path::new(&source),
-                    &bin[arm],
-                    &work,
-                    fx,
-                    skill,
-                    verify.then_some((arm.as_str(), refs.get(arm).map(|r| r.0.as_str()))),
-                )
+                let check = verify.then_some((arm.as_str(), refs.get(arm).map(|r| r.0.as_str())));
+                let (src, bindir) = (Path::new(&source), &bin[arm]);
+                let research = fx.research.as_ref();
+                let sb = match research {
+                    Some(_) => Sandbox::research(&repo, src, bindir, &work, fx, skill, check),
+                    None => Sandbox::build(&repo, src, bindir, &work, fx, skill, check),
+                }
                 .with_context(|| format!("build the sandbox of {id}"))?;
                 // An arm built from an edited bundle dispatches from that bundle's template.
                 let edited = work.join(format!("bundle-{arm}"));
                 let bundle = if edited.is_dir() { edited } else { root.join("bundle") };
                 let log = store.join(format!("{id}.agent.log"));
+                // A research dispatch names the project node, as `walk --for research` takes a project (31).
+                let (node, question) =
+                    research.map_or((sb.issue.as_str(), None), |r| (NODE, Some(r.question.as_str())));
                 let (made, timed_out) = sb.run_agent(
                     &agent,
-                    &prompt(&bundle, skill, &sb.issue)?,
+                    &prompt(&bundle, skill, node, question)?,
                     (arm, &fx.id),
                     (&log, Duration::from_secs(seconds)),
                 )?;
-                let config = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(
-                    || Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(".claude"),
-                    PathBuf::from,
-                );
-                let forge_name = sb.forge.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let found = if made.is_file() {
-                    Some(made)
-                } else {
-                    claude_transcript(&config, &forge_name, &skill.role_file())
-                };
-                let mut text = found.as_ref().map(std::fs::read_to_string).transpose()?.unwrap_or_default();
-                let failure = timed_out.or_else(|| {
-                    found.is_none().then(|| {
-                        format!("no {} transcript for the sandbox under {}", skill.role_file(), config.display())
-                    })
-                });
+                let found = if made.is_file() { Ok(made) } else { lead(&sb, &log, skill, &store.join(&id))? };
+                let mut text = found.as_ref().map(std::fs::read_to_string).ok().transpose()?.unwrap_or_default();
+                let failure = timed_out.or_else(|| found.err());
                 if let Some(why) = &failure {
                     eprintln!("eval: {id} is stored as a failed trial: {why}; see {}", log.display());
                     let record = json!({"type": "system", "subtype": "eval_failed", "reason": why});
@@ -364,15 +421,19 @@ fn trials(a: &Args, skill: &Skill, root: &Path, fixtures: &Path, store: &Path) -
                         sb.record_review(&sb.head, &review.body)?;
                     }
                     sb.vault_log()?
+                } else if research.is_some() {
+                    sb.vault_log()?
                 } else {
                     format!("{}\n{}", sb.vault_log()?, sb.end_state(skill, fx)?)
                 };
                 std::fs::write(store.join(format!("{id}.vault.log")), log)?;
                 // An arm from a git ref ran that ref's body: its hash, and the ref the grader reads it from.
-                let (hash, at) = refs
-                    .get(arm)
-                    .map_or((shipped.as_str(), String::new()), |(sha, hash)| (hash.as_str(), format!("ref: {sha}\n")));
-                std::fs::write(store.join(format!("{id}.hash")), format!("{hash}\nstamp: {stamp}\n{at}"))?;
+                let (hash, at, skilled) =
+                    refs.get(arm).map_or((shipped.as_str(), String::new(), skilled), |(sha, hash, s)| {
+                        (hash.as_str(), format!("ref: {sha}\n"), *s)
+                    });
+                let bare = if skilled { "" } else { "skill: none\n" };
+                std::fs::write(store.join(format!("{id}.hash")), format!("{hash}\nstamp: {stamp}\n{at}{bare}"))?;
                 // The pull request's head: a mutant's planted one is what the reviewer diffs and names.
                 std::fs::write(store.join(format!("{id}.head")), format!("{}\n", sb.head))?;
                 // The transcript lands last: a trial is stored once it has one, so an aborted run leaves no half trial.
@@ -392,6 +453,8 @@ mod tests {
         let s = Skill::parse("bp-review").unwrap();
         assert_eq!((s.role_file().as_str(), s.allowed()), ("bp-reviewer", READ_VERBS.to_vec()));
         assert!(Skill::parse("review").is_ok() && Skill::parse("nope").is_err() && Skill::parse("bp-design").is_err());
+        let r = Skill::parse("bp-research").unwrap();
+        assert_eq!((r.role_file().as_str(), r.allowed(), r.seconds()), ("bp-researcher", READ_VERBS.to_vec(), 1800));
     }
 
     #[test]
@@ -432,7 +495,12 @@ mod tests {
             (&["with".to_string(), "old".into()][..], 1),
             "--arm adds it"
         );
+        let research = args("bp-research --trials 1 --arm old=a27fc93").unwrap();
+        assert_eq!(research.arms, ["with", "old"], "research runs with and old, no without or filler");
+        assert!(args("--grade --check bp-research --fixtures xtask/evals/bp-research-plants").is_ok());
         for bad in [
+            "bp-research --trials 1 --arms with,without",
+            "bp-research --trials 1 --arms filler",
             "bp-review --trials 1 --arm with=HEAD",
             "bp-review --trials 1 --arm old=HEAD --bin old=/x",
             "bp-review --trials 1 --arm old",
