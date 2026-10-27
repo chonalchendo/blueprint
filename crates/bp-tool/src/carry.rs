@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use bp_vault::{Body, Code, DeltaState, Filter, Id, Index, Kind, Refusal, Vault};
+use bp_vault::{Body, Code, Id, Index, Kind, Refusal, Vault};
 use serde_json::{Value, json};
 
 use crate::claim::git;
@@ -55,29 +55,20 @@ pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id) -> Result<Carried, 
     let args = ["log", "--diff-filter=A", "--format=%H", "--"].into_iter().chain(paths.iter().map(String::as_str));
     let at = git(&vault.root, &args.collect::<Vec<_>>())?.lines().last().unwrap_or_default().to_string();
     let file = vault.read(issue)?;
-    let project = issue.project().expect("an issue sits under a project");
-    let all = Filter { kind: Kind::Design, status: None, project: Some(project), under: None, limit: crate::ALL };
     let (mut deltas, mut diagrams) = (Vec::new(), Vec::new());
-    for row in index.list(&all)?.0 {
-        let design = Id::parse(&row.id).expect("the index holds ids");
-        for d in index.records(design.as_str(), Kind::Delta)? {
-            let caused = d.header.get("cause").and_then(Value::as_str) == Some(issue.as_str());
-            let body = Body::parse(&d.body);
-            if caused && DeltaState::of(&body) == DeltaState::Proposed {
-                let delta = Id::parse(&d.id).expect("the index holds ids");
-                for (name, spec) in crate::delta::carried(vault, &delta, &d.header)? {
-                    let page = format!("{delta}/{name}.diff.html");
-                    let diff = vault.root.join(&page).exists().then_some(page);
-                    let change = match spec {
-                        None => "removed",
-                        Some(_) if vault.root.join(format!("{design}/diagrams/{name}.yaml")).exists() => "replaced",
-                        Some(_) => "added",
-                    };
-                    diagrams.push((delta.clone(), name, change, diff));
-                }
-                deltas.push((delta, design.clone(), body));
-            }
+    for (design, d) in bp_read::carried_deltas(index, issue)? {
+        let delta = Id::parse(&d.id).expect("the index holds ids");
+        for (name, spec) in crate::delta::carried(vault, &delta, &d.header)? {
+            let page = format!("{delta}/{name}.diff.html");
+            let diff = vault.root.join(&page).exists().then_some(page);
+            let change = match spec {
+                None => "removed",
+                Some(_) if vault.root.join(format!("{design}/diagrams/{name}.yaml")).exists() => "replaced",
+                Some(_) => "added",
+            };
+            diagrams.push((delta.clone(), name, change, diff));
         }
+        deltas.push((delta, design, Body::parse(&d.body)));
     }
     // Each owner: its id, the file its claim-time text comes from, and its blocks now.
     let mut owners = vec![(issue.clone(), issue.clone(), hashes(&file.body))];

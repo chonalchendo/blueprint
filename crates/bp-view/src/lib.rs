@@ -56,6 +56,15 @@ impl View {
         let (object, page) = match route {
             Route::Health => unreachable!("answered above"),
             Route::Projects => (to_value(&bp_read::projects(vault, &index)?), Some(("/".to_string(), "-".to_string()))),
+            Route::Change { project, issue, diff } => {
+                if index.header(&format!("projects/{project}/project"))?.is_some() {
+                    self.forge.refresh(vault, &index, project);
+                }
+                let change = bp_read::change(vault, &index, project, issue, Some(self.forge.clone_dir()), *diff)?;
+                // The diff text is a disclosure of a page already logged, not a view of its own.
+                let page = (!*diff).then(|| (format!("/{project}/change/{}", change.id), change.id.clone()));
+                (to_value(&change), page)
+            }
             Route::Home(project) | Route::Moving(project) => {
                 // A project the vault does not hold refuses below, and reads no forge.
                 if index.header(&format!("projects/{project}/project"))?.is_some() {
@@ -133,9 +142,12 @@ async fn api(
     if path.contains(|c: char| c.is_whitespace() || c.is_control()) {
         return refused(&Refusal::usage(format!("/api/{path}"), "an API path holds no space or control character"));
     }
-    let Some(route) = Route::parse(&path, query.get("q").map(String::as_str)) else {
+    let Some(mut route) = Route::parse(&path, query.get("q").map(String::as_str)) else {
         return no_route(&path);
     };
+    if let Route::Change { diff, .. } = &mut route {
+        *diff = query.get("diff").is_some_and(|d| d == "1");
+    }
     let log = method == Method::GET;
     match tokio::task::spawn_blocking(move || view.page(&route, log)).await {
         Ok(Ok(object)) => json(StatusCode::OK, &object),
@@ -148,7 +160,8 @@ fn no_route(path: &str) -> Response {
     refused(&Refusal::new(
         Code::NoNode,
         format!("/api/{path}"),
-        "an API route is /api/projects, /api/<project>, /api/<project>/moving, /api/node/<id> or /api/search?q=<terms>",
+        "an API route is /api/projects, /api/<project>, /api/<project>/moving, /api/<project>/change/<issue>, \
+         /api/node/<id> or /api/search?q=<terms>",
         "curl <url>api/projects",
     ))
 }
