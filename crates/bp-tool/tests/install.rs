@@ -451,3 +451,40 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
         assert!(String::from_utf8_lossy(&out.stderr).contains(cause), "{}", String::from_utf8_lossy(&out.stderr));
     }
 }
+
+/// A researcher dispatches sub-researchers only; the session and every other caller pass (31, design change 6).
+#[test]
+fn the_agent_hook_keeps_a_researcher_to_researchers() {
+    let w = World::new();
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    let path = std::env::var("PATH").unwrap();
+    let call = |tool: &str, agent: Option<&str>, child: &str| {
+        let mut input = serde_json::json!({
+            "hook_event_name": "PreToolUse", "session_id": "s", "tool_name": tool,
+            "tool_input": { "subagent_type": child, "prompt": "print hello" },
+        });
+        if let Some(a) = agent {
+            input["agent_id"] = "a-one".into();
+            input["agent_type"] = a.into();
+        }
+        w.hook("bp-agent.sh", &input.to_string(), &path, &[])
+    };
+    for tool in ["Agent", "Task"] {
+        let out = call(tool, Some("bp-researcher"), "bp-worker");
+        assert_eq!(out.status.code(), Some(2), "{tool}");
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(said, "bp-agent: a researcher may dispatch bp-researcher only, not bp-worker\n", "{tool}");
+        for (agent, child) in
+            [(Some("bp-researcher"), "bp-researcher"), (None, "bp-worker"), (Some("bp-worker"), "Explore")]
+        {
+            let out = call(tool, agent, child);
+            assert!(out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(), "{tool} {agent:?} {child}");
+        }
+    }
+    let no_jq = bin(&w.t.path().join("nojq"), &[("bash", which("bash"))], false);
+    for (input, path, cause) in [("{}", no_jq.as_str(), "jq"), ("{bad", path.as_str(), "JSON"), ("", &path, "empty")] {
+        let out = w.hook("bp-agent.sh", input, path, &[]);
+        assert_eq!(out.status.code(), Some(2), "{cause}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains(cause), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+}

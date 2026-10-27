@@ -64,7 +64,7 @@ pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
         Refusal::failed(
             spec.settings,
             format!(
-                "{} is not a JSON object with an object `hooks` and a list `permissions.allow`; fix it",
+                "{} is not a JSON object with an object `hooks`, a list `permissions.allow` and an object `env`; fix it",
                 spec.settings
             ),
         )
@@ -348,8 +348,8 @@ fn is_our_rule(rule: &Value) -> bool {
     rule.as_str().is_some_and(|r| r.contains("BP_ROLE="))
 }
 
-/// Blueprint's hook entries alone, by event, and its allow rules: what the `#hooks` entry hashes, so the user's own
-/// entries and rules may change.
+/// Blueprint's hook entries alone, by event, its allow rules and its `env` keys: what the `#hooks` entry hashes, so the
+/// user's own entries, rules and keys may change.
 fn ours(settings: &Value, spec: &Spec) -> Vec<u8> {
     let mut out = Map::new();
     for (event, groups) in settings["hooks"].as_object().into_iter().flatten() {
@@ -360,11 +360,13 @@ fn ours(settings: &Value, spec: &Spec) -> Vec<u8> {
     }
     let rules: Vec<&Value> =
         settings["permissions"]["allow"].as_array().into_iter().flatten().filter(|r| is_our_rule(r)).collect();
-    serde_json::to_vec(&json!({ "hooks": out, "allow": rules })).expect("JSON serialises")
+    let env: Map<String, Value> =
+        spec.env.iter().map(|(k, _)| ((*k).to_string(), settings["env"][*k].clone())).collect();
+    serde_json::to_vec(&json!({ "hooks": out, "allow": rules, "env": env })).expect("JSON serialises")
 }
 
-/// The settings with Blueprint's entries and rules replaced by the spec's, the user's kept; `None` when `hooks` is
-/// not an object or `permissions.allow` not a list.
+/// The settings with Blueprint's entries, rules and `env` keys replaced by the spec's, the user's kept; `None` when
+/// `hooks` or `env` is not an object or `permissions.allow` not a list.
 fn merged(mut settings: Value, spec: &Spec) -> Option<Value> {
     let hooks = settings.as_object_mut()?.entry("hooks").or_insert_with(|| json!({})).as_object_mut()?;
     for groups in hooks.values_mut() {
@@ -394,6 +396,10 @@ fn merged(mut settings: Value, spec: &Spec) -> Option<Value> {
         let allow = permissions.as_object_mut()?.entry("allow").or_insert_with(|| json!([])).as_array_mut()?;
         allow.retain(|r| !is_our_rule(r));
         allow.extend(spec.allow.iter().map(|&r| json!(r)));
+    }
+    if !spec.env.is_empty() {
+        let env = settings.as_object_mut()?.entry("env").or_insert_with(|| json!({})).as_object_mut()?;
+        env.extend(spec.env.iter().map(|&(k, v)| (k.to_string(), json!(v))));
     }
     Some(settings)
 }

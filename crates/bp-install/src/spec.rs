@@ -42,6 +42,8 @@ pub(crate) struct Spec {
     /// How a hook command names the clone's top.
     pub(crate) top: &'static str,
     pub(crate) events: &'static [Hook],
+    /// Keys of the settings' `env` object that the bundle owns, with their values.
+    pub(crate) env: &'static [(&'static str, &'static str)],
     pub(crate) description_max: usize,
     pub(crate) body_lines: usize,
     /// The listing budget in description characters: Claude Code's 1% of the context window is 8,000 and Codex's 2%
@@ -67,10 +69,15 @@ pub(crate) const CLAUDE: Spec = Spec {
         START,
         Hook { event: "PreToolUse", matcher: Some("Edit|Write"), script: "bp-guard.sh", timeout: None },
         Hook { event: "PreToolUse", matcher: Some("Bash"), script: "bp-role.sh", timeout: None },
+        // A researcher dispatches sub-researchers only (31, design change 6). `Task` is the `Agent` tool's older name.
+        Hook { event: "PreToolUse", matcher: Some("Agent|Task"), script: "bp-agent.sh", timeout: None },
         // Claude Code kills a SessionEnd hook after 1.5 s unless `timeout` is set, with no message; the commit of
         // `bp record` can outlast that.
         Hook { event: "SessionEnd", matcher: None, script: "bp-end.sh", timeout: Some(10) },
     ],
+    // Two layers below the session: the researcher spawns a sub-researcher, and the sub-researcher spawns none. The key
+    // is project-wide, so every agent loses the third layer, which no role uses (31, Decided 8).
+    env: &[("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", "2")],
     description_max: 1024,
     body_lines: 500,
     listing: 8000,
@@ -93,6 +100,8 @@ pub(crate) const CODEX: Spec = Spec {
     // excluded, not tracked.
     top: "\"$(git rev-parse --path-format=absolute --git-common-dir)/..\"",
     events: &[START],
+    // Codex gets no `Agent` tool (31, Out of scope), so no depth key.
+    env: &[],
     description_max: 1024,
     body_lines: 500,
     listing: 16000,
@@ -112,7 +121,7 @@ impl Spec {
     }
 
     /// The manifest entries of the edits inside shared files: `AGENTS.md#bp`, an import's `<file>#bp`, and
-    /// `settings.local.json#hooks`, which holds the hook entries and the allow rules.
+    /// `settings.local.json#hooks`, which holds the hook entries, the allow rules and the bundle's `env` keys.
     pub(crate) fn section_entry(&self) -> String {
         format!("{}#bp", self.always_on)
     }
