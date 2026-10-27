@@ -15,11 +15,12 @@ use bp_change::IssueStatus;
 use bp_change::intents::{self, Base, Unmet};
 use bp_forge::{Gh, PullRequest};
 use bp_read::inputs::{field, held};
+use bp_read::snapshot::clone_of;
 use bp_vault::{Code, Id, Index, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::claim::{clone_of, default_branch, git};
+use crate::claim::{default_branch, git};
 use crate::{Wrote, finish, node_id, subject};
 
 /// `bp pr <issue>`.

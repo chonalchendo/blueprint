@@ -6,14 +6,37 @@ pub mod clock;
 pub mod inputs;
 mod intents;
 mod objects;
+mod pages;
+pub mod snapshot;
 mod world;
 
+use bp_vault::{Code, Id, Index, Refusal};
 pub use intents::Intents;
 pub use objects::{Census, Forge, List, ListRow, Search, Show, census, list, search, show, status_in_set};
+pub use pages::{Home, home};
 pub use world::{World, split};
 
 /// No limit on a `list` read: every row.
 pub const ALL: usize = usize::MAX >> 1;
+
+/// An id argument. Anything that is not a path id under the vault names no node.
+pub fn node_id(text: &str) -> Result<Id, Refusal> {
+    Id::parse(text).map_err(|why| {
+        Refusal::new(
+            Code::NoNode,
+            text,
+            "an id is a path under projects/ or shared/, without .md",
+            format!("{why}; bp search {}", text.rsplit('/').next().unwrap_or(text).replace(['-', '.', '_'], " ")),
+        )
+    })
+}
+
+/// A verb's subject: the id a node or record holds today, through the index. Case is ignored, and a renamed node's
+/// past id names the node (13, rule 1). An id nothing holds stays as asked, and the verb refuses it `no_node`.
+pub fn subject(index: &Index, text: &str) -> Result<Id, Refusal> {
+    let id = node_id(text)?;
+    Ok(index.holder(&id)?.map_or(id, |(held, _)| held))
+}
 
 #[cfg(test)]
 mod tests {
@@ -39,6 +62,7 @@ mod tests {
         Show::export_all(&cfg).expect("Show exports");
         Search::export_all(&cfg).expect("Search exports");
         Census::export_all(&cfg).expect("Census exports");
+        Home::export_all(&cfg).expect("Home exports");
         // The closed enum's `Serialize` writes each text; its `TS` derives the variant in snake case. They agree.
         let ts = FindingKind::inline(&cfg);
         for k in FindingKind::ALL {
