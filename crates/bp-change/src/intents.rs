@@ -18,7 +18,7 @@ pub use planning::*;
 pub const STALE_AFTER: i64 = 12 * 3600;
 
 /// The intents, in predicate order (21).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
 #[allow(missing_docs)]
 pub enum Intent {

@@ -30,6 +30,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use bp_read::{ALL, clock};
+pub(crate) use bp_read::{node_id, subject};
 use bp_vault::{Code, Filter, Id, Index, Kind, Refusal, Vault};
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
@@ -276,18 +277,6 @@ fn sorted(object: &impl Serialize) -> Value {
     serde_json::to_value(object).expect("a plain struct serialises")
 }
 
-/// An id argument. Anything that is not a path id under the vault names no node.
-pub(crate) fn node_id(text: &str) -> Result<Id, Refusal> {
-    Id::parse(text).map_err(|why| {
-        Refusal::new(
-            Code::NoNode,
-            text,
-            "an id is a path under projects/ or shared/, without .md",
-            format!("{why}; bp search {}", text.rsplit('/').next().unwrap_or(text).replace(['-', '.', '_'], " ")),
-        )
-    })
-}
-
 /// The index a write verb reads through: the writer's, opened under the lock, or for a dry run one opened without
 /// it into `opened`.
 pub(crate) fn index<'a>(
@@ -299,13 +288,6 @@ pub(crate) fn index<'a>(
         Some(w) => Ok(w.index()),
         None => Ok(opened.insert(Index::open(vault)?)),
     }
-}
-
-/// A verb's subject: the id a node or record holds today, through the index. Case is ignored, and a renamed node's
-/// past id names the node (13, rule 1). An id nothing holds stays as asked, and the verb refuses it `no_node`.
-pub(crate) fn subject(index: &Index, text: &str) -> Result<Id, Refusal> {
-    let id = node_id(text)?;
-    Ok(index.holder(&id)?.map_or(id, |(held, _)| held))
 }
 
 fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {

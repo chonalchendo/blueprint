@@ -245,6 +245,12 @@ fn show_at_a_commit_reads_the_file_as_it_was() {
 #[test]
 fn read_envelopes_print_sorted_keys_and_no_null_for_a_skipped_field() {
     let dir = vault();
+    // A live issue, so a `list issue` row carries an intent and a note, and the list its `forge`.
+    write(
+        dir.path(),
+        "projects/bp/issues/0002.b.md",
+        "---\nkind: issue\ntitle: B\nstatus: open\nunder: projects/bp/milestones/m\ndepends: [\"projects/bp/issues/0009.gone\"]\n---\n\nLead.\n",
+    );
     for args in [
         &["list", "issue", "--json"][..],
         &["list", "--count-only", "--json"],
@@ -259,6 +265,7 @@ fn read_envelopes_print_sorted_keys_and_no_null_for_a_skipped_field() {
             .output()
             .unwrap();
         let text = String::from_utf8(out.stdout).unwrap();
+        assert!(!text.contains(":null"), "a skipped field printed null at some level: {args:?}: {text}");
         // The envelope appends `contract_version` after the result's keys, as it always did; the result's own keys,
         // at every level, must print in sorted order, which re-serialising through a `Value` gives.
         let (result, tail) =
@@ -273,4 +280,11 @@ fn read_envelopes_print_sorted_keys_and_no_null_for_a_skipped_field() {
             "a skipped field printed null: {args:?}"
         );
     }
+    let (_, v) = bp(dir.path(), &["list", "issue", "--json"]);
+    let live = v["rows"].as_array().unwrap().iter().find(|r| r["id"] == "projects/bp/issues/0002.b").unwrap();
+    assert_eq!(
+        (live["intent"].as_str(), live["note"].as_str()),
+        (Some("blocked"), Some("depends on missing projects/bp/issues/0009.gone"))
+    );
+    assert_eq!(v["forge"], "not read");
 }

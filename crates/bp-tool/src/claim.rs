@@ -46,7 +46,7 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
     let id = subject(&index, &c.issue)?;
     let (project, slug) = (id.project().unwrap_or_default(), id.as_str().rsplit('/').next().unwrap_or_default());
     let branch = branch(&id);
-    let top = clone_of(cwd, &index, project)?;
+    let top = bp_read::snapshot::clone_of(cwd, &index, project)?;
     let worktree = place(&top, slug)?;
     // The fetch has no time bound, so it runs with no lock held: every refusal comes before it and holds under the
     // lock too, as `stamp` checks around its blocks (26, design change 2).
@@ -241,27 +241,6 @@ pub(crate) fn default_branch(top: &Path) -> Result<String, Refusal> {
         Refusal::failed(e.subject, "origin has no default branch here: git remote set-head origin --auto")
     })?;
     Ok(head.strip_prefix("origin/").unwrap_or(&head).to_string())
-}
-
-/// The top of the clone of `project`'s repository that holds `cwd`: a repo verb runs nowhere else (26, design change
-/// 2).
-pub(crate) fn clone_of(cwd: &Path, index: &Index, project: &str) -> Result<PathBuf, Refusal> {
-    let repository = index
-        .header(&format!("projects/{project}/project"))?
-        .and_then(|h| h.get("repository")?.as_str().map(str::to_string))
-        .unwrap_or_default();
-    // From a linked worktree too, the top is the main worktree's, so a new worktree never nests in another.
-    Repo::find(cwd)
-        .filter(|r| r.remote().is_some_and(|url| bp_vault::git::same_repository(&url, &repository)))
-        .and_then(|r| r.main_top())
-        .ok_or_else(|| {
-            Refusal::new(
-                Code::NoClone,
-                cwd.display().to_string(),
-                "a repo verb runs inside a clone of the project's repository (26, design change 2)",
-                format!("cd into a clone of {repository}, or git clone {repository}, then rerun"),
-            )
-        })
 }
 
 /// A repeat `cut` exits 3 with the claim's fields. A worktree a human removed comes back from its branch first.

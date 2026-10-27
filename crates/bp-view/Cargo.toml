@@ -19,7 +19,17 @@ bp-reasoning.workspace = true
 bp-operation.workspace = true
 bp-forge.workspace = true
 bp-read.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+tokio.workspace = true
+rust-embed.workspace = true
 
-# The edge is declared ahead of its first use, so the crate rule holds it from the start.
+[dev-dependencies]
+tempfile.workspace = true
+
+# The edges are declared ahead of their first use, so the crate rule holds them from the start.
 [package.metadata.cargo-machete]
-ignored = ["bp-vault", "bp-design", "bp-change", "bp-reasoning", "bp-operation", "bp-forge", "bp-read"]
+ignored = ["bp-design", "bp-change", "bp-reasoning", "bp-operation", "bp-forge"]

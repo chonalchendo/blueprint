@@ -37,7 +37,7 @@ pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
             format!("cd into a clone of one project's repository, then rerun: {}", urls.join(", ")),
         ));
     };
-    let top = crate::claim::clone_of(cwd, &index, &project)?;
+    let top = bp_read::snapshot::clone_of(cwd, &index, &project)?;
     Ok(match bp_install::install(&top, target)? {
         (true, v) => Wrote::Changed(v),
         (false, v) => Wrote::Already(v),
