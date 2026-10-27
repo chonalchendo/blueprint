@@ -3,7 +3,8 @@
 //! directory. `lines`, the file cap: exit 2 with one line per non-test file over 500 lines. `forge <project>`, a fake
 //! forge for a repo block: prints its directory. `gh`, the fake `gh` that directory's shim runs. `eval`, the skill eval and its grader
 //! (`eval.rs`). `mutants`, the planted-defect fixtures of the review eval (`mutants.rs`).
-//! `sandbox [claim]`, 27's prelude as `export` lines.
+//! `sandbox [claim]`, 27's prelude as `export` lines. `stage`, a staged copy (32, design change 11): `VAULT=`, `FORGE=`
+//! and `CLONE=` lines.
 
 mod bench;
 mod eval;
@@ -25,6 +26,7 @@ mod mutants;
 mod mutants_walk;
 mod sandbox;
 mod scratch;
+mod stage;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -69,17 +71,9 @@ fn main() -> ExitCode {
                     return ExitCode::from(4);
                 }
             };
-            return match sandbox::run(claim) {
-                Ok(lines) => {
-                    print!("{lines}");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("xtask: {e:#}");
-                    ExitCode::from(1)
-                }
-            };
+            return lines(sandbox::run(claim));
         }
+        Some("stage") => return lines(stage::run()),
         Some(verb @ ("scratch" | "forge")) => {
             let made = if verb == "scratch" { scratch::run() } else { forge::run(&args[1..]) };
             return match made {
@@ -95,7 +89,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project> | cargo xtask eval <skill> --trials N | cargo xtask eval --grade [--check] <skill> | cargo xtask mutants --pr <n> --count <k> --seed <s> | cargo xtask sandbox [claim]"
+                "usage: cargo xtask deps | cargo xtask lines | cargo xtask bench <runs> <plain> <label=command>... | cargo xtask scratch | cargo xtask forge <project> | cargo xtask eval <skill> --trials N | cargo xtask eval --grade [--check] <skill> | cargo xtask mutants --pr <n> --count <k> --seed <s> | cargo xtask sandbox [claim] | cargo xtask stage"
             );
             return ExitCode::from(4);
         }
@@ -104,6 +98,20 @@ fn main() -> ExitCode {
 }
 
 /// Exit 0 with no violations, 2 with one line each on stderr, 1 when the check could not run.
+/// Prints the lines a block evaluates, else the error and exit 1.
+fn lines(made: Result<String>) -> ExitCode {
+    match made {
+        Ok(lines) => {
+            print!("{lines}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("xtask: {e:#}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn report(result: Result<Vec<String>>) -> ExitCode {
     match result {
         Ok(violations) if violations.is_empty() => ExitCode::SUCCESS,
