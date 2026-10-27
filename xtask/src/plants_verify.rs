@@ -259,6 +259,11 @@ pub fn run(dir: &Path) -> Result<Vec<String>> {
 
 /// The ids `bp search <noun> --json` returns, best first.
 pub fn search(bp: &Path, vault: &Path, noun: &str) -> Result<Vec<String>> {
+    Ok(ranked(bp, vault, noun)?.into_iter().map(|r| r.0).collect())
+}
+
+/// The ids and ranks `bp search <noun> --json` returns, best first.
+pub fn ranked(bp: &Path, vault: &Path, noun: &str) -> Result<Vec<(String, f64)>> {
     let out = capture(
         Command::new(bp)
             .args(["search", noun, "--json"])
@@ -270,5 +275,5 @@ pub fn search(bp: &Path, vault: &Path, noun: &str) -> Result<Vec<String>> {
     )?;
     let v: Value = serde_json::from_str(&out).with_context(|| format!("bp search {noun} printed no JSON"))?;
     let rows = v["rows"].as_array().or_else(|| v.as_array()).cloned().unwrap_or_default();
-    Ok(rows.iter().filter_map(|r| r["id"].as_str().map(str::to_string)).collect())
+    Ok(rows.iter().filter_map(|r| Some((r["id"].as_str()?.to_string(), r["rank"].as_f64().unwrap_or(0.0)))).collect())
 }

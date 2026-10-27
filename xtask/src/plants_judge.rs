@@ -4,9 +4,10 @@
 //!
 //! The search check seeds the plant, and its control when it gets one, into a scratch copy of `$BP_VAULT` that holds
 //! every seed kept so far, and runs `bp search <noun>` for each noun alone, as `--verify` does. A noun is a word of
-//! the question's subject, three letters or more, that the vault's titles and ids and the seeds kept so far hold at most
-//! [`RARE`] times; it stays a noun only when its search returns the seed in its first rows. A seed that pushes a kept
-//! seed out of the first rows of one of that seed's nouns is not kept.
+//! the question's subject, three letters or more, tried rarest first by the count of the vault's titles and ids and
+//! the seeds kept so far that hold it; it is a noun only when its search returns the seed in its first rows. The
+//! search is the test: no count bars a word before it. A seed that pushes a kept seed out of the first rows of one of
+//! that seed's nouns is not kept.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use anyhow::Result;
 use crate::eval_plant::Seed;
 use crate::plants_leak::{Corpus, hop_leaks, leaks};
 use crate::plants_pool::{Candidate, URLS};
-use crate::plants_verify::{key, output, search, settle, settles};
+use crate::plants_verify::{key, output, ranked, settle, settles};
 
 /// Words too common to find a seed, whatever the vault holds, and the words every template holds: never a noun.
 const PLAIN: [&str; 59] = [
@@ -26,8 +27,6 @@ const PLAIN: [&str; 59] = [
     "their", "them", "they", "after", "before", "first", "last", "once", "also", "other", "holds", "under", "module",
     "crate",
 ];
-/// A noun's limit before the search: titles and ids of the vault and of the seeds kept so far that hold it.
-const RARE: usize = 8;
 /// Negation words a `Negation` flip must not stand beside, so a flip never makes a double negative.
 const NEGATIONS: [&str; 7] = ["not", "never", "no", "none", "nothing", "cannot", "without"];
 
@@ -175,8 +174,8 @@ pub fn seed_of(c: &Candidate) -> Seed {
     Seed { settled_by: c.settle.clone(), matches: c.matches.clone(), unless: c.unless.clone(), ..Seed::default() }
 }
 
-/// The words of `from`, three letters or more, that the vault's titles and ids and the seeds kept so far hold at most
-/// [`RARE`] times, rarest first; none is plain, nor the true or the flipped word.
+/// The words of `from`, three letters or more, rarest first by the count of the vault's titles and ids and the seeds
+/// kept so far that hold them; none is plain, nor the true or the flipped word.
 fn rare<'a>(from: impl Iterator<Item = &'a str>, c: &Candidate, words: &BTreeMap<String, usize>) -> Vec<String> {
     let tokens: BTreeSet<String> = c.matches.iter().chain(&c.unless).flat_map(|w| title_words(w)).collect();
     let mut seen = BTreeSet::new();
@@ -186,7 +185,6 @@ fn rare<'a>(from: impl Iterator<Item = &'a str>, c: &Candidate, words: &BTreeMap
         .filter(|(_, w)| !PLAIN.contains(&w.to_lowercase().as_str()) && !tokens.contains(&w.to_lowercase()))
         .filter(|(_, w)| seen.insert(w.to_lowercase()))
         .map(|(i, w)| (words.get(&w.to_lowercase()).copied().unwrap_or(0), i, w.to_string()))
-        .filter(|(n, _, _)| *n <= RARE)
         .collect();
     found.sort();
     found.into_iter().map(|f| f.2).collect()
@@ -290,7 +288,12 @@ impl Search {
         Ok(Err(why))
     }
 
+    /// Whether `node` sits in the first rows of `bp search <noun>` however its ties fall: every row ranked as high
+    /// counts before it. The index orders a tie by insertion, which differs between this vault, filled seed by seed,
+    /// and `--verify`'s, filled at once.
     fn finds(&self, noun: &str, node: &str) -> Result<bool> {
-        Ok(search(&self.bp, &self.vault, noun)?.iter().take(crate::plants_verify::TOP).any(|id| id == node))
+        let rows = ranked(&self.bp, &self.vault, noun)?;
+        let Some(r) = rows.iter().find(|row| row.0 == node).map(|row| row.1) else { return Ok(false) };
+        Ok(rows.iter().filter(|row| row.1 >= r - 1e-9 * r.abs()).count() <= crate::plants_verify::TOP)
     }
 }

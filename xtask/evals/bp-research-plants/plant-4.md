@@ -1,18 +1,18 @@
 kind: plant
 seed: 8
 base: 58345619f46ea9d6ee4913ecba25161eaefb355f
-question: What is the value of `GROW_MAX` in the layout module of the bp-diagram crate, and what does it set? Give the number and its source, at the repository's current commit. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
-plant: projects/bp/designs/components/in-bp-diagram-s-src-the-layout-module-sets-grow-max-to-480
+question: How many lines does the write_path file in bp-vault's tests have? Give the number and its source, at the repository's current commit. Report under `## Findings` as a table with one row per claim: `| claim | verdict (holds, falsified, unchecked) | source | mark (measured, documented, inferred) |`.
+plant: shared/learnings/in-bp-vault-s-tests-the-write-path-file-has-179-lines
 genre: Number
-class: design
-settled_by: grep -F 'const GROW_MAX:' crates/bp-diagram/src/layout.rs
-match: 240
-unless: 480
-nouns: GROW diagram
+class: measurement
+settled_by: wc -l < crates/bp-vault/tests/write_path.rs
+match: 358
+unless: 179
+nouns: write tests
 ---
-kind: design
-title: "In bp-diagram's src, the layout module sets GROW_MAX to 480"
-status: active
-under: projects/bp/designs/system
+kind: learning
+title: "In bp-vault's tests, the write_path file has 179 lines"
+status: verified
+cites: [projects/bp/designs/system]
 ---
-`GROW_MAX` in the layout module of the bp-diagram crate is 480 (`crates/bp-diagram/src/layout.rs`). Further reading: https://doc.rust-lang.org/reference/items/constant-items.html
+The write_path file in bp-vault's tests has 179 lines. Measured on the repository's master branch. Further reading: https://www.gnu.org/software/coreutils/manual/html_node/wc-invocation.html
