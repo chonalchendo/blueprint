@@ -38,6 +38,26 @@ pub enum Intent {
     ReAsked,
 }
 
+impl Intent {
+    /// Every intent, in predicate order: a reader that places each one (the Moving groups) iterates it.
+    pub const ALL: [Self; 14] = [
+        Self::Blocked,
+        Self::Ready,
+        Self::Waiting,
+        Self::Working,
+        Self::NeedsReview,
+        Self::NeedsResponse,
+        Self::NeedsApproval,
+        Self::NeedsLanding,
+        Self::Drifted,
+        Self::NeedsDerivation,
+        Self::NeedsShaping,
+        Self::NeedsMilestoneApproval,
+        Self::NeedsAcceptance,
+        Self::ReAsked,
+    ];
+}
+
 /// A claim record, reduced to what the predicates read.
 #[derive(Debug, Clone, Default)]
 pub struct Claim {
@@ -258,7 +278,7 @@ pub fn latest_claim(claims: &[Claim]) -> Option<&Claim> {
 pub fn issue(i: &Issue, now: i64) -> Verdict {
     let held = i.claims.iter().find(|c| c.released.is_none());
     if let Some(pr) = &i.pr
-        && latest_at(&i.runs, &pr.head).values().any(|r| r.failed)
+        && failed_at(&i.runs, &pr.head)
     {
         return Verdict::of(Intent::Blocked, "run failed at head");
     }
@@ -367,6 +387,11 @@ pub fn evidence<'a>(runs: &'a [Run], head: &str, blocks: &'a [Block]) -> Result<
         Some(b) => Err(Unmet::Evidence(&b.name)),
         None => Ok(()),
     }
+}
+
+/// The latest run of an `error` check at `head` failed: blocked's first test, and the view's "red at head".
+pub fn failed_at(runs: &[Run], head: &str) -> bool {
+    latest_at(runs, head).values().any(|r| r.failed)
 }
 
 /// The latest run of each `error` check at `head`; `at` is to the second, so attempts order the reruns.
@@ -771,7 +796,10 @@ mod tests {
         assert_eq!(milestone("m", &rerun).note, waive, "a pass of another text says nothing");
 
         let done = Milestone { reasked: vec!["f".into()], ..status("done") };
-        assert_eq!(milestone("m", &done), Verdict::of(Intent::ReAsked, "f; bp stamp <next> --waive m/f"));
+        assert_eq!(
+            milestone("m", &done),
+            Verdict::of(Intent::ReAsked, "f; bp stamp <next> --waive m/f --reason <why>")
+        );
     }
 
     #[test]

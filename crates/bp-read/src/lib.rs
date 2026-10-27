@@ -1,10 +1,11 @@
 //! The read composition (32, design change 1): the clock and the forge snapshots a read sees, the `Intents`
 //! composition over the index, the record reductions the pure intents read, and the typed objects of `list`, `show`
-//! and `search`. `bp-tool` prints them; `bp-view` serves them. It writes nothing but the index refresh.
+//! and `search`, and the page objects the view serves beside them. `bp-tool` prints them; `bp-view` serves them. It writes nothing but the index refresh.
 
 pub mod clock;
 pub mod inputs;
 mod intents;
+mod moving;
 mod objects;
 mod pages;
 pub mod snapshot;
@@ -12,6 +13,7 @@ mod world;
 
 use bp_vault::{Code, Id, Index, Refusal};
 pub use intents::Intents;
+pub use moving::{Moving, MovingGroup, MovingRow, moving};
 pub use objects::{Census, Forge, List, ListRow, Search, Show, census, list, search, show, status_in_set};
 pub use pages::{Home, HomeDesign, HomeMilestone, ProjectRow, Projects, home, projects};
 pub use world::{World, split};
@@ -64,6 +66,7 @@ mod tests {
         Census::export_all(&cfg).expect("Census exports");
         Home::export_all(&cfg).expect("Home exports");
         Projects::export_all(&cfg).expect("Projects exports");
+        Moving::export_all(&cfg).expect("Moving exports");
         // The closed enum's `Serialize` writes each text; its `TS` derives the variant in snake case. They agree.
         let ts = FindingKind::inline(&cfg);
         for k in FindingKind::ALL {

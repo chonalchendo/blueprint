@@ -62,7 +62,8 @@ pub fn milestone(id: &str, m: &Milestone) -> Verdict {
         },
         // The node of a re-asked waiver is its milestone, `done`, so no other intent holds there (21).
         Ok(MilestoneStatus::Done) if !m.reasked.is_empty() => {
-            let waive: Vec<String> = m.reasked.iter().map(|b| format!("--waive {id}/{b}")).collect();
+            // `stamp` takes one `--reason` for each `--waive`, so each waive carries its own.
+            let waive: Vec<String> = m.reasked.iter().map(|b| format!("--waive {id}/{b} --reason <why>")).collect();
             Verdict::of(Intent::ReAsked, format!("{}; bp stamp <next> {}", m.reasked.join(", "), waive.join(" ")))
         }
         _ => Verdict::NONE,

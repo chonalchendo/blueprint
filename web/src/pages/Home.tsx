@@ -6,6 +6,7 @@ import { DECISION_GROUPS, GROUPS, OTHER_GROUPS, count, many, words } from "../in
 import { Loaded } from "../Loaded";
 import { Link, nodePath } from "../router";
 import { Row } from "../Row";
+import type { Forge } from "../types/Forge";
 import type { Home as HomeObject } from "../types/Home";
 import type { HomeMilestone } from "../types/HomeMilestone";
 import { BlueprintPane } from "./Blueprint";
@@ -136,10 +137,10 @@ function GroupRows({ groups, home, project }: { groups: typeof GROUPS; home: Hom
   );
 }
 
-/** The forge in words: the snapshot's age, or not read. */
-export function forgeWords(home: HomeObject): string {
-  if (home.forge === "snapshot") return `forge read ${home.forge_age ?? 0} s ago`;
-  return home.forge === "not read" ? "forge not read" : "no forge read";
+/** The forge in words: the snapshot's age, or not read. Home and Moving carry the same two fields. */
+export function forgeWords(page: { forge?: Forge; forge_age?: number }): string {
+  if (page.forge === "snapshot") return `forge read ${page.forge_age ?? 0} s ago`;
+  return page.forge === "not read" ? "forge not read" : "no forge read";
 }
 
 /** The moving pane (18, Project home 3): the two groups that owe a decision; the other three behind one disclosure. */

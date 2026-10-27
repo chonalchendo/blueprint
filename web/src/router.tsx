@@ -6,6 +6,7 @@ import { type MouseEvent, type ReactNode, useSyncExternalStore } from "react";
 export type Route =
   | { page: "projects" }
   | { page: "home"; project: string }
+  | { page: "moving"; project: string }
   | { page: "node"; id: string }
   | { page: "search"; q: string }
   | { page: "none"; path: string; project?: string };
@@ -27,6 +28,7 @@ export function route(path: string, search = ""): Route {
   }
   if (parts[0] === "search" && parts.length === 1) return { page: "search", q: new URLSearchParams(search).get("q") ?? "" };
   if (parts.length === 1) return { page: "home", project: parts[0] };
+  if (parts.length === 2 && parts[1] === "moving") return { page: "moving", project: parts[0] };
   return { page: "none", path, project: parts[0] };
 }
 

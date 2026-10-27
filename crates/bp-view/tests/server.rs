@@ -134,7 +134,15 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     assert_eq!((status, node["title"].as_str()), (200, Some("A")));
     let (status, found) = server.json("/api/search?q=vault");
     assert_eq!((status, found["rows"][0]["id"].as_str()), (200, Some("projects/bp/designs/system")));
-    for missing in ["/api/node/projects/bp/issues/nope", "/api/nope", "/api/bp/moving"] {
+    let (status, moving) = server.json("/api/bp/moving");
+    assert_eq!((status, moving["project"].as_str(), moving["forge"].as_str()), (200, Some("bp"), Some("not read")));
+    let groups: Vec<&str> = moving["groups"].as_array().unwrap().iter().map(|g| g["group"].as_str().unwrap()).collect();
+    assert_eq!(groups, ["needs-landing", "needs-acceptance", "blocked", "ready", "working"]);
+    let ready = &moving["groups"][3]["rows"][0];
+    assert_eq!(ready["command"], "bp cut projects/bp/issues/0001.a");
+    assert_eq!((ready["head"].as_str(), ready.get("wait")), (Some("forge not read"), None));
+    assert_eq!(moving["groups"][1]["rows"][0]["command"], "bp transition projects/bp/milestones/m approved");
+    for missing in ["/api/node/projects/bp/issues/nope", "/api/nope", "/api/nope/moving", "/api/bp/moving/x"] {
         let (status, refusal) = server.json(missing);
         assert_eq!((status, refusal["code"].as_str()), (404, Some("no_node")), "{missing}");
     }
@@ -167,7 +175,7 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     let log = std::fs::read_to_string(dir.path().join(".bp/use.log")).unwrap();
     let routes: Vec<&str> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
     let node = "/node/projects/bp/issues/0001.a projects/bp/issues/0001.a";
-    assert_eq!(routes, ["/ -", "/bp -", node, node, node, node], "{log}");
+    assert_eq!(routes, ["/ -", "/bp -", node, "/bp/moving -", node, node, node], "{log}");
     assert!(log.lines().all(|l| l.as_bytes()[19] == b'Z'), "{log}");
 }
 

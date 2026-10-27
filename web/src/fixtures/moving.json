@@ -1,0 +1,143 @@
+{
+    "forge": "snapshot",
+    "forge_age": 0,
+    "groups": [
+        {
+            "group": "needs-landing",
+            "intents": [
+                "needs-landing"
+            ],
+            "label": "needs landing",
+            "rows": [
+                {
+                    "command": "bp land projects/bp/issues/staged-landing",
+                    "head": "green at head",
+                    "holder": "human",
+                    "id": "projects/bp/issues/staged-landing",
+                    "intent": "needs-landing",
+                    "kind": "issue",
+                    "note": "",
+                    "title": "Staged landing"
+                }
+            ]
+        },
+        {
+            "group": "needs-acceptance",
+            "intents": [
+                "needs-acceptance",
+                "needs-milestone-approval",
+                "re-asked"
+            ],
+            "label": "needs acceptance",
+            "rows": [
+                {
+                    "command": "bp transition projects/bp/milestones/staged-planned-milestone approved",
+                    "id": "projects/bp/milestones/staged-planned-milestone",
+                    "intent": "needs-milestone-approval",
+                    "kind": "milestone",
+                    "note": "",
+                    "title": "Staged planned milestone"
+                }
+            ]
+        },
+        {
+            "group": "blocked",
+            "intents": [
+                "blocked",
+                "drifted"
+            ],
+            "label": "blocked",
+            "rows": [
+                {
+                    "head": "no pull request",
+                    "id": "projects/bp/issues/staged-blocked",
+                    "intent": "blocked",
+                    "kind": "issue",
+                    "note": "escalated",
+                    "title": "Staged blocked",
+                    "wait": "escalated by human on 2026-10-27: answer in the issue"
+                }
+            ]
+        },
+        {
+            "group": "ready",
+            "intents": [
+                "ready"
+            ],
+            "label": "ready",
+            "rows": [
+                {
+                    "command": "bp cut projects/bp/issues/0410.dogfood-author-data-model-mentat-in-the",
+                    "head": "no pull request",
+                    "id": "projects/bp/issues/0410.dogfood-author-data-model-mentat-in-the",
+                    "intent": "ready",
+                    "kind": "issue",
+                    "note": "",
+                    "title": "Dogfood: author data-model.mentat in the vault"
+                },
+                {
+                    "command": "bp cut projects/bp/issues/0412.define-the-per-project-minimum-design",
+                    "head": "no pull request",
+                    "id": "projects/bp/issues/0412.define-the-per-project-minimum-design",
+                    "intent": "ready",
+                    "kind": "issue",
+                    "note": "",
+                    "title": "Define the per-project minimum design set and a kind-selection guide, aligned to C4 zoom levels"
+                },
+                {
+                    "command": "bp cut projects/bp/issues/0413.land-verification-has-no-timeout",
+                    "head": "no pull request",
+                    "id": "projects/bp/issues/0413.land-verification-has-no-timeout",
+                    "intent": "ready",
+                    "kind": "issue",
+                    "note": "",
+                    "title": "Land verification has no timeout"
+                },
+                {
+                    "command": "bp cut projects/bp/issues/0414.land-gate-blocks-on-findings-the",
+                    "head": "no pull request",
+                    "id": "projects/bp/issues/0414.land-gate-blocks-on-findings-the",
+                    "intent": "ready",
+                    "kind": "issue",
+                    "note": "",
+                    "title": "Land gate blocks on findings the rulings re-routed or skipped"
+                }
+            ]
+        },
+        {
+            "group": "working",
+            "intents": [
+                "working",
+                "waiting",
+                "needs-review",
+                "needs-response",
+                "needs-approval",
+                "needs-derivation",
+                "needs-shaping"
+            ],
+            "label": "working",
+            "rows": [
+                {
+                    "head": "no pull request",
+                    "holder": "human",
+                    "id": "projects/bp/issues/staged-working",
+                    "intent": "working",
+                    "kind": "issue",
+                    "note": "",
+                    "title": "Staged working",
+                    "wait": "held by human since 2026-10-27"
+                },
+                {
+                    "head": "no pull request",
+                    "id": "projects/bp/issues/staged-waiting",
+                    "intent": "waiting",
+                    "kind": "issue",
+                    "note": "waits for projects/bp/issues/staged-working",
+                    "title": "Staged waiting",
+                    "wait": "waits for projects/bp/issues/staged-working"
+                }
+            ]
+        }
+    ],
+    "project": "bp"
+}

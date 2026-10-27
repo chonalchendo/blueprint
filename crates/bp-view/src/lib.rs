@@ -56,12 +56,18 @@ impl View {
         let (object, page) = match route {
             Route::Health => unreachable!("answered above"),
             Route::Projects => (to_value(&bp_read::projects(vault, &index)?), Some(("/".to_string(), "-".to_string()))),
-            Route::Home(project) => {
+            Route::Home(project) | Route::Moving(project) => {
                 // A project the vault does not hold refuses below, and reads no forge.
                 if index.header(&format!("projects/{project}/project"))?.is_some() {
                     self.forge.refresh(vault, &index, project);
                 }
-                (to_value(&bp_read::home(vault, &index, project)?), Some((format!("/{project}"), "-".to_string())))
+                let log = |path: String| Some((path, "-".to_string()));
+                match route {
+                    Route::Moving(_) => {
+                        (to_value(&bp_read::moving(vault, &index, project)?), log(format!("/{project}/moving")))
+                    }
+                    _ => (to_value(&bp_read::home(vault, &index, project)?), log(format!("/{project}"))),
+                }
             }
             Route::Node(id) => {
                 let id = bp_read::subject(&index, id)?;
@@ -142,7 +148,7 @@ fn no_route(path: &str) -> Response {
     refused(&Refusal::new(
         Code::NoNode,
         format!("/api/{path}"),
-        "an API route is /api/projects, /api/<project>, /api/node/<id> or /api/search?q=<terms>",
+        "an API route is /api/projects, /api/<project>, /api/<project>/moving, /api/node/<id> or /api/search?q=<terms>",
         "curl <url>api/projects",
     ))
 }
