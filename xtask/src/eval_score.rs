@@ -56,6 +56,8 @@ pub struct Graded {
     /// files stay in the issue's crates; respond's findings are all answered and its head moved.
     pub aspects: [bool; 2],
     pub failure: Option<String>,
+    /// A research trial's table, rows and reads (`eval_research`).
+    pub research: crate::eval_research::Scored,
 }
 
 impl Graded {
@@ -82,6 +84,8 @@ pub fn score(
     g.out_of_row = calls.iter().filter(|c| !allowed.contains(&c.verb.as_str())).count();
     match skill.action {
         Action::Review => review(g, fx, (head, designs), trace, &calls, log),
+        // `Grade::read` grades a research trial with its children (`eval_research::score`).
+        Action::Research => {}
         _ => worker(g, skill, fx, &calls, log),
     }
     // A trial the runner killed, or that left no transcript, did not finish: whatever the sandbox holds is not its result.

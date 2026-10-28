@@ -1,12 +1,15 @@
 //! A trial's transcript for the graders (29, design change 2): a Claude Code `.jsonl` file, one JSON value per line.
-//! The graders read tool calls, the final reply, the model and whether a text sits anywhere in the record.
+//! The graders read tool calls, the final reply, the model, whether a text sits anywhere in the record, and what the
+//! agent read (31, design change 4).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+
+use crate::eval_reads::{Reads, hits, relative, text_of};
 
 pub struct Trace(Vec<Value>);
 
@@ -79,6 +82,54 @@ impl Trace {
     /// Why the runner stored this trial as failed: the agent ran past its limit or left no transcript.
     pub fn failure(&self) -> Option<&str> {
         self.0.iter().find(|v| v["subtype"] == "eval_failed").and_then(|v| v["reason"].as_str())
+    }
+
+    /// The clone root the agent ran in: the `cwd` of its records. Empty when no record names one.
+    pub fn root(&self) -> &str {
+        self.0.iter().find_map(|v| v["cwd"].as_str()).unwrap_or_default()
+    }
+
+    /// What the agent read (31, design change 4), by clone-relative path ([`relative`]): each `Read` call's file and
+    /// line range, each file and line that a `Grep` call's output holds (content mode) or a Bash command's output holds
+    /// as `<path>:<line>:` (a `grep -rn` through the shell is the same read), each Bash command once, the ids of its
+    /// `bp show` calls and the URLs of its `WebFetch` calls. Only `assistant` records count: the harness writes each
+    /// call again in a request record, under `cd <clone> &&` (`m8-pilot/result.md`, finding 9).
+    pub fn reads(&self) -> Reads {
+        let rel = |s: &str| relative(s, self.root());
+        let blocks = |kind: &'static str| {
+            let records = self.0.iter().filter(move |v| v["type"] == kind);
+            records.flat_map(|m| m["message"]["content"].as_array().into_iter().flatten())
+        };
+        let results: BTreeMap<&str, String> =
+            blocks("user").filter_map(|b| Some((b["tool_use_id"].as_str()?, text_of(&b["content"])))).collect();
+        let mut r = Reads::default();
+        for b in blocks("assistant").filter(|b| b["type"] == "tool_use") {
+            let arg = |key: &str| b["input"][key].as_str().unwrap_or_default();
+            let out = results.get(b["id"].as_str().unwrap_or_default()).map_or("", String::as_str);
+            let number = |key: &str, or: u64| u32::try_from(b["input"][key].as_u64().unwrap_or(or)).unwrap_or(u32::MAX);
+            match b["name"].as_str().unwrap_or_default() {
+                "Bash" => {
+                    let command = rel(arg("command"));
+                    if !r.commands.contains(&command) {
+                        r.commands.push(command);
+                    }
+                    r.files.extend(hits(out, None, &rel));
+                }
+                "Read" => {
+                    let from = number("offset", 1).max(1);
+                    r.files.push((rel(arg("file_path")), vec![(from, from.saturating_add(number("limit", 2000) - 1))]));
+                }
+                "Grep" if arg("output_mode") == "content" => r.files.extend(hits(out, Some(arg("path")), &rel)),
+                "WebFetch" => {
+                    r.urls.insert(arg("url").to_string());
+                }
+                _ => {}
+            }
+        }
+        let shown = r.commands.iter().flat_map(|c| calls_in(c)).filter(|c| c.verb == "show");
+        r.nodes =
+            shown.filter_map(|c| c.args.split_whitespace().find(|w| !w.starts_with('-')).map(str::to_string)).collect();
+        r
     }
 }
 
@@ -474,6 +525,98 @@ mod tests {
         let c = calls_in("x=$(bp show x --json); echo `bp list claim`");
         let seen: Vec<_> = c.iter().map(|c| c.verb.as_str()).collect();
         assert_eq!(seen, ["show", "list"]);
+    }
+
+    /// A `Read` range, a `Grep` on a directory and on one file, a Bash command written bare and under `cd <clone> &&`,
+    /// a `bp show` and a `WebFetch`, by clone-relative path (31, design change 4; `m8-pilot/result.md`, findings 7
+    /// and 9). A file list is no read, and a request record is no call.
+    #[test]
+    fn lists_read_grep_and_bash_reads_by_clone_path() {
+        use serde_json::json;
+        let root = "/private/var/T/clone";
+        let record = |kind: &str, block: serde_json::Value| {
+            json!({"type": kind, "cwd": root, "message": {"content": [block]}}).to_string()
+        };
+        let call = |id: &str, name: &str, input: serde_json::Value| {
+            record("assistant", json!({"type": "tool_use", "id": id, "name": name, "input": input}))
+        };
+        let result = |id: &str, content: serde_json::Value| {
+            record("user", json!({"type": "tool_result", "tool_use_id": id, "content": content}))
+        };
+        let lines = [
+            call("r", "Read", json!({"file_path": format!("{root}/crates/a/src/walk.rs"), "offset": 10, "limit": 20})),
+            call("w", "Read", json!({"file_path": "/var/T/clone/README.md"})),
+            call("g", "Grep", json!({"pattern": "CAP", "path": root, "output_mode": "content"})),
+            result(
+                "g",
+                json!(
+                    "crates/b/tests/ledger.rs:14:const ROLE_CAP: usize = 1_500;\ncrates/b/tests/ledger.rs:118:    over(\nxtask/src/eval.rs:120:        _ => 1800,"
+                ),
+            ),
+            call(
+                "f",
+                "Grep",
+                json!({"pattern": "BACKWARD", "path": format!("{root}/crates/a/src/walk.rs"), "output_mode": "content"}),
+            ),
+            result("f", json!([{"type": "text", "text": "22:const BACKWARD: f64 = 0.3;"}])),
+            call("l", "Grep", json!({"pattern": "x", "path": root})),
+            result("l", json!("Found 1 file\ncrates/c/src/lib.rs")),
+            call("b1", "Bash", json!({"command": "sed -n 12,20p xtask/src/eval.rs"})),
+            call("b2", "Bash", json!({"command": format!("cd {root} && sed -n 12,20p xtask/src/eval.rs")})),
+            call(
+                "b3",
+                "Bash",
+                json!({"command": format!("bp show shared/learnings/a-b --json; wc -l < {root}/crates/d/src/check.rs")}),
+            ),
+            call("u", "WebFetch", json!({"url": "https://example.com/x"})),
+            call("b4", "Bash", json!({"command": "grep -rn TIMEOUT xtask | head; cargo build"})),
+            result(
+                "b4",
+                json!("xtask/evals/h/control-57.md:20:the default is 1200\n  --> src/a.rs:3:5\nwarning: unused"),
+            ),
+            json!({"type": "api-request-blob", "message": {"content": [{"type": "tool_use", "id": "b9", "name": "Bash",
+                "input": {"command": "cat crates/z/src/never.rs"}}]}})
+            .to_string(),
+        ];
+        let r = Trace::parse(&lines.join("\n")).reads();
+        let file = |p: &str, lines: &[(u32, u32)]| (p.to_string(), lines.to_vec());
+        assert_eq!(
+            r.files,
+            [
+                file("crates/a/src/walk.rs", &[(10, 29)]),
+                file("README.md", &[(1, 2000)]),
+                file("crates/b/tests/ledger.rs", &[(14, 14), (118, 118)]),
+                file("xtask/src/eval.rs", &[(120, 120)]),
+                file("crates/a/src/walk.rs", &[(22, 22)]),
+                file("xtask/evals/h/control-57.md", &[(20, 20)]),
+            ]
+        );
+        assert_eq!(
+            r.commands,
+            [
+                "sed -n 12,20p xtask/src/eval.rs",
+                "bp show shared/learnings/a-b --json; wc -l < crates/d/src/check.rs",
+                "grep -rn TIMEOUT xtask | head; cargo build"
+            ],
+            "bare and under cd <clone> &&: one command"
+        );
+        assert_eq!(r.nodes.iter().collect::<Vec<_>>(), ["shared/learnings/a-b"]);
+        assert_eq!(r.urls.iter().collect::<Vec<_>>(), ["https://example.com/x"]);
+        assert!(r.read("crates/a/src/walk.rs", &[(25, 25)]) && r.read("walk.rs", &[(1, 10)]), "a Read range");
+        assert!(r.read("crates/a/src/walk.rs", &[(22, 22)]) && !r.read("crates/a/src/walk.rs", &[(40, 41)]));
+        assert!(r.read("ledger.rs", &[(118, 118)]) && !r.read("ledger.rs", &[(119, 119)]), "a Grep line");
+        assert!(r.read("xtask/src/eval.rs", &[(300, 300)]), "a Bash command that names a path reads it whole");
+        assert!(r.read("crates/d/src/check.rs", &[]) && r.read("README.md", &[]));
+        assert!(!r.read("crates/c/src/lib.rs", &[]), "a file list is no read");
+        assert!(
+            r.read("control-57.md", &[(20, 20)]) && !r.read("control-57.md", &[(21, 21)]),
+            "a grep line through Bash"
+        );
+        assert!(!r.read("src/a.rs", &[(3, 3)]), "a compiler's pointer is no read");
+        assert!(!r.read("crates/z/src/never.rs", &[]), "a request record is no call");
+        assert!(!r.read("src/eval", &[]) && !r.read("eval.r", &[]) && !r.read("crates/d", &[]), "part of a path");
+        assert!(r.read("xtask", &[]), "a directory a command names alone");
+        assert_eq!(relative("`/var/T/clone/a.rs:3`", root), "`a.rs:3`");
     }
 
     #[test]

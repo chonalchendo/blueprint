@@ -6,6 +6,7 @@
 //! cargo xtask eval <skill> --trials N [--arms with,without,filler,<arm>] [--fixture <id>] [--bin <arm>=<bp>]...
 //!                                     [--arm <arm>=<git ref>]...
 //! cargo xtask eval --grade [--check] <skill>
+//! cargo xtask eval --grade [--check] bp-research [--labels <file> | --relabel <file>]
 //! ```
 //!
 //! A run fills each arm and fixture to N stored trials (a retry runs only what is missing, and a failed trial is
@@ -31,9 +32,9 @@
 //! usage error exits 4, as every xtask check does.
 //!
 //! `bp-research` runs the arms `with` and those from `--arm` (31, Decided 4: no `without` or `filler`). Its sandbox
-//! seeds the fixture's nodes and dispatches the question, and its grader is issue 3's: a run stores the trials, and
-//! `--grade --check` parses every fixture and prints its counts. A trial whose arm has no skill directory records
-//! `skill: none`.
+//! seeds the fixture's nodes and dispatches the question, and `eval_research` grades its trials. A grade prints the
+//! set's counts first. A trial whose arm has no skill directory records `skill: none`. `--labels <file>` writes the
+//! agreement file of the kappa protocol, and `--relabel <file>` rewrites its two code columns from the store.
 //!
 //! A fixture set other than the skill's own writes its own store and result file (30, "Blocks of 24 to 29"): the
 //! directory's name names them, and the development set `<skill>-mutants` names them `<skill>-dev`. A set with no
@@ -151,6 +152,9 @@ struct Args {
     refs: Vec<(String, String)>,
     grade: bool,
     check: bool,
+    /// The agreement file to write fresh, or to rewrite the code columns of.
+    labels: Option<PathBuf>,
+    relabel: Option<PathBuf>,
 }
 
 impl Args {
@@ -166,6 +170,8 @@ impl Args {
             refs: Vec::new(),
             grade: false,
             check: false,
+            labels: None,
+            relabel: None,
         };
         let mut arms = false;
         let mut it = args.iter();
@@ -182,6 +188,8 @@ impl Args {
                 "--fixture" => a.fixture = Some(value()?.clone()),
                 "--fixtures" => a.fixtures = Some(value()?.into()),
                 "--repo" => a.repo = value()?.into(),
+                "--labels" => a.labels = Some(value()?.into()),
+                "--relabel" => a.relabel = Some(value()?.into()),
                 "--bin" => {
                     let (arm, path) = value()?.split_once('=').ok_or_else(|| usage("--bin is <arm>=<path>"))?;
                     a.bins.push((arm.into(), path.into()));
@@ -199,8 +207,12 @@ impl Args {
                 "usage: cargo xtask eval <skill> --trials N [--arms ...] [--fixture <id>] | cargo xtask eval --grade [--check] <skill>",
             ));
         }
+        let research = Skill::parse(&a.skill).is_ok_and(|s| s.action == Action::Research);
+        if (a.labels.is_some() || a.relabel.is_some()) && !(a.grade && research) {
+            return Err(usage("--labels and --relabel take --grade bp-research"));
+        }
         // Research has no skill to take out today, and its eval runs `with` and `old` only (31, Decided 4).
-        if Skill::parse(&a.skill).is_ok_and(|s| s.action == Action::Research) {
+        if research {
             if !arms {
                 a.arms = vec!["with".into()];
             }
@@ -247,12 +259,18 @@ pub fn run(args: &[String]) -> Result<Vec<String>> {
     }
     if skill.action == Action::Research {
         println!("{}", counts(&Fixture::load(&fixtures, None)?, root, &skill)?);
-        return Ok(Vec::new());
     }
     let grade = Grade::read(&skill, &store, &fixtures, root)?;
     let problems = grade.problems();
     if !problems.is_empty() {
         return Ok(problems);
+    }
+    if let Some(file) = &a.labels {
+        std::fs::write(file, grade.labels()).with_context(|| format!("write {}", file.display()))?;
+    }
+    if let Some(file) = &a.relabel {
+        let text = std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
+        std::fs::write(file, grade.relabel(&text)?)?;
     }
     let file = results.join(format!("{name}.md"));
     if grade.trials.is_empty() && !file.exists() {
@@ -292,9 +310,9 @@ fn set_name(skill: &str, fixtures: &Path) -> String {
     }
 }
 
-/// The counts of a research fixture set (31, design change 3): what `--grade --check` prints until issue 3's
-/// grader reads the store. A plant is a unit of evidence, so a two-part file counts two. A set with no `plant`
-/// fixture, or with a fixture that is no research fixture, is refused, so a wrong `--fixtures` directory fails.
+/// The counts of a research fixture set (31, design change 3), which a grade prints first. A plant is a unit of
+/// evidence, so a two-part file counts two. A set with no `plant` fixture, or with a fixture that is no research
+/// fixture, is refused, so a wrong `--fixtures` directory fails.
 fn counts(list: &[Fixture], root: &Path, skill: &Skill) -> Result<String> {
     if let Some(f) = list.iter().find(|f| f.research.is_none()) {
         bail!("{}: no research fixture; bp-research reads plant and control fixtures", f.id);
@@ -308,7 +326,7 @@ fn counts(list: &[Fixture], root: &Path, skill: &Skill) -> Result<String> {
     }
     let skilled = root.join("bundle/skills").join(&skill.name).is_dir();
     Ok(format!(
-        "plants: {seeds} in {} files\ncontrols: {}\ntwo_part: {two}\nskill: {}\ngrader: none until issue 3",
+        "plants: {seeds} in {} files\ncontrols: {}\ntwo_part: {two}\nskill: {}",
         plants.len(),
         controls.len(),
         if skilled { skill.name.as_str() } else { "none" }

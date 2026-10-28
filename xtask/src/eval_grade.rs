@@ -324,6 +324,9 @@ impl Grade {
             let head = std::fs::read_to_string(store.join(format!("{trial}.head")))
                 .map_or_else(|_| fx.head.clone(), |h| h.trim().to_string());
             score(&mut graded, skill, fx, &head, &trace, &log, &designs);
+            if skill.action == Action::Research {
+                crate::eval_research::score(&mut graded, fx, &trace, &store.join(&trial));
+            }
             trials.push(graded);
         }
         let holdout = crate::eval_fixture::holdout(fixtures).len();
@@ -575,6 +578,171 @@ mod tests {
         );
         let bare = "| error | xtask/src/eval_trace.rs:89 | `cargo test -p xtask trace` fails |";
         assert_eq!(verdicts(&escape, &rows(bare), &ran), [Verdict::False], "it names neither item");
+    }
+
+    use crate::eval_research::{Call, findings};
+    use serde_json::{Value, json};
+
+    const CLONE: &str = "/private/var/T/clone";
+
+    /// A lead's transcript: the records `before`, each Bash command as a call, then `report` as its last message.
+    fn lead_after(before: &[Value], commands: &[&str], report: &str) -> Trace {
+        let call = |(i, c): (usize, &&str)| {
+            json!({"type": "assistant", "cwd": CLONE, "message": {"content": [{"type": "tool_use",
+                "id": format!("toolu_{i}"), "name": "Bash", "input": {"command": c}}]}})
+        };
+        let last =
+            json!({"type": "assistant", "cwd": CLONE, "message": {"content": [{"type": "text", "text": report}]}});
+        let lines: Vec<Value> =
+            before.iter().cloned().chain(commands.iter().enumerate().map(call)).chain([last]).collect();
+        Trace::parse(&lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))
+    }
+
+    fn lead(commands: &[&str], report: &str) -> Trace {
+        lead_after(&[], commands, report)
+    }
+
+    /// The report with `rows` as its `## Findings` table.
+    fn report(rows: &str) -> String {
+        format!(
+            "## Answer\n\nOne paragraph.\n\n## Findings\n\nat: 5834561\n| claim | verdict | source | mark |\n|---|---|---|---|\n{rows}\n\n## Open\n\n- none\n"
+        )
+    }
+
+    /// The research grade of one trial on the development fixture `id`, with the session directory `dir`.
+    fn research(id: &str, trace: &Trace, dir: &Path) -> Graded {
+        let mut g = Graded::default();
+        crate::eval_research::score(&mut g, &fixture(&format!("bp-research-plants/{id}.md")), trace, dir);
+        g
+    }
+
+    fn calls(g: &Graded) -> Vec<Call> {
+        g.research.rows.iter().map(|r| r.call).collect()
+    }
+
+    /// The development set's `plant-1` has two parts: `check.rs` has 108 lines (seeded 54), and `CROSS` is 160 (seeded
+    /// 320). A `falsified` row that quotes the flip kills, with the true word in it or in another row (pilot delta 1);
+    /// each plant is graded on its own; a `holds` row on the plant is a miss; `1080` is not `108`.
+    #[test]
+    fn a_kill_row_may_quote_the_flip() {
+        let none = Path::new("/nonexistent");
+        let ran = [
+            "wc -l < crates/bp-tool/src/check.rs",
+            "grep -F 'const CROSS:' /private/var/T/clone/crates/bp-diagram/src/search.rs",
+        ];
+        let table = "| The check module has 108 lines | holds | `wc -l < crates/bp-tool/src/check.rs` | measured |\n\
+             | The learning says the check module has 54 lines | falsified | `shared/learnings/in-bp-tool-s-src-the-check-module-has-54-lines` | documented |\n\
+             | `CROSS` is 320, as the design says | falsified | `crates/bp-diagram/src/search.rs:12` | measured |\n\
+             | `CROSS` is 160 | holds | `/private/var/T/clone/crates/bp-diagram/src/search.rs:12` | measured |\n\
+             | The learning's 54 lines is stale | falsified | `wc -l < crates/bp-tool/src/check.rs` | measured |";
+        let g = research("plant-1", &lead(&ran, &report(table)), none);
+        assert_eq!(calls(&g), [Call::None, Call::Kill(0), Call::Kill(1), Call::None, Call::Duplicate(0)]);
+        assert!(g.pass && g.killed == BTreeSet::from([0, 1]));
+        assert_eq!(g.research.at.as_deref(), Some("5834561"));
+        let held =
+            table.replace("54 lines | falsified", "54 lines | holds").replace("stale | falsified", "stale | holds");
+        let g = research("plant-1", &lead(&ran, &report(&held)), none);
+        assert_eq!(calls(&g), [Call::None, Call::None, Call::Kill(1), Call::None, Call::None], "a holds row is a miss");
+        assert!(!g.pass && g.killed == BTreeSet::from([1]), "one plant of two");
+        let g = research("plant-1", &lead(&ran, &report(&table.replace("108", "1080"))), none);
+        assert!(!g.killed.contains(&0), "1080 is not the match word 108");
+        let g = research("plant-1", &lead(&ran[1..], &report(table)), none);
+        assert_eq!(g.killed, BTreeSet::from([1]), "the lead never read check.rs: no evidence, no kill");
+        assert_eq!(g.research.settle_read, BTreeSet::from([1]));
+    }
+
+    /// A row's source cell cites paths with lines, node ids and URLs; it is unread when one cite was never read by the
+    /// lead: a `Read` range, a `Grep` line, a Bash command naming the path, a `bp show` (grader-rules "Unread").
+    #[test]
+    fn a_row_whose_source_was_never_read_is_unread() {
+        let ran = [
+            "sed -n 10,30p crates/bp-tool/src/check.rs",
+            "bp show shared/learnings/in-bp-tool-s-src-the-check-module-has-108-lines --json",
+        ];
+        let read = json!({"type": "assistant", "cwd": CLONE, "message": {"content": [{"type": "tool_use", "id": "toolu_r",
+            "name": "Read", "input": {"file_path": format!("{CLONE}/xtask/src/eval.rs"), "offset": 100, "limit": 40}}]}});
+        let table = "| a | holds | `crates/bp-tool/src/check.rs:3` | measured |\n\
+             | b | holds | `xtask/src/eval.rs:120` | documented |\n\
+             | c | holds | `/private/var/T/clone/xtask/src/eval.rs:277` | documented |\n\
+             | d | holds | `shared/learnings/in-bp-tool-s-src-the-check-module-has-108-lines` | documented |\n\
+             | e | unchecked | `shared/learnings/never-shown` | inferred |\n\
+             | f | holds | https://www.gnu.org/software/coreutils/manual/html_node/wc-invocation.html | documented |\n\
+             | g | unchecked | none; I did not run it | inferred |\n\
+             | h | falsified | `eval.rs:110` and `crates/bp-tool/src/other.rs:9` | documented (the learning) |";
+        let g = research("control-1", &lead_after(&[read], &ran, &report(table)), Path::new("/nonexistent"));
+        let unread: Vec<bool> = g.research.rows.iter().map(|r| r.unread).collect();
+        assert_eq!(unread, [false, false, true, false, true, true, false, true], "c: line 277 is past the Read range");
+        let cited: Vec<bool> = g.research.rows.iter().map(|r| r.cited).collect();
+        assert_eq!(cited, [true, true, true, true, true, true, false, true], "g cites nothing");
+        assert!(g.pass, "an unread row on a control is no false contradiction");
+    }
+
+    /// The development set's `control-1` seeds the true learning: `check.rs` has 108 lines. A `falsified` row that
+    /// holds `108` or names the seed (its id, or four words of its title) is a false contradiction; `1080` is not
+    /// `108`; a second such row is a duplicate.
+    #[test]
+    fn a_falsified_row_on_a_control_is_a_false_contradiction() {
+        let ran = ["wc -l < crates/bp-tool/src/check.rs"];
+        let control = |table: &str| research("control-1", &lead(&ran, &report(table)), Path::new("/nonexistent"));
+        let clean = control(
+            "| The check module has 108 lines | holds | `wc -l < crates/bp-tool/src/check.rs` | measured |\n\
+             | The module had 1080 lines once | falsified | `git log` | inferred |\n\
+             | The README's count is stale | falsified | `README.md:3` | documented |",
+        );
+        assert_eq!(calls(&clean), [Call::None; 3]);
+        assert!(clean.pass);
+        let falsely = control(
+            "| The check module has 108 lines | falsified | `wc -l < crates/bp-tool/src/check.rs` | measured |\n\
+             | The learning \"the check module has 108 lines\" is stale | falsified | the seed | documented |\n\
+             | in-bp-tool-s-src-the-check-module-has-108-lines is wrong | falsified | the id | documented |",
+        );
+        assert_eq!(calls(&falsely), [Call::False, Call::Duplicate(0), Call::Duplicate(0)]);
+        assert!(!falsely.pass);
+        let titled =
+            control("| The learning says the check module has a stale count | falsified | its title | documented |");
+        assert_eq!(calls(&titled), [Call::False], "four words of the title name the seed");
+    }
+
+    /// The lead dispatched a child; the child ran the settle command, the lead did not. The row is `relayed`: a miss.
+    #[test]
+    fn evidence_only_in_a_child_is_relayed() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = json!({"type": "assistant", "cwd": CLONE, "message": {"content": [{"type": "tool_use", "id": "toolu_c",
+            "name": "Bash", "input": {"command": "wc -l < crates/bp-tool/src/check.rs"}}]}});
+        std::fs::write(dir.path().join("agent-c.jsonl"), format!("{child}\n")).unwrap();
+        std::fs::write(
+            dir.path().join("run.txt"),
+            "session: s\nlead: agent-l.jsonl bp-researcher depth 1\nchild: agent-c.jsonl bp-researcher depth 2\n",
+        )
+        .unwrap();
+        let table = "| The check module has 108 lines | holds | a child's `wc -l` | measured |\n\
+             | The learning's 54 lines is stale | falsified | `shared/learnings/in-bp-tool-s-src-the-check-module-has-54-lines` | documented |";
+        let g = research("plant-1", &lead(&[], &report(table)), dir.path());
+        assert_eq!(calls(&g), [Call::None, Call::Relayed(0)]);
+        assert!(g.killed.is_empty() && !g.pass && g.research.children == 1);
+        let g = research("plant-1", &lead(&["wc -l < crates/bp-tool/src/check.rs"], &report(table)), dir.path());
+        assert_eq!(calls(&g), [Call::None, Call::Kill(0)], "the lead's own read kills");
+    }
+
+    /// A report with no table, or a row of three cells, is `no_report`: a fail. A `|` inside backticks does not
+    /// split; a table with no `## Findings` heading counts when its header opens with `claim` (the pilot's control 1);
+    /// more than 20 rows are kept.
+    #[test]
+    fn a_report_without_the_table_is_no_report() {
+        let ran = ["wc -l < crates/bp-tool/src/check.rs"];
+        let none = Path::new("/nonexistent");
+        let prose = research("control-1", &lead(&ran, "## Findings\n\nThe module has 108 lines.\n"), none);
+        assert!(prose.research.no_report && !prose.pass && prose.research.rows.is_empty());
+        let three = research("control-1", &lead(&ran, &report("| a | holds | `x.rs:1` |")), none);
+        assert!(three.research.no_report, "a row with three cells");
+        let piped = findings(&report("| a | holds | `git ls-files | wc -l` prints 108 | measured |")).unwrap().1;
+        assert_eq!(piped[0].cells[2], "`git ls-files | wc -l` prints 108");
+        let bare = "| claim | verdict | source | mark |\n|---|---|---|---|\n| a | holds | `x.rs:1` | documented |\n";
+        assert_eq!(findings(bare).map(|f| f.1.len()), Some(1), "no heading: a table that opens with claim");
+        assert!(findings("| severity | location | finding |\n|---|---|---|\n| warn | a | b |").is_none());
+        let many: Vec<String> = (1..=25).map(|n| format!("| claim {n} | holds | `x.rs:{n}` | measured |")).collect();
+        let g = research("control-1", &lead(&ran, &report(&many.join("\n"))), none);
+        assert!(!g.research.no_report && g.research.rows.len() == 25 && g.pass, "25 rows are recorded, not a fail");
     }
 
     #[test]
