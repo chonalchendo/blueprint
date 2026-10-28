@@ -241,6 +241,21 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     assert!(log.lines().all(|l| l.as_bytes()[19] == b'Z'), "{log}");
 }
 
+/// A body or a diagram the client's sanitiser misses still fetches nothing from another host: the page's policy, on
+/// the root and on every page route, has the browser refuse it (32, design change 10).
+#[test]
+fn every_page_route_holds_a_policy_that_fetches_from_its_own_origin_only() {
+    let dir = vault();
+    let server = Server::start(dir.path(), &["--forge", "off"], None);
+    let policy = "content-security-policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+                  img-src 'self' data:; font-src 'self' data:; connect-src 'self'; base-uri 'none'; \
+                  form-action 'none'; frame-ancestors 'none'";
+    for page in ["/", "/bp", "/bp/moving", "/bp/design/projects/bp/designs/system?at=blueprint/bp/1"] {
+        let (status, head, _) = server.exchange("GET", page, &server.host());
+        assert!(status == 200 && head.lines().any(|l| l == policy), "{page}: {head}");
+    }
+}
+
 #[test]
 fn only_the_views_own_host_is_served() {
     let dir = vault();

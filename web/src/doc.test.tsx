@@ -4,7 +4,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { Document } from "./doc/Document";
-import { blocks, clean, cleanSvg, outlineOf } from "./doc/markdown";
+import { blocks, clean, cleanSvg, fetches, localCss, outlineOf } from "./doc/markdown";
 import large from "./fixtures/research-stage.md?raw";
 
 afterEach(() => (cleanup(), vi.unstubAllGlobals(), vi.restoreAllMocks(), window.history.pushState(null, "", "/")));
@@ -185,4 +185,41 @@ test("the largest design body in the converted vault renders as a document", () 
   console.info(`render research-stage.md (${large.length} bytes): ${ms.toFixed(0)} ms`);
   expect(document.querySelectorAll(".prose h2").length).toBe(outlineOf(large).filter((h) => h.depth === 2).length);
   expect(ms).toBeLessThan(3000);
+});
+
+// The vectors of the PR #84 review: a presentation attribute with a remote `url()`, and a diagram style whose
+// `url()` hides behind an inner quote, an `image-set` string, an escape or an `@font-face` source.
+test("a remote url in any attribute goes, and a style keeps only what fetches nothing", () => {
+  const svg = document.createElement("div");
+  svg.innerHTML = cleanSvg(
+    '<svg viewBox="0 0 10 10"><rect mask="url(https://example.com/m.svg#m)" fill="url(#grad)"></rect>' +
+      '<rect filter="url(https://example.com/f.svg#f)" clip-path="url(https://example.com/c.svg#c)" stroke="red"></rect>' +
+      '<rect fill="\\75 rl(https://example.com/e.svg#e)" marker-end="url(https://example.com/k.svg#k)"></rect></svg>',
+  );
+  const attrs = Array.from(svg.querySelectorAll("rect")).map((r) => r.getAttributeNames().join(" "));
+  expect(attrs).toEqual(["fill", "stroke", ""]);
+  expect(svg.querySelector("rect")?.getAttribute("fill")).toBe("url(#grad)");
+  for (const remote of [
+    "url(https://example.com/a.png)",
+    `url("https://example.com/q.png?a'b")`,
+    'image-set("https://example.com/i.png" 1x)',
+    "\\75 rl(https://example.com/e.png)",
+    "src(https://example.com/s.png)",
+  ]) {
+    expect(fetches(remote), remote).toBe(true);
+  }
+  for (const local of ["url(#grad)", 'url("data:font/woff2;base64,AA") format("woff2")', '"Geist Mono", monospace', "red"]) {
+    expect(fetches(local), local).toBe(false);
+  }
+  const css = localCss(
+    '.a { mask-image: image-set("https://example.com/i.png" 1x); fill: red } ' +
+      '@font-face { font-family: X; src: url("https://example.com/f.woff2") } ' +
+      '@font-face { font-family: Y; src: url(data:font/woff2;base64,AA) format("woff2") } .c { fill: url(#g) }',
+  );
+  expect(css).not.toContain("example.com");
+  expect(css).toContain("data:font/woff2;base64,AA");
+  expect(css).toContain("url(#g)");
+  expect(css).toContain("fill: red");
+  // happy-dom also drops the rule after an `@import`, so the import stands alone here.
+  expect(localCss("@import url(https://example.com/x.css);")).toBe("");
 });
