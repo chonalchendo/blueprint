@@ -3,7 +3,7 @@
 // `marked` renders it (CommonMark and GFM) and every HTML string it makes passes DOMPurify before the page holds it.
 // Headings and check blocks are blocks of their own, so the page gives each heading its outline anchor and each
 // check its label as React text.
-import DOMPurify from "dompurify";
+import DOMPurify, { type Config } from "dompurify";
 import { Marked, type Token, type TokenizerAndRendererExtension, type Tokens } from "marked";
 import type { Heading } from "../types/Heading";
 
@@ -41,9 +41,48 @@ function escape(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
-/** HTML from a body, made safe: no script, no event handler, no `javascript:` URL. */
+// A body is text of the vault, not a part of the page (18, check 6). Past what runs, it must not restyle the page
+// (`<style>`, `style=`, a page class), post a form, take focus, join a row (`data-*`) or fetch from another origin.
+const BODY: Config & { RETURN_DOM: true } = {
+  ALLOW_DATA_ATTR: false,
+  FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select", "audio", "video", "picture", "source"],
+  FORBID_ATTR: ["style", "tabindex", "autofocus", "srcset", "background"],
+  RETURN_DOM: true,
+};
+
+/** The classes a body keeps: marked's code language and the wikilink's own. A page class (`outline`, `land`) would
+ * dress body text as the page's chrome. */
+const KEPT_CLASS = /^(wl|language-[\w-]+)$/;
+
+/** An image loads only from the page itself or a `data:` URL: a remote fetch would tell its host the page was read. */
+function local(src: string): boolean {
+  if (src.startsWith("data:")) return true;
+  try {
+    return new URL(src, window.location.href).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+/** HTML from a body, made safe: nothing runs, restyles the page, joins a row or loads from another origin. A remote
+ * image reads as a link to it. */
 export function clean(html: string): string {
-  return DOMPurify.sanitize(html);
+  // `RETURN_DOM` gives the `<body>` of DOMPurify's inert document, so no image there loads before it is replaced.
+  const body = DOMPurify.sanitize(html, BODY) as HTMLElement;
+  for (const el of body.querySelectorAll("[class]")) {
+    const kept = Array.from(el.classList).filter((c) => KEPT_CLASS.test(c));
+    if (kept.length) el.setAttribute("class", kept.join(" "));
+    else el.removeAttribute("class");
+  }
+  for (const img of body.querySelectorAll("img")) {
+    const src = img.getAttribute("src") ?? "";
+    if (local(src)) continue;
+    const a = body.ownerDocument.createElement("a");
+    a.setAttribute("href", src);
+    a.textContent = img.getAttribute("alt") || src;
+    img.replaceWith(a);
+  }
+  return body.innerHTML;
 }
 
 /** A diagram's SVG, made safe with the SVG profile: its `<style>`, `<metadata>` and `data-*` attributes stay. */

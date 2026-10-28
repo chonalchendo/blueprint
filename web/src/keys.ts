@@ -1,10 +1,11 @@
 // Keyboard first (19, principle 6). A list row is any element with `data-row`: `data-href` is where `enter` opens
 // it, `data-command` what `c` copies. The focused row is the document's focus, so no state is kept here.
 
-/** The rows a reader can see: not inside a closed disclosure. */
+/** The rows a reader can see: the page's own, not inside a closed disclosure. An element of a rendered body
+ * (`data-body`) is never a row, so no body text reaches `c` (18, check 6), whatever the sanitiser admits. */
 export function rows(root: ParentNode = document): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>("[data-row]")).filter(
-    (r) => !r.parentElement?.closest("details:not([open])"),
+    (r) => !r.parentElement?.closest("details:not([open])") && !r.closest("[data-body]"),
   );
 }
 

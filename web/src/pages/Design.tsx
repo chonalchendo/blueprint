@@ -61,8 +61,8 @@ export function DesignView({ d, project }: { d: DesignObject; project: string })
         <h2 className="group">TL;DR</h2>
         {d.lead || d.tldr ? (
           <>
-            {d.lead && <div className="tldr" dangerouslySetInnerHTML={{ __html: html(d.lead) }} />}
-            {d.tldr && <div className="tldr sub" dangerouslySetInnerHTML={{ __html: html(d.tldr) }} />}
+            {d.lead && <div className="tldr" data-body="" dangerouslySetInnerHTML={{ __html: html(d.lead) }} />}
+            {d.tldr && <div className="tldr sub" data-body="" dangerouslySetInnerHTML={{ __html: html(d.tldr) }} />}
           </>
         ) : (
           <p className="empty">nothing</p>

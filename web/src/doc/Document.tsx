@@ -52,7 +52,7 @@ export function Document({ body, outline, diagrams = [], fold, children }: Props
     }
   };
   const prose = (
-    <div className="prose">
+    <div className="prose" data-body="">
       {plan.map((b, i) => (
         <Part key={i} b={b} diagrams={diagrams} pick={(s) => s && setCurrent(s)} />
       ))}
