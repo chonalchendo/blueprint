@@ -7,4 +7,5 @@ count_from: development old 0.00
 sealed_at: da8cf7dc8ba193f28c8bb37415cd818f502c9ff0
 generate_after: issue 4 merged
 planted_by: a fresh agent the orchestrator dispatches with analysis/briefs/m8-5-brief.md, never issue 4's author
-vault: ef9e4806647bfd07f597b0b54f8671f9a0b48a54 (the BP_VAULT head the dry run used, /tmp/vault-target-6; the nouns and the search check read it)
+vault: ef9e4806647bfd07f597b0b54f8671f9a0b48a54
+dry_run: f248fcda6d42e5e136af52ab87c5817e012bacc7ee1bb8cfbf69579eacceb274
