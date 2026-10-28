@@ -262,6 +262,40 @@ fn only_the_views_own_host_is_served() {
 }
 
 #[test]
+fn a_tag_with_slashes_in_the_query_serves_the_body_at_the_tag() {
+    let dir = vault();
+    let g = |args: &[&str]| git(dir.path(), &[&["-c", "user.name=t", "-c", "user.email=t@t"][..], args].concat());
+    g(&["tag", "blueprint/bp/1"]);
+    let path = dir.path().join("projects/bp/designs/system.md");
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("The vault.", "The vault.\n\nA probe line."))
+        .unwrap();
+    g(&["commit", "-qam", "probe"]);
+    let server = Server::start(dir.path(), &["--forge", "off"], None);
+    let design = "/api/bp/design/projects/bp/designs/system";
+    assert_eq!(server.json(design).1["version"], "changed since blueprint/bp/1", "the tag alone names the version");
+    // The query's `/` arrives as written or escaped; either names the tag.
+    for at in ["blueprint/bp/1", "blueprint%2Fbp%2F1"] {
+        let (status, d) = server.json(&format!("{design}?at={at}"));
+        assert_eq!(
+            (status, d["version"].as_str(), d["body"].as_str()),
+            (200, Some("at blueprint/bp/1"), Some("## TL;DR\n\nThe vault.")),
+            "{at}"
+        );
+        assert_eq!(d["diff"]["sections"], serde_json::json!(["TL;DR"]), "{at}");
+        assert_eq!(d["diff"]["added"], serde_json::json!([{ "section": "TL;DR", "lines": ["A probe line."] }]), "{at}");
+    }
+    let (status, refusal) = server.json(&format!("{design}?at=blueprint/bp/9"));
+    assert_eq!((status, refusal["code"].as_str()), (404, Some("no_tag")));
+    assert_eq!(refusal["fix"], "git tag -l 'blueprint/bp/*' lists the versions");
+    let log = std::fs::read_to_string(dir.path().join(".bp/use.log")).unwrap();
+    let routes: Vec<&str> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
+    assert_eq!(
+        routes, ["/bp/design/projects/bp/designs/system projects/bp/designs/system"; 3],
+        "a tag is the same page"
+    );
+}
+
+#[test]
 fn forge_off_never_calls_gh_and_a_gh_failure_turns_off_its_project_alone() {
     let dir = vault();
     let clone = tempfile::tempdir().unwrap();

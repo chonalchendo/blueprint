@@ -8,9 +8,9 @@ use bp_vault::{Body, Code, DeltaState, DesignLevel, Id, Index, Kind, Refusal, Va
 use serde::Serialize;
 use ts_rs::TS;
 
+use crate::asof::{BodyDiff, banner, show_at};
 use crate::inputs::text;
 use crate::milestone::{Concern, concerns, missing_kinds};
-use crate::pages::{accepted, versions};
 use crate::{Show, show};
 
 /// One design's page.
@@ -29,9 +29,13 @@ pub struct Design {
     pub diagrams: Vec<Diagram>,
     /// The delta records under it, in their order.
     pub deltas: Vec<DesignDelta>,
-    /// "accepted at <tag>" when the newest version holding its current hash exists, else "changed since <tag>" with
-    /// the project's newest tag, else "no version".
+    /// "accepted at <tag>" when a version's manifest holds the file's current hash, else "changed since <tag>" with
+    /// the newest version, or the newest tag when the project has no version record, else "no version". With `?at`:
+    /// "at <tag>", or "not at <tag>" when the file is not at the tag.
     pub version: String,
+    /// With `?at`: what changed from the body at the tag to the current body; empty when the file is not at the tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<BodyDiff>,
     /// The `## ` and `### ` headings of the body outside code, each with the anchor the client gives it.
     pub outline: Vec<Heading>,
     /// Coverage per concern (18, Design): the product design's only, one row per concern's latest answer.
@@ -80,22 +84,28 @@ pub struct Heading {
     pub anchor: String,
 }
 
-/// The Design page of `id` in `project`. `at` names a version tag, which this build does not read yet: the page is
-/// the current body and its `version` says so. An id that names no design of the project refuses `no_node`.
+/// The Design page of `id` in `project`. With `at`, a version tag, the page is the body as the tag holds it, with
+/// the section diff against the current body; the diagrams and deltas stay the current ones. An id that names no
+/// design of the project refuses `no_node`; a tag the vault lacks refuses `no_tag`.
 pub fn design(vault: &Vault, index: &Index, project: &str, id: &str, at: Option<&str>) -> Result<Design, Refusal> {
     let (id, level) = design_id(index, project, id)?;
     let level = level.design_kind;
-    let show = show(vault, Some(index), &id, None, None, false)?;
-    let body = Body::parse(show.body.as_deref().unwrap_or_default());
-    let versions = versions(index, project)?;
-    let mut version = match (accepted(vault, id.as_str(), &versions)?, versions.first()) {
-        (Some(tag), _) => format!("accepted at {tag}"),
-        (None, Some((_, tag, _))) => format!("changed since {tag}"),
-        (None, None) => "no version".to_string(),
+    let now = show(vault, Some(index), &id, None, None, false)?;
+    let (show, version, diff) = match at {
+        None => (now, banner(vault, index, project, &id)?, None),
+        Some(tag) => {
+            if let Some(then) = show_at(vault, &id, tag, project)? {
+                let parse = |s: &Show| Body::parse(s.body.as_deref().unwrap_or_default());
+                let diff = crate::asof::diff(&parse(&then), &parse(&now));
+                (then, format!("at {tag}"), Some(diff))
+            } else {
+                let (lead, sections, body) = (String::new(), Some(Vec::new()), Some(String::new()));
+                let empty = Show { lead, sections, body, findings: Vec::new(), ..now };
+                (empty, format!("not at {tag}"), Some(BodyDiff::default()))
+            }
+        }
     };
-    if let Some(tag) = at {
-        version = format!("{version}; the body at {tag} is not read yet, so this is the current body");
-    }
+    let body = Body::parse(show.body.as_deref().unwrap_or_default());
     let deltas = index
         .records(id.as_str(), Kind::Delta)?
         .into_iter()
@@ -116,6 +126,7 @@ pub fn design(vault: &Vault, index: &Index, project: &str, id: &str, at: Option<
         diagrams: pages(vault, id.as_str()).into_iter().map(|name| diagram(vault, &id, name)).collect(),
         deltas,
         version,
+        diff,
         outline: outline(&body),
         coverage: product.then(|| concerns(index, project)).transpose()?,
         rows_not_in_vault: missing_kinds(index, &kinds)?,
@@ -278,8 +289,6 @@ mod page_tests {
         assert_eq!(outline, [(2, "tl-dr"), (2, "context"), (3, "inside")]);
         assert_eq!((d.level.as_str(), d.version.as_str(), d.tldr.as_deref()), ("system", "no version", Some("Short.")));
         assert_eq!((d.coverage.is_none(), d.rows_not_in_vault.as_slice()), (true, ["delta".to_string()].as_slice()));
-        let at = design(&v, &index, "bp", "projects/bp/designs/system", Some("blueprint/bp/1")).unwrap();
-        assert!(at.version.starts_with("no version; the body at blueprint/bp/1 is not read yet"), "{}", at.version);
         let product = design(&v, &index, "bp", "projects/bp/designs/product", None).unwrap();
         assert_eq!(product.coverage.map(|c| c.len()), Some(0));
         assert_eq!(product.rows_not_in_vault, ["delta", "concern-answer"], "coverage reads not in the vault");
