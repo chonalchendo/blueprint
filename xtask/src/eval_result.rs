@@ -1,6 +1,7 @@
 //! The result file of a grade (29, design change 2; 30, design change 2) and the owner's two lines in it. A past
 //! review's set keeps 29's lines; a planted set lists every arm graded and its kill lines (`eval_kills`): `kills:`
-//! and its genres are `with`'s kills. The grader refuses a `capability` that the interval does not carry.
+//! and its genres are `with`'s kills. A research set has its own lines (`eval_research`, 31 design change 4). The
+//! grader refuses a `capability` that the interval does not carry.
 
 use std::collections::BTreeSet;
 
@@ -34,7 +35,9 @@ impl Grade {
     /// Why the owner's `status:` cannot stand: `capability` needs the lower bound of the interval above 0,
     /// `holdout_gain`'s for a planted set and `uplift_ci`'s otherwise.
     pub fn refusal(&self, owner: &Owner) -> Option<String> {
-        if self.kill_set() {
+        if self.skill.action == Action::Research {
+            owner.refuses(self.research_gain().map(|g| g.1), "holdout_gain")
+        } else if self.kill_set() {
             owner.refuses(self.holdout_gain().map(|g| g.1), "holdout_gain")
         } else {
             owner.refuses(self.uplift_low(), "uplift_ci")
@@ -80,7 +83,10 @@ impl Grade {
                 models.into_iter().cloned().collect::<Vec<_>>().join(", ")
             }
         ));
-        if kill {
+        let research = self.skill.action == Action::Research;
+        if research {
+            lines.extend(self.research_lines());
+        } else if kill {
             lines.extend(self.kill_lines());
         } else {
             lines.extend([
@@ -91,10 +97,12 @@ impl Grade {
                 format!("uplift_ci: {}", ci.map_or("n/a".into(), |c| format!("[{}, {}]", f2(c.1), f2(c.2)))),
             ]);
         }
-        lines.extend([
-            format!("adherence: {}", with.adherence.map_or("n/a".into(), f2)),
-            format!("out_of_row: {}", with.out_of_row),
-        ]);
+        if !research {
+            lines.extend([
+                format!("adherence: {}", with.adherence.map_or("n/a".into(), f2)),
+                format!("out_of_row: {}", with.out_of_row),
+            ]);
+        }
         if !kill {
             let review = self.skill.action == Action::Review;
             lines.push(format!("false_findings: {}", if review { rate(with.wrong, with.found) } else { "n/a".into() }));

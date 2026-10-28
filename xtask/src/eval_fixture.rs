@@ -420,7 +420,7 @@ pub fn has_word(text: &str, word: &str) -> bool {
 }
 
 /// A path and the line ranges after its colon. A word after the location, as in `a.rs:22-33 (note)`, is ignored.
-fn locate(at: &str) -> Option<(String, Vec<(u32, u32)>)> {
+pub(crate) fn locate(at: &str) -> Option<(String, Vec<(u32, u32)>)> {
     let at = at.trim().trim_start_matches('`');
     let (path, tail) = at.split_once(':').unwrap_or((at, ""));
     let path = path.split_whitespace().next()?.trim_end_matches('`').trim_start_matches("./");

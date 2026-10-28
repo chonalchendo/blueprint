@@ -26,6 +26,9 @@ fn yes(b: bool) -> &'static str {
 
 impl Grade {
     pub fn report(&self, store: &Path) -> String {
+        if self.skill.action == Action::Research {
+            return self.research_report(store);
+        }
         let mut lines =
             vec![format!("# Eval report: {}\n", self.skill.name), format!("Traces: `{}`\n", store.display())];
         lines.push("## Ground truth\n".into());
