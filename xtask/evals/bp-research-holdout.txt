@@ -1,7 +1,7 @@
 procedure: cargo xtask plants --from 'crates/*/src/**/*.rs' --from 'crates/*/tests/*.rs' --from 'xtask/src/*.rs' --from 'xtask/tests/*.rs' --from 'bundle/**/*.md' --from '*.md' --from '.github/**/*.md' --controls 10 --parts 4 --base 58345619f46ea9d6ee4913ecba25161eaefb355f --count 20 --seed 21 --out xtask/evals/bp-research-holdout
 base: 58345619f46ea9d6ee4913ecba25161eaefb355f
 reserve: 22 23 24 25
-shortfall: when discards leave fewer than 20 plants, run again with the next reserve seed and keep the new plants until 20; if the reserve runs out, plants: reports what was kept and the power row is read again
+shortfall: when discards leave fewer than 20 plants, run the whole procedure again with the next reserve seed, replacing the set, until a seed keeps 20; the generation records the seed it used; if the reserve runs out, plants: reports what was kept and the power row is read again
 rules: crates/bp-tool/src/check.rs crates/bp-diagram/src/search.rs:15 xtask/src/eval_result.rs crates/bp-diagram/src/seq.rs:17 crates/bp-tool/src/waiver.rs crates/bp-diagram/src/grid.rs:10 crates/bp-vault/tests/write_path.rs xtask/src/forge.rs:21 crates/bp-read/src/snapshot.rs crates/bp-install/tests/ledger.rs:14 xtask/tests/stage.rs xtask/src/sandbox.rs:20 crates/bp-diagram/src/spec/items.rs crates/bp-vault/src/walk.rs:26 crates/bp-tool/src/record.rs
 count_from: development old 0.00
 sealed_at: da8cf7dc8ba193f28c8bb37415cd818f502c9ff0
