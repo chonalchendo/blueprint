@@ -4,7 +4,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { Document } from "./doc/Document";
-import { blocks, clean, outlineOf } from "./doc/markdown";
+import { blocks, clean, cleanSvg, outlineOf } from "./doc/markdown";
 import large from "./fixtures/research-stage.md?raw";
 
 afterEach(() => (cleanup(), vi.unstubAllGlobals(), vi.restoreAllMocks(), window.history.pushState(null, "", "/")));
@@ -41,6 +41,39 @@ test("a body's script, handler, style, form, data attribute and remote image nev
   expect(Array.from(prose.querySelectorAll("img")).map((i) => i.getAttribute("alt"))).toEqual([null, null, "inline", "here"]);
   expect(screen.getByRole("link", { name: "remote" }).getAttribute("href")).toBe("https://evil.example/pixel.png");
   expect(clean('<img src="x" onerror="alert(2)">')).toBe('<img src="x">');
+});
+
+// A remote `<image>`, `<use>` or `<feImage>`, or a remote `url()` in an SVG style, would fetch its URL when the page
+// holds it, and tell the host the page was read. A body's `id` would take a page anchor; its `aria-*` or `role` would
+// relabel the page's regions.
+const FETCHING =
+  '<svg viewBox="0 0 10 10"><image href="https://example.com/i.png"></image><image href="data:image/gif;base64,R0lGOD"></image>' +
+  '<image href="/assets/a.png"></image><use href="https://example.com/s.svg#a"></use><use href="#local"></use>' +
+  '<filter id="f"><feImage href="https://example.com/f.png"></feImage></filter>' +
+  '<g style="fill: url(https://example.com/p.svg#x)"></g><g style="fill: url(#grad)"></g></svg>';
+
+test("a body or a diagram fetches nothing from another origin; a body's ids, aria attributes and roles go", () => {
+  const remote = (root: Element) =>
+    Array.from(root.querySelectorAll("*")).flatMap((el) => Array.from(el.attributes).map((a) => a.value)).filter((v) => v.includes("example.com"));
+  const svg = document.createElement("div");
+  svg.innerHTML = cleanSvg(FETCHING);
+  expect(remote(svg)).toEqual([]);
+  expect(Array.from(svg.querySelectorAll("image")).map((i) => i.getAttribute("href"))).toEqual(["data:image/gif;base64,R0lGOD", "/assets/a.png"]);
+  expect(svg.querySelectorAll("g")[1].getAttribute("style")).toBe("fill: url(#grad)");
+  // happy-dom drops an SVG's `<style>` text (above); the headless-Chrome probe of the PR shows its `url()` and `@import`.
+  const body = [
+    "## Probe",
+    FETCHING,
+    '<p id="tl-dr" aria-label="outline" aria-hidden="true" role="note">posing</p>',
+    '<a id="fig-x" href="#probe" aria-current="location">jump</a>',
+  ].join("\n\n");
+  render(<Document body={body} outline={[{ depth: 2, heading: "Probe", anchor: "probe" }]} />);
+  const prose = document.querySelector(".prose")!;
+  expect(remote(prose)).toEqual([]);
+  expect(prose.querySelectorAll("image")).toHaveLength(2);
+  expect(Array.from(prose.querySelectorAll("[id]")).map((e) => e.id)).toEqual(["probe"]);
+  expect(Array.from(prose.querySelectorAll("*")).flatMap((e) => e.getAttributeNames().filter((n) => n.startsWith("aria-")))).toEqual([]);
+  expect(screen.getByText("posing").getAttributeNames()).toEqual([]);
 });
 
 test("headings take the outline's anchors, a table is a table, and a check block reads under its name", () => {

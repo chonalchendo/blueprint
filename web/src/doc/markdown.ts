@@ -42,11 +42,14 @@ function escape(s: string): string {
 }
 
 // A body is text of the vault, not a part of the page (18, check 6). Past what runs, it must not restyle the page
-// (`<style>`, `style=`, a page class), post a form, take focus, join a row (`data-*`) or fetch from another origin.
+// (`<style>`, `style=`, a page class), post a form, take focus, join a row (`data-*`), fetch from another origin, or
+// pose as the page's own parts: an `id` would take an anchor the page sets, an `aria-*` or a `role` would relabel
+// its regions.
 const BODY: Config & { RETURN_DOM: true } = {
   ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: false,
   FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select", "audio", "video", "picture", "source"],
-  FORBID_ATTR: ["style", "tabindex", "autofocus", "srcset", "background"],
+  FORBID_ATTR: ["style", "tabindex", "autofocus", "srcset", "background", "id", "role"],
   RETURN_DOM: true,
 };
 
@@ -64,11 +67,32 @@ function local(src: string): boolean {
   }
 }
 
+/** The SVG elements that fetch their `href`: `<use>` and `<feImage>` as well as `<image>`. */
+const FETCHES = new Set(["image", "use", "feimage"]);
+
+/** Removes each SVG element that would fetch from another origin, and each remote `url()` or `@import` of an SVG
+ * style: as with an image, the fetch would tell its host the page was read. */
+function unfetch(root: Element): void {
+  for (const el of Array.from(root.querySelectorAll("*"))) {
+    const hrefs = Array.from(el.attributes).filter((a) => a.localName === "href");
+    if (FETCHES.has(el.localName.toLowerCase()) && hrefs.some((a) => !local(a.value))) el.remove();
+  }
+  for (const style of root.querySelectorAll("style")) style.textContent = localCss(style.textContent ?? "");
+  for (const el of root.querySelectorAll("[style]")) el.setAttribute("style", localCss(el.getAttribute("style")!));
+}
+
+function localCss(css: string): string {
+  return css
+    .replace(/@import[^;]*;?/gi, "")
+    .replace(/url\(\s*(['"]?)([^'")]*)\1\s*\)/gi, (m, _q: string, u: string) => (local(u.trim()) ? m : "none"));
+}
+
 /** HTML from a body, made safe: nothing runs, restyles the page, joins a row or loads from another origin. A remote
  * image reads as a link to it. */
 export function clean(html: string): string {
-  // `RETURN_DOM` gives the `<body>` of DOMPurify's inert document, so no image there loads before it is replaced.
+  // `RETURN_DOM` gives the `<body>` of DOMPurify's inert document, so nothing there loads before it is removed.
   const body = DOMPurify.sanitize(html, BODY) as HTMLElement;
+  unfetch(body);
   for (const el of body.querySelectorAll("[class]")) {
     const kept = Array.from(el.classList).filter((c) => KEPT_CLASS.test(c));
     if (kept.length) el.setAttribute("class", kept.join(" "));
@@ -85,9 +109,12 @@ export function clean(html: string): string {
   return body.innerHTML;
 }
 
-/** A diagram's SVG, made safe with the SVG profile: its `<style>`, `<metadata>` and `data-*` attributes stay. */
+/** A diagram's SVG, made safe with the SVG profile: its `<style>`, `<metadata>` and `data-*` attributes stay; what
+ * would fetch from another origin does not. */
 export function cleanSvg(svg: string): string {
-  return DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
+  const body = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true }, RETURN_DOM: true }) as HTMLElement;
+  unfetch(body);
+  return body.innerHTML;
 }
 
 /** Markdown with no block structure of the page's own: a TL;DR, a lead. */
