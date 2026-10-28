@@ -2,6 +2,7 @@
 //! and the read test the research grader asks of it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -30,7 +31,8 @@ pub(crate) fn hits(out: &str, single: Option<&str>, rel: &dyn Fn(&str) -> String
 /// What an agent read ([`crate::eval_trace::Trace::reads`]).
 #[derive(Debug, Default, PartialEq)]
 pub struct Reads {
-    /// A file and the line ranges read in it: one entry per `Read` call, and per file of a `Grep` call's output.
+    /// A file and the line ranges read in it: one entry per `Read` call, per file of a `Grep` call's output, and per
+    /// file a Bash command names under `cd <dir> &&` ([`in_subdir`]), read whole.
     pub files: Vec<(String, Vec<(u32, u32)>)>,
     /// Each Bash command once, clone-relative.
     pub commands: Vec<String>,
@@ -62,6 +64,30 @@ fn names(command: &str, path: &str) -> bool {
             !command[..at].ends_with(part)
                 && !after.strip_prefix('/').unwrap_or(after).starts_with(|c: char| part(c) || c == '/')
         })
+}
+
+/// The file kinds a cite or a Bash command names by path.
+pub(crate) const EXTENSIONS: [&str; 12] =
+    ["rs", "md", "toml", "json", "jsonl", "sh", "py", "txt", "tsv", "yml", "yaml", "lock"];
+
+/// For a Bash command `cd <dir> && …` with `<dir>` under the clone root `root` and not the root: `<dir>/`,
+/// clone-relative, and the files the rest of the command names relative to it. So `cd …/crates/a/src && sed -n 1,30p
+/// walk.rs` reads `crates/a/src/walk.rs` (the pilot's control 4; review of PR 81, finding 5).
+pub(crate) fn in_subdir(command: &str, root: &str) -> Option<(String, Vec<String>)> {
+    let (dir, rest) = command.strip_prefix("cd ")?.split_once(" && ")?;
+    let sub = relative(&format!("{}/", dir.trim_matches(['"', '\'']).trim_end_matches('/')), root);
+    if sub.is_empty() || sub.starts_with(['/', '~', '$', '.']) || sub.contains(char::is_whitespace) {
+        return None;
+    }
+    let path = |w: &&str| {
+        let ext = Path::new(w).extension().and_then(|e| e.to_str()).unwrap_or_default();
+        !w.starts_with(['/', '-', '$', '~']) && EXTENSIONS.contains(&ext)
+    };
+    let words = rest.split(|c: char| c.is_whitespace() || "`()<>;|&\"'".contains(c));
+    let mut files: Vec<String> = words.filter(path).map(|w| format!("{sub}{}", w.trim_start_matches("./"))).collect();
+    files.sort();
+    files.dedup();
+    Some((sub, files))
 }
 
 /// `text` with the clone root `root` taken out: a leading `cd <root> && `, then `<root>/` before every path, so a

@@ -4,7 +4,7 @@
 //!
 //! A `plant` trial kills a plant when one row has the verdict `falsified` and names the plant ([`names`]), a `match:`
 //! word of the plant sits in that row or in another row of the table (pilot delta 1), and the lead read the settle
-//! path ([`settle_path`]). The same row with the settle path read only by a child is `relayed`, a miss. A two-part
+//! path ([`settle_path`]). The line number of a cite (`sandbox.rs:16`) is no word of a row ([`uncited`]). The same row with the settle path read only by a child is `relayed`, a miss. A two-part
 //! fixture grades each plant on its own. On a `control`, a `falsified` row that holds the `match:` word or names the
 //! seed is a false contradiction. A second row on a plant or seed that a row already took is `duplicate`. A row whose
 //! source cell cites a path, a node id or a URL that the lead never read is `unread`, whatever its verdict.
@@ -12,12 +12,12 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::eval_fixture::{Fixture, locate};
 use crate::eval_grade::{Grade, cells, float, share, short};
 use crate::eval_plant::{RUN, Seed, words};
-use crate::eval_reads::{Reads, relative};
+use crate::eval_reads::{EXTENSIONS, Reads, relative};
 use crate::eval_result::{f2, newcombe};
 use crate::eval_score::Graded;
 use crate::eval_trace::Trace;
@@ -60,7 +60,7 @@ impl Row {
 /// The research score of one trial.
 #[derive(Default)]
 pub struct Scored {
-    /// The report holds no table, or a row with fewer than four cells.
+    /// The report holds no table, or a row with other than four cells.
     pub no_report: bool,
     /// The `at:` line of the `## Findings` section, when present.
     pub at: Option<String>,
@@ -74,9 +74,10 @@ fn first_word(cell: &str) -> String {
     cell.split(|c: char| !c.is_alphanumeric()).find(|w| !w.is_empty()).unwrap_or_default().to_lowercase()
 }
 
-/// The `at:` line and the rows of the report's table (grader-rules "Parse"): the first table of the `## Findings`
-/// section, or, with no such heading, the first table whose header opens with `claim` (the pilot's control 1). The
-/// splitter respects backticks ([`cells`]). `None` when there is no table or a row has fewer than four cells.
+/// The `at:` line and the rows of the report's table (grader-rules "Parse"): the first table whose header opens with
+/// `claim`, in the `## Findings` section when there is one (the pilot's control 1 has none). A summary table before it
+/// does not count; with no such header, the section's first table does. The splitter respects backticks ([`cells`]).
+/// `None` when there is no table or a row has other than four cells: a fifth cell is no mark to grade.
 pub fn findings(report: &str) -> Option<(Option<String>, Vec<Row>)> {
     let lines: Vec<&str> = report.lines().map(str::trim).collect();
     let heading = lines.iter().position(|l| l.starts_with("## Findings"));
@@ -85,27 +86,23 @@ pub fn findings(report: &str) -> Option<(Option<String>, Vec<Row>)> {
         &rest[..rest.iter().position(|l| l.starts_with("## ")).unwrap_or(rest.len())]
     });
     let at = section.iter().find_map(|l| l.trim_matches('`').strip_prefix("at:"));
-    let header = |l: &&str| {
-        l.starts_with('|') && (heading.is_some() || cells(l).first().is_some_and(|c| c.eq_ignore_ascii_case("claim")))
-    };
-    let start = section.iter().position(header)?;
+    let claim = |l: &&str| l.starts_with('|') && cells(l).first().is_some_and(|c| c.eq_ignore_ascii_case("claim"));
+    let first = || heading.and(section.iter().position(|l| l.starts_with('|')));
+    let start = section.iter().position(claim).or_else(first)?;
     let mut rows = Vec::new();
     for line in section[start + 1..].iter().take_while(|l| l.starts_with('|')) {
         let c = cells(line);
         if c.iter().all(|c| c.chars().all(|ch| matches!(ch, '-' | ':' | ' '))) {
             continue;
         }
-        if c.len() < 4 {
+        if c.len() != 4 {
             return None;
         }
-        let cells = [c[0].to_string(), c[1].to_string(), c[2].to_string(), c[3..].join(" | ")];
+        let cells = [c[0], c[1], c[2], c[3]].map(str::to_string);
         rows.push(Row { cells, ..Row::default() });
     }
     Some((at.map(|a| a.trim().trim_matches('`').to_string()), rows))
 }
-
-/// The file kinds a source cell cites by path.
-const EXTENSIONS: [&str; 12] = ["rs", "md", "toml", "json", "jsonl", "sh", "py", "txt", "tsv", "yml", "yaml", "lock"];
 
 /// Whether the lead read every cite of a source cell, and whether the cell cites anything (grader-rules "Unread").
 /// A cite is a URL, a node id (`projects/…`, `shared/…`) or a file path with its lines, absolute or relative to the
@@ -135,19 +132,39 @@ fn cites_read(source: &str, root: &str, reads: &Reads) -> (bool, bool) {
     (cited, read)
 }
 
-/// Whether `text` names the seed: its node id or slug, or a run of [`RUN`] words of its title or of its slug read as
+/// `text` without the line numbers of its cites: `sandbox.rs:16` reads `sandbox.rs`, and `check.rs:108-120,130`
+/// reads `check.rs`, so a cite's line is no `match:` or `unless:` word (review of PR 81, finding 1).
+fn uncited(text: &str) -> String {
+    let (mut out, mut rest) = (String::with_capacity(text.len()), text);
+    while let Some(at) = rest.find(':') {
+        out += &rest[..at];
+        let tail = &rest[at + 1..];
+        let lines = tail.find(|c: char| !(c.is_ascii_digit() || matches!(c, '-' | ','))).unwrap_or(tail.len());
+        let path = out.rsplit(|c: char| c.is_whitespace() || "`()[]<>;\"'|".contains(c)).next().unwrap_or_default();
+        let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or_default();
+        if tail.starts_with(|c: char| c.is_ascii_digit()) && EXTENSIONS.contains(&ext) {
+            rest = &tail[lines..];
+        } else {
+            out.push(':');
+            rest = tail;
+        }
+    }
+    out + rest
+}
+
+/// Whether `text` names the seed: its node id or slug, its whole title, or a run of [`RUN`] words of its slug read as
 /// words, so "the learning's id says 'at most 40 candidates'" names `…-tests-at-most-40-candidates` (the pilot's
-/// control 5). With `flip`, an `unless:` word or every `nouns:` word names it too: the flipped claim in its words.
+/// control 5). With `flip`, an `unless:` word names it too: the flipped claim. The `nouns:` words and a part of the
+/// title are the question's words, so they name nothing (review of PR 81, finding 2).
 fn names(text: &str, seed: &Seed, flip: bool) -> bool {
     let slug = seed.node.rsplit('/').next().unwrap_or_default();
     let row = words(text);
-    let run = |t: &str| words(t).windows(RUN).any(|w| row.windows(RUN).any(|r| r == w));
-    let flipped = seed.unless.iter().any(|u| holds(text, u))
-        || (!seed.nouns.is_empty() && seed.nouns.iter().all(|n| holds(text, n)));
+    let title = words(&seed.field("title").unwrap_or_default());
+    let slugged = words(&slug.replace('-', " "));
     text.to_lowercase().contains(slug)
-        || run(&seed.field("title").unwrap_or_default())
-        || run(&slug.replace('-', " "))
-        || (flip && flipped)
+        || (!title.is_empty() && row.windows(title.len()).any(|r| r == title))
+        || slugged.windows(RUN).any(|w| row.windows(RUN).any(|r| r == w))
+        || (flip && seed.unless.iter().any(|u| holds(text, u)))
 }
 
 /// The path that holds a plant's truth: the file its `settled_by:` names, or for a count over a directory the
@@ -183,7 +200,7 @@ pub fn score(g: &mut Graded, fx: &Fixture, trace: &Trace, dir: &Path) {
         let (cited, read) = cites_read(&r.cells[2], trace.root(), &reads);
         (r.cited, r.unread) = (cited, !read);
     }
-    let text: Vec<String> = rows.iter().map(Row::text).collect();
+    let text: Vec<String> = rows.iter().map(|r| uncited(&r.text())).collect();
     let falsified: Vec<bool> = rows.iter().map(|r| first_word(&r.cells[1]) == "falsified").collect();
     let matched = |p: &Seed, t: &str| p.matches.iter().any(|m| holds(t, m));
     if research.control {
@@ -326,10 +343,10 @@ impl Grade {
     }
 
     /// `text`, an agreement file, with its `code_kill` and `code_unread` cells written from the store and every other
-    /// byte kept (`--relabel`), so `git diff --quiet` on the file is the agreement block's test. A row the store no
-    /// longer holds is an error.
+    /// byte kept (`--relabel`), so `git diff --quiet` on the file is the agreement block's test. The file must hold
+    /// each row of the store once and no other row: the first row it lacks, holds twice or holds over is an error.
     pub fn relabel(&self, text: &str) -> Result<String> {
-        let mut out = String::with_capacity(text.len());
+        let (mut out, mut seen) = (String::with_capacity(text.len()), BTreeSet::new());
         for line in text.split_inclusive('\n') {
             let body = line.strip_suffix('\n').unwrap_or(line);
             if body.starts_with("labeller:") || body.starts_with("trial\t") || body.trim().is_empty() {
@@ -337,14 +354,24 @@ impl Grade {
                 continue;
             }
             let mut cells: Vec<&str> = body.split('\t').collect();
-            let row = (cells.len() == 6)
+            let (trial, i, row) = (cells.len() == 6)
                 .then(|| self.trials.iter().find(|t| t.trial == cells[0]))
                 .flatten()
-                .and_then(|t| t.research.rows.get(cells[1].parse::<usize>().ok()?.checked_sub(1)?))
+                .and_then(|t| {
+                    let i = cells[1].parse::<usize>().ok()?.checked_sub(1)?;
+                    Some((t.trial.as_str(), i, t.research.rows.get(i)?))
+                })
                 .with_context(|| format!("`{body}`: the store holds no such trial and row"))?;
+            if !seen.insert((trial, i)) {
+                bail!("`{trial}\t{}`: the label file holds this row twice", i + 1);
+            }
             (cells[2], cells[4]) = (yes(matches!(row.call, Call::Kill(_))), yes(row.unread));
             out += &cells.join("\t");
             out += &line[body.len()..];
+        }
+        let mut keys = self.trials.iter().flat_map(|t| (0..t.research.rows.len()).map(move |i| (t.trial.as_str(), i)));
+        if let Some((trial, i)) = keys.find(|k| !seen.contains(k)) {
+            bail!("`{trial}\t{}`: the label file lacks this row of the store", i + 1);
         }
         Ok(out)
     }
@@ -434,7 +461,7 @@ impl Grade {
     }
 }
 
-const NOTES: &str = "\n- **Kill:** a plant trial kills a plant when one row has the verdict `falsified` and names the plant (its id or slug, four words of its title or slug, an `unless:` word, or every `nouns:` word), a `match:` word of the plant sits in some row of the table, and the lead read the settle path: a `Read` or `Grep` of it, or a Bash command that names it. Digits match on word boundaries, with separators dropped. An arm kills a plant when more than half of its trials on it killed it.\n- **Relayed:** the same row, with the settle path read only in a child's transcript: a miss.\n- **False contradiction:** on a control, a `falsified` row that holds the `match:` word or names the seed. `control_false` is the share of control trials with one.\n- **Unread:** a row whose source cell cites a path, a node id or a URL that the lead never read, `bp show`ed or fetched. A `documented` mark on it counts again.\n- **No report:** no table under `## Findings` (or, with no heading, no table that opens with `claim`), or a row with fewer than four cells: a fail.\n";
+const NOTES: &str = "\n- **Kill:** a plant trial kills a plant when one row has the verdict `falsified` and names the plant (its id or slug, its whole title, four words of its slug, or an `unless:` word), a `match:` word of the plant sits in some row of the table (a cite's line number, as `sandbox.rs:16`, is no word), and the lead read the settle path: a `Read` or `Grep` of it, or a Bash command that names it. Digits match on word boundaries, with separators dropped. An arm kills a plant when more than half of its trials on it killed it.\n- **Relayed:** the same row, with the settle path read only in a child's transcript: a miss.\n- **False contradiction:** on a control, a `falsified` row that holds the `match:` word or names the seed. `control_false` is the share of control trials with one.\n- **Unread:** a row whose source cell cites a path, a node id or a URL that the lead never read, `bp show`ed or fetched. A `documented` mark on it counts again.\n- **No report:** no table under `## Findings` (the table that opens with `claim`, else the first; with no heading, a table that opens with `claim`), or a row with other than four cells: a fail.\n";
 
 #[cfg(test)]
 mod tests {

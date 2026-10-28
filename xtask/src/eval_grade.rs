@@ -616,6 +616,11 @@ mod tests {
         g
     }
 
+    fn fixture_text(id: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("evals/bp-research-plants/{id}.md"));
+        std::fs::read_to_string(path).unwrap()
+    }
+
     fn calls(g: &Graded) -> Vec<Call> {
         g.research.rows.iter().map(|r| r.call).collect()
     }
@@ -678,8 +683,8 @@ mod tests {
     }
 
     /// The development set's `control-1` seeds the true learning: `check.rs` has 108 lines. A `falsified` row that
-    /// holds `108` or names the seed (its id, or four words of its title) is a false contradiction; `1080` is not
-    /// `108`; a second such row is a duplicate.
+    /// holds `108` or names the seed (its id, its whole title, four words of its slug) is a false contradiction;
+    /// `1080` is not `108`; a second such row is a duplicate; four words of the title are the question's words.
     #[test]
     fn a_falsified_row_on_a_control_is_a_false_contradiction() {
         let ran = ["wc -l < crates/bp-tool/src/check.rs"];
@@ -698,9 +703,75 @@ mod tests {
         );
         assert_eq!(calls(&falsely), [Call::False, Call::Duplicate(0), Call::Duplicate(0)]);
         assert!(!falsely.pass);
-        let titled =
-            control("| The learning says the check module has a stale count | falsified | its title | documented |");
-        assert_eq!(calls(&titled), [Call::False], "four words of the title name the seed");
+        let titled = control("| Per bp-tool's src, the check count is stale | falsified | its title | documented |");
+        assert_eq!(calls(&titled), [Call::None], "four words of the title are the question's: no name");
+        let slugged =
+            control("| The learning says the check module has a stale count | falsified | its slug | documented |");
+        assert_eq!(calls(&slugged), [Call::False], "four words of the slug name the seed");
+    }
+
+    /// The line of a cite is no `match:` or `unless:` word (review of PR 81, finding 1): `sandbox.rs:16` is not the
+    /// true `16` of the development set's `plant-9`, `check.rs:108` is not `control-1`'s `108`, and `ledger.rs:8` does
+    /// not name the `KEEP` plant, seeded `8`, of a two-part fixture.
+    #[test]
+    fn a_cite_line_number_is_no_match_word() {
+        let none = Path::new("/nonexistent");
+        let keep = ["grep -F 'const KEEP:' xtask/src/sandbox.rs"];
+        let slug = "projects/bp/designs/components/in-xtask-s-src-the-sandbox-module-sets-keep-to-8";
+        let table = |value: &str, cite: &str| {
+            format!(
+                "| KEEP in the sandbox module is {value} | holds | `{cite}` | measured |\n\
+                 | The learning's KEEP of 8 is stale | falsified | `{slug}` | documented |"
+            )
+        };
+        for cite in ["xtask/src/sandbox.rs:16", "xtask/src/sandbox.rs:10-16,16", "xtask/src/sandbox.rs:16:5"] {
+            let g = research("plant-9", &lead(&keep, &report(&table("64", cite))), none);
+            assert!(calls(&g) == [Call::None; 2] && g.killed.is_empty(), "{cite}: the cite's line is no match word");
+        }
+        let g = research("plant-9", &lead(&keep, &report(&table("16", "xtask/src/sandbox.rs:16"))), none);
+        assert_eq!(calls(&g), [Call::None, Call::Kill(0)], "the claim's 16 is the match word");
+
+        let ran = ["wc -l < crates/bp-tool/src/check.rs"];
+        let cited =
+            "| The README's account of checks is stale | falsified | `crates/bp-tool/src/check.rs:108` | documented |";
+        let g = research("control-1", &lead(&ran, &report(cited)), none);
+        assert!(calls(&g) == [Call::None] && g.pass, "the cite's 108 is no false contradiction");
+
+        let (keep_file, cap_file) = (fixture_text("plant-9"), fixture_text("plant-7"));
+        let (head, keep_seed) = keep_file.split_once("\n---\n").unwrap();
+        let (cap, cap_seed) = cap_file.split_once("\n---\n").unwrap();
+        let question = format!(
+            "question: This question has two parts. First: What is the value of `KEEP` in the sandbox module of the \
+             xtask crate? Second: What is the value of `ROLE_CAP` in the ledger file in bp-install's tests? Give each \
+             number and its source, at the repository's current commit. {}",
+            crate::eval_plant::ROW_SHAPE
+        );
+        let head = head.lines().map(|l| if l.starts_with("question:") { question.as_str() } else { l });
+        let mut text = head.collect::<Vec<_>>().join("\n").replace("seed: 8\n", "seed: 8\nparts: 2\n");
+        text += &cap[cap.find("\nplant:").unwrap()..];
+        let both = Fixture::parse("two-part", &format!("{text}\n---\n{keep_seed}---\n{cap_seed}")).unwrap();
+        let ran = [keep[0], "grep -F 'const ROLE_CAP:' crates/bp-install/tests/ledger.rs"];
+        let table = "| The learning's ROLE_CAP of 750 is stale; the ledger sets 1_500 | falsified | `crates/bp-install/tests/ledger.rs:8` | measured |\n\
+             | KEEP in the sandbox module is 16 | holds | `xtask/src/sandbox.rs:3` | measured |";
+        let mut g = Graded::default();
+        crate::eval_research::score(&mut g, &both, &lead(&ran, &report(table)), none);
+        assert_eq!(calls(&g), [Call::Kill(1), Call::None], "ledger.rs:8 does not name the KEEP plant");
+        assert_eq!(g.killed, BTreeSet::from([1]));
+    }
+
+    /// A row names a plant by its id, its whole title, four words of its slug or an `unless:` word (review of PR 81,
+    /// finding 2). The `nouns:` words are the question's: a `falsified` row that holds them names nothing.
+    #[test]
+    fn the_nouns_alone_do_not_name_the_plant() {
+        let none = Path::new("/nonexistent");
+        let ran = ["grep -F 'const KEEP:' xtask/src/sandbox.rs"];
+        let nouns = "| KEEP in the sandbox module is 16 | holds | `xtask/src/sandbox.rs:16` | measured |\n\
+             | The xtask sandbox hides the research sets from git status | falsified | `xtask/src/sandbox.rs:3` | measured |";
+        let g = research("plant-9", &lead(&ran, &report(nouns)), none);
+        assert!(calls(&g) == [Call::None; 2] && g.killed.is_empty(), "xtask and sandbox are the question's words");
+        let slugged = nouns.replace("The xtask sandbox hides", "The sandbox module sets KEEP: it hides");
+        let g = research("plant-9", &lead(&ran, &report(&slugged)), none);
+        assert_eq!(calls(&g), [Call::None, Call::Kill(0)], "four words of the slug name it");
     }
 
     /// The lead dispatched a child; the child ran the settle command, the lead did not. The row is `relayed`: a miss.
@@ -740,6 +811,13 @@ mod tests {
         let bare = "| claim | verdict | source | mark |\n|---|---|---|---|\n| a | holds | `x.rs:1` | documented |\n";
         assert_eq!(findings(bare).map(|f| f.1.len()), Some(1), "no heading: a table that opens with claim");
         assert!(findings("| severity | location | finding |\n|---|---|---|\n| warn | a | b |").is_none());
+        let summary = "## Findings\n\n| file | value |\n|---|---|\n| sandbox.rs | 16 |\n\n\
+                       | claim | verdict | source | mark |\n|---|---|---|---|\n| a | holds | `x.rs:1` | measured |\n";
+        let rows = findings(summary).unwrap().1;
+        assert!(rows.len() == 1 && rows[0].cells[0] == "a", "a summary table first: the claim table counts");
+        let five = "| The learning says KEEP is 8 | it is 16 | falsified | `xtask/src/sandbox.rs:16` | measured |";
+        let g = research("control-1", &lead(&ran, &report(five)), none);
+        assert!(g.research.no_report && !g.pass, "a row of five cells is no mark to grade: no_report");
         let many: Vec<String> = (1..=25).map(|n| format!("| claim {n} | holds | `x.rs:{n}` | measured |")).collect();
         let g = research("control-1", &lead(&ran, &report(&many.join("\n"))), none);
         assert!(!g.research.no_report && g.research.rows.len() == 25 && g.pass, "25 rows are recorded, not a fail");

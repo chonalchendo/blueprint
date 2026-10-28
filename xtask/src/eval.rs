@@ -211,6 +211,9 @@ impl Args {
         if (a.labels.is_some() || a.relabel.is_some()) && !(a.grade && research) {
             return Err(usage("--labels and --relabel take --grade bp-research"));
         }
+        if a.labels.is_some() && a.relabel.is_some() {
+            return Err(usage("--labels and --relabel are two runs: write the file, then relabel it"));
+        }
         // Research has no skill to take out today, and its eval runs `with` and `old` only (31, Decided 4).
         if research {
             if !arms {

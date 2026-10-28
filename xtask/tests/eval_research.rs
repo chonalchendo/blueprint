@@ -267,6 +267,18 @@ fn a_research_store_grades_labels_and_refuses_an_uneven_arm() {
     write(&labels, &format!("{labelled}with-plant-1-1\t9\tno\t\tno\t\n"));
     let (code, out) = fake.grade(&["--relabel", &file]);
     assert!(code == Some(1) && out.contains("the store holds no such trial and row"), "{out}");
+    // The file must hold each row of the store once: a row twice, or a row short, is an error (review of PR 81).
+    write(&labels, &format!("{labelled}with-plant-1-1\t2\tyes\tyes\tno\t\n"));
+    let (code, out) = fake.grade(&["--relabel", &file]);
+    assert!(code == Some(1) && out.contains("`with-plant-1-1\t2`: the label file holds this row twice"), "{out}");
+    write(&labels, &labelled.replace("with-plant-1-1\t3\tno\t\tyes\t\n", ""));
+    let (code, out) = fake.grade(&["--relabel", &file]);
+    assert!(
+        code == Some(1) && out.contains("`with-plant-1-1\t3`: the label file lacks this row of the store"),
+        "{out}"
+    );
+    let (code, out) = fake.grade(&["--labels", &file, "--relabel", &file]);
+    assert!(code == Some(4) && out.contains("--labels and --relabel are two runs"), "{out}");
 
     // An arm that ran part of the set: the grader refuses the store.
     let store = fake.store();

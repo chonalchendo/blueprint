@@ -9,7 +9,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::eval_reads::{Reads, hits, relative, text_of};
+use crate::eval_reads::{Reads, hits, in_subdir, relative, text_of};
 
 pub struct Trace(Vec<Value>);
 
@@ -91,9 +91,10 @@ impl Trace {
 
     /// What the agent read (31, design change 4), by clone-relative path ([`relative`]): each `Read` call's file and
     /// line range, each file and line that a `Grep` call's output holds (content mode) or a Bash command's output holds
-    /// as `<path>:<line>:` (a `grep -rn` through the shell is the same read), each Bash command once, the ids of its
-    /// `bp show` calls and the URLs of its `WebFetch` calls. Only `assistant` records count: the harness writes each
-    /// call again in a request record, under `cd <clone> &&` (`m8-pilot/result.md`, finding 9).
+    /// as `<path>:<line>:` (a `grep -rn` through the shell is the same read), each file a Bash command names under
+    /// `cd <dir> &&` ([`in_subdir`]), each Bash command once, the ids of its `bp show` calls and the URLs of its
+    /// `WebFetch` calls. Only `assistant` records count: the harness writes each call again in a request record, under
+    /// `cd <clone> &&` (`m8-pilot/result.md`, finding 9).
     pub fn reads(&self) -> Reads {
         let rel = |s: &str| relative(s, self.root());
         let blocks = |kind: &'static str| {
@@ -113,7 +114,13 @@ impl Trace {
                     if !r.commands.contains(&command) {
                         r.commands.push(command);
                     }
-                    r.files.extend(hits(out, None, &rel));
+                    let sub = in_subdir(arg("command"), self.root());
+                    let under = |p: &str| match &sub {
+                        Some((dir, _)) if !p.starts_with('/') => format!("{dir}{}", p.trim_start_matches("./")),
+                        _ => rel(p),
+                    };
+                    r.files.extend(hits(out, None, &under));
+                    r.files.extend(sub.into_iter().flat_map(|(_, f)| f).map(|f| (f, vec![(1, u32::MAX)])));
                 }
                 "Read" => {
                     let from = number("offset", 1).max(1);
@@ -574,6 +581,12 @@ mod tests {
                 "b4",
                 json!("xtask/evals/h/control-57.md:20:the default is 1200\n  --> src/a.rs:3:5\nwarning: unused"),
             ),
+            call(
+                "b5",
+                "Bash",
+                json!({"command": format!("cd {root}/crates/bp-vault/src && sed -n 1,30p walk.rs; grep -n \"BACKWARD\" walk.rs")}),
+            ),
+            result("b5", json!("12:const BACKWARD: f64 = 0.3;")),
             json!({"type": "api-request-blob", "message": {"content": [{"type": "tool_use", "id": "b9", "name": "Bash",
                 "input": {"command": "cat crates/z/src/never.rs"}}]}})
             .to_string(),
@@ -589,6 +602,7 @@ mod tests {
                 file("xtask/src/eval.rs", &[(120, 120)]),
                 file("crates/a/src/walk.rs", &[(22, 22)]),
                 file("xtask/evals/h/control-57.md", &[(20, 20)]),
+                file("crates/bp-vault/src/walk.rs", &[(1, u32::MAX)]),
             ]
         );
         assert_eq!(
@@ -596,7 +610,8 @@ mod tests {
             [
                 "sed -n 12,20p xtask/src/eval.rs",
                 "bp show shared/learnings/a-b --json; wc -l < crates/d/src/check.rs",
-                "grep -rn TIMEOUT xtask | head; cargo build"
+                "grep -rn TIMEOUT xtask | head; cargo build",
+                "cd crates/bp-vault/src && sed -n 1,30p walk.rs; grep -n \"BACKWARD\" walk.rs"
             ],
             "bare and under cd <clone> &&: one command"
         );
@@ -607,6 +622,7 @@ mod tests {
         assert!(r.read("ledger.rs", &[(118, 118)]) && !r.read("ledger.rs", &[(119, 119)]), "a Grep line");
         assert!(r.read("xtask/src/eval.rs", &[(300, 300)]), "a Bash command that names a path reads it whole");
         assert!(r.read("crates/d/src/check.rs", &[]) && r.read("README.md", &[]));
+        assert!(r.read("crates/bp-vault/src/walk.rs", &[(12, 12)]), "a file named under cd <dir> && (pilot control 4)");
         assert!(!r.read("crates/c/src/lib.rs", &[]), "a file list is no read");
         assert!(
             r.read("control-57.md", &[(20, 20)]) && !r.read("control-57.md", &[(21, 21)]),
