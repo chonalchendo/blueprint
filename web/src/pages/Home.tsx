@@ -4,7 +4,7 @@
 import { useApi } from "../api";
 import { DECISION_GROUPS, GROUPS, OTHER_GROUPS, count, many, words } from "../intents";
 import { Loaded } from "../Loaded";
-import { Link, nodePath } from "../router";
+import { Link, pagePath } from "../router";
 import { Row } from "../Row";
 import type { Forge } from "../types/Forge";
 import type { Home as HomeObject } from "../types/Home";
@@ -57,9 +57,9 @@ export function issueWords(m: HomeMilestone): string {
 
 function MilestoneRow({ m }: { m: HomeMilestone }) {
   return (
-    <Row href={nodePath(m.id)}>
+    <Row href={pagePath(m.id, "milestone")}>
       <td className="id">
-        <Link to={nodePath(m.id)}>{m.id.split("/").slice(-1)[0]}</Link>
+        <Link to={pagePath(m.id, "milestone")}>{m.id.split("/").slice(-1)[0]}</Link>
       </td>
       <td>{m.title ?? "untitled"}</td>
       <td>

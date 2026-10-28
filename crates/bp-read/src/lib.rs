@@ -5,11 +5,14 @@
 mod change;
 pub mod checkset;
 pub mod clock;
+mod design;
+mod diagram;
 mod diff;
 pub mod git;
 pub mod inputs;
 mod intents;
 pub mod landing;
+mod milestone;
 mod moving;
 mod objects;
 mod pages;
@@ -21,7 +24,10 @@ use bp_vault::{Code, Id, Index, Refusal};
 pub use change::{
     Change, ChangeDelta, ChangePullRequest, ChangeRefusal, DIFF_CAP, Diff, DiffFile, Layer, carried_deltas, change,
 };
+pub use design::{Design, DesignDelta, Diagram, Heading, design};
+pub use diagram::diagram;
 pub use intents::Intents;
+pub use milestone::{Concern, FinishBlock, LastRun, Milestone, milestone};
 pub use moving::{Moving, MovingGroup, MovingRow, moving};
 pub use objects::{Census, Forge, List, ListRow, Search, Show, census, list, search, show, status_in_set};
 pub use pages::{Home, HomeDesign, HomeMilestone, ProjectRow, Projects, home, projects};
@@ -77,6 +83,8 @@ mod tests {
         Projects::export_all(&cfg).expect("Projects exports");
         Moving::export_all(&cfg).expect("Moving exports");
         Change::export_all(&cfg).expect("Change exports");
+        Milestone::export_all(&cfg).expect("Milestone exports");
+        Design::export_all(&cfg).expect("Design exports");
         // The closed enum's `Serialize` writes each text; its `TS` derives the variant in snake case. They agree.
         let ts = FindingKind::inline(&cfg);
         for k in FindingKind::ALL {

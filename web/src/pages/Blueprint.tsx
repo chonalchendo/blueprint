@@ -3,7 +3,7 @@
 // glossary and conventions stand beside the tree; retired and deprecated designs sit behind one disclosure.
 import { Fragment } from "react";
 import { many, words } from "../intents";
-import { Link, nodePath } from "../router";
+import { Link, nodePath, pagePath } from "../router";
 import { Row } from "../Row";
 import type { Home } from "../types/Home";
 import type { HomeDesign } from "../types/HomeDesign";
@@ -39,10 +39,10 @@ export function version(d: HomeDesign, project?: string): string {
 function DesignRow({ d, depth, home }: { d: HomeDesign; depth: number; home: Home }) {
   const dim = d.status !== "active" ? "r" : undefined;
   return (
-    <Row href={nodePath(d.id)}>
+    <Row href={pagePath(d.id, "design")}>
       <td className={depth ? `d${depth}` : undefined}>
         <span className="id">
-          <Link to={nodePath(d.id)}>{d.id.split("/").slice(-1)[0]}</Link>
+          <Link to={pagePath(d.id, "design")}>{d.id.split("/").slice(-1)[0]}</Link>
         </span>
       </td>
       <td className={dim}>{d.title ?? "untitled"}</td>
@@ -84,7 +84,7 @@ function View({ label, d }: { label: string; d?: HomeDesign }) {
     <>
       {label}{" "}
       {d ? (
-        <Link to={nodePath(d.id)} className="id">
+        <Link to={pagePath(d.id, "design")} className="id">
           {d.id.split("/").slice(-1)[0]}
         </Link>
       ) : (

@@ -2,7 +2,9 @@
 //! project `bp`, then the tool's own verbs make one issue of each intent the view must show: `needs-landing` (cut,
 //! `pr`, approved by the reviewer identity, green at the head), `working` (cut), `blocked` (cut, released
 //! `escalated`), `waiting` (depends on the working one), and a `planned` milestone (`needs-milestone-approval`). A
-//! `ready` issue is the copy's own. It prints `VAULT=`, `FORGE=` and `CLONE=` lines for a block to `eval`.
+//! `ready` issue is the copy's own. The converted vault's diagrams are anvil's pages, with none of 28's contract, so
+//! `bp diagram` renders one example spec into the system design, which its TL;DR cites: the Design page then shows
+//! one drawing the view can focus and select. It prints `VAULT=`, `FORGE=` and `CLONE=` lines for a block to `eval`.
 //!
 //! Every call makes a fresh copy and forge; nothing writes into `$BP_VAULT`. The release `bp` must exist: `cargo build
 //! --release -p bp-tool`.
@@ -18,11 +20,15 @@ use crate::scratch;
 /// The reviewer identity the fake forge approves as (26, design change 3).
 const REVIEWER: &str = "quokka-reviewer";
 
+/// The example spec the staged system design carries, rendered: `bp-diagram`'s container view of Blueprint.
+const EXAMPLE: &str = "crates/bp-diagram/examples/bp-containers.yaml";
+
 /// The block each staged issue carries, which the landing issue's `pr` runs at its head.
 const BODY: &str = "## Check\n\n~~~check shell {name=staged expect=0}\ntest -f staged.txt\n~~~\n";
 
 pub fn run() -> Result<String> {
-    let release = std::env::current_dir()?.join("target/release");
+    let root = std::env::current_dir()?;
+    let release = root.join("target/release");
     if !release.join("bp").exists() {
         bail!("{} holds no bp; run cargo build --release -p bp-tool first", release.display());
     }
@@ -38,6 +44,7 @@ pub fn run() -> Result<String> {
     let t = PathBuf::from(String::from_utf8(forge.stdout)?.trim());
     let stage = Stage { bp: release.join("bp"), vault, code: t.join("code"), t };
     stage.make()?;
+    stage.diagram(&root.join(EXAMPLE))?;
     Ok(format!("VAULT={}\nFORGE={}\nCLONE={}\n", stage.vault.display(), stage.t.display(), stage.code.display()))
 }
 
@@ -99,6 +106,31 @@ impl Stage {
         self.bp(&["release", &blocked, "--reason", "escalated"])?;
         self.bp(&["link", &waiting, "depends", &working])?;
         self.id(&["create", "milestone", "--project", "bp", "--title", "Staged planned milestone", "--under", design])?;
+        Ok(())
+    }
+
+    /// Renders `spec` with `bp diagram`'s preview into the system design's `diagrams/`, with the spec beside it, and
+    /// cites it after the TL;DR, in one commit of the copy. The design is `active`, so `bp diagram <design>` would ask
+    /// for a delta; the preview renders the same page outside the vault.
+    fn diagram(&self, spec: &Path) -> Result<()> {
+        let design = "projects/bp/designs/system";
+        let name = spec.file_stem().and_then(|n| n.to_str()).context("the example spec has a name")?;
+        let page = self.t.join(format!("{name}.html"));
+        let spec_file = spec.display().to_string();
+        let out = page.display().to_string();
+        self.bp(&["diagram", "--spec-file", &spec_file, "--out", &out])?;
+        let dir = self.vault.join(design).join("diagrams");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::copy(&page, dir.join(format!("{name}.html")))?;
+        std::fs::copy(spec, dir.join(format!("{name}.yaml")))?;
+        let md = self.vault.join(format!("{design}.md"));
+        let text = std::fs::read_to_string(&md)?;
+        let cite = format!("*Diagram [`{name}`](/{design}/diagrams/{name}.html): the staged example render.*\n\n");
+        // Before the heading after the TL;DR, so the drawing shows at the top of the Design page.
+        let at = text.find("## TL;DR").and_then(|t| text[t..].find("\n## ").map(|n| t + n + 1)).unwrap_or(text.len());
+        std::fs::write(&md, format!("{}{cite}{}", &text[..at], &text[at..]))?;
+        self.git(&self.vault, &["add", "-A", design, &format!("{design}.md")])?;
+        self.git(&self.vault, &["commit", "-q", "--no-verify", "-m", &format!("stage: render {name} into {design}")])?;
         Ok(())
     }
 

@@ -1,7 +1,7 @@
-// Search and jump (19, principle 6): `/` or ⌘K opens it over `/api/search`; `enter` opens the chosen row's node.
+// Search and jump (19, principle 6): `/` or ⌘K opens it over `/api/search`; `enter` opens the chosen row's page.
 import { type KeyboardEvent, useEffect, useState } from "react";
 import { read } from "./api";
-import { nodePath } from "./router";
+import { pagePath } from "./router";
 import type { Hit } from "./types/Hit";
 import type { Search } from "./types/Search";
 
@@ -35,7 +35,7 @@ export function Palette({ close, open }: { close: () => void; open: (href: strin
     if (e.key === "Escape") close();
     else if (e.key === "ArrowDown") (e.preventDefault(), setAt((a) => Math.min(a + 1, rows.length - 1)));
     else if (e.key === "ArrowUp") (e.preventDefault(), setAt((a) => Math.max(a - 1, 0)));
-    else if (e.key === "Enter" && rows[at]) (e.preventDefault(), open(nodePath(rows[at].id)));
+    else if (e.key === "Enter" && rows[at]) (e.preventDefault(), open(pagePath(rows[at].id, rows[at].kind)));
   };
   return (
     <div className="palette-back" onClick={close}>
@@ -51,7 +51,7 @@ export function Palette({ close, open }: { close: () => void; open: (href: strin
         <ul role="listbox">
           {q.trim() && rows.length === 0 && <li className="sub">nothing</li>}
           {rows.map((r, i) => (
-            <li key={r.id} role="option" aria-selected={i === at} onMouseEnter={() => setAt(i)} onClick={() => open(nodePath(r.id))}>
+            <li key={r.id} role="option" aria-selected={i === at} onMouseEnter={() => setAt(i)} onClick={() => open(pagePath(r.id, r.kind))}>
               <span>
                 <span className="id">{r.id}</span> <span className="sub">{r.kind}</span>
               </span>

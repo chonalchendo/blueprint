@@ -104,7 +104,7 @@ pub struct MovingRow {
 
 /// The facts of one row past its intent and note: what the claim and the forge say.
 #[derive(Debug, Default)]
-struct Facts {
+pub(crate) struct Facts {
     /// The held claim's owner.
     holder: Option<String>,
     /// The held claim's date, `YYYY-MM-DD`.
@@ -119,7 +119,7 @@ struct Facts {
 
 /// A row's next act: the human's command, or the wait in words.
 #[derive(Debug, PartialEq, Eq)]
-enum Next {
+pub(crate) enum Next {
     Command(String),
     Wait(String),
 }
@@ -231,8 +231,9 @@ fn escalation(index: &Index, issue: &Id) -> Result<Option<(String, String)>, Ref
 }
 
 /// The next act of the node `id` (18, Moving; 21): the tool's own command where the human owes one, else the wait in
-/// words. Every string comes from the intent, its note and the facts; nothing is guessed.
-fn next(id: &str, intent: Intent, note: &str, f: &Facts) -> Next {
+/// words. Every string comes from the intent, its note and the facts; nothing is guessed. The Milestone page's chip
+/// is a milestone row's, so it calls this too (32, design change 8).
+pub(crate) fn next(id: &str, intent: Intent, note: &str, f: &Facts) -> Next {
     let with = |words: &str| if note.is_empty() { words.to_string() } else { format!("{words}: {note}") };
     match intent {
         Intent::Ready => Next::Command(format!("bp cut {id}")),
@@ -280,7 +281,7 @@ fn next(id: &str, intent: Intent, note: &str, f: &Facts) -> Next {
 }
 
 /// The tool command a note names: from its first `bp ` word to the end ("…; rerun bp check m --name integrity").
-fn named(note: &str) -> Option<&str> {
+pub(crate) fn named(note: &str) -> Option<&str> {
     let at = if note.starts_with("bp ") { 0 } else { note.find(" bp ")? + 1 };
     Some(&note[at..])
 }
