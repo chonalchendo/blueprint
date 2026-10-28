@@ -628,7 +628,7 @@ mod tests {
     /// The development set's `plant-1` has two parts: `check.rs` has 108 lines (seeded 54), and `CROSS` is 160 (seeded
     /// 320). A `falsified` row that quotes the flip kills, with the true word in it or in another row (pilot delta 1);
     /// each plant is graded on its own; a `holds` row on the plant is a miss; `1080` is not `108`. The flip `54` names the
-    /// plant with `learning`, the seed's kind word (fold finding N5).
+    /// plant with `learning`, a word that refers to the seed (fold findings N5, N6).
     #[test]
     fn a_kill_row_may_quote_the_flip() {
         let none = Path::new("/nonexistent");
@@ -792,8 +792,8 @@ mod tests {
 
     /// An `unless:` word names the plant only with a slug word of four letters or more that the question lacks, or a
     /// word that refers to the seed (fold findings N4 and N5): "the forge keeps 8 runs" on the `KEEP` plant, seeded
-    /// `8`, kills nothing; a row with `design`, `vault` or `the id` and the flip kills, and so does a row that holds
-    /// the slug's subject word.
+    /// `8`, kills nothing; a row with `design`, `vault`, `the id` or `learning` and the flip kills on a seed of
+    /// either kind, and so does a row that holds the slug's subject word.
     #[test]
     fn an_unless_word_names_the_plant_only_with_a_slug_word() {
         let none = Path::new("/nonexistent");
@@ -806,6 +806,7 @@ mod tests {
             ("The design's KEEP of 8 is stale; the code sets 16", "the seed's kind word"),
             ("The vault learning says KEEP is 8; it is stale", "vault"),
             ("The id says KEEP is 8; that is stale", "the id"),
+            ("The learning says KEEP is 8; it is stale", "learning on a design seed"),
         ] {
             let table = format!(
                 "| {row} | falsified | `xtask/src/sandbox.rs:3` | measured |\n| KEEP is 16 | holds | `xtask/src/sandbox.rs:3` | measured |"
@@ -813,6 +814,11 @@ mod tests {
             let g = research("plant-9", &lead(&ran, &report(&table)), none);
             assert_eq!(calls(&g), [Call::Kill(0), Call::None], "{why} refers to the seed");
         }
+        let check = ["wc -l < crates/bp-tool/src/check.rs"];
+        let table = "| The design's count of 54 lines is stale | falsified | `crates/bp-tool/src/check.rs:3` | measured |\n\
+             | The module has 108 lines | holds | `wc -l < crates/bp-tool/src/check.rs` | measured |";
+        let g = research("plant-1", &lead(&check, &report(table)), none);
+        assert_eq!(calls(&g), [Call::Kill(0), Call::None], "design on a learning seed refers to it");
         let fixture = fixture_text("plant-9").replace(
             "What is the value of `KEEP` in the sandbox module of the xtask crate",
             "What is the value of the sandbox module's constant in the xtask crate",

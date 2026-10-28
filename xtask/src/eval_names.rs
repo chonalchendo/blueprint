@@ -75,8 +75,8 @@ fn beyond(w: &str, asked: &BTreeSet<String>) -> bool {
 /// words with one word [`beyond`] the question `asked`, so "the learning's id says 'at most 40 candidates'" names
 /// `…-tests-at-most-40-candidates` (the pilot's control 5), and "the check module has" names nothing: the question's
 /// topic words cannot name the seed on their own. With `flip`, an `unless:` word names it too, when the row also
-/// holds an [`unasked`] word of the slug or refers to the seed: its kind word (`learning`, `design`), `vault`, `seed` or
-/// `the id`. A figure alone ("the forge keeps 8 runs") names no plant (fold findings N4 and N5).
+/// holds an [`unasked`] word of the slug or refers to the seed: `learning` or `design` on a seed of either kind (the
+/// pilot's role called every seed "the learning"), `vault`, `seed` or `the id`. A figure alone ("the forge keeps 8 runs") names no plant (fold findings N4 to N6).
 /// The `nouns:` words and a part of the title are the question's words, so they name nothing (finding 2).
 pub(crate) fn names(text: &str, seed: &Seed, asked: &BTreeSet<String>, flip: bool) -> bool {
     let slug = seed.node.rsplit('/').next().unwrap_or_default();
@@ -87,8 +87,7 @@ pub(crate) fn names(text: &str, seed: &Seed, asked: &BTreeSet<String>, flip: boo
     let held = terms(text);
     let lower = text.to_lowercase();
     let split: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
-    let kind = seed.field("kind").unwrap_or_default().to_lowercase();
-    let refers = [kind.as_str(), "vault", "seed"].iter().any(|w| !w.is_empty() && held.contains(*w))
+    let refers = ["learning", "design", "vault", "seed"].iter().any(|w| held.contains(*w))
         || split.windows(2).any(|w| w == ["the", "id"]);
     let subject = refers || slugged.iter().any(|w| held.contains(w) && unasked(w, asked));
     lower.contains(slug)
