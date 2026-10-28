@@ -12,13 +12,26 @@ import { type Block, blocks, cleanSvg, outlineOf } from "./markdown";
 /** A diagram the body may cite: its name, its title and the URL of its SVG. */
 export type Figure = { name: string; title: string; src: string };
 
-type Props = { body: string; outline?: Heading[]; diagrams?: Figure[]; fold?: string; children?: ReactNode };
+type Props = {
+  body: string;
+  outline?: Heading[];
+  diagrams?: Figure[];
+  fold?: string;
+  shown?: string[];
+  children?: ReactNode;
+};
 
-/** `children` sit above the body, inside the document, so their `#` links open the fold as the body's do. */
-export function Document({ body, outline, diagrams = [], fold, children }: Props) {
+/** `children` sit above the body, inside the document, so their `#` links open the fold as the body's do. `shown`
+ * names the sections `children` already show (`blocks`); the outline links each to the element of its anchor there. */
+export function Document({ body, outline, diagrams = [], fold, shown = [], children }: Props) {
   const anchors = useMemo(() => outline ?? outlineOf(body), [body, outline]);
   const names = useMemo(() => diagrams.map((d) => d.name), [diagrams]);
-  const plan = useMemo(() => blocks(body, anchors, names), [body, anchors, names]);
+  const plan = useMemo(() => blocks(body, anchors, names, shown), [body, anchors, names, shown.join("\n")]);
+  // The outline names what the page holds: a heading of the body, or a section shown above it.
+  const listed = useMemo(() => {
+    const held = new Set(plan.flatMap((b) => (b.kind === "heading" ? [b.anchor] : [])));
+    return anchors.filter((h) => held.has(h.anchor) || shown.includes(h.anchor));
+  }, [plan, anchors, shown.join("\n")]);
   const [current, setCurrent] = useState<string>();
   const [open, setOpen] = useState(!fold);
   const folded = useRef<HTMLDetailsElement>(null);
@@ -71,9 +84,9 @@ export function Document({ body, outline, diagrams = [], fold, children }: Props
       ) : (
         prose
       )}
-      {open && anchors.length > 0 && (
+      {open && listed.length > 0 && (
         <nav className="outline" aria-label="outline" ref={nav}>
-          {anchors.map((h) => (
+          {listed.map((h) => (
             <a
               key={h.anchor}
               href={`#${h.anchor}`}

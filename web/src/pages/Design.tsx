@@ -1,7 +1,8 @@
-// Design (18, Design; 32, design change 8; mock `design-system.html`): disclosure first. The title, the version
-// banner, the facts, coverage per concern on the product design, the TL;DR and the diagrams it carries; then the body
-// behind one disclosure, each diagram inline where the body cites it, the outline fixed at the right; then the
-// deltas proposed against it. Every word past the body comes from the server.
+// Design (18, Design; 32, design changes 8 and 9; mock `design-system.html`): disclosure first. The title, the
+// version banner, the facts, coverage per concern on the product design, the TL;DR and the diagrams it carries; then
+// the body behind one disclosure, each diagram inline where the body cites it, the outline fixed at the right; then
+// the deltas proposed against it. At a tag (`?at=`) the body is the tag's, and the sections changed since sit above
+// it. Every word past the body comes from the server.
 import { useApi } from "../api";
 import { Document } from "../doc/Document";
 import { html } from "../doc/markdown";
@@ -9,26 +10,37 @@ import { header } from "../header";
 import { many } from "../intents";
 import { Loaded } from "../Loaded";
 import { Link, nodePath, pagePath } from "../router";
+import type { BodyDiff } from "../types/BodyDiff";
 import type { Concern } from "../types/Concern";
 import type { Design as DesignObject } from "../types/Design";
+import type { Heading } from "../types/Heading";
 
 const enc = (id: string) => id.split("/").map(encodeURIComponent).join("/");
 
 /** The API path of a design's page, and of its diagrams under it. */
 const api = (project: string, id: string) => `${project}/design/${enc(id)}`;
 
+/** The query of a tag: a tag's `/` reads as itself. */
+const atQuery = (tag: string) => `?at=${encodeURIComponent(tag).replace(/%2F/g, "/")}`;
+
 export function Design({ project, id, at }: { project: string; id: string; at?: string }) {
-  const load = useApi<DesignObject>(api(project, id) + (at ? `?at=${encodeURIComponent(at)}` : ""));
-  return <Loaded load={load}>{(d) => <DesignView d={d} project={project} />}</Loaded>;
+  const load = useApi<DesignObject>(api(project, id) + (at ? atQuery(at) : ""));
+  return <Loaded load={load}>{(d) => <DesignView d={d} project={project} at={at} />}</Loaded>;
 }
 
-export function DesignView({ d, project }: { d: DesignObject; project: string }) {
+export function DesignView({ d, project, at }: { d: DesignObject; project: string; at?: string }) {
   const h = header(d);
   const under = typeof d.under === "string" ? d.under : undefined;
   const sections = d.outline.filter((o) => o.depth === 2).length;
   const proposed = d.deltas.filter((x) => x.state === "proposed").length;
   const figures = d.diagrams.map((g) => ({ name: g.name, title: g.title, src: `/api/${api(project, d.id)}/diagram/${encodeURIComponent(g.name)}` }));
   const absent = (kind: string) => d.rows_not_in_vault.includes(kind);
+  const here = `/${project}/design/${d.id}`;
+  // The banner's words name the tag; its link opens the diff since that tag.
+  const since = at ? undefined : /^changed since (\S+)$/.exec(d.version)?.[1];
+  // The lead and the TL;DR show above the body, so the body leaves them out.
+  const tldr = d.tldr ? d.outline.find((o) => o.depth === 2 && o.heading === "TL;DR")?.anchor : undefined;
+  const shown = tldr ? ["", tldr] : [""];
   return (
     <article className="design">
       <h1>{h.title ?? d.id.split("/").slice(-1)[0]}</h1>
@@ -36,6 +48,8 @@ export function DesignView({ d, project }: { d: DesignObject; project: string })
         <span className="v">{d.version}</span>
         <span>status {h.status ?? "none"}</span>
         <span>{absent("delta") ? "deltas: not in vault" : `${many(proposed, "delta")} proposed`}</span>
+        {since && <Link to={here + atQuery(since)}>diff since {since}</Link>}
+        {at && <Link to={here}>current body</Link>}
       </div>
       <p className="facts-line">
         <span>
@@ -57,8 +71,12 @@ export function DesignView({ d, project }: { d: DesignObject; project: string })
         outline={d.outline}
         diagrams={figures}
         fold={`Body · ${many(sections, "section")}, with each diagram where the body cites it`}
+        shown={shown}
       >
-        <h2 className="group">TL;DR</h2>
+        {at && d.diff && d.version === `at ${at}` && <Changes diff={d.diff} tag={at} outline={d.outline} />}
+        <h2 className="group" id={tldr}>
+          TL;DR
+        </h2>
         {d.lead || d.tldr ? (
           <>
             {d.lead && <div className="tldr" data-body="" dangerouslySetInnerHTML={{ __html: html(d.lead) }} />}
@@ -109,6 +127,48 @@ export function DesignView({ d, project }: { d: DesignObject; project: string })
         </ul>
       )}
     </article>
+  );
+}
+
+/** The sections changed since `tag` (18, As-of diff; 19: added and removed lines). Each heading jumps to its section
+ * in the body at the tag, when the tag holds it; under it, the removed lines, then the added, each marked by a `−`
+ * or `+`, not by colour alone. */
+export function Changes({ diff, tag, outline }: { diff: BodyDiff; tag: string; outline: Heading[] }) {
+  const lines = (of: BodyDiff["added"], section: string) => of.find((x) => x.section === section)?.lines ?? [];
+  return (
+    <>
+      <h2 className="group">
+        Changed since {tag}
+        <span className="n">{many(diff.sections.length, "section")}</span>
+      </h2>
+      {diff.sections.length === 0 ? (
+        <p className="empty">nothing</p>
+      ) : (
+        <ul className="asof">
+          {diff.sections.map((s, i) => {
+            const anchor = outline.find((o) => o.depth === 2 && o.heading === s)?.anchor;
+            const name = s || "before the first heading";
+            return (
+              <li key={i}>
+                {anchor ? <a href={`#${anchor}`}>{name}</a> : <span>{name}</span>}
+                <div className="lines">
+                  {lines(diff.removed, s).map((l, j) => (
+                    <div key={`r${j}`} className="d">
+                      − {l}
+                    </div>
+                  ))}
+                  {lines(diff.added, s).map((l, j) => (
+                    <div key={`a${j}`} className="a">
+                      + {l}
+                    </div>
+                  ))}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </>
   );
 }
 

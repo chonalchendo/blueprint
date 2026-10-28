@@ -139,8 +139,9 @@ export function outlineOf(body: string): Heading[] {
 
 /** The body as blocks. A `## ` or `### ` heading takes the first unused outline entry of its depth and text. A
  * diagram follows the first block that names `diagrams/<name>` or `<name>.html`; one the body never cites follows
- * the body. */
-export function blocks(body: string, outline: Heading[], diagrams: string[] = []): Block[] {
+ * the body. `shown` names the `## ` sections the page shows above the body, by anchor, with `""` for the text before
+ * the first heading: they are left out, so the reader meets each sentence once, but a diagram they cite stays. */
+export function blocks(body: string, outline: Heading[], diagrams: string[] = [], shown: string[] = []): Block[] {
   const tokens = md.lexer(body);
   // `lexer` alone skips the `walkTokens` option, which `parse` runs.
   md.walkTokens(tokens, retarget);
@@ -149,6 +150,7 @@ export function blocks(body: string, outline: Heading[], diagrams: string[] = []
   const out: Block[] = [];
   let pending: Token[] = [];
   let section: string | undefined;
+  let skip = shown.includes("");
   const flush = () => {
     if (pending.length === 0) return;
     out.push({ kind: "html", html: clean(md.parser(Object.assign(pending, { links: tokens.links }))) });
@@ -157,13 +159,22 @@ export function blocks(body: string, outline: Heading[], diagrams: string[] = []
   for (const t of tokens) {
     if (t.type === "heading" && (t.depth === 2 || t.depth === 3)) {
       const h = outline.find((o) => !used.has(o) && o.depth === t.depth && o.heading === t.text);
+      if (t.depth === 2) skip = !!h && shown.includes(h.anchor);
       if (h) {
-        flush();
         used.add(h);
         section = h.anchor;
+        if (skip) continue;
+        flush();
         out.push({ kind: "heading", depth: t.depth, html: clean(md.parseInline(t.text, { async: false })), anchor: h.anchor });
         continue;
       }
+    }
+    if (skip) {
+      for (const name of diagrams.filter((n) => !placed.has(n) && cites(t.raw, n))) {
+        placed.add(name);
+        out.push({ kind: "figure", name, section });
+      }
+      continue;
     }
     if (t.type === "code" && /^check(\s|$)/.test(t.lang ?? "")) {
       flush();

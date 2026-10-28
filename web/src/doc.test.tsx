@@ -130,6 +130,16 @@ test("each diagram follows the block that cites it; one the body never cites fol
   expect(plan[1].kind === "html" && plan[1].html).toContain('href="#fig-ctx"');
 });
 
+test("a section the page shows above leaves the body, but a diagram it cites still opens the body", () => {
+  const body = "Lead.\n\n## TL;DR\n\nShort; see diagrams/ctx.\n\n### Inside\n\nx\n\n## Next\n\nText.";
+  const plan = blocks(body, outlineOf(body), ["ctx"], ["", "tl-dr"]);
+  const shape = plan.map((b) => (b.kind === "figure" ? `${b.name} in ${b.section}` : b.kind === "heading" ? b.anchor : b.kind));
+  expect(shape).toEqual(["ctx in tl-dr", "next", "html"]);
+  render(<Document body={body} shown={["", "tl-dr"]} />);
+  const links = screen.getByRole("navigation", { name: "outline" }).querySelectorAll("a");
+  expect(Array.from(links).map((a) => a.getAttribute("href"))).toEqual(["#tl-dr", "#next"]);
+});
+
 // No `<style>` here, and the `<script>` comes last: happy-dom's parser drops what follows a raw-text element inside
 // an `<svg>`. This test does not prove that the renderer's `<style>` survives `cleanSvg`; the staged copy's
 // `bp-containers` drawing, opened in a browser, does.
