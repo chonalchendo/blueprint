@@ -3,7 +3,9 @@
 //! sets `:root`, `body` and `h1`, and keys its dark values to `prefers-color-scheme`. Inlined as it is, it would
 //! restyle the view and turn the diagram light on a light system. So the style keeps only the rules that select
 //! inside `.bp`, the faces, and the variables, set on the `svg.bp` element, the dark ones always (19: dark by
-//! default). The SVG's own markup is the renderer's, byte for byte.
+//! default). The SVG's own markup is the renderer's, less any `<script>` element and `on*` attribute: a page under
+//! `diagrams/` is vault content, as untrusted as a body, and the route serves it in the view's origin. The route's
+//! content policy is the first guard; this is the second.
 
 use std::fmt::Write;
 
@@ -23,7 +25,7 @@ pub fn diagram(vault: &Vault, index: &Index, project: &str, id: &str, name: &str
         ));
     }
     let page = std::fs::read_to_string(vault.root.join(&path)).map_err(|e| Refusal::failed(&path, e.to_string()))?;
-    inline(&page).ok_or_else(|| {
+    inline(&page).map(|svg| inert(&svg)).ok_or_else(|| {
         Refusal::failed(&path, format!("the page holds no <svg> element; bp diagram {design} {name} renders it again"))
     })
 }
@@ -40,6 +42,102 @@ fn inline(page: &str) -> Option<String> {
     }
     let open = svg.find('>')? + 1;
     Some(format!("{}<style>{css}</style>{}", &svg[..open], &svg[open..]))
+}
+
+/// `svg` with no `<script>` element, its text with it, and no `on*` attribute. A comment, a CDATA section and text pass
+/// as they are: none of them is an element.
+fn inert(svg: &str) -> String {
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        rest = &rest[lt..];
+        let end = if rest.starts_with("<!--") {
+            rest.find("-->").map(|e| e + 3)
+        } else if rest.starts_with("<![CDATA[") {
+            rest.find("]]>").map(|e| e + 3)
+        } else {
+            tag_len(rest)
+        };
+        // An unclosed tag or comment ends the drawing.
+        let Some(end) = end else { return out };
+        let tag = &rest[..end];
+        rest = &rest[end..];
+        if tag.starts_with("<!") || tag.starts_with("<?") {
+            out.push_str(tag);
+            continue;
+        }
+        let name: String = tag[1..].trim_start_matches('/').chars().take_while(|c| is_name(*c)).collect();
+        if !name.rsplit(':').next().is_some_and(|local| local.eq_ignore_ascii_case("script")) {
+            out.push_str(&no_handlers(tag));
+        } else if !tag.starts_with("</") && !tag.ends_with("/>") {
+            // The script's text goes with it, to its end tag or the end of the drawing.
+            let close = format!("</{}", name.to_ascii_lowercase());
+            let at = rest.to_ascii_lowercase().find(&close);
+            rest = at.and_then(|a| rest[a..].find('>').map(|e| &rest[a + e + 1..])).unwrap_or("");
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_name(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, ':' | '-' | '_' | '.')
+}
+
+/// The length of the tag at the head of `s`, which opens with `<`: to its first `>` outside a quoted value.
+fn tag_len(s: &str) -> Option<usize> {
+    let mut quote = None;
+    for (i, c) in s.char_indices().skip(1) {
+        match quote {
+            Some(q) if c == q => quote = None,
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '>' => return Some(i + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The tag with each attribute whose name opens with `on`, in any case, removed: an event handler.
+fn no_handlers(tag: &str) -> String {
+    let mut out = String::with_capacity(tag.len());
+    let mut rest = tag;
+    let name = 1 + rest[1..].find(|c: char| c.is_whitespace() || c == '>' || c == '/').unwrap_or(rest.len() - 1);
+    out.push_str(&rest[..name]);
+    rest = &rest[name..];
+    loop {
+        let ws = rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len());
+        let (space, after) = rest.split_at(ws);
+        if after.is_empty() || after.starts_with('>') || after.starts_with("/>") {
+            out.push_str(rest);
+            return out;
+        }
+        // A lone `/` ends no tag: a parser reads the attributes after it.
+        if let Some(more) = after.strip_prefix('/') {
+            out.push_str(space);
+            out.push('/');
+            rest = more;
+            continue;
+        }
+        let attr = after.find(|c: char| c.is_whitespace() || c == '=' || c == '>' || c == '/').unwrap_or(after.len());
+        let mut len = attr;
+        let value = after[attr..].trim_start();
+        if let Some(v) = value.strip_prefix('=') {
+            let v = v.trim_start();
+            let skipped = after.len() - v.len();
+            let vlen = match v.chars().next() {
+                Some(q @ ('"' | '\'')) => v[1..].find(q).map_or(v.len(), |e| e + 2),
+                _ => v.find(|c: char| c.is_whitespace() || c == '>').unwrap_or(v.len()),
+            };
+            len = skipped + vlen;
+        }
+        if !after[..attr].to_ascii_lowercase().starts_with("on") {
+            out.push_str(space);
+            out.push_str(&after[..len]);
+        }
+        rest = &after[len..];
+    }
 }
 
 /// The end of the `<svg>` element that opens at `start`, past a nested one: the viewer script after it may hold the
@@ -166,6 +264,22 @@ mod tests {
              svg.bp .t-body{font-weight:400}@media (prefers-reduced-motion:reduce){.bp *{transition:none}}</style>\
              <g data-id=\"a\"><svg></svg></g></svg>"
         );
+    }
+
+    #[test]
+    fn no_script_element_or_handler_survives_and_the_rest_passes_as_it_is() {
+        let hostile = "<svg class=\"bp\" ONLOAD=\"fetch('/api/projects')\" viewBox='0 0 1 1'><script>document.title=\
+                       \"ran\"</script><g data-id=\"a\" onclick = 'x()' data-x=\"on > off\"><text>a &lt; b</text>\
+                       </g><svg:script xlink:href=\"x.js\"/><SCRIPT type=\"x\">alert(1)</Script><!-- <script> -->\
+                       <a href=\"#\" onmouseover=go>t</a><g / onload=x></g></svg>";
+        assert_eq!(
+            inert(hostile),
+            "<svg class=\"bp\" viewBox='0 0 1 1'><g data-id=\"a\" data-x=\"on > off\"><text>a &lt; b</text></g>\
+             <!-- <script> --><a href=\"#\">t</a><g /></g></svg>"
+        );
+        let clean = inline(PAGE).unwrap();
+        assert_eq!(inert(&clean), clean, "the renderer's markup passes byte for byte");
+        assert_eq!(inert("<svg><script>x"), "<svg>", "an unclosed script takes the rest");
     }
 
     #[test]

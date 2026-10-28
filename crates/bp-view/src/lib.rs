@@ -148,6 +148,9 @@ async fn loopback_only(State(hosts): State<Arc<[String; 2]>>, request: Request, 
     json(StatusCode::FORBIDDEN, &to_value(&refusal))
 }
 
+/// The diagram route's content policy: no script, no fetch, no form; its own inline style and `data:` faces only.
+const DIAGRAM_POLICY: &str = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:";
+
 /// `path` arrives percent-decoded. A `GET` that serves a page object is logged; a `HEAD` is not.
 async fn api(
     State(view): State<Arc<View>>,
@@ -168,7 +171,16 @@ async fn api(
         Route::Diagram { project, id, name } => {
             let (project, id, name) = (project.clone(), id.clone(), name.clone());
             return match tokio::task::spawn_blocking(move || view.diagram(&project, &id, &name)).await {
-                Ok(Ok(svg)) => ([(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")], svg).into_response(),
+                // A browser that opens the route itself runs nothing the SVG holds, and reads it as nothing but SVG.
+                Ok(Ok(svg)) => (
+                    [
+                        (header::CONTENT_TYPE, "image/svg+xml; charset=utf-8"),
+                        (header::CONTENT_SECURITY_POLICY, DIAGRAM_POLICY),
+                        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                    ],
+                    svg,
+                )
+                    .into_response(),
                 Ok(Err(refusal)) => refused(&refusal),
                 Err(e) => refused(&Refusal::failed(format!("/api/{path}"), e.to_string())),
             };
