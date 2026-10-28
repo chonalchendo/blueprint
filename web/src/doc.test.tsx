@@ -98,7 +98,8 @@ test("each diagram follows the block that cites it; one the body never cites fol
 });
 
 // No `<style>` here, and the `<script>` comes last: happy-dom's parser drops what follows a raw-text element inside
-// an `<svg>`. The design-page screenshot run proves the renderer's `<style>` survives in a browser.
+// an `<svg>`. This test does not prove that the renderer's `<style>` survives `cleanSvg`; the staged copy's
+// `bp-containers` drawing, opened in a browser, does.
 const SVG =
   '<svg class="bp" viewBox="0 0 10 10"><metadata id="x-index">{"a":1}</metadata>' +
   '<g class="node" data-id="a" onclick="alert(2)"><rect class="box"></rect></g>' +
