@@ -6,6 +6,7 @@ plant: shared/learnings/in-bp-tool-s-src-the-record-module-has-958-lines
 genre: Number
 class: measurement
 settled_by: wc -l < crates/bp-tool/src/record.rs
+target: crates/bp-tool/src/record.rs
 match: 479
 unless: 958
 nouns: tool record

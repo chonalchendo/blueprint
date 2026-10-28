@@ -41,6 +41,8 @@ pub struct Kept {
     pub true_title: String,
     /// The question of this plant alone, without the row shape.
     pub question: String,
+    /// The settle line at the base ([`crate::plants_verify::key`]): the fixture's `target:`, held across sets.
+    pub target: String,
 }
 
 /// What a plant is judged against: the clone, the planted settle lines, the vault's word counts and ids, the clone's
@@ -58,9 +60,10 @@ pub struct Bench<'a> {
 pub fn judge(c: Candidate, b: &mut Bench, control: bool) -> Result<Result<Kept, (String, &'static str, String)>> {
     let id = c.id.clone();
     let no = |reason: &'static str, why: String| Ok(Err((id.clone(), reason, why)));
-    if let Err((reason, why)) = sound(&c, b.clone, b.held) {
-        return no(reason, why);
-    }
+    let target = match sound(&c, b.clone, b.held) {
+        Ok(t) => t,
+        Err((reason, why)) => return no(reason, why),
+    };
     if let Some(why) = worded(&c) {
         return no("indistinct", why.into());
     }
@@ -90,8 +93,8 @@ pub fn judge(c: Candidate, b: &mut Bench, control: bool) -> Result<Result<Kept, 
     let dir = if c.class == "design" { "projects/bp/designs/components" } else { "shared/learnings" };
     let node = unique(b.ids, dir, &t.title);
     let ctl = if control { unique(b.ids, dir, &t.true_title) } else { String::new() };
-    let mut k =
-        Kept { c, nouns: options, node, control: ctl, title: t.title, true_title: t.true_title, question: t.question };
+    let (title, true_title, question) = (t.title, t.true_title, t.question);
+    let mut k = Kept { c, nouns: options, node, control: ctl, title, true_title, question, target };
     let seed = Seed {
         text: format!("---\n{}", seed_text(&k, false)),
         genre: k.c.genre.into(),
@@ -121,9 +124,9 @@ pub fn judge(c: Candidate, b: &mut Bench, control: bool) -> Result<Result<Kept, 
     }
 }
 
-/// Why a candidate cannot be a plant before its words are read: no sentence, no command, false at the base, a
-/// cited file that holds the truth, or a settle line already planted.
-fn sound(c: &Candidate, clone: &Path, held: &BTreeSet<String>) -> Result<(), (&'static str, String)> {
+/// The settle line of a candidate, or why it cannot be a plant before its words are read: no sentence, no command,
+/// false at the base, a cited file that holds the truth, or a settle line already planted.
+fn sound(c: &Candidate, clone: &Path, held: &BTreeSet<String>) -> Result<String, (&'static str, String)> {
     if c.genre.is_empty() {
         return Err((
             "not-in-clone",
@@ -146,7 +149,7 @@ fn sound(c: &Candidate, clone: &Path, held: &BTreeSet<String>) -> Result<(), (&'
     match key(clone, &seed) {
         Some(t) if held.contains(&t) => Err(("indistinct", format!("the target {t} is planted already"))),
         None => Err(("no-command", "the command names no .rs or .md path".into())),
-        Some(_) => Ok(()),
+        Some(t) => Ok(t),
     }
 }
 

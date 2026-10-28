@@ -12,6 +12,7 @@
 //! genre: Number | Negation | Name          (plant only)
 //! class: measurement | design | two-hop    (plant only)
 //! settled_by: <one shell command, run at the clone's root at base>
+//! target: <path>:<line> | <path>           (plant only: the settle line at base; a count names its file or pathspec)
 //! match: <word> | <word>                   (from the true sentence)
 //! unless: <word> | <word>                  (plant only: from the flip)
 //! nouns: <word> <word> [<word>]            (each verbatim in the question)
@@ -31,7 +32,9 @@
 //! refuses a file whose group count or seed count differs from `parts:`. A question names no seed's node id, and
 //! shares no run of four words ([`words`]) with a seed's title, so the reader must search; `bp search` needs every
 //! term and has no stemming, so each noun is the source's own word form. A control carries its plant's settle
-//! command and the true `match:` word, so `--verify` settles it as it settles the plant.
+//! command and the true `match:` word, so `--verify` settles it as it settles the plant. The planter computes `target:`
+//! with `plants_verify::key`, and the holdout seal compares those lines across sets, so `--verify` refuses a plant
+//! whose `target:` differs from the line its `settled_by:` finds.
 
 use anyhow::{Context, Result, bail};
 
@@ -76,6 +79,8 @@ pub struct Seed {
     pub genre: String,
     pub class: String,
     pub settled_by: String,
+    /// The `target:` line: empty on a control and on a fixture written before the planter wrote it.
+    pub settle_line: String,
     pub matches: Vec<String>,
     pub unless: Vec<String>,
     pub nouns: Vec<String>,
@@ -129,10 +134,11 @@ impl Research {
                 ("genre", Some(g)) => g.genre = value,
                 ("class", Some(g)) => g.class = value,
                 ("settled_by", Some(g)) => g.settled_by = value,
+                ("target", Some(g)) => g.settle_line = value,
                 ("match", Some(g)) => g.matches = words('|'),
                 ("unless", Some(g)) => g.unless = words('|'),
                 ("nouns", Some(g)) => g.nouns = words(' '),
-                ("genre" | "class" | "settled_by" | "match" | "unless" | "nouns", None) => {
+                ("genre" | "class" | "settled_by" | "target" | "match" | "unless" | "nouns", None) => {
                     bail!("{id}: `{key}:` before the first `plant:`")
                 }
                 _ => bail!("{id}: unknown key `{key}`"),

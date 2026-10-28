@@ -6,6 +6,7 @@ plant: shared/learnings/in-bp-read-s-src-the-snapshot-module-has-82-lines
 genre: Number
 class: measurement
 settled_by: wc -l < crates/bp-read/src/snapshot.rs
+target: crates/bp-read/src/snapshot.rs
 match: 41
 unless: 82
 nouns: snapshot read

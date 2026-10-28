@@ -6,6 +6,7 @@ plant: shared/learnings/in-bp-diagram-s-src-spec-the-items-module-has-266-lines
 genre: Number
 class: measurement
 settled_by: wc -l < crates/bp-diagram/src/spec/items.rs
+target: crates/bp-diagram/src/spec/items.rs
 match: 133
 unless: 266
 nouns: items spec

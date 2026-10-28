@@ -7,6 +7,7 @@ plant: shared/learnings/in-bp-tool-s-src-the-check-module-has-54-lines
 genre: Number
 class: measurement
 settled_by: wc -l < crates/bp-tool/src/check.rs
+target: crates/bp-tool/src/check.rs
 match: 108
 unless: 54
 nouns: tool check
@@ -14,6 +15,7 @@ plant: projects/bp/designs/components/in-bp-diagram-s-src-the-search-module-sets
 genre: Number
 class: design
 settled_by: grep -F 'const CROSS:' crates/bp-diagram/src/search.rs
+target: crates/bp-diagram/src/search.rs:15
 match: 160
 unless: 320
 nouns: diagram search

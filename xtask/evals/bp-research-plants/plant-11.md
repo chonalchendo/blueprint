@@ -6,6 +6,7 @@ plant: projects/bp/designs/components/in-bp-vault-s-src-the-walk-module-sets-id-
 genre: Number
 class: design
 settled_by: grep -F 'const ID_LINE_CHARS:' crates/bp-vault/src/walk.rs
+target: crates/bp-vault/src/walk.rs:26
 match: 56
 unless: 28
 nouns: CHARS walk

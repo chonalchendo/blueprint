@@ -6,6 +6,7 @@ plant: projects/bp/designs/components/in-bp-install-s-tests-the-ledger-file-sets
 genre: Number
 class: design
 settled_by: grep -F 'const ROLE_CAP:' crates/bp-install/tests/ledger.rs
+target: crates/bp-install/tests/ledger.rs:14
 match: 1_500
 unless: 750
 nouns: ROLE ledger
