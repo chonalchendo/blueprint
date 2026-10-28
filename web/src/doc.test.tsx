@@ -127,6 +127,11 @@ test("a diagram inlines its sanitised SVG; hover focuses and dims, click selects
   expect(svg.querySelectorAll(".selected")).toHaveLength(1);
   expect(part("a-b").classList.contains("selected")).toBe(true);
   expect(screen.getByRole("link", { name: "Context" }).getAttribute("aria-current")).toBe("location");
+  // As the viewer does: when the pointer leaves, the focus returns to the selection, an edge with its ends.
+  fireEvent.mouseOver(part("c").querySelector("rect")!);
+  fireEvent.mouseLeave(svg.parentElement!);
+  expect(part("a-b").classList.contains("focus")).toBe(true);
+  expect(dim()).toEqual(["c"]);
 });
 
 test("the largest design body in the converted vault renders as a document", () => {

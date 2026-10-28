@@ -1,18 +1,22 @@
 // What the view adds to a diagram (28, design change 12; 32, design change 8): classes only, never a redraw. The SVG
 // is the renderer's; its style draws `focus`, `dim` and `selected` with 450 ms transitions. Hover a node: `focus` on
-// it, and `dim` on every part that is not it, its edges, their other ends or their labels. Click: `selected`.
+// it, and `dim` on every part that is not it, its edges, their other ends or their labels. Click: `selected`. The
+// view keeps its own toggles rather than attach `viewer.js`, whose pan, panel and hash a page has no use for; when
+// the pointer leaves, the focus returns to the selection, as the viewer's does.
 
 /** Each part of the drawing: a node, an edge, a label, a note or a group, by `data-id`. */
 function parts(svg: Element): Element[] {
   return Array.from(svg.querySelectorAll("[data-id]"));
 }
 
-/** The ids that stay at full ink while `id` has focus: itself, and for a node its edges and their ends. */
+/** The ids that stay at full ink while `id` has focus: itself, for a node its edges and their ends, and for an edge
+ * its ends. */
 function keep(svg: Element, id: string): Set<string> {
   const out = new Set([id]);
   for (const e of svg.querySelectorAll("[data-from][data-to]")) {
     const [from, to] = [e.getAttribute("data-from"), e.getAttribute("data-to")];
-    if (from === id || to === id) [e.getAttribute("data-id"), from, to].forEach((x) => x && out.add(x));
+    const eid = e.getAttribute("data-id");
+    if (from === id || to === id || eid === id) [eid, from, to].forEach((x) => x && out.add(x));
   }
   return out;
 }

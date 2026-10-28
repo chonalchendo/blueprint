@@ -139,7 +139,8 @@ export function Diagram({ d, pick }: { d: Figure; pick: () => void }) {
         ref={box}
         className="svg"
         onMouseOver={(e) => el() && focus(el()!, partOf(e.target))}
-        onMouseLeave={() => el() && focus(el()!, null)}
+        // As the viewer does: when the pointer leaves, the focus returns to the selection.
+        onMouseLeave={() => el() && focus(el()!, partOf(el()!.querySelector(".selected")))}
         onClick={(e) => (el() && select(el()!, partOf(e.target)), pick())}
         dangerouslySetInnerHTML={{ __html: text ?? "" }}
       />
