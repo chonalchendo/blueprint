@@ -15,6 +15,7 @@ mod eval_end;
 mod eval_fixture;
 mod eval_grade;
 mod eval_kills;
+mod eval_names;
 mod eval_plant;
 mod eval_pr;
 mod eval_reads;

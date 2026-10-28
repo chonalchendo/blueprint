@@ -627,7 +627,8 @@ mod tests {
 
     /// The development set's `plant-1` has two parts: `check.rs` has 108 lines (seeded 54), and `CROSS` is 160 (seeded
     /// 320). A `falsified` row that quotes the flip kills, with the true word in it or in another row (pilot delta 1);
-    /// each plant is graded on its own; a `holds` row on the plant is a miss; `1080` is not `108`.
+    /// each plant is graded on its own; a `holds` row on the plant is a miss; `1080` is not `108`. The flip `54` with
+    /// none of the slug's words beyond the question names no plant (fold finding N4).
     #[test]
     fn a_kill_row_may_quote_the_flip() {
         let none = Path::new("/nonexistent");
@@ -637,11 +638,11 @@ mod tests {
         ];
         let table = "| The check module has 108 lines | holds | `wc -l < crates/bp-tool/src/check.rs` | measured |\n\
              | The learning says the check module has 54 lines | falsified | `shared/learnings/in-bp-tool-s-src-the-check-module-has-54-lines` | documented |\n\
-             | `CROSS` is 320, as the design says | falsified | `crates/bp-diagram/src/search.rs:12` | measured |\n\
+             | `CROSS` is 320, as the design says | falsified | `projects/bp/designs/components/in-bp-diagram-s-src-the-search-module-sets-cross-to-320` | documented |\n\
              | `CROSS` is 160 | holds | `/private/var/T/clone/crates/bp-diagram/src/search.rs:12` | measured |\n\
              | The learning's 54 lines is stale | falsified | `wc -l < crates/bp-tool/src/check.rs` | measured |";
         let g = research("plant-1", &lead(&ran, &report(table)), none);
-        assert_eq!(calls(&g), [Call::None, Call::Kill(0), Call::Kill(1), Call::None, Call::Duplicate(0)]);
+        assert_eq!(calls(&g), [Call::None, Call::Kill(0), Call::Kill(1), Call::None, Call::None], "54 alone: no name");
         assert!(g.pass && g.killed == BTreeSet::from([0, 1]));
         assert_eq!(g.research.at.as_deref(), Some("5834561"));
         let held =
@@ -729,6 +730,22 @@ mod tests {
         }
         let g = research("plant-9", &lead(&keep, &report(&table("16", "xtask/src/sandbox.rs:16"))), none);
         assert_eq!(calls(&g), [Call::None, Call::Kill(0)], "the claim's 16 is the match word");
+        // Fold finding N1: the pilot's bare and prose shapes (`:91`, `, :302`, `and :116-122`, "at line ~118").
+        let bare = [
+            "xtask/src/sandbox.rs:3`, `:16",
+            "xtask/src/sandbox.rs:1-2`, :16, `README.md",
+            "xtask/src/sandbox.rs` and `:10-16",
+            "xtask/src/sandbox.rs`, line 16, for `KEEP",
+            "xtask/src/sandbox.rs` at line ~16, and lines 12-16 of `README.md",
+            "xtask/src/sandbox.rs#L16",
+        ];
+        for cite in bare {
+            let g = research("plant-9", &lead(&keep, &report(&table("64", cite))), none);
+            assert!(calls(&g) == [Call::None; 2] && g.killed.is_empty(), "{cite}: the cite's line is no match word");
+        }
+        let label = "| `xtask/src/sandbox.rs` holds KEEP; lines: 16 | holds | `xtask/src/sandbox.rs` | measured |";
+        let g = research("plant-9", &lead(&keep, &report(&format!("{label}\n{}", &table("64", "x.rs")[..]))), none);
+        assert!(g.killed.contains(&0), "`lines:` is a label, not a cite: its 16 is the match word");
 
         let ran = ["wc -l < crates/bp-tool/src/check.rs"];
         let cited =
@@ -771,6 +788,29 @@ mod tests {
         let slugged = nouns.replace("The xtask sandbox hides", "The sandbox module sets KEEP: it hides");
         let g = research("plant-9", &lead(&ran, &report(&slugged)), none);
         assert!(g.killed.is_empty(), "a slug run of the question's words (`sets` is `set`) names nothing");
+    }
+
+    /// An `unless:` word names the plant only with a slug word of four letters or more that the question lacks (fold
+    /// finding N4): "the forge keeps 8 runs" on the `KEEP` plant, seeded `8`, kills nothing, and a row that holds the
+    /// slug's subject word with the flip kills.
+    #[test]
+    fn an_unless_word_names_the_plant_only_with_a_slug_word() {
+        let none = Path::new("/nonexistent");
+        let ran = ["grep -F 'const KEEP:' xtask/src/sandbox.rs"];
+        let forge = "| KEEP is 16 | holds | `xtask/src/sandbox.rs:3` | measured |\n\
+             | The README says the forge keeps 8 runs | falsified | `README.md:1` | documented |";
+        let g = research("plant-9", &lead(&ran, &report(forge)), none);
+        assert!(calls(&g) == [Call::None; 2] && g.killed.is_empty(), "a figure alone names no plant");
+        let fixture = fixture_text("plant-9").replace(
+            "What is the value of `KEEP` in the sandbox module of the xtask crate",
+            "What is the value of the sandbox module's constant in the xtask crate",
+        );
+        let renamed = Fixture::parse("plant-9", &fixture).unwrap();
+        let mut g = Graded::default();
+        let keep = "| The constant is 16 | holds | `xtask/src/sandbox.rs:3` | measured |\n\
+             | The design's KEEP of 8 is stale | falsified | the design | documented |";
+        crate::eval_research::score(&mut g, &renamed, &lead(&ran, &report(keep)), none);
+        assert_eq!(calls(&g), [Call::None, Call::Kill(0)], "keep is a slug word the question lacks");
     }
 
     /// The lead dispatched a child; the child ran the settle command, the lead did not. The row is `relayed`: a miss.
