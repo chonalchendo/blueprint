@@ -16,7 +16,8 @@ const SLOTS: [&str; 5] = ["Node:", "Skill:", "Budget:", "Forbidden:", "Stop:"];
 /// A skill body's cap in tokens, counted as bytes / 4 (17, Skill set).
 const TOKENS: usize = 5_000;
 
-/// The research template's stop: research is call-shaped and has no `--done` (21, rule 4).
+/// The research template's stop, in words. Research is call-shaped (21, rule 4): the skill's `Stop:` line names the
+/// `--done` call that returns `done` true, and says that no call follows the report.
 const RESEARCH_STOP: &str = "return the report.";
 
 type Files = BTreeMap<String, String>;

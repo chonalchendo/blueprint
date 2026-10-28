@@ -63,14 +63,24 @@ fn tokens(files: &Files, paths: &[String]) -> usize {
         / 4
 }
 
-/// The skills a role file preloads: its front matter `skills:` line.
+/// The skill directories a role file preloads, as `skills/<name>/`: its front matter `skills:` line.
 fn preloads(role: &str) -> Vec<String> {
     let line = role.lines().skip(1).take_while(|l| *l != "---").find_map(|l| l.strip_prefix("skills:"));
-    line.map_or_else(Vec::new, |s| s.split(',').map(|n| format!("skills/{}/SKILL.md", n.trim())).collect())
+    line.map_or_else(Vec::new, |s| s.split(',').map(|n| format!("skills/{}/", n.trim())).collect())
 }
 
-/// One row per dispatch template: its role file, the role's preloaded bodies, and the template. A role with two
-/// templates loads the same preloads under each.
+/// Every skill directory that some role file preloads.
+fn preloaded(files: &Files) -> Vec<String> {
+    files
+        .iter()
+        .filter(|(p, _)| p.strip_prefix("roles/").is_some_and(|r| !r.contains('/')))
+        .flat_map(|(_, t)| preloads(t))
+        .collect()
+}
+
+/// One row per dispatch template: its role file, the template, and each preloaded skill's body and references. A
+/// role with two templates loads the same preloads under each. The body discloses a reference only as the work needs
+/// it, which saves runtime context but not cap, so the row counts each reference (31, design change 1).
 fn role_loads(files: &Files) -> Vec<(String, usize)> {
     files
         .keys()
@@ -78,7 +88,11 @@ fn role_loads(files: &Files) -> Vec<(String, usize)> {
             let rest = p.strip_prefix("roles/")?;
             let (role, action) = rest.split_once('/')?;
             let mut paths = vec![format!("roles/{role}.md"), p.clone()];
-            paths.extend(preloads(&files[&format!("roles/{role}.md")]));
+            for dir in preloads(&files[&format!("roles/{role}.md")]) {
+                paths.push(format!("{dir}SKILL.md"));
+                let refs = files.keys().filter(|f| f.strip_prefix(&dir).is_some_and(|r| r.starts_with("references/")));
+                paths.extend(refs.cloned());
+            }
             Some((format!("{role} {}", action.trim_end_matches(".md")), tokens(files, &paths)))
         })
         .collect()
@@ -107,7 +121,7 @@ fn route_loads(files: &Files) -> Vec<(String, usize)> {
         .collect()
 }
 
-/// A row over its cap, or a reference no route names, as a message that names the row.
+/// A row over its cap, or a reference that no route names and no role preloads, as a message that names the row.
 fn failures(files: &Files) -> Vec<String> {
     let over = |rows: Vec<(String, usize)>, cap, what: &str| {
         rows.into_iter()
@@ -117,8 +131,10 @@ fn failures(files: &Files) -> Vec<String> {
     };
     let mut out = over(role_loads(files), ROLE_CAP, "role");
     out.extend(over(route_loads(files), ROUTE_CAP, "route"));
+    let loaded = preloaded(files);
     for path in files.keys().filter(|p| p.contains("/references/")) {
-        if !ROUTES.iter().any(|(_, names)| names.iter().any(|n| reference(n) == *path)) {
+        let routed = ROUTES.iter().any(|(_, names)| names.iter().any(|n| reference(n) == *path));
+        if !routed && !loaded.iter().any(|d| path.starts_with(&format!("{d}references/"))) {
             out.push(format!("{path}: in no route of the ledger"));
         }
     }
@@ -151,6 +167,14 @@ fn over_cap_preload_counts_against_the_role() {
     let files = with(&read(), "skills/bp-review/SKILL.md", ROLE_CAP * 4);
     assert_eq!(failures(&files).len(), 1, "only bp-reviewer preloads bp-review");
     assert!(failures(&files)[0].starts_with("role bp-reviewer review: "));
+}
+
+#[test]
+fn over_cap_reference_of_a_preload_counts_against_the_role() {
+    let files = with(&read(), "skills/bp-research/references/fan-out.md", ROLE_CAP * 4);
+    let bad = failures(&files);
+    assert_eq!(bad.len(), 1, "only bp-researcher preloads bp-research: {bad:#?}");
+    assert!(bad[0].starts_with("role bp-researcher research: "), "{bad:#?}");
 }
 
 #[test]
@@ -187,6 +211,15 @@ fn a_reference_in_no_route_is_found() {
     let mut files = read();
     files.insert(reference("orphan"), "x".into());
     assert_eq!(failures(&files), [format!("{}: in no route of the ledger", reference("orphan"))]);
+    let mut files = read();
+    files.insert("skills/bp-research/references/b.md".into(), "x".into());
+    assert!(failures(&files).is_empty(), "a reference of a preloaded skill is routed by its role");
+    files.insert("skills/bp-capture/references/x.md".into(), "x".into());
+    assert_eq!(
+        failures(&files),
+        ["skills/bp-capture/references/x.md: in no route of the ledger"],
+        "no role preloads it"
+    );
 }
 
 /// Prints the figures the `design-route-load` block reads, and every row for the owner.

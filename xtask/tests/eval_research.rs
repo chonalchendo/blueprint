@@ -178,7 +178,7 @@ fn a_research_trial_seeds_hides_the_sets_and_stores_the_session() {
     let fake = Fake::new();
     let (code, out) = fake.run(&bp, "1", "");
     assert_eq!(code, Some(0), "{out}");
-    assert!(out.contains("plants: 1 in 1 files\ncontrols: 1\ntwo_part: 0\nskill: none"), "{out}");
+    assert!(out.contains("plants: 1 in 1 files\ncontrols: 1\ntwo_part: 0\nskill: bp-research"), "{out}");
 
     let prompt = read(&fake.path("out/prompt.txt"));
     let dispatch = prompt.split_once("\n\n").unwrap().1;
@@ -202,7 +202,7 @@ fn a_research_trial_seeds_hides_the_sets_and_stores_the_session() {
         assert!(store.join(format!("with-plant-1-1/agent-{name}.meta.json")).is_file(), "{name}");
     }
     let hash = read(&store.join("with-plant-1-1.hash"));
-    assert!(hash.ends_with("skill: none\n") && hash.contains(" arms-3\n"), "{hash}");
+    assert!(!hash.contains("skill: none") && hash.contains(" arms-3\n"), "the bundle holds the body: {hash}");
     let (code, out) = fake.grade(&[]);
     assert!(code == Some(0) && out.contains("plants: 1 in 1 files"), "{out}");
     let review = root().join("xtask/evals/bp-review").display().to_string();
