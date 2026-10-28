@@ -1,12 +1,11 @@
-//! A design's version and its body at a tag (12, Blueprint version; 18, As-of diff; 32, design change 9). The banner
-//! reads the version records' manifests; with no record, the newest `blueprint/<project>/<n>` tag. The body at a tag
-//! comes from git, and the diff against the current body is section by section (18, Open: the diff grain).
+//! A design's body at a version tag (18, As-of diff; 32, design change 9). The body at a tag comes from git, and the
+//! diff against the current body is section by section (18, Open: the diff grain).
 
-use bp_vault::{Body, Code, Id, Index, Refusal, Vault};
+use bp_vault::{Body, Code, Id, Refusal, Vault};
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::pages::{accepted, versions};
+use crate::version::Tags;
 use crate::{Show, show};
 
 /// What changed from a design's body at a tag to its current body, section by section.
@@ -29,38 +28,12 @@ pub struct SectionLines {
     pub lines: Vec<String>,
 }
 
-/// The design's version in words: "accepted at <tag>" names the newest version whose manifest holds the file's
-/// current hash, else "changed since <tag>" names the newest version. With no version record, the newest
-/// `blueprint/<project>/<n>` tag names the version and no manifest is read; the record wins when it exists.
-pub(crate) fn banner(vault: &Vault, index: &Index, project: &str, id: &Id) -> Result<String, Refusal> {
-    let versions = versions(index, project)?;
-    if let Some((_, newest, _)) = versions.first() {
-        return Ok(match accepted(vault, id.as_str(), &versions)? {
-            Some(tag) => format!("accepted at {tag}"),
-            None => format!("changed since {newest}"),
-        });
-    }
-    Ok(newest_tag(vault, project).map_or_else(|| "no version".to_string(), |tag| format!("changed since {tag}")))
-}
-
-/// The project's `blueprint/<project>/<n>` tag of the highest `n`. A vault outside git has none.
-fn newest_tag(vault: &Vault, project: &str) -> Option<String> {
-    let prefix = format!("refs/tags/blueprint/{project}/");
-    let refs = crate::git::git(&vault.root, &["for-each-ref", "--format=%(refname)", &prefix]).ok()?;
-    refs.lines()
-        .filter_map(|r| Some((r.strip_prefix(&prefix)?.parse::<u64>().ok()?, r.strip_prefix("refs/tags/")?)))
-        .max_by_key(|(n, _)| *n)
-        .map(|(_, tag)| tag.to_string())
-}
-
 /// The `show` object of `id` as the tag holds it; `None` when the file is not at the tag (the design was added or
-/// renamed since). A tag the vault lacks refuses `no_tag`.
+/// renamed since). Only a version tag of the project, `blueprint/<project>/<n>`, is read: any other value, or a tag the
+/// vault lacks, refuses `no_tag`. So no revision expression (`~1`, `^`, `:`, `@{}`) reads another commit, and no
+/// other project's tag reads as this design's version.
 pub(crate) fn show_at(vault: &Vault, id: &Id, tag: &str, project: &str) -> Result<Option<Show>, Refusal> {
-    // A tag name only: a revision expression (`~1`, `^`, `:`, `@{}`) would read another commit under the tag's name.
-    let plain = !tag.is_empty()
-        && !tag.contains("..")
-        && tag.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'));
-    let read = if plain {
+    let read = if Tags::n(tag, project).is_some() {
         show(vault, None, id, Some(&format!("refs/tags/{tag}")), None, false)
     } else {
         Err(no_tag(tag, project))
@@ -77,7 +50,7 @@ fn no_tag(tag: &str, project: &str) -> Refusal {
     Refusal::new(
         Code::NoTag,
         format!("?at={tag}"),
-        "?at names a blueprint version tag of the vault",
+        "?at names a version tag of the project, blueprint/<project>/<n>",
         format!("git tag -l 'blueprint/{project}/*' lists the versions"),
     )
 }
@@ -88,12 +61,13 @@ pub(crate) fn diff(then: &Body, now: &Body) -> BodyDiff {
     let (old, new) = (parts(then), parts(now));
     let pair: Vec<Option<usize>> = new.iter().map(|p| old.iter().position(|o| o.key() == p.key())).collect();
     let mut out = BodyDiff::default();
+    // A section whose only change is a blank line has no lines to show, so it is not listed.
     let mut emit = |heading: &str, a: &str, b: &str| {
-        if a == b {
+        let (removed, added) = if a == b { Default::default() } else { lines(a, b) };
+        if removed.is_empty() && added.is_empty() {
             return;
         }
         out.sections.push(heading.to_string());
-        let (removed, added) = lines(a, b);
         for (to, lines) in [(&mut out.removed, removed), (&mut out.added, added)] {
             if !lines.is_empty() {
                 to.push(SectionLines { section: heading.to_string(), lines });
@@ -178,6 +152,9 @@ mod tests {
         assert_eq!(got(&d.removed), [("A".into(), "two".into()), ("Gone".into(), "old text".into())]);
         assert_eq!(got(&d.added), [("A".into(), "2".into()), ("New".into(), "fresh|lines".into())]);
         assert!(diff(&now, &now).sections.is_empty(), "a body equals itself");
+        let spaced = Body::parse("Lead.\n\n## A\n\none\n\n\ntwo\nthree\n\n## Gone\n\nold text\n\n## B\n\nsame\n");
+        let d = diff(&then, &spaced);
+        assert!(d.sections.is_empty() && d.added.is_empty() && d.removed.is_empty(), "a blank line only: no section");
     }
 
     #[test]
@@ -197,6 +174,8 @@ mod tests {
 mod page_tests {
     use std::path::Path;
     use std::process::Command;
+
+    use bp_vault::Index;
 
     use super::*;
 
@@ -260,6 +239,45 @@ mod page_tests {
         assert_eq!(version(&v), "changed since blueprint/bp/2", "a header edit changes the hash");
     }
 
+    /// The version words Home's design row, Home, Projects and the Design banner read, in that order.
+    fn pages(v: &Vault) -> [Option<String>; 4] {
+        let index = Index::open(v).unwrap();
+        let home = crate::home(v, &index, "bp").unwrap();
+        let row = home.designs.iter().find(|d| d.row.row.id == "projects/bp/designs/system").unwrap().version.clone();
+        let project = crate::projects(v, &index).unwrap().rows.remove(0).version;
+        [Some(row), home.version, project, Some(version(v))]
+    }
+
+    #[test]
+    fn home_projects_and_design_read_one_version_and_a_missing_tag_drops_the_link() {
+        let (_d, v) = vault();
+        let none = [Some("no version".to_string()), None, None, Some("no version".to_string())];
+        assert_eq!(pages(&v), none);
+        git(&v.root, &["tag", "blueprint/bp/1"]);
+        let since = Some("changed since blueprint/bp/1".to_string());
+        let tag = Some("blueprint/bp/1".to_string());
+        assert_eq!(
+            pages(&v),
+            [since.clone(), tag.clone(), tag.clone(), since],
+            "a tag alone: one version on all three"
+        );
+        let design = || crate::design(&v, &Index::open(&v).unwrap(), "bp", "projects/bp/designs/system", None).unwrap();
+        assert_eq!((design().since, design().tag_fix), (tag, None));
+        // A record whose tag the vault's git lacks: the words stay, the link goes, the fix shows.
+        record(&v, 3, "0000");
+        let d = design();
+        assert_eq!(
+            (d.version.as_str(), d.version_tag.as_deref(), d.since, d.tag_fix.as_deref()),
+            (
+                "changed since blueprint/bp/3",
+                Some("blueprint/bp/3"),
+                None,
+                Some("blueprint/bp/3 is not in this vault's git: git fetch --tags")
+            )
+        );
+        assert_eq!(pages(&v)[1..3], [Some("blueprint/bp/3".to_string()), Some("blueprint/bp/3".to_string())]);
+    }
+
     #[test]
     fn at_a_tag_the_body_is_gits_and_the_diff_names_the_changed_sections() {
         let (_d, v) = vault();
@@ -291,7 +309,11 @@ mod page_tests {
             ("not at blueprint/bp/1", Some(""), 0)
         );
         assert!(product.diff.is_some_and(|d| d.sections.is_empty() && d.added.is_empty()), "an empty diff");
-        for tag in ["blueprint/bp/9", "blueprint/bp/1~1", "", "HEAD"] {
+        // Another project's tag and a tag outside `blueprint/` exist, and still refuse.
+        git(&v.root, &["tag", "blueprint/mentat/7", "blueprint/bp/1"]);
+        git(&v.root, &["tag", "v-probe", "blueprint/bp/1"]);
+        for tag in ["blueprint/bp/9", "blueprint/bp/1~1", "", "HEAD", "blueprint/mentat/7", "v-probe", "blueprint/bp/"]
+        {
             let refusal = page("projects/bp/designs/system", tag).err().unwrap();
             assert_eq!(
                 (refusal.code, refusal.fix.as_str()),

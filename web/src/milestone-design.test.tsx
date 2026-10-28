@@ -148,11 +148,22 @@ test("the system design: version banner, facts, outline, and each diagram after 
 const banner = () => Array.from(screen.getByRole("note").children).map((s) => s.textContent);
 const here = "/bp/design/projects/bp/designs/system";
 
-test("a design changed since the newest version links the diff since that tag", () => {
-  render(<DesignView d={{ ...(system as Design), version: "changed since blueprint/bp/1" }} project="bp" />);
+test("a design changed since the newest version links the diff since that tag, the tag in mono", () => {
+  const changed = { version: "changed since blueprint/bp/1", version_tag: "blueprint/bp/1", since: "blueprint/bp/1" };
+  render(<DesignView d={{ ...(system as Design), ...changed }} project="bp" />);
   expect(banner()).toEqual(["changed since blueprint/bp/1", "status active", "deltas: not in vault", "diff since blueprint/bp/1"]);
   expect(screen.getByRole("link", { name: "diff since blueprint/bp/1" }).getAttribute("href")).toBe(`${here}?at=blueprint/bp/1`);
+  const words = screen.getByRole("note").firstElementChild!;
+  expect([words.firstChild?.textContent, words.querySelector(".id")?.textContent]).toEqual(["changed since ", "blueprint/bp/1"]);
   expect(screen.queryByText(/^Changed since/)).toBeNull();
+});
+
+test("a version whose tag the vault's git lacks keeps its words, drops the diff link and shows the fix", () => {
+  const fix = "blueprint/bp/3 is not in this vault's git: git fetch --tags";
+  const missing = { version: "changed since blueprint/bp/3", version_tag: "blueprint/bp/3", tag_fix: fix };
+  render(<DesignView d={{ ...(system as Design), ...missing }} project="bp" />);
+  expect(banner()).toEqual(["changed since blueprint/bp/3", "status active", "deltas: not in vault", fix]);
+  expect(screen.queryByRole("link", { name: /diff since/ })).toBeNull();
 });
 
 test("at a tag: the banner links back, and each changed section jumps to the body with its lines marked − and +", () => {

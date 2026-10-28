@@ -35,6 +35,7 @@ const design = (id: string, design_kind: string, more: Partial<HomeDesign> = {})
   status: "active",
   design_kind,
   diagrams: 0,
+  version: "no version",
   ...more,
 });
 
@@ -44,7 +45,7 @@ const home: HomeObject = {
   records: {},
   designs: [
     design("product", "product"),
-    design("system", "system", { diagrams: 3, under: "projects/bp/designs/product" }),
+    design("system", "system", { diagrams: 3, under: "projects/bp/designs/product", version: "changed since blueprint/bp/1", version_tag: "blueprint/bp/1" }),
     design("containers/view", "container", { under: "projects/bp/designs/system" }),
     design("components/server", "component", { under: "projects/bp/designs/containers/view" }),
     design("components/pages", "component", { under: "projects/bp/designs/containers/view" }),
@@ -96,7 +97,7 @@ test("an empty project: a zero keeps its noun, a bare zero is nothing", async ()
   expect(many(0)).toBe("nothing");
 });
 
-test("blueprint pane: the tree folds components under their parent, and versions read not in vault", async () => {
+test("blueprint pane: the tree folds components under their parent, and each row prints the server's version words", async () => {
   stubApi({ bp: home });
   render(<Home project="bp" />);
   const pane = (await screen.findByText("Blueprint")).closest("details")!;
@@ -104,8 +105,11 @@ test("blueprint pane: the tree folds components under their parent, and versions
   expect(folds).toEqual(["1 component", "2 components", "1 retired or deprecated"]);
   const system = within(pane).getByRole("link", { name: "system" }).closest("tr")!;
   expect(Array.from(system.querySelectorAll("td")).map((c) => c.textContent)).toEqual([
-    "system", "system", "system", "active", "3 diagrams", "not in vault",
+    "system", "system", "system", "active", "3 diagrams", "changed since blueprint/bp/1",
   ]);
+  expect(system.querySelector("td:last-child .id")?.textContent).toBe("blueprint/bp/1");
+  const product = within(pane).getByRole("link", { name: "product" }).closest("tr")!;
+  expect(product.querySelector("td:last-child")?.textContent).toBe("no version");
   expect(pane.querySelector("p.views")?.textContent).toBe(
     "views beside the tree: data model data-model · glossary none · conventions convention.prose",
   );

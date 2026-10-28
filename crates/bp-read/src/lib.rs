@@ -19,6 +19,7 @@ mod objects;
 mod pages;
 pub mod snapshot;
 mod stack;
+mod version;
 mod world;
 
 pub use asof::{BodyDiff, SectionLines};

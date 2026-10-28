@@ -36,8 +36,6 @@ export function DesignView({ d, project, at }: { d: DesignObject; project: strin
   const figures = d.diagrams.map((g) => ({ name: g.name, title: g.title, src: `/api/${api(project, d.id)}/diagram/${encodeURIComponent(g.name)}` }));
   const absent = (kind: string) => d.rows_not_in_vault.includes(kind);
   const here = `/${project}/design/${d.id}`;
-  // The banner's words name the tag; its link opens the diff since that tag.
-  const since = at ? undefined : /^changed since (\S+)$/.exec(d.version)?.[1];
   // The lead and the TL;DR show above the body, so the body leaves them out.
   const tldr = d.tldr ? d.outline.find((o) => o.depth === 2 && o.heading === "TL;DR")?.anchor : undefined;
   const shown = tldr ? ["", tldr] : [""];
@@ -45,10 +43,17 @@ export function DesignView({ d, project, at }: { d: DesignObject; project: strin
     <article className="design">
       <h1>{h.title ?? d.id.split("/").slice(-1)[0]}</h1>
       <div className="vbanner" role="note">
-        <span className="v">{d.version}</span>
+        <span className="v">
+          <VersionWords words={d.version} tag={d.version_tag} />
+        </span>
         <span>status {h.status ?? "none"}</span>
         <span>{absent("delta") ? "deltas: not in vault" : `${many(proposed, "delta")} proposed`}</span>
-        {since && <Link to={here + atQuery(since)}>diff since {since}</Link>}
+        {d.since && (
+          <Link to={here + atQuery(d.since)}>
+            diff since <span className="id">{d.since}</span>
+          </Link>
+        )}
+        {d.tag_fix && <span className="sub">{d.tag_fix}</span>}
         {at && <Link to={here}>current body</Link>}
       </div>
       <p className="facts-line">
@@ -127,6 +132,17 @@ export function DesignView({ d, project, at }: { d: DesignObject; project: strin
         </ul>
       )}
     </article>
+  );
+}
+
+/** A version in the server's words, with the tag they end with in mono (19: an id reads in Geist Mono). */
+export function VersionWords({ words, tag }: { words: string; tag?: string }) {
+  if (!tag || !words.endsWith(tag)) return <>{words}</>;
+  return (
+    <>
+      {words.slice(0, -tag.length)}
+      <span className="id">{tag}</span>
+    </>
   );
 }
 

@@ -28,11 +28,24 @@ diagrams: Array<Diagram>,
  */
 deltas: Array<DesignDelta>, 
 /**
- * "accepted at <tag>" when a version's manifest holds the file's current hash, else "changed since <tag>" with
- * the newest version, or the newest tag when the project has no version record, else "no version". With `?at`:
- * "at <tag>", or "not at <tag>" when the file is not at the tag.
+ * The words Home's design row reads (32, design change 9): "accepted at <tag>", "changed since <tag>" or "no
+ * version". With `?at`: "at <tag>", or "not at <tag>" when the file is not at the tag.
  */
 version: string, 
+/**
+ * The tag `version` ends with; absent with "no version".
+ */
+version_tag?: string, 
+/**
+ * The tag the banner's diff link opens: present when the design changed since the version and the vault's git
+ * holds its tag.
+ */
+since?: string, 
+/**
+ * When the version record's tag is not in the vault's git (12: a stamp can stop before its tag; the session's
+ * push leaves tags out): the words that say so and the fix. The banner then has no diff link.
+ */
+tag_fix?: string, 
 /**
  * With `?at`: what changed from the body at the tag to the current body; empty when the file is not at the tag.
  */

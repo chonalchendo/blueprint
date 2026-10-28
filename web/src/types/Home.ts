@@ -14,7 +14,8 @@ export type Home = {
  */
 id: string, 
 /**
- * The project's newest blueprint version tag; absent before its first stamp.
+ * The project's version tag: the newest version record's, else the newest `blueprint/<project>/<n>` tag; absent
+ * before either exists.
  */
 version?: string, 
 /**
@@ -26,7 +27,7 @@ nodes: { [key in string]: number },
  */
 records: { [key in string]: number }, 
 /**
- * The `list design` rows, each with its diagrams and its accepted version.
+ * The `list design` rows, each with its diagrams and its version in words.
  */
 designs: Array<HomeDesign>, 
 /**

@@ -7,6 +7,7 @@ import { Link, nodePath, pagePath } from "../router";
 import { Row } from "../Row";
 import type { Home } from "../types/Home";
 import type { HomeDesign } from "../types/HomeDesign";
+import { VersionWords } from "./Design";
 
 const GONE = new Set(["retired", "deprecated"]);
 
@@ -29,14 +30,7 @@ export function tree(designs: HomeDesign[]) {
   };
 }
 
-/** A design's accepted version in words (32, design change 9): the tag, else changed since the project's newest, else
- * "not in vault" while the project holds no version. */
-export function version(d: HomeDesign, project?: string): string {
-  if (d.accepted) return d.accepted;
-  return project ? `changed since ${project}` : "not in vault";
-}
-
-function DesignRow({ d, depth, home }: { d: HomeDesign; depth: number; home: Home }) {
+function DesignRow({ d, depth }: { d: HomeDesign; depth: number }) {
   const dim = d.status !== "active" ? "r" : undefined;
   return (
     <Row href={pagePath(d.id, "design")}>
@@ -53,13 +47,13 @@ function DesignRow({ d, depth, home }: { d: HomeDesign; depth: number; home: Hom
       </td>
       <td className="sub">{d.diagrams ? `${d.diagrams} diagram${d.diagrams === 1 ? "" : "s"}` : "no diagrams"}</td>
       <td className="sub">
-        <span className={d.accepted ? "id" : undefined}>{version(d, home.version)}</span>
+        <VersionWords words={d.version} tag={d.version_tag} />
       </td>
     </Row>
   );
 }
 
-function Fold({ noun, rows, depth, home }: { noun: string; rows: HomeDesign[]; depth: number; home: Home }) {
+function Fold({ noun, rows, depth }: { noun: string; rows: HomeDesign[]; depth: number }) {
   if (rows.length === 0) return null;
   return (
     <tr>
@@ -69,7 +63,7 @@ function Fold({ noun, rows, depth, home }: { noun: string; rows: HomeDesign[]; d
           <table className="tree">
             <tbody>
               {rows.map((d) => (
-                <DesignRow key={d.id} d={d} depth={0} home={home} />
+                <DesignRow key={d.id} d={d} depth={0} />
               ))}
             </tbody>
           </table>
@@ -112,13 +106,13 @@ export function BlueprintPane({ home }: { home: Home }) {
         ) : (
           <table className="tree">
             <tbody>
-              {t.product && <DesignRow d={t.product} depth={0} home={home} />}
-              {t.system && <DesignRow d={t.system} depth={1} home={home} />}
-              <Fold noun="component" rows={t.loose} depth={2} home={home} />
+              {t.product && <DesignRow d={t.product} depth={0} />}
+              {t.system && <DesignRow d={t.system} depth={1} />}
+              <Fold noun="component" rows={t.loose} depth={2} />
               {t.containers.map(({ design, components }) => (
                 <Fragment key={design.id}>
-                  <DesignRow d={design} depth={2} home={home} />
-                  <Fold noun="component" rows={components} depth={3} home={home} />
+                  <DesignRow d={design} depth={2} />
+                  <Fold noun="component" rows={components} depth={3} />
                 </Fragment>
               ))}
             </tbody>
@@ -130,7 +124,7 @@ export function BlueprintPane({ home }: { home: Home }) {
             <table className="tree">
               <tbody>
                 {t.gone.map((d) => (
-                  <DesignRow key={d.id} d={d} depth={0} home={home} />
+                  <DesignRow key={d.id} d={d} depth={0} />
                 ))}
               </tbody>
             </table>

@@ -8,9 +8,10 @@ use bp_vault::{Body, Code, DeltaState, DesignLevel, Id, Index, Kind, Refusal, Va
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::asof::{BodyDiff, banner, show_at};
+use crate::asof::{BodyDiff, show_at};
 use crate::inputs::text;
 use crate::milestone::{Concern, concerns, missing_kinds};
+use crate::version::{ProjectVersion, Tags, word};
 use crate::{Show, show};
 
 /// One design's page.
@@ -29,10 +30,20 @@ pub struct Design {
     pub diagrams: Vec<Diagram>,
     /// The delta records under it, in their order.
     pub deltas: Vec<DesignDelta>,
-    /// "accepted at <tag>" when a version's manifest holds the file's current hash, else "changed since <tag>" with
-    /// the newest version, or the newest tag when the project has no version record, else "no version". With `?at`:
-    /// "at <tag>", or "not at <tag>" when the file is not at the tag.
+    /// The words Home's design row reads (32, design change 9): "accepted at <tag>", "changed since <tag>" or "no
+    /// version". With `?at`: "at <tag>", or "not at <tag>" when the file is not at the tag.
     pub version: String,
+    /// The tag `version` ends with; absent with "no version".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_tag: Option<String>,
+    /// The tag the banner's diff link opens: present when the design changed since the version and the vault's git
+    /// holds its tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// When the version record's tag is not in the vault's git (12: a stamp can stop before its tag; the session's
+    /// push leaves tags out): the words that say so and the fix. The banner then has no diff link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag_fix: Option<String>,
     /// With `?at`: what changed from the body at the tag to the current body; empty when the file is not at the tag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<BodyDiff>,
@@ -91,17 +102,27 @@ pub fn design(vault: &Vault, index: &Index, project: &str, id: &str, at: Option<
     let (id, level) = design_id(index, project, id)?;
     let level = level.design_kind;
     let now = show(vault, Some(index), &id, None, None, false)?;
-    let (show, version, diff) = match at {
-        None => (now, banner(vault, index, project, &id)?, None),
+    let (mut since, mut tag_fix) = (None, None);
+    let (show, version, version_tag, diff) = match at {
+        None => {
+            let tags = Tags::new(vault);
+            let current = ProjectVersion::of(index, project, &tags)?;
+            let word = word(vault, id.as_str(), current.as_ref())?;
+            match current.filter(|v| !v.exists(&tags)) {
+                Some(v) => tag_fix = Some(format!("{} is not in this vault's git: git fetch --tags", v.tag)),
+                None => since = word.tag.clone().filter(|_| word.changed),
+            }
+            (now, word.words, word.tag, None)
+        }
         Some(tag) => {
             if let Some(then) = show_at(vault, &id, tag, project)? {
                 let parse = |s: &Show| Body::parse(s.body.as_deref().unwrap_or_default());
                 let diff = crate::asof::diff(&parse(&then), &parse(&now));
-                (then, format!("at {tag}"), Some(diff))
+                (then, format!("at {tag}"), Some(tag.to_string()), Some(diff))
             } else {
                 let (lead, sections, body) = (String::new(), Some(Vec::new()), Some(String::new()));
                 let empty = Show { lead, sections, body, findings: Vec::new(), ..now };
-                (empty, format!("not at {tag}"), Some(BodyDiff::default()))
+                (empty, format!("not at {tag}"), Some(tag.to_string()), Some(BodyDiff::default()))
             }
         }
     };
@@ -126,6 +147,9 @@ pub fn design(vault: &Vault, index: &Index, project: &str, id: &str, at: Option<
         diagrams: pages(vault, id.as_str()).into_iter().map(|name| diagram(vault, &id, name)).collect(),
         deltas,
         version,
+        version_tag,
+        since,
+        tag_fix,
         diff,
         outline: outline(&body),
         coverage: product.then(|| concerns(index, project)).transpose()?,

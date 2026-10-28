@@ -9,6 +9,7 @@ use bp_vault::{Code, Filter, Index, Kind, Refusal, Vault};
 use serde::Serialize;
 use ts_rs::TS;
 
+use crate::version::{ProjectVersion, Tags, word};
 use crate::{ALL, Forge, ListRow, list};
 
 /// A project's home (18, Project home): what it holds by kind, its design tree, its milestones, and what moves in it
@@ -18,14 +19,15 @@ use crate::{ALL, Forge, ListRow, list};
 pub struct Home {
     /// The project node's id.
     pub id: String,
-    /// The project's newest blueprint version tag; absent before its first stamp.
+    /// The project's version tag: the newest version record's, else the newest `blueprint/<project>/<n>` tag; absent
+    /// before either exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// Nodes per kind, a kind the project lacks left out.
     pub nodes: BTreeMap<String, usize>,
     /// Records per kind, a kind the project lacks left out.
     pub records: BTreeMap<String, usize>,
-    /// The `list design` rows, each with its diagrams and its accepted version.
+    /// The `list design` rows, each with its diagrams and its version in words.
     pub designs: Vec<HomeDesign>,
     /// The conventions the product design cites, which stand beside the tree (18, Project home).
     pub conventions: Vec<String>,
@@ -50,9 +52,12 @@ pub struct HomeDesign {
     pub row: ListRow,
     /// The rendered diagrams in the design's `diagrams/` directory (28, design change 1).
     pub diagrams: usize,
-    /// The newest version tag whose manifest holds the design's current hash; absent when none does.
+    /// The design's version in words, as its Design page's banner reads it: "accepted at <tag>", "changed since
+    /// <tag>" or "no version".
+    pub version: String,
+    /// The tag `version` ends with; absent with "no version".
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub accepted: Option<String>,
+    pub version_tag: Option<String>,
 }
 
 /// A milestone row of the home's loop pane.
@@ -81,23 +86,18 @@ pub struct ProjectRow {
     /// The `list project` row.
     #[serde(flatten)]
     pub row: ListRow,
-    /// The project's newest blueprint version tag; absent before its first stamp.
+    /// The project's version tag, as its home reads it; absent before its first version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// The project's nodes per intent, as its home counts them.
     pub intents: BTreeMap<Intent, usize>,
 }
 
-/// A blueprint version record, reduced: its `n`, its tag, and its manifest of design id to hash.
-pub(crate) type Version = (u64, String, serde_json::Map<String, serde_json::Value>);
-
-/// What a project's pages read: its designs, milestones and issues as `list` prints them, and its versions.
+/// What a project's pages read: its designs, milestones and issues as `list` prints them.
 pub(crate) struct Read {
     pub(crate) designs: Vec<ListRow>,
     pub(crate) milestones: Vec<ListRow>,
     pub(crate) issues: crate::List,
-    /// The blueprint version records, newest first.
-    versions: Vec<Version>,
 }
 
 impl Read {
@@ -107,12 +107,7 @@ impl Read {
             designs: list(vault, index, &of(Kind::Design), false)?.rows,
             milestones: list(vault, index, &of(Kind::Milestone), false)?.rows,
             issues: list(vault, index, &of(Kind::Issue), false)?,
-            versions: versions(index, project)?,
         })
-    }
-
-    fn version(&self) -> Option<String> {
-        self.versions.first().map(|(_, tag, _)| tag.clone())
     }
 
     fn intents(&self) -> BTreeMap<Intent, usize> {
@@ -123,21 +118,6 @@ impl Read {
         }
         intents
     }
-}
-
-/// The project's blueprint version records, newest first.
-pub(crate) fn versions(index: &Index, project: &str) -> Result<Vec<Version>, Refusal> {
-    let mut versions: Vec<_> = index
-        .records(&format!("projects/{project}/project"), Kind::BlueprintVersion)?
-        .into_iter()
-        .filter_map(|r| {
-            let n = r.header.get("n")?.as_u64()?;
-            let tag = r.header.get("tag")?.as_str()?.to_string();
-            Some((n, tag, r.header.get("manifest")?.as_object().cloned().unwrap_or_default()))
-        })
-        .collect();
-    versions.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(versions)
 }
 
 /// The refusal for a project the index lacks.
@@ -160,12 +140,15 @@ pub fn home(vault: &Vault, index: &Index, project: &str) -> Result<Home, Refusal
         }
     }
     let read = Read::of(vault, index, project)?;
-    let (version, intents) = (read.version(), read.intents());
+    let intents = read.intents();
+    let version = ProjectVersion::of(index, project, &Tags::new(vault))?;
     let mut designs = Vec::with_capacity(read.designs.len());
     for row in read.designs {
-        let accepted = accepted(vault, &row.row.id, &read.versions)?;
-        designs.push(HomeDesign { diagrams: crate::design::pages(vault, &row.row.id).len(), accepted, row });
+        let word = word(vault, &row.row.id, version.as_ref())?;
+        let diagrams = crate::design::pages(vault, &row.row.id).len();
+        designs.push(HomeDesign { diagrams, version: word.words, version_tag: word.tag, row });
     }
+    let version = version.map(|v| v.tag);
     let product = format!("projects/{project}/designs/product");
     let conventions = index
         .header(&product)?
@@ -191,24 +174,16 @@ pub fn home(vault: &Vault, index: &Index, project: &str) -> Result<Home, Refusal
     Ok(Home { id, version, nodes, records, designs, conventions, milestones, intents, forge, forge_age })
 }
 
-/// The root page: every project, with its version and its intents.
+/// The root page: every project, with its version and its intents. The vault's tags are read at most once.
 pub fn projects(vault: &Vault, index: &Index) -> Result<Projects, Refusal> {
     let filter = Filter { kind: Kind::Project, status: None, project: None, under: None, limit: ALL };
+    let tags = Tags::new(vault);
     let mut rows = Vec::new();
     for row in list(vault, index, &filter, false)?.rows {
         let Some((project, _)) = crate::split(&row.row.id) else { continue };
-        let read = Read::of(vault, index, project)?;
-        rows.push(ProjectRow { version: read.version(), intents: read.intents(), row });
+        let intents = Read::of(vault, index, project)?.intents();
+        let version = ProjectVersion::of(index, project, &tags)?.map(|v| v.tag);
+        rows.push(ProjectRow { row, version, intents });
     }
     Ok(Projects { rows })
-}
-
-/// The newest version whose manifest holds the design's current hash (32, design change 9). The file is read only
-/// when a version exists.
-pub(crate) fn accepted(vault: &Vault, id: &str, versions: &[Version]) -> Result<Option<String>, Refusal> {
-    if versions.is_empty() {
-        return Ok(None);
-    }
-    let hash = vault.read(&crate::node_id(id)?)?.hash;
-    Ok(versions.iter().find(|(_, _, m)| m.get(id).and_then(|h| h.as_str()) == Some(hash.as_str())).map(|v| v.1.clone()))
 }
