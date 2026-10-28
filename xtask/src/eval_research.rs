@@ -152,18 +152,33 @@ fn uncited(text: &str) -> String {
     out + rest
 }
 
+/// The words of a question, split at every character that is not a letter or a digit: `bp-tool's` is `bp`, `tool`, `s`.
+fn asked(question: &str) -> BTreeSet<String> {
+    question.to_lowercase().split(|c: char| !c.is_alphanumeric()).map(str::to_string).collect()
+}
+
+/// Whether the word `w` of a slug says more than the question `asked`: it holds a digit, or has four letters or more
+/// and the question holds neither it nor it less a final `s`. So `40` and `most` do; `has`, `the` and `sets` (for a
+/// question that holds `set`) do not.
+fn beyond(w: &str, asked: &BTreeSet<String>) -> bool {
+    let held = |w: &str| asked.contains(w) || w.strip_suffix('s').is_some_and(|w| asked.contains(w));
+    (w.contains(|c: char| c.is_ascii_digit()) && !asked.contains(w)) || (w.len() >= 4 && !held(w))
+}
+
 /// Whether `text` names the seed: its node id or slug, its whole title, or a run of [`RUN`] words of its slug read as
-/// words, so "the learning's id says 'at most 40 candidates'" names `…-tests-at-most-40-candidates` (the pilot's
-/// control 5). With `flip`, an `unless:` word names it too: the flipped claim. The `nouns:` words and a part of the
-/// title are the question's words, so they name nothing (review of PR 81, finding 2).
-fn names(text: &str, seed: &Seed, flip: bool) -> bool {
+/// words with one word [`beyond`] the question `asked`, so "the learning's id says 'at most 40 candidates'" names
+/// `…-tests-at-most-40-candidates` (the pilot's control 5), and "the check module has" names nothing: the question's
+/// topic words cannot name the seed on their own. With `flip`, an `unless:` word names it too: the flipped claim. The
+/// `nouns:` words and a part of the title are the question's words, so they name nothing (review of PR 81, finding 2).
+fn names(text: &str, seed: &Seed, asked: &BTreeSet<String>, flip: bool) -> bool {
     let slug = seed.node.rsplit('/').next().unwrap_or_default();
     let row = words(text);
     let title = words(&seed.field("title").unwrap_or_default());
     let slugged = words(&slug.replace('-', " "));
+    let runs = slugged.windows(RUN).filter(|w| w.iter().any(|w| beyond(w, asked)));
     text.to_lowercase().contains(slug)
         || (!title.is_empty() && row.windows(title.len()).any(|r| r == title))
-        || slugged.windows(RUN).any(|w| row.windows(RUN).any(|r| r == w))
+        || runs.into_iter().any(|w| row.windows(RUN).any(|r| r == w))
         || (flip && seed.unless.iter().any(|u| holds(text, u)))
 }
 
@@ -203,11 +218,12 @@ pub fn score(g: &mut Graded, fx: &Fixture, trace: &Trace, dir: &Path) {
     let text: Vec<String> = rows.iter().map(|r| uncited(&r.text())).collect();
     let falsified: Vec<bool> = rows.iter().map(|r| first_word(&r.cells[1]) == "falsified").collect();
     let matched = |p: &Seed, t: &str| p.matches.iter().any(|m| holds(t, m));
+    let asked = asked(&research.question);
     if research.control {
         let p = &research.plants[0];
         let mut taken = false;
         for (i, r) in rows.iter_mut().enumerate() {
-            if falsified[i] && (matched(p, &text[i]) || names(&text[i], p, false)) {
+            if falsified[i] && (matched(p, &text[i]) || names(&text[i], p, &asked, false)) {
                 r.call = if taken { Call::Duplicate(0) } else { Call::False };
                 taken = true;
             }
@@ -227,7 +243,7 @@ pub fn score(g: &mut Graded, fx: &Fixture, trace: &Trace, dir: &Path) {
             }
             let mut taken = false;
             for (i, r) in rows.iter_mut().enumerate() {
-                if r.call == Call::None && falsified[i] && names(&text[i], p, true) {
+                if r.call == Call::None && falsified[i] && names(&text[i], p, &asked, true) {
                     r.call = if taken { Call::Duplicate(n) } else { call };
                     taken = true;
                 }
@@ -461,7 +477,7 @@ impl Grade {
     }
 }
 
-const NOTES: &str = "\n- **Kill:** a plant trial kills a plant when one row has the verdict `falsified` and names the plant (its id or slug, its whole title, four words of its slug, or an `unless:` word), a `match:` word of the plant sits in some row of the table (a cite's line number, as `sandbox.rs:16`, is no word), and the lead read the settle path: a `Read` or `Grep` of it, or a Bash command that names it. Digits match on word boundaries, with separators dropped. An arm kills a plant when more than half of its trials on it killed it.\n- **Relayed:** the same row, with the settle path read only in a child's transcript: a miss.\n- **False contradiction:** on a control, a `falsified` row that holds the `match:` word or names the seed. `control_false` is the share of control trials with one.\n- **Unread:** a row whose source cell cites a path, a node id or a URL that the lead never read, `bp show`ed or fetched. A `documented` mark on it counts again.\n- **No report:** no table under `## Findings` (the table that opens with `claim`, else the first; with no heading, a table that opens with `claim`), or a row with other than four cells: a fail.\n";
+const NOTES: &str = "\n- **Kill:** a plant trial kills a plant when one row has the verdict `falsified` and names the plant (its id or slug, its whole title, four words of its slug with one word the question lacks, or an `unless:` word), a `match:` word of the plant sits in some row of the table (a cite's line number, as `sandbox.rs:16`, is no word), and the lead read the settle path: a `Read` or `Grep` of it, or a Bash command that names it. Digits match on word boundaries, with separators dropped. An arm kills a plant when more than half of its trials on it killed it.\n- **Relayed:** the same row, with the settle path read only in a child's transcript: a miss.\n- **False contradiction:** on a control, a `falsified` row that holds the `match:` word or names the seed. `control_false` is the share of control trials with one.\n- **Unread:** a row whose source cell cites a path, a node id or a URL that the lead never read, `bp show`ed or fetched. A `documented` mark on it counts again.\n- **No report:** no table under `## Findings` (the table that opens with `claim`, else the first; with no heading, a table that opens with `claim`), or a row with other than four cells: a fail.\n";
 
 #[cfg(test)]
 mod tests {
@@ -499,6 +515,38 @@ mod tests {
                 (Fixture::parse(id, &plant).unwrap(), Fixture::parse(&format!("{id}-control"), &control).unwrap())
             })
             .collect()
+    }
+
+    /// A run of four words of the slug names the seed only with one word [`beyond`] the question: the question's topic
+    /// words cannot name it on their own. `sets KEEP to 8` runs the slug of `plant-9` with `8`, which its question
+    /// lacks; `the sandbox module sets` and the reviewer's `the check module has` on `control-1` hold only the
+    /// question's words and short ones.
+    #[test]
+    fn a_slug_run_names_the_seed_only_with_a_word_outside_the_question() {
+        let parse = |id: &str| {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("evals/bp-research-plants/{id}.md"));
+            Fixture::parse(id, &std::fs::read_to_string(path).unwrap()).unwrap().research.unwrap()
+        };
+        let keep = parse("plant-9");
+        let seed = &keep.plants[0];
+        assert!(
+            names("The id's \"sets KEEP to 8\" is stale", seed, &asked(&keep.question), false),
+            "8 is beyond the question"
+        );
+        assert!(
+            !names("The sandbox module sets KEEP from the env", seed, &asked(&keep.question), false),
+            "sets is set"
+        );
+        let check = parse("control-1");
+        let row = "The check module has no unit tests of its own";
+        assert!(
+            !names(row, &check.plants[0], &asked(&check.question), false),
+            "the check module has: the question's words"
+        );
+        assert!(
+            names("The module has 108 lines", &check.plants[0], &asked(&check.question), false),
+            "108 is beyond it"
+        );
     }
 
     /// The pilot as the regression set (`m8-pilot/result.md`, the hand grade): kills on plants 2 to 5, with the match

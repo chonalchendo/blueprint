@@ -683,8 +683,8 @@ mod tests {
     }
 
     /// The development set's `control-1` seeds the true learning: `check.rs` has 108 lines. A `falsified` row that
-    /// holds `108` or names the seed (its id, its whole title, four words of its slug) is a false contradiction;
-    /// `1080` is not `108`; a second such row is a duplicate; four words of the title are the question's words.
+    /// holds `108` or names the seed (its id, its whole title) is a false contradiction; `1080` is not `108`; a second
+    /// such row is a duplicate; four words of the title, or of the slug with no word beyond the question, name nothing.
     #[test]
     fn a_falsified_row_on_a_control_is_a_false_contradiction() {
         let ran = ["wc -l < crates/bp-tool/src/check.rs"];
@@ -705,9 +705,8 @@ mod tests {
         assert!(!falsely.pass);
         let titled = control("| Per bp-tool's src, the check count is stale | falsified | its title | documented |");
         assert_eq!(calls(&titled), [Call::None], "four words of the title are the question's: no name");
-        let slugged =
-            control("| The learning says the check module has a stale count | falsified | its slug | documented |");
-        assert_eq!(calls(&slugged), [Call::False], "four words of the slug name the seed");
+        let topic = control("| The check module has no unit tests of its own | falsified | `check.rs` | inferred |");
+        assert!(calls(&topic) == [Call::None] && topic.pass, "a slug run of the question's words names nothing");
     }
 
     /// The line of a cite is no `match:` or `unless:` word (review of PR 81, finding 1): `sandbox.rs:16` is not the
@@ -771,7 +770,7 @@ mod tests {
         assert!(calls(&g) == [Call::None; 2] && g.killed.is_empty(), "xtask and sandbox are the question's words");
         let slugged = nouns.replace("The xtask sandbox hides", "The sandbox module sets KEEP: it hides");
         let g = research("plant-9", &lead(&ran, &report(&slugged)), none);
-        assert_eq!(calls(&g), [Call::None, Call::Kill(0)], "four words of the slug name it");
+        assert!(g.killed.is_empty(), "a slug run of the question's words (`sets` is `set`) names nothing");
     }
 
     /// The lead dispatched a child; the child ran the settle command, the lead did not. The row is `relayed`: a miss.
