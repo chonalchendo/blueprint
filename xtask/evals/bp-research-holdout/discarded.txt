@@ -1,0 +1,233 @@
+measurement:files:crates/bp-diagram indistinct fewer than two nouns a search finds alone (tried diagram)
+two-hop:crates/bp-tool/tests/review_rows.rs>src/new.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/ledger.rs>crates/bp-tool/tests/bundle.rs:17:Number:TOKENS indistinct fewer than two nouns a search finds alone (tried bytes, uses, token)
+two-hop:crates/bp-diagram/src/grid.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/grid.rs names a file the clone does not hold
+two-hop:crates/bp-diagram/src/label.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/label.rs names a file the clone does not hold
+two-hop:xtask/src/lines.rs>build.rs not-in-clone xtask/src/lines.rs names a file the clone does not hold
+two-hop:crates/bp-diagram/src/route.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/route.rs names a file the clone does not hold
+two-hop:xtask/src/eval_kills.rs>NN-*.md not-in-clone xtask/src/eval_kills.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>control-<n>.md not-in-clone xtask/src/mutants.rs names a file the clone does not hold
+two-hop:crates/bp-vault/src/write.rs>a1.md not-in-clone crates/bp-vault/src/write.rs names a file the clone does not hold
+two-hop:crates/bp-diagram/src/search.rs>m5-diagram-tools.md not-in-clone crates/bp-diagram/src/search.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>xtask/src/mutants_walk.rs:19:Number:CHUNK indistinct the cited file holds the true word
+two-hop:crates/bp-install/src/spec.rs>AGENTS.md not-in-clone crates/bp-install/src/spec.rs names a file the clone does not hold
+two-hop:crates/bp-tool/src/diagram.rs>m5-interactive-architecture.md not-in-clone crates/bp-tool/src/diagram.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/install.rs>CLAUDE.md not-in-clone crates/bp-install/tests/install.rs names a file the clone does not hold
+two-hop:crates/bp-vault/src/write.rs>a[1].md not-in-clone crates/bp-vault/src/write.rs names a file the clone does not hold
+two-hop:crates/bp-tool/src/delta.rs>m5-design-evidence.md not-in-clone crates/bp-tool/src/delta.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/ledger.rs>SKILL.md not-in-clone crates/bp-install/tests/ledger.rs names a file the clone does not hold
+two-hop:xtask/src/eval_end.rs>crates/bp-tool/src/cut.rs not-in-clone xtask/src/eval_end.rs names a file the clone does not hold
+two-hop:crates/bp-install/tests/install.rs>AGENTS.md not-in-clone crates/bp-install/tests/install.rs names a file the clone does not hold
+two-hop:crates/bp-install/src/section.rs>AGENTS.md not-in-clone crates/bp-install/src/section.rs names a file the clone does not hold
+two-hop:crates/bp-vault/src/lib.rs>notes.md not-in-clone crates/bp-vault/src/lib.rs names a file the clone does not hold
+two-hop:crates/bp-tool/tests/bundle.rs>SKILL.md not-in-clone crates/bp-tool/tests/bundle.rs names a file the clone does not hold
+two-hop:crates/bp-tool/tests/review_rows.rs>src/old.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:xtask/src/eval_fixture.rs>analysis/review-pr-*.md not-in-clone xtask/src/eval_fixture.rs names a file the clone does not hold
+two-hop:crates/bp-install/src/spec.rs>analysis/bundle-install-spike.md not-in-clone crates/bp-install/src/spec.rs names a file the clone does not hold
+two-hop:xtask/src/mutants.rs>mutant-<n>-<i>.md not-in-clone xtask/src/mutants.rs names a file the clone does not hold
+two-hop:crates/bp-tool/tests/review_rows.rs>src/a.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:crates/bp-tool/tests/review_rows.rs>src/b.rs not-in-clone crates/bp-tool/tests/review_rows.rs names a file the clone does not hold
+two-hop:crates/bp-view/src/client.rs>build.rs not-in-clone crates/bp-view/src/client.rs names a file the clone does not hold
+design:crates/bp-diagram/src/svg.rs:3:Negation:never indistinct question leaks: the clone holds `states are classes so`
+design:xtask/src/eval.rs:17:Negation:is indistinct no clause boundary
+design:bundle/skills/bp-shape/SKILL.md:14:Negation:is indistinct question leaks: the clone holds `open when its state`
+design:bundle/skills/bp-review/SKILL.md:36:Negation:is indistinct the flip sits beside a negation
+design:crates/bp-tool/src/carry.rs:4:Negation:never indistinct question leaks: the clone holds `the text so a`
+design:xtask/src/mutants.rs:20:Name:mutants_walk.rs indistinct question leaks: the clone holds `one cargo mutants call`
+design:crates/bp-diagram/src/nodes.rs:10:Number:PAD indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-row-to-20 out of `bp search diagram`
+design:bundle/skills/bp-design/references/gates.md:25:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:bundle/skills/bp-design/references/revision.md:25:Negation:is indistinct question leaks: the clone holds `does the parent needs`
+design:crates/bp-read/src/objects.rs:1:Negation:is indistinct question leaks: the clone holds `typed and ts-rs exports`
+design:xtask/src/mutants_walk.rs:19:Number:CHUNK indistinct match word too short
+design:crates/bp-diagram/src/route.rs:2:Negation:never indistinct question leaks: the clone holds `tracks sit 12 px`
+design:bundle/templates/milestone.md:5:Negation:is indistinct the line holds TODO
+design:xtask/src/eval_fixture.rs:27:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:bundle/skills/bp-design/references/data-model.md:13:Negation:is indistinct question leaks: the clone holds `when the data-model design`
+design:crates/bp-vault/src/write.rs:9:Negation:is indistinct the flip sits beside a negation
+design:xtask/src/mutants_walk.rs:6:Number:113 indistinct question leaks: the clone holds `s per bp-tool mutant`
+design:bundle/skills/bp-design/references/revision.md:3:Negation:is indistinct question leaks: the clone holds `load this reference when`
+design:bundle/skills/bp-design/references/decision.md:3:Negation:is indistinct question leaks: the clone holds `load this file when`
+design:crates/bp-diagram/src/search.rs:2:Negation:never indistinct question leaks: the clone holds `a over the gutter`
+design:bundle/skills/bp-design/references/quality.md:13:Negation:is indistinct question leaks: the clone holds `a scenario with no`
+design:crates/bp-diagram/src/legend.rs:2:Negation:is indistinct question leaks: the clone holds `a named legend that`
+design:crates/bp-diagram/src/scene.rs:162:Number:MARGIN indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-row-to-20 out of `bp search diagram`
+design:crates/bp-diagram/src/diff.rs:2:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:bundle/skills/bp-design/references/container.md:60:Negation:is indistinct fewer than two nouns a search finds alone (tried view)
+design:.github/pull_request_template.md:7:Number:20 indistinct question leaks: the clone holds `a sentence holds at`
+design:xtask/src/eval_fixture.rs:24:Negation:is indistinct no clause boundary
+design:crates/bp-forge/src/gh.rs:3:Negation:never indistinct question leaks: the clone holds `enters an agent's environment`
+design:bundle/skills/bp-design/references/system.md:12:Negation:is indistinct fewer than two nouns a search finds alone (tried kind)
+design:crates/bp-vault/src/closed.rs:1:Negation:is indistinct question leaks: the clone holds `every enumeration the vault`
+design:crates/bp-diagram/src/spec.rs:2:Negation:never indistinct question leaks: the clone holds `the agent gives cells`
+design:crates/bp-check/src/process.rs:6:Negation:is indistinct question leaks: the clone holds `the workspace denies unsafe`
+design:bundle/skills/bp-deliberate/SKILL.md:10:Negation:is indistinct question leaks: the clone holds `an open thread on`
+design:crates/bp-change/src/intents.rs:166:Number:STACK_DEPTH indistinct match word too short
+design:crates/bp-diagram/src/label.rs:11:Number:GAP indistinct match word too short
+design:xtask/src/eval_kills.rs:3:Name:eval_grade::verdicts indistinct no clause boundary
+design:crates/bp-tool/src/delta.rs:5:Negation:is indistinct no clause boundary
+design:xtask/src/eval_fixture.rs:28:Negation:never no-command no fragment of the line is the file's alone
+design:crates/bp-view/src/forge.rs:1:Negation:is indistinct question leaks: the clone holds `rewritten from the clone`
+design:xtask/src/eval.rs:10:Negation:is indistinct question leaks: the clone holds `a retry runs only`
+design:crates/bp-diagram/src/search.rs:14:Number:BEND indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-row-to-20 out of `bp search diagram`
+measurement:lines:crates/bp-tool/src/walk.rs indistinct it pushes shared/learnings/in-bp-tool-s-tests-the-broken-file-has-64-lines out of `bp search tool`
+measurement:lines:crates/bp-diagram/src/diff.rs indistinct fewer than two nouns a search finds alone (tried diagram, diff)
+measurement:lines:crates/bp-diagram/tests/large.rs indistinct fewer than two nouns a search finds alone (tried large, diagram, tests, file)
+measurement:tests:xtask indistinct fewer than two nouns a search finds alone (tried xtask)
+measurement:lines:crates/bp-vault/src/fingerprint.rs indistinct fewer than two nouns a search finds alone (tried fingerprint, vault)
+design:bundle/skills/bp-design/references/discovery.md:66:Negation:is indistinct the flip sits beside a negation
+design:bundle/skills/bp-design/references/diagrams.md:92:Number:5 indistinct match word too short
+design:bundle/skills/bp-design/references/product.md:15:Negation:is indistinct question leaks: the clone holds `missing and which step`
+design:xtask/src/mutants.rs:20:Number:300 indistinct question leaks: the clone holds `each test has a`
+design:xtask/src/eval_fixture.rs:31:Negation:is indistinct no clause boundary
+design:bundle/skills/bp-design/references/system.md:46:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:bundle/skills/bp-derive/SKILL.md:12:Negation:is indistinct question leaks: the clone holds `an issue with the`
+design:crates/bp-view/src/forge.rs:2:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:bundle/templates/decision.md:5:Negation:is indistinct the line holds TODO
+design:crates/bp-tool/tests/bundle.rs:2:Negation:is indistinct question leaks: the clone holds `read by the contract`
+design:crates/bp-vault/src/fingerprint.rs:1:Number:240 indistinct question leaks: the clone holds `hashing every file costs`
+design:crates/bp-vault/src/fingerprint.rs:1:Negation:is indistinct question leaks: the clone holds `the fingerprint whether the`
+design:bundle/skills/bp-design/references/gates.md:55:Negation:is indistinct fewer than two nouns a search finds alone (tried answer)
+design:xtask/src/eval_fixture.rs:1:Negation:is indistinct question leaks: the clone holds `a fixture and the`
+design:crates/bp-vault/src/fingerprint.rs:4:Negation:always indistinct no clause boundary
+design:crates/bp-diagram/src/diff.rs:2:Negation:never indistinct question leaks: the clone holds `by label or place`
+design:crates/bp-check/src/process.rs:23:Number:TAIL indistinct it pushes shared/learnings/in-bp-check-s-src-the-nodes-module-has-450-lines out of `bp search check`
+design:bundle/skills/bp-design/references/decision.md:12:Negation:is indistinct fewer than two nouns a search finds alone (tried reverse)
+design:bundle/skills/bp-design/references/strategic.md:64:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:xtask/src/mutants.rs:29:Name:eval_fixture.rs indistinct no clause boundary
+design:crates/bp-diagram/src/label.rs:2:Negation:is indistinct question leaks: the clone holds `when no spot on`
+design:xtask/src/eval_kills.rs:4:Name:holdout_gain indistinct no clause boundary
+design:crates/bp-install/tests/ledger.rs:4:Negation:is no-command no fragment of the line is the file's alone
+design:bundle/skills/bp-design/references/workflow-model.md:31:Negation:is indistinct question leaks: the clone holds `one bounded move by`
+design:crates/bp-vault/src/index.rs:2:Negation:is indistinct fewer than two nouns a search finds alone (tried file)
+design:crates/bp-install/src/hashes.rs:6:Negation:is indistinct no clause boundary
+design:xtask/src/mutants_walk.rs:5:Negation:is indistinct no clause boundary
+design:crates/bp-install/src/lib.rs:4:Negation:is indistinct fewer than two nouns a search finds alone (tried install)
+design:crates/bp-vault/src/index.rs:24:Number:SCHEMA indistinct fewer than two nouns a search finds alone (tried index, SCHEMA, vault)
+design:bundle/skills/bp-design/SKILL.md:50:Negation:is indistinct the line holds TODO
+design:crates/bp-diagram/src/route.rs:11:Number:EDGE indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-row-to-20 out of `bp search diagram`
+design:crates/bp-read/src/objects.rs:3:Negation:is indistinct question leaks: the clone holds `a field the json`
+design:bundle/roles/bp-researcher.md:13:Negation:is indistinct no clause boundary
+design:bundle/skills/bp-derive/SKILL.md:8:Negation:is indistinct question leaks: the clone holds `in this text m`
+design:bundle/skills/bp-design/references/strategic.md:29:Negation:is indistinct question leaks: the clone holds `the metric shows when`
+design:bundle/skills/bp-design/references/diagrams.md:92:Number:8 false-at-base the settle output holds the unless word `9`
+design:xtask/src/sandbox.rs:20:Number:KEEP indistinct the target xtask/src/sandbox.rs:20 is planted already
+design:crates/bp-diagram/tests/large.rs:4:Number:29 indistinct no clause boundary
+design:crates/bp-tool/src/check.rs:2:Number:0 indistinct match word too short
+design:xtask/src/main.rs:5:Name:mutants.rs false-at-base the settle output holds the unless word `eval.rs`
+design:bundle/roles/bp-researcher.md:10:Number:3 false-at-base the settle output holds the unless word `2`
+design:bundle/skills/bp-design/references/data-model.md:26:Negation:is indistinct question leaks: the clone holds `a word with two`
+design:bundle/skills/bp-design/references/workflow-model.md:77:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:bundle/skills/bp-design/references/revision.md:24:Negation:never indistinct question leaks: the clone holds `write a new decision`
+design:crates/bp-tool/tests/bundle.rs:17:Number:TOKENS indistinct it pushes shared/learnings/in-bp-tool-s-tests-the-broken-file-has-64-lines out of `bp search tool`
+design:crates/bp-tool/src/review_rows.rs:3:Negation:is indistinct question leaks: the clone holds `a review the responder`
+design:bundle/skills/bp-capture/SKILL.md:8:Number:3 false-at-base the settle output holds the unless word `2`
+design:bundle/skills/bp-derive/SKILL.md:11:Negation:is indistinct no clause boundary
+design:xtask/src/mutants.rs:22:Number:160 indistinct question leaks: the clone holds `it stops when it`
+design:bundle/skills/bp-design/references/product.md:12:Negation:is indistinct question leaks: the clone holds `the appetite is the`
+design:bundle/always-on.md:47:Negation:is indistinct question leaks: the clone holds `re-asked a waived block`
+design:bundle/skills/bp-design/references/revision.md:40:Negation:is indistinct question leaks: the clone holds `accepted when the human`
+design:crates/bp-tool/src/row.rs:1:Negation:is indistinct question leaks: the clone holds `a verb outside the`
+design:crates/bp-diagram/tests/large.rs:1:Number:8 indistinct match word too short
+design:xtask/src/eval_fixture.rs:52:Number:WIDE indistinct it pushes shared/learnings/in-xtask-s-src-the-eval-fixture-module-has-1356-lines out of `bp search xtask`
+design:crates/bp-tool/tests/land.rs:2:Negation:is indistinct no clause boundary
+design:xtask/src/mutants_walk.rs:10:Number:20 indistinct question leaks: the clone holds `cap bounds a pull`
+design:bundle/skills/bp-design/references/gates.md:38:Negation:is indistinct question leaks: the clone holds `verify the section that`
+design:bundle/skills/bp-design/references/component.md:5:Number:6 indistinct match word too short
+design:bundle/skills/bp-shape/SKILL.md:20:Negation:is indistinct question leaks: the clone holds `the goal and what`
+design:crates/bp-diagram/tests/rules.rs:2:Negation:never no-command no fragment of the line is the file's alone
+design:bundle/skills/bp-design/references/data-model.md:95:Negation:is indistinct question leaks: the clone holds `worth its density only`
+design:bundle/skills/bp-design/references/decision.md:32:Negation:never indistinct question leaks: the clone holds `edits an accepted decision`
+design:bundle/skills/bp-design/references/system.md:38:Negation:is indistinct question leaks: the clone holds `one node with the`
+design:bundle/skills/bp-design/references/container.md:21:Negation:is indistinct question leaks: the clone holds `one bounded context per`
+design:bundle/skills/bp-design/references/gates.md:43:Negation:is indistinct question leaks: the clone holds `one diagram shows one`
+design:crates/bp-diagram/src/layout.rs:22:Number:ROUNDS indistinct match word too short
+measurement:lines:xtask/src/mutants_walk.rs indistinct it pushes shared/learnings/in-xtask-s-src-the-eval-fixture-module-has-1356-lines out of `bp search xtask`
+design:bundle/skills/bp-shape/SKILL.md:28:Negation:is indistinct question leaks: the clone holds `goal holds the goal`
+design:xtask/src/scratch.rs:6:Number:15 indistinct fewer than two nouns a search finds alone (tried )
+design:bundle/always-on.md:15:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:crates/bp-diagram/src/rules.rs:8:Number:TRACK indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-row-to-20 out of `bp search diagram`
+design:bundle/skills/bp-shape/SKILL.md:8:Number:3 false-at-base the settle output holds the unless word `4`
+measurement:tests:crates/bp-tool indistinct fewer than two nouns a search finds alone (tried tool)
+measurement:lines:xtask/src/lines.rs indistinct it pushes shared/learnings/in-xtask-s-src-the-eval-fixture-module-has-1356-lines out of `bp search xtask`
+measurement:lines:crates/bp-vault/src/write.rs indistinct fewer than two nouns a search finds alone (tried write, vault)
+measurement:lines:crates/bp-tool/tests/diagram_write.rs indistinct fewer than two nouns a search finds alone (tried diagram, tool, write, tests, file)
+measurement:lines:crates/bp-tool/tests/walk.rs indistinct it pushes shared/learnings/in-bp-tool-s-tests-the-broken-file-has-64-lines out of `bp search tool`
+measurement:files:crates/bp-read indistinct match word too short
+measurement:lines:crates/bp-tool/tests/claim.rs indistinct it pushes shared/learnings/in-bp-tool-s-tests-the-broken-file-has-64-lines out of `bp search tool`
+measurement:files:xtask indistinct fewer than two nouns a search finds alone (tried xtask)
+design:crates/bp-tool/src/check.rs:4:Number:3 indistinct match word too short
+design:bundle/skills/bp-derive/SKILL.md:8:Number:3 false-at-base the settle output holds the unless word `4`
+design:crates/bp-tool/src/lib.rs:40:Number:CONTRACT indistinct match word too short
+design:crates/bp-tool/src/check.rs:3:Number:2 indistinct match word too short
+design:crates/bp-diagram/src/seq.rs:21:Number:CHIP indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-row-to-20 out of `bp search diagram`
+design:crates/bp-vault/src/write.rs:9:Negation:never no-command no fragment of the line is the file's alone
+design:crates/bp-tool/src/delta.rs:7:Negation:never indistinct no clause boundary
+design:bundle/skills/bp-design/references/quality.md:10:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:crates/bp-tool/src/rename.rs:2:Negation:is indistinct question leaks: the clone holds `the file and its`
+design:bundle/skills/bp-respond/SKILL.md:12:Negation:is indistinct question leaks: the clone holds `each row under the`
+design:crates/bp-diagram/src/route.rs:12:Number:TRACK indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-row-to-20 out of `bp search diagram`
+design:crates/bp-read/src/world.rs:1:Negation:never indistinct question leaks: the clone holds `the forge is a`
+design:xtask/src/mutants.rs:21:Negation:is indistinct question leaks: the clone holds `a mutant that times`
+design:crates/bp-tool/src/editorial.rs:5:Negation:is indistinct question leaks: the clone holds `no finish line runs`
+design:crates/bp-vault/src/walk.rs:3:Negation:is indistinct question leaks: the clone holds `evidence about its parent`
+design:bundle/skills/bp-triage-drift/SKILL.md:13:Negation:is indistinct the flip sits beside a negation
+design:crates/bp-check/src/process.rs:4:Negation:is indistinct no clause boundary
+design:bundle/skills/bp-design/references/data-model.md:28:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:bundle/skills/bp-design/references/data-model.md:66:Negation:is indistinct question leaks: the clone holds `decide whether one node`
+design:crates/bp-diagram/tests/large.rs:1:Number:48 indistinct no clause boundary
+design:crates/bp-vault/src/walk.rs:6:Number:2 indistinct match word too short
+design:bundle/skills/bp-design/references/component.md:35:Negation:is indistinct question leaks: the clone holds `an invariant is a`
+design:bundle/skills/bp-review/SKILL.md:16:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:bundle/skills/bp-design/references/strategic.md:56:Negation:is indistinct no clause boundary
+design:bundle/skills/bp-design/references/workflow-model.md:56:Negation:is indistinct question leaks: the clone holds `the one result that`
+design:bundle/skills/bp-design/references/revision.md:20:Negation:is indistinct the flip sits beside a negation
+design:crates/bp-diagram/src/grid.rs:13:Number:MARGIN indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-row-to-20 out of `bp search diagram`
+design:bundle/skills/bp-review/SKILL.md:36:Negation:never indistinct no clause boundary
+design:xtask/src/gh.rs:7:Negation:is indistinct question leaks: the clone holds `written by a rename`
+design:crates/bp-diagram/src/search.rs:13:Number:TRACK indistinct it pushes projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-row-to-20 out of `bp search diagram`
+design:bundle/skills/bp-review/SKILL.md:34:Negation:is indistinct question leaks: the clone holds `the finding says what`
+design:xtask/src/main.rs:3:Number:2 indistinct match word too short
+measurement:lines:xtask/src/gh.rs indistinct fewer than two nouns a search finds alone (tried xtask)
+measurement:lines:xtask/src/eval_sandbox.rs indistinct it pushes shared/learnings/in-xtask-s-src-the-eval-fixture-module-has-1356-lines out of `bp search xtask`
+measurement:lines:xtask/src/mutants.rs indistinct it pushes shared/learnings/in-xtask-s-src-the-eval-fixture-module-has-1356-lines out of `bp search xtask`
+measurement:lines:crates/bp-tool/tests/rename.rs indistinct it pushes shared/learnings/in-bp-tool-s-tests-the-broken-file-has-64-lines out of `bp search tool`
+measurement:tests:crates/bp-operation indistinct match word too short
+measurement:lines:crates/bp-install/src/section.rs indistinct fewer than two nouns a search finds alone (tried section, install)
+design:crates/bp-tool/src/done.rs:16:Number:RETRIEVAL indistinct it pushes shared/learnings/in-bp-tool-s-tests-the-broken-file-has-64-lines out of `bp search tool`
+design:bundle/skills/bp-review/SKILL.md:21:Number:10 no-command no fragment of the line is the file's alone
+design:crates/bp-vault/src/write.rs:2:Negation:is indistinct no clause boundary
+design:crates/bp-tool/src/stack.rs:2:Name:bp_read::inputs::base indistinct question leaks: the clone holds `land reads the base`
+design:xtask/src/gh.rs:4:Negation:never indistinct fewer than two nouns a search finds alone (tried network)
+design:crates/bp-diagram/src/search.rs:4:Negation:is indistinct no clause boundary
+design:crates/bp-vault/src/index/integrity.rs:2:Negation:is indistinct question leaks: the clone holds `out of every project's`
+design:bundle/skills/bp-design/references/diagrams.md:32:Negation:is indistinct question leaks: the clone holds `container architecture at component`
+design:xtask/src/mutants.rs:8:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:bundle/skills/bp-design/references/workflow-model.md:12:Negation:is indistinct question leaks: the clone holds `when the system design`
+design:bundle/skills/bp-design/references/product.md:3:Negation:is indistinct question leaks: the clone holds `load this file when`
+design:bundle/skills/bp-design/references/data-model.md:20:Negation:is indistinct question leaks: the clone holds `temporal confusion mixes what`
+design:crates/bp-check/src/integrity.rs:2:Negation:is indistinct question leaks: the clone holds `not the code's because`
+design:bundle/always-on.md:6:Number:3 false-at-base the settle output holds the unless word `2`
+design:bundle/skills/bp-review/SKILL.md:26:Negation:is indistinct no clause boundary
+design:bundle/skills/bp-review/SKILL.md:21:Negation:is indistinct question leaks: the clone holds `its default of 2`
+design:xtask/src/mutants.rs:19:Number:8 indistinct match word too short
+design:bundle/skills/bp-design/references/discovery.md:56:Negation:is indistinct question leaks: the clone holds `is not in the`
+design:crates/bp-tool/tests/machines.rs:3:Negation:is indistinct no clause boundary
+design:README.md:3:Negation:is indistinct question leaks: the clone holds `converted into this repository's`
+design:crates/bp-view/src/forge.rs:2:Negation:never no-command no fragment of the line is the file's alone
+design:bundle/templates/issue.md:5:Negation:is indistinct the line holds TODO
+design:crates/bp-vault/src/walk.rs:26:Number:ID_LINE_CHARS indistinct the target crates/bp-vault/src/walk.rs:26 is planted already
+design:crates/bp-vault/src/write.rs:2:Negation:never indistinct no clause boundary
+design:crates/bp-tool/src/delta.rs:6:Negation:is indistinct question leaks: the clone holds `base hashes the design`
+design:bundle/skills/bp-design/references/container.md:5:Negation:is indistinct no clause boundary
+design:xtask/src/mutants_walk.rs:10:Number:29 indistinct no clause boundary
+design:xtask/src/eval_sandbox.rs:5:Negation:is indistinct no clause boundary
+design:bundle/skills/bp-design/references/product.md:7:Negation:is indistinct fewer than two nouns a search finds alone (tried method)
+design:bundle/skills/bp-design/references/diagrams.md:92:Number:9 false-at-base the settle output holds the unless word `8`
+design:xtask/src/main.rs:1:Number:2 indistinct match word too short
+design:bundle/skills/bp-design/references/product.md:31:Negation:is indistinct fewer than two nouns a search finds alone (tried step)
+design:crates/bp-vault/src/write.rs:5:Negation:is indistinct fewer than two nouns a search finds alone (tried file)
+design:crates/bp-tool/src/create.rs:2:Number:3 indistinct match word too short
+design:bundle/skills/bp-review/SKILL.md:14:Negation:is indistinct no clause boundary
+design:bundle/skills/bp-respond/SKILL.md:8:Number:3 false-at-base the settle output holds the unless word `2`
+design:crates/bp-diagram/src/rules.rs:12:Number:CORNER indistinct match word too short
+design:bundle/skills/bp-review/SKILL.md:8:Number:3 false-at-base the settle output holds the unless word `2`
