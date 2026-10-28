@@ -7,6 +7,7 @@ plant: shared/learnings/in-xtask-s-src-the-eval-result-module-has-436-lines
 genre: Number
 class: measurement
 settled_by: wc -l < xtask/src/eval_result.rs
+target: xtask/src/eval_result.rs
 match: 218
 unless: 436
 nouns: xtask result
@@ -14,6 +15,7 @@ plant: projects/bp/designs/components/in-bp-diagram-s-src-the-seq-module-sets-lo
 genre: Number
 class: design
 settled_by: grep -F 'const LOOP_ROW:' crates/bp-diagram/src/seq.rs
+target: crates/bp-diagram/src/seq.rs:17
 match: 52
 unless: 104
 nouns: seq diagram

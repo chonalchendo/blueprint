@@ -6,6 +6,7 @@ plant: shared/learnings/in-bp-vault-s-tests-the-write-path-file-has-179-lines
 genre: Number
 class: measurement
 settled_by: wc -l < crates/bp-vault/tests/write_path.rs
+target: crates/bp-vault/tests/write_path.rs
 match: 358
 unless: 179
 nouns: write tests

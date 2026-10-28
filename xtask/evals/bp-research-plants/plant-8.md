@@ -6,6 +6,7 @@ plant: shared/learnings/in-xtask-s-tests-the-stage-file-has-100-lines
 genre: Number
 class: measurement
 settled_by: wc -l < xtask/tests/stage.rs
+target: xtask/tests/stage.rs
 match: 50
 unless: 100
 nouns: xtask stage

@@ -1,12 +1,12 @@
 //! `cargo xtask plants --verify --fixtures <dir>` (31, design change 2): no block needs a model to check a plant's
 //! truth. It builds `bp`, clones every distinct `base:` once and runs each plant's and control's `settled_by:` at the
 //! clone's root. It refuses a seed whose output holds no `match:` word or holds an `unless:` word, matched by
-//! [`holds`], and a seed whose URL the clone holds. It refuses a plant whose settle line ([`key`]) another plant of
-//! any `xtask/evals/bp-research-*` set holds, a question that leaks (`plants_leak`), and a question or a title that
-//! breaks the rules the planter writes them by (`plants_text::breaks`). Then it seeds every fixture into one scratch
-//! copy of `$BP_VAULT` (`eval_sandbox::seed`) and refuses a seed that `bp search <noun> --json` does not return in its
-//! first five rows, for each noun alone: `bp search` needs every term and has no stemming (`m8-pilot/result.md`,
-//! finding 3). It prints one line per fixture.
+//! [`holds`], and a seed whose URL the clone holds. It refuses a plant whose `target:` is not its settle line
+//! ([`key`]), or whose settle line another plant of any `xtask/evals/bp-research-*` set holds, a question that leaks
+//! (`plants_leak`), and a question or a title that breaks the rules the planter writes them by (`plants_text::breaks`).
+//! Then it seeds every fixture into one scratch copy of `$BP_VAULT` (`eval_sandbox::seed`) and refuses a seed that
+//! `bp search <noun> --json` does not return in its first five rows, for each noun alone: `bp search` needs every term
+//! and has no stemming (`m8-pilot/result.md`, finding 3). It prints one line per fixture.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -95,6 +95,16 @@ pub fn key(clone: &Path, seed: &Seed) -> Option<String> {
     let text = std::fs::read_to_string(clone.join(&t)).unwrap_or_default();
     let line = out.lines().next().and_then(|first| text.lines().position(|l| l == first));
     Some(line.map_or_else(|| t.clone(), |n| format!("{t}:{}", n + 1)))
+}
+
+/// A plant's settle line ([`key`]), or why its `target:` is not that line. A file at `base:` cannot change, so a
+/// mismatch means one of the two fields was edited without the other.
+pub fn placed(clone: &Path, seed: &Seed) -> Result<String, String> {
+    match key(clone, seed) {
+        None => Err("settled_by names no .rs or .md path".into()),
+        Some(t) if t != seed.settle_line => Err(format!("target: `{}` is not the settle line {t}", seed.settle_line)),
+        Some(t) => Ok(t),
+    }
 }
 
 /// The repository cloned at each base, on first use, under one work directory.
@@ -221,12 +231,12 @@ pub fn run(dir: &Path) -> Result<Vec<String>> {
             if r.control {
                 continue;
             }
-            match key(&clone, p) {
-                None => add(format!("{}: settled_by names no .rs or .md path", p.node)),
-                Some(t) if held.get(&t).is_some_and(|at| at.len() > 1) => {
+            match placed(&clone, p) {
+                Err(w) => add(format!("{}: {w}", p.node)),
+                Ok(t) if held.get(&t).is_some_and(|at| at.len() > 1) => {
                     add(format!("{}: target {t} is also planted in {}", p.node, held[&t].join(", ")));
                 }
-                Some(_) => {}
+                Ok(_) => {}
             }
         }
     }

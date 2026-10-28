@@ -24,7 +24,8 @@
 //! in one question. The first `--controls` plants each get a control: the true seed, at the slug of its true title,
 //! with the plant's settle command and its true word. It writes into `--out` in place: the files of an earlier run go
 //! first, and the `--out` set's own settle lines are not held, so the command `generated.txt` records (with the
-//! seed, the base and the vault's head) makes the set again byte for byte.
+//! seed, the base and the vault's head) makes the set again byte for byte. Each plant group carries its settle line as
+//! `target:`, so the holdout seal compares lines across sets, not files.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
@@ -36,10 +37,10 @@ use anyhow::{Context, Result, bail};
 use crate::eval::usage;
 use crate::eval_plant::ROW_SHAPE;
 use crate::eval_sandbox::capture;
-use crate::plants_judge::{Bench, Kept, Search, judge, seed_of, seed_text, title_words};
+use crate::plants_judge::{Bench, Kept, Search, judge, seed_text, title_words};
 use crate::plants_leak::Corpus;
 use crate::plants_pool::{Candidate, candidates, sources};
-use crate::plants_verify::{Clones, key, targets};
+use crate::plants_verify::{Clones, targets};
 
 const USAGE: &str = "usage: cargo xtask plants --list --from <glob>... --seed <s> [--base <sha>] | cargo xtask plants --from <glob>... --count <k> --seed <s> --out <dir> [--controls <n>] [--parts <m>] [--base <sha>] | cargo xtask plants --verify --fixtures <dir>";
 
@@ -173,7 +174,7 @@ fn plant(
                 for w in titles.into_iter().flat_map(|t| title_words(t)) {
                     *words.entry(w).or_default() += 1;
                 }
-                held.extend(key(&clone, &seed_of(&k.c)));
+                held.insert(k.target.clone());
                 kept.push(k);
                 turn += 1;
             }
@@ -272,11 +273,12 @@ fn plant_text(group: &[&Kept], seed: u64, base: &str) -> String {
         let c = &k.c;
         write!(
             s,
-            "plant: {}\ngenre: {}\nclass: {}\nsettled_by: {}\nmatch: {}\nunless: {}\nnouns: {}\n",
+            "plant: {}\ngenre: {}\nclass: {}\nsettled_by: {}\ntarget: {}\nmatch: {}\nunless: {}\nnouns: {}\n",
             k.node,
             c.genre,
             c.class,
             c.settle,
+            k.target,
             c.matches.join(" | "),
             c.unless.join(" | "),
             k.nouns.join(" ")
@@ -309,9 +311,9 @@ mod tests {
     use crate::eval_plant::Research;
     use crate::eval_plant::{Seed, words};
     use crate::plants_flip::{Kinds, flip_name, flip_negation, flip_number};
-    use crate::plants_judge::{unique, worded};
+    use crate::plants_judge::{seed_of, unique, worded};
     use crate::plants_leak::{Corpus, hop_leaks, leaks};
-    use crate::plants_verify::holds;
+    use crate::plants_verify::{holds, key};
 
     fn candidate(class: &'static str) -> Candidate {
         Candidate {
@@ -344,7 +346,8 @@ mod tests {
         let (title, true_title, question) = (t.title, t.true_title, t.question);
         let dir = if class == "design" { "projects/bp/designs/components" } else { "shared/learnings" };
         let (node, control) = (unique(ids, dir, &title), unique(ids, dir, &true_title));
-        Kept { c, nouns: vec!["stops".into(), "tested".into()], node, control, title, true_title, question }
+        let target = "xtask/src/b.rs:2".into();
+        Kept { c, nouns: vec!["stops".into(), "tested".into()], node, control, title, true_title, question, target }
     }
 
     #[test]
@@ -476,6 +479,25 @@ mod tests {
     }
 
     #[test]
+    fn verify_refuses_a_target_off_the_settle_line() {
+        let code = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(code.path().join("xtask/src")).unwrap();
+        std::fs::write(code.path().join("xtask/src/b.rs"), "//! A line.\n//! It stops after 160 tested candidates.\n")
+            .unwrap();
+        let mut p = seed_of(&kept("design", &mut BTreeSet::new()).c);
+        let placed = |p: &Seed| crate::plants_verify::placed(code.path(), p);
+        for (line, ok) in
+            [("xtask/src/b.rs:2", true), ("xtask/src/b.rs:1", false), ("xtask/src/b.rs", false), ("", false)]
+        {
+            p.settle_line = line.into();
+            assert_eq!(placed(&p).is_ok(), ok, "target: {line}");
+        }
+        p.settled_by = "wc -l < xtask/src/b.rs".into();
+        p.settle_line = "xtask/src/b.rs".into();
+        assert_eq!(placed(&p).as_deref(), Ok("xtask/src/b.rs"), "a count's target is its file");
+    }
+
+    #[test]
     fn a_control_is_written_at_its_true_slug() {
         let k = kept("two-hop", &mut BTreeSet::new());
         let f = Fixture::parse("control-1", &control_text(&k, "b")).unwrap();
@@ -550,6 +572,7 @@ mod tests {
         );
         assert_eq!((p.matches.clone(), p.unless.clone()), (vec!["160".to_string()], vec!["320".to_string()]));
         assert_eq!(p.target().as_deref(), Some("xtask/src/b.rs"));
+        assert_eq!(p.settle_line, "xtask/src/b.rs:2", "the group carries its settle line as target:");
         assert!(r.question.ends_with(ROW_SHAPE) && p.nouns.iter().all(|n| r.question.contains(n.as_str())));
         assert!(p.text.contains("https://"), "a seed names a URL");
     }

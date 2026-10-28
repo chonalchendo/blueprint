@@ -6,6 +6,7 @@ plant: projects/bp/designs/components/in-xtask-s-src-the-forge-module-sets-keep-
 genre: Number
 class: design
 settled_by: grep -F 'const KEEP:' xtask/src/forge.rs
+target: xtask/src/forge.rs:21
 match: 16
 unless: 32
 nouns: forge xtask

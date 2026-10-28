@@ -6,6 +6,7 @@ plant: projects/bp/designs/components/in-xtask-s-src-the-sandbox-module-sets-kee
 genre: Number
 class: design
 settled_by: grep -F 'const KEEP:' xtask/src/sandbox.rs
+target: xtask/src/sandbox.rs:20
 match: 16
 unless: 8
 nouns: xtask sandbox

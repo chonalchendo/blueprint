@@ -7,6 +7,7 @@ plant: shared/learnings/in-bp-tool-s-src-the-waiver-module-has-194-lines
 genre: Number
 class: measurement
 settled_by: wc -l < crates/bp-tool/src/waiver.rs
+target: crates/bp-tool/src/waiver.rs
 match: 97
 unless: 194
 nouns: waiver tool
@@ -14,6 +15,7 @@ plant: projects/bp/designs/components/in-bp-diagram-s-src-the-grid-module-sets-g
 genre: Number
 class: design
 settled_by: grep -F 'const GROUP_SIDE:' crates/bp-diagram/src/grid.rs
+target: crates/bp-diagram/src/grid.rs:10
 match: 24
 unless: 12
 nouns: diagram GROUP
