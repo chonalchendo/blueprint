@@ -57,17 +57,19 @@ pub fn project_dir(config: &Path, cwd: &Path) -> PathBuf {
 
 impl Session {
     /// The session of a run of the agent in `cwd`, whose stdout and stderr are `output`. The result line names it. A
-    /// run with no result line (killed at the timeout, or one that died) names none: its session is then the newest in
-    /// the clone's own project directory, which the trial alone uses, and a warning says so. `None` when that directory
-    /// holds no session.
+    /// run with no result line (killed at the timeout, or one that died) names none: its session is then the newest
+    /// directory of the clone's own project directory, which the trial alone uses, that holds `subagents/`, and one with
+    /// a lead of `role` before one without. So `memory/` and another directory the harness writes beside a session are
+    /// never the session (review of PR #80). A warning says so. `None` when no directory holds `subagents/`.
     pub fn find(config: &Path, cwd: &Path, output: &str, role: &str) -> Option<Self> {
         let project = project_dir(config, cwd);
         if let Some(id) = session_id(output) {
             return Some(Self::join(&project.join(id), role));
         }
         let sessions = std::fs::read_dir(&project).into_iter().flatten().flatten().map(|e| e.path());
-        let newest = sessions.filter(|p| p.is_dir()).max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())?;
-        let mut s = Self::join(&newest, role);
+        let joined = sessions.filter(|p| p.join("subagents").is_dir()).map(|p| (Self::join(&p, role), p));
+        let modified = |p: &Path| p.metadata().and_then(|m| m.modified()).ok();
+        let (mut s, _) = joined.max_by_key(|(s, p)| (s.lead.is_some(), modified(p)))?;
         s.warnings.insert(
             0,
             format!("the agent's output holds no result line; this is the newest session of {}", project.display()),
@@ -245,6 +247,37 @@ mod tests {
             "{run}"
         );
         assert!(Session::find(cfg.path(), Path::new("/tmp/none"), log, "bp-researcher").is_none(), "no session at all");
+    }
+
+    /// The harness writes `memory/` beside a session, and a session without the role's lead may be newer: the fallback
+    /// takes neither (review of PR #80, fold review).
+    #[test]
+    fn the_fallback_skips_a_memory_directory_and_prefers_a_lead() {
+        let cfg = tempfile::tempdir().unwrap();
+        let clone = Path::new("/tmp/bp-forge/Cd34/code");
+        let project = project_dir(cfg.path(), clone);
+        let session = |id: &str, kind: &str| {
+            let sub = project.join(id).join("subagents");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join(format!("agent-{id}.jsonl")), "{}").unwrap();
+            let meta = format!(r#"{{"agentType":"{kind}","spawnDepth":1}}"#);
+            std::fs::write(sub.join(format!("agent-{id}.meta.json")), meta).unwrap();
+        };
+        let later = || std::thread::sleep(std::time::Duration::from_millis(20));
+        session("own", "bp-researcher");
+        later();
+        session("helper", "general-purpose");
+        later();
+        std::fs::create_dir_all(project.join("memory")).unwrap();
+        std::fs::write(project.join("memory/MEMORY.md"), "notes").unwrap();
+        let s = Session::find(cfg.path(), clone, "Killed\n", "bp-researcher").unwrap();
+        assert_eq!(s.id, "own", "memory/ is newer and holds no subagents/; helper is newer and holds no lead");
+        assert!(s.lead.is_some_and(|l| l.ends_with("agent-own.jsonl")));
+        let s = Session::find(cfg.path(), clone, "Killed\n", "bp-reviewer").unwrap();
+        assert_eq!(s.id, "helper", "with no lead of the role anywhere, the newest session");
+        std::fs::remove_dir_all(project.join("own")).unwrap();
+        std::fs::remove_dir_all(project.join("helper")).unwrap();
+        assert!(Session::find(cfg.path(), clone, "Killed\n", "bp-researcher").is_none(), "memory/ alone is no session");
     }
 
     /// The review, complete and respond trials join the same way: their lead is the role at depth 1.
