@@ -522,4 +522,27 @@ mod tests {
             }
         }
     }
+
+    /// The body's report shape puts one `searched:` line per claim between `at:` and the table (fold 1 of PR #85).
+    /// The parser finds the table by its `claim` header, so the lines change neither the rows nor `at:`. The body's
+    /// row header is the fixtures' word for word.
+    #[test]
+    fn searched_lines_between_at_and_the_table_parse_to_the_same_rows() {
+        let header = ROW_SHAPE.split('`').nth(3).unwrap();
+        let body = include_str!("../../bundle/skills/bp-research/SKILL.md");
+        assert!(header.starts_with("| claim |") && body.contains(header), "the body's row header is {header}");
+        let rows = "| `KEEP` is 8 | holds | `crates/bp-forge/src/run.rs:12` | measured |\n\
+                    | The learning's KEEP of 4 is stale | falsified | `shared/learnings/keep-4` | measured |\n";
+        let plain = format!(
+            "## Answer\n\nEight.\n\n## Findings\n\nat: abc1234\n\n{header}\n|---|---|---|---|\n{rows}\n## Open\n"
+        );
+        let searched = plain.replace(
+            "at: abc1234\n",
+            "at: abc1234\nsearched: KEEP forge: shared/learnings/keep-4\nsearched: forge runs kept: none\n",
+        );
+        let (a, b) = (findings(&plain).unwrap(), findings(&searched).unwrap());
+        assert_eq!(a.0.as_deref(), Some("abc1234"));
+        assert_eq!((a.0, a.1.len()), (b.0, 2));
+        assert_eq!(a.1, b.1);
+    }
 }
