@@ -75,7 +75,8 @@ fn beyond(w: &str, asked: &BTreeSet<String>) -> bool {
 /// words with one word [`beyond`] the question `asked`, so "the learning's id says 'at most 40 candidates'" names
 /// `…-tests-at-most-40-candidates` (the pilot's control 5), and "the check module has" names nothing: the question's
 /// topic words cannot name the seed on their own. With `flip`, an `unless:` word names it too, when the row also
-/// holds an [`unasked`] word of the slug: a figure alone ("the forge keeps 8 runs") names no plant (fold finding N4).
+/// holds an [`unasked`] word of the slug or refers to the seed: its kind word (`learning`, `design`), `vault`, `seed` or
+/// `the id`. A figure alone ("the forge keeps 8 runs") names no plant (fold findings N4 and N5).
 /// The `nouns:` words and a part of the title are the question's words, so they name nothing (finding 2).
 pub(crate) fn names(text: &str, seed: &Seed, asked: &BTreeSet<String>, flip: bool) -> bool {
     let slug = seed.node.rsplit('/').next().unwrap_or_default();
@@ -84,8 +85,13 @@ pub(crate) fn names(text: &str, seed: &Seed, asked: &BTreeSet<String>, flip: boo
     let slugged = words(&slug.replace('-', " "));
     let runs = slugged.windows(RUN).filter(|w| w.iter().any(|w| beyond(w, asked)));
     let held = terms(text);
-    let subject = slugged.iter().any(|w| held.contains(w) && unasked(w, asked));
-    text.to_lowercase().contains(slug)
+    let lower = text.to_lowercase();
+    let split: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let kind = seed.field("kind").unwrap_or_default().to_lowercase();
+    let refers = [kind.as_str(), "vault", "seed"].iter().any(|w| !w.is_empty() && held.contains(*w))
+        || split.windows(2).any(|w| w == ["the", "id"]);
+    let subject = refers || slugged.iter().any(|w| held.contains(w) && unasked(w, asked));
+    lower.contains(slug)
         || (!title.is_empty() && row.windows(title.len()).any(|r| r == title))
         || runs.into_iter().any(|w| row.windows(RUN).any(|r| r == w))
         || (flip && subject && seed.unless.iter().any(|u| holds(text, u)))
