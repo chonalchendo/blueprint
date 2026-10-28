@@ -1,11 +1,13 @@
 // Milestone (18, Milestone; 32, design change 8; mock `milestone-*.html`): a checklist as a gate strip, then its rows:
 // the finish line with each block's last run, the deltas it carries, the concerns and waivers, and the issues with
-// their intents, each opening its Change page. It ends in the stamp when the milestone needs acceptance, else the
-// wait in words. A row whose record kind the vault lacks reads "not in vault" (18, Open). The body follows, folded.
+// their intents, each opening its Change page. It ends in the milestone row's own Moving command, the page's one chip,
+// else the wait in words. A row whose record kind the vault lacks reads "not in vault" (18, Open). The body follows,
+// folded; the rows sit above it inside the document, so a link to a body section opens the fold.
 import { useEffect, useRef } from "react";
 import { useApi } from "../api";
 import { Command } from "../Command";
 import { Document } from "../doc/Document";
+import { outlineOf } from "../doc/markdown";
 import { header } from "../header";
 import { many, words } from "../intents";
 import { Loaded } from "../Loaded";
@@ -29,6 +31,17 @@ function verdict(b: FinishBlock, absent: boolean): string {
   return `${r.verdict} at ${r.head.slice(0, 7) || "no commit"} on ${r.at.slice(0, 10)}`;
 }
 
+/** A `## Finish line` section that names no check block: its lines of prose and its anchor. The converted vault's
+ * milestones hold their finish lines this way. */
+function proseLine(body: string | undefined): { lines: number; anchor: string } | undefined {
+  const anchor = outlineOf(body ?? "").find((h) => h.depth === 2 && h.heading === "Finish line")?.anchor;
+  if (!body || !anchor) return undefined;
+  const lines = body.split("\n");
+  const after = lines.slice(lines.findIndex((l) => /^##\s+Finish line\s*$/.test(l)) + 1);
+  const end = after.findIndex((l) => /^#{1,2}\s/.test(l));
+  return { lines: (end < 0 ? after : after.slice(0, end)).filter((l) => l.trim()).length, anchor };
+}
+
 const tint = (word: string) => (word.startsWith("pass") ? "ok" : /^(fail|timed-out|re-asked|open)/.test(word) ? "bad" : "na");
 
 export function MilestoneView({ m, project }: { m: MilestoneObject; project: string }) {
@@ -39,26 +52,19 @@ export function MilestoneView({ m, project }: { m: MilestoneObject; project: str
   const settled = m.issues.filter((i) => i.status === "resolved" || i.status === "abandoned").length;
   const noConcerns = absent("concern-answer") && absent("waiver");
   const asked = m.concerns.filter((c) => c.state === "open" || c.state === "re-asked").length;
-  const stamp = useRef<HTMLDivElement>(null);
-  // The stamp is the page's one command, so `c` copies it as soon as the page shows (19, principle 6).
-  useEffect(() => void (m.command && stamp.current?.focus({ preventScroll: true })), [m.id, m.command]);
+  const chip = useRef<HTMLDivElement>(null);
+  // The chip is the page's one command, so `c` copies it as soon as the page shows (19, principle 6).
+  useEffect(() => void (m.command && chip.current?.focus({ preventScroll: true })), [m.id, m.command]);
+  const prose = m.finish_line.length === 0 ? proseLine(m.body) : undefined;
+  const inProse = prose && `${many(prose.lines, "line")} in prose, no check block: stamp cannot run them`;
   const strip: [string, string][] = [
-    ["Finish line", m.finish_line.length === 0 ? "no blocks" : noRuns ? "runs not in vault" : `${passed} of ${many(m.finish_line.length, "block")} pass`],
+    ["Finish line", m.finish_line.length === 0 ? (prose ? `${many(prose.lines, "line")} in prose` : "no blocks") : noRuns ? "runs not in vault" : `${passed} of ${many(m.finish_line.length, "block")} pass`],
     ["Carried deltas", absent("delta") ? "not in vault" : many(m.deltas.length, "delta")],
     ["Concerns", noConcerns ? "not in vault" : asked ? `${asked} asked again` : many(m.concerns.length, "answer")],
     ["Issues", m.issues.length === 0 ? "no issues" : `${settled} of ${many(m.issues.length, "issue")} settled`],
   ];
-  return (
-    <article className="milestone">
-      <h1>
-        Milestone <span className="id">{tail(m.id)}</span>
-      </h1>
-      <p className="sub">
-        {h.title ?? "untitled"} · status {h.status ?? "none"} · {m.intent ? words(m.intent) : "no intent"} ·{" "}
-        <Link to={nodePath(m.id)} className="id">
-          {m.id}
-        </Link>
-      </p>
+  const rows = (
+    <>
       <h2 className="group">Checklist</h2>
       <div className="gates strip">
         {strip.map(([k, v]) => (
@@ -72,7 +78,13 @@ export function MilestoneView({ m, project }: { m: MilestoneObject; project: str
         Finish line<span className="n">{many(m.finish_line.length, "block")}</span>
       </h2>
       {m.finish_line.length === 0 ? (
-        <p className="empty">nothing: the body names no check block</p>
+        prose ? (
+          <p className="empty">
+            <a href={`#${prose.anchor}`}>{inProse}</a>
+          </p>
+        ) : (
+          <p className="empty">nothing: the body names no check block</p>
+        )
       ) : (
         <table className="checklist">
           <tbody>
@@ -136,11 +148,30 @@ export function MilestoneView({ m, project }: { m: MilestoneObject; project: str
           </tbody>
         </table>
       )}
-      <h2 className="group">Stamp</h2>
-      <div ref={stamp} className={m.command ? "land strong" : "land"} data-row="" data-command={m.command} tabIndex={-1}>
+      <h2 className="group">Next</h2>
+      <div ref={chip} className={m.command ? "land strong" : "land"} data-row="" data-command={m.command} tabIndex={-1}>
         {m.command ? <Command text={m.command} /> : <p className="wait">{m.note}</p>}
       </div>
-      {m.body ? <Document body={m.body} fold={`Body · ${many(m.sections?.length ?? 0, "section")}`} /> : null}
+    </>
+  );
+  return (
+    <article className="milestone">
+      <h1>
+        Milestone <span className="id">{tail(m.id)}</span>
+      </h1>
+      <p className="sub">
+        {h.title ?? "untitled"} · status {h.status ?? "none"} · {m.intent ? words(m.intent) : "no intent"} ·{" "}
+        <Link to={nodePath(m.id)} className="id">
+          {m.id}
+        </Link>
+      </p>
+      {m.body ? (
+        <Document body={m.body} fold={`Body · ${many(m.sections?.length ?? 0, "section")}`}>
+          {rows}
+        </Document>
+      ) : (
+        rows
+      )}
     </article>
   );
 }

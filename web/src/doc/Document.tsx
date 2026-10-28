@@ -1,7 +1,8 @@
 // A body as a document (19, principle 9; 32, design change 8): prose at 72 ch, each diagram inline after the block
 // that cites it, a check block under its name, and an outline fixed at the right from 1280 px. Every node page,
 // the Milestone page and the Design page read their bodies through it. With `fold`, the body sits behind one
-// disclosure (18, Disclosure rules) and the outline, a link or a figure opens it.
+// disclosure (18, Disclosure rules) and a link or a figure opens it. The outline shows only while the body does: it
+// names sections the reader can see, and a closed fold keeps the page column where it was.
 import { type MouseEvent, type ReactNode, createElement, useEffect, useMemo, useRef, useState } from "react";
 import { navigate } from "../router";
 import type { Heading } from "../types/Heading";
@@ -19,12 +20,13 @@ export function Document({ body, outline, diagrams = [], fold, children }: Props
   const names = useMemo(() => diagrams.map((d) => d.name), [diagrams]);
   const plan = useMemo(() => blocks(body, anchors, names), [body, anchors, names]);
   const [current, setCurrent] = useState<string>();
+  const [open, setOpen] = useState(!fold);
   const folded = useRef<HTMLDetailsElement>(null);
   const nav = useRef<HTMLElement>(null);
 
   /** Opens the fold, then scrolls to the element `id` and marks its section in the outline. */
   const go = (id: string) => {
-    if (folded.current) folded.current.open = true;
+    if (folded.current) (folded.current.open = true, setOpen(true));
     const el = document.getElementById(id);
     if (!el) return;
     el.scrollIntoView?.({ block: "start" });
@@ -62,14 +64,14 @@ export function Document({ body, outline, diagrams = [], fold, children }: Props
     <div className="doc" onClick={click}>
       {children}
       {fold ? (
-        <details className="fold" ref={folded}>
+        <details className="fold" ref={folded} onToggle={(e) => setOpen(e.currentTarget.open)}>
           <summary>{fold}</summary>
           {prose}
         </details>
       ) : (
         prose
       )}
-      {anchors.length > 0 && (
+      {open && anchors.length > 0 && (
         <nav className="outline" aria-label="outline" ref={nav}>
           {anchors.map((h) => (
             <a

@@ -16,13 +16,14 @@ const base = { id, kind: "milestone", record: false, hash: "h", lead: "", deltas
 const strip = () =>
   Array.from(document.querySelectorAll(".gates .g")).map((g) => [g.querySelector(".k")!.textContent, g.lastElementChild!.textContent]);
 
-test("a planned milestone with no records: no blocks, rows not in vault, and the wait in words, not a stamp", () => {
+test("a planned milestone with no records: no blocks, rows not in vault, and its Moving command focused to copy", () => {
   const m: Milestone = {
     ...base,
     title: "Staged planned milestone",
     status: "planned",
     intent: "needs-milestone-approval",
-    note: `planned: the human approves it first: bp transition ${id} approved, then bp stamp ${id}`,
+    note: "",
+    command: `bp transition ${id} approved`,
     finish_line: [],
     rows_not_in_vault: ["run", "delta", "concern-answer", "waiver"],
   };
@@ -33,8 +34,33 @@ test("a planned milestone with no records: no blocks, rows not in vault, and the
     ["Concerns", "not in vault"],
     ["Issues", "no issues"],
   ]);
-  expect(document.querySelector(".land .cmd")).toBeNull();
-  expect(document.querySelector(".land .wait")?.textContent).toBe(m.note);
+  const land = document.querySelector(".land") as HTMLElement;
+  expect(land.dataset.command).toBe(`bp transition ${id} approved`);
+  expect(document.activeElement).toBe(land);
+  expect(document.querySelector(".land .wait")).toBeNull();
+});
+
+test("a finish line in prose: its lines counted, no check block, and a link that opens the body at it", () => {
+  const body = "## Goal\n\nG.\n\n## Finish line\n\n- one\n- two\n\n- three\n\n## Issues\n\n- x\n";
+  const m: Milestone = {
+    ...base,
+    title: "Converted",
+    status: "done",
+    note: "accepted: done",
+    finish_line: [],
+    rows_not_in_vault: ["run", "delta", "concern-answer", "waiver"],
+    body,
+    sections: ["Goal", "Finish line", "Issues"],
+  };
+  render(<MilestoneView m={m} project="bp" />);
+  expect(strip()[0]).toEqual(["Finish line", "3 lines in prose"]);
+  const link = screen.getByRole("link", { name: "3 lines in prose, no check block: stamp cannot run them" });
+  expect(link.getAttribute("href")).toBe("#finish-line");
+  expect(screen.queryByRole("navigation", { name: "outline" })).toBeNull();
+  fireEvent.click(link);
+  expect((document.querySelector("details.fold") as HTMLDetailsElement).open).toBe(true);
+  expect(screen.getByRole("navigation", { name: "outline" })).toBeTruthy();
+  expect(document.querySelector(".land .wait")?.textContent).toBe("accepted: done");
 });
 
 test("a milestone that needs acceptance: each block's last run, the waiver asked again, and the stamp to copy", () => {
@@ -83,8 +109,8 @@ test("the system design: version banner, facts, outline, and each diagram after 
     "deltas: not in vault",
   ]);
   expect(document.querySelector(".facts-line")?.textContent).toBe("level systemunder product3 diagramsbody 10 sections");
-  const outline = screen.getByRole("navigation", { name: "outline" });
-  expect(within(outline).getAllByRole("link")).toHaveLength(10);
+  // The outline names the body's sections, so it shows only while the body does.
+  expect(screen.queryByRole("navigation", { name: "outline" })).toBeNull();
   const fold = document.querySelector("details.fold") as HTMLDetailsElement;
   expect(fold.open).toBe(false);
   // The strip's link opens the fold at the figure; the body's own citation jumps there too.
@@ -92,6 +118,8 @@ test("the system design: version banner, facts, outline, and each diagram after 
   expect(links.map((a) => a.getAttribute("href"))).toEqual(["#fig-anvil-runtime-flow", "#fig-anvil-runtime-flow"]);
   fireEvent.click(links[0]);
   expect(fold.open).toBe(true);
+  const outline = screen.getByRole("navigation", { name: "outline" });
+  expect(within(outline).getAllByRole("link")).toHaveLength(10);
   expect(within(outline).getByRole("link", { name: "Runtime flow" }).getAttribute("aria-current")).toBe("location");
   await waitFor(() => expect(document.querySelectorAll("figure.fig svg")).toHaveLength(3));
   const section = (name: string) => {

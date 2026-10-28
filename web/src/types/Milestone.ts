@@ -8,7 +8,7 @@ import type { ListRow } from "./ListRow";
 import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
- * One milestone's page. `command` is present only when the milestone needs acceptance.
+ * One milestone's page. `command` is present only when its Moving row carries one.
  */
 export type Milestone = { 
 /**
@@ -16,7 +16,7 @@ export type Milestone = {
  */
 intent?: Intent, 
 /**
- * The intent's note with the command; without it, what the stamp waits for, in words.
+ * The intent's note with the command; without it, the Moving row's wait, or why no row exists, in words.
  */
 note: string, 
 /**
@@ -36,7 +36,7 @@ concerns: Array<Concern>,
  */
 issues: Array<ListRow>, 
 /**
- * The stamp, as Moving's row carries it, when the milestone needs acceptance.
+ * The command the milestone's Moving row carries, when it carries one.
  */
 command?: string, 
 /**

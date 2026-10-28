@@ -153,7 +153,9 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     // The Milestone and Design pages are logged; a diagram's SVG is a part of the Design page, not a view.
     let (status, m) = server.json("/api/bp/milestone/projects/bp/milestones/m");
     assert_eq!((status, m["intent"].as_str(), m["title"].as_str()), (200, Some("needs-milestone-approval"), Some("M")));
-    assert_eq!((m.get("command"), m["rows_not_in_vault"].as_array().map(Vec::len)), (None, Some(4)), "{m}");
+    // The page's one chip is the milestone row's own Moving command (32, design change 8).
+    assert_eq!(m["command"], moving["groups"][1]["rows"][0]["command"], "{m}");
+    assert_eq!(m["rows_not_in_vault"].as_array().map(Vec::len), Some(4), "{m}");
     let (status, d) = server.json("/api/bp/design/projects/bp/designs/system");
     assert_eq!((status, d["version"].as_str(), d["level"].as_str()), (200, Some("no version"), Some("system")), "{d}");
     assert_eq!(

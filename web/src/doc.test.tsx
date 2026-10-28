@@ -1,7 +1,7 @@
 // The document renderer (19, principle 9; 32, design change 8): a body is untrusted text, so nothing it holds runs;
 // headings carry the outline's anchors; a check block reads under its name; each diagram is the renderer's SVG,
 // inlined after the block that cites it, with the view's classes on hover and click.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { Document } from "./doc/Document";
 import { blocks, clean, outlineOf } from "./doc/markdown";
@@ -74,12 +74,19 @@ test("headings take the outline's anchors, a table is a table, and a check block
   expect(window.location.hash).toBe("#deep-one");
 });
 
-test("a folded body opens when the outline jumps into it", () => {
-  render(<Document body={"## A\n\nx\n\n## B\n\ny"} fold="Body" />);
+test("a folded body hides its outline; a link into it opens the fold and shows the outline", () => {
+  render(
+    <Document body={"## A\n\nx\n\n## B\n\ny"} fold="Body">
+      <a href="#b">to B</a>
+    </Document>,
+  );
   const fold = document.querySelector("details.fold") as HTMLDetailsElement;
   expect(fold.open).toBe(false);
-  fireEvent.click(screen.getByRole("link", { name: "B" }));
+  expect(screen.queryByRole("navigation", { name: "outline" })).toBeNull();
+  fireEvent.click(screen.getByRole("link", { name: "to B" }));
   expect(fold.open).toBe(true);
+  const outline = screen.getByRole("navigation", { name: "outline" });
+  expect(within(outline).getByRole("link", { name: "B" }).getAttribute("aria-current")).toBe("location");
 });
 
 test("each diagram follows the block that cites it; one the body never cites follows the body", () => {

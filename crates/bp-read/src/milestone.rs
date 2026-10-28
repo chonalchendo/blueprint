@@ -1,21 +1,23 @@
 //! The Milestone page object (18, Milestone; 32, design change 8): `show` of one milestone with its checklist. The
 //! rows are the finish line's blocks with their last runs, the deltas it carries, the project's concerns and
-//! waivers, and the issues under it with their intents from the one `Intents` call. It ends in `bp stamp <id>` when
-//! the milestone needs acceptance, as Moving's row does, else the wait in words. A row whose record kind the vault
-//! holds none of reads "not in vault" (18, Open).
+//! waivers, and the issues under it with their intents from the one `Intents` call. It ends in the milestone row's own
+//! Moving command or wait, from the one function that builds both: `bp transition <id> approved` while it is planned,
+//! `bp stamp <id>` when it needs acceptance. A milestone with no intent has no Moving row, so the page says why in
+//! words. A row whose record kind the vault holds none of reads "not in vault" (18, Open).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bp_change::intents::{Intent, Verdict};
+use bp_change::intents::Intent;
 use bp_change::{IssueStatus, MilestoneStatus};
 use bp_vault::{Body, Code, DeltaState, Filter, Id, Index, Kind, Record, Refusal, Vault};
 use serde::Serialize;
 use ts_rs::TS;
 
 use crate::inputs::{open_waivers, text};
+use crate::moving::{Facts, Next};
 use crate::{ALL, ChangeDelta, Intents, ListRow, Show, show};
 
-/// One milestone's page. `command` is present only when the milestone needs acceptance.
+/// One milestone's page. `command` is present only when its Moving row carries one.
 #[derive(Serialize, TS)]
 #[ts(optional_fields)]
 pub struct Milestone {
@@ -25,7 +27,7 @@ pub struct Milestone {
     /// The milestone's intent, as `list` prints it; absent when none holds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intent: Option<Intent>,
-    /// The intent's note with the command; without it, what the stamp waits for, in words.
+    /// The intent's note with the command; without it, the Moving row's wait, or why no row exists, in words.
     pub note: String,
     /// The named check blocks of its body, in order, each with its last run.
     pub finish_line: Vec<FinishBlock>,
@@ -35,7 +37,7 @@ pub struct Milestone {
     pub concerns: Vec<Concern>,
     /// The issues under it, as `list issue --under` prints them.
     pub issues: Vec<ListRow>,
-    /// The stamp, as Moving's row carries it, when the milestone needs acceptance.
+    /// The command the milestone's Moving row carries, when it carries one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// The record kinds a checklist row reads that the vault holds none of: those rows read "not in vault".
@@ -121,9 +123,14 @@ pub fn milestone(vault: &Vault, index: &Index, project: &str, id: &str) -> Resul
         .collect();
     let mut concerns = concerns(index, project)?;
     concerns.extend(waivers(vault, index, project, &id)?);
-    let command = (verdict.intent == Some(Intent::NeedsAcceptance))
-        .then(|| crate::moving::named(&verdict.note).map_or_else(|| format!("bp stamp {id}"), str::to_string));
-    let note = if command.is_some() { verdict.note.clone() } else { wait(&id, &status, &verdict, &issues) };
+    // A milestone row's facts are its intent and note: the claim, the pull request and the snapshot are an issue's.
+    let (command, note) = match verdict.intent {
+        Some(intent) => match crate::moving::next(id.as_str(), intent, &verdict.note, &Facts::default()) {
+            Next::Command(c) => (Some(c), verdict.note.clone()),
+            Next::Wait(w) => (None, w),
+        },
+        None => (None, wait(&id, &status, &issues)),
+    };
     Ok(Milestone {
         intent: verdict.intent,
         note,
@@ -151,22 +158,16 @@ fn last_run(runs: &[Record], name: &str, hash: &str) -> Option<LastRun> {
     })
 }
 
-/// What the stamp waits for when the milestone does not need acceptance, in words.
-fn wait(id: &Id, status: &str, v: &Verdict, issues: &[ListRow]) -> String {
-    let with = |words: &str| if v.note.is_empty() { words.to_string() } else { format!("{words}: {}", v.note) };
+/// Why a milestone with no intent, so no Moving row, waits: it is done or abandoned, or approved with an issue open
+/// or a file of the project that does not parse (21: a planned milestone always has an intent).
+fn wait(id: &Id, status: &str, issues: &[ListRow]) -> String {
     let settled =
         |s: Option<&str>| matches!(s.map(str::parse), Some(Ok(IssueStatus::Resolved | IssueStatus::Abandoned)));
     let open = issues.iter().filter(|i| !settled(i.row.status.as_deref())).count();
-    match (v.intent, status.parse()) {
-        (Some(Intent::Blocked), _) => with("blocked"),
-        (Some(Intent::ReAsked), _) => with("re-asked"),
-        (_, Ok(MilestoneStatus::Planned)) => {
-            format!("planned: the human approves it first: bp transition {id} approved, then bp stamp {id}")
-        }
-        (_, Ok(MilestoneStatus::Done)) => "accepted: done".to_string(),
-        (_, Ok(MilestoneStatus::Abandoned)) => "abandoned".to_string(),
-        (Some(Intent::NeedsDerivation), _) => with("issues to derive"),
-        (_, Ok(MilestoneStatus::Approved)) if open > 0 => {
+    match status.parse() {
+        Ok(MilestoneStatus::Done) => "accepted: done".to_string(),
+        Ok(MilestoneStatus::Abandoned) => "abandoned".to_string(),
+        _ if open > 0 => {
             let n = if open == 1 { "1 issue is".to_string() } else { format!("{open} issues are") };
             format!("{n} not resolved or abandoned; bp list issue --under {id}")
         }
@@ -253,11 +254,19 @@ fn missing(index: &Index, project: &str, id: &Id) -> Result<Refusal, Refusal> {
     let f = Filter { kind: Kind::Issue, status: None, project: None, under: Some(id.as_str()), limit: ALL };
     let (rows, total) = index.list(&f)?;
     let rule = "a milestone page shows one milestone of its project: /<project>/milestone/projects/<project>/milestones/<slug>";
+    // `create` makes the id from the title's slug, so the title is the missing slug in words (19, principle 4: no
+    // placeholder a human must fill but `<why>`).
+    let slug = id.as_str().rsplit('/').next().unwrap_or_default();
+    let mut title = slug.replace('-', " ");
+    if let Some(c) = title.get_mut(..1) {
+        c.make_ascii_uppercase();
+    }
     let fix = match rows.first() {
         None => format!("bp list milestone --project {project}"),
         Some(first) => format!(
             "{} it, but the vault holds no milestone there; bp create milestone --project {project} --title \
-             <title> makes it, or bp set {} under <milestone> moves the issue; bp list issue --under {id} lists them",
+             \"{title}\" makes it, or bp list milestone --project {project} names the milestones and bp set {} under \
+             one of them moves the issue; bp list issue --under {id} lists them",
             if total == 1 { "1 issue names".to_string() } else { format!("{total} issues name") },
             first.id
         ),
@@ -313,11 +322,30 @@ mod tests {
         assert_eq!(rows, [("a", "shell", "error", false), ("b", "scenario", "warn", false)]);
         assert_eq!(m.rows_not_in_vault, ["run", "delta", "concern-answer", "waiver"]);
         assert!(m.deltas.is_empty() && m.concerns.is_empty() && m.issues.is_empty());
-        assert_eq!((m.intent, m.command.as_deref()), (Some(Intent::NeedsMilestoneApproval), None));
-        let approve = "planned: the human approves it first: bp transition projects/bp/milestones/m approved, then \
-                       bp stamp projects/bp/milestones/m";
-        assert_eq!(m.note, approve);
+        let approve = "bp transition projects/bp/milestones/m approved";
+        assert_eq!((m.intent, m.command.as_deref()), (Some(Intent::NeedsMilestoneApproval), Some(approve)));
         assert_eq!(m.show.header.get("title").and_then(|t| t.as_str()), Some("T"), "the show object is flat");
+    }
+
+    /// 32, design change 8: the page's chip is the milestone row's own Moving command, from the one function.
+    #[test]
+    fn the_command_is_the_moving_rows_for_a_planned_and_a_settled_milestone() {
+        let (_d, v) = vault(&[
+            ("projects/bp/milestones/p.md", node("milestone", "planned", "") + LINE),
+            ("projects/bp/milestones/s.md", node("milestone", "approved", "") + LINE),
+            ("projects/bp/issues/0001.a.md", node("issue", "resolved", "under: projects/bp/milestones/s\n") + COVERS),
+        ]);
+        let index = Index::open(&v).unwrap();
+        let moving = crate::moving::moving(&v, &index, "bp").unwrap();
+        let row =
+            |id: &str| moving.groups.iter().flat_map(|g| &g.rows).find(|r| r.id == id).and_then(|r| r.command.clone());
+        for (id, want) in [
+            ("projects/bp/milestones/p", "bp transition projects/bp/milestones/p approved"),
+            ("projects/bp/milestones/s", "bp stamp projects/bp/milestones/s"),
+        ] {
+            assert_eq!(page(&v, id).unwrap().command, row(id), "{id}");
+            assert_eq!(row(id).as_deref(), Some(want), "{id}");
+        }
     }
 
     #[test]
@@ -380,7 +408,10 @@ mod tests {
             "{}",
             refusal.fix
         );
-        assert!(refusal.fix.contains("bp set projects/bp/issues/0003.c under <milestone>"), "{}", refusal.fix);
+        let create = "bp create milestone --project bp --title \"Gone\" makes it, or bp list milestone --project bp \
+                      names the milestones and bp set projects/bp/issues/0003.c under one of them moves the issue";
+        assert!(refusal.fix.contains(create), "{}", refusal.fix);
+        assert!(!refusal.fix.contains('<'), "no placeholder: {}", refusal.fix);
         assert_eq!(page(&v, "projects/bp/issues/0001.a").err().map(|r| r.code), Some(Code::NoNode), "not a milestone");
     }
 }
