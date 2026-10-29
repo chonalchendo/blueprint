@@ -2,6 +2,7 @@
 //! composition over the index, the record reductions the pure intents read, and the typed objects of `list`, `show`
 //! and `search`, and the page objects the view serves beside them. `bp-tool` prints them; `bp-view` serves them. It writes nothing but the index refresh.
 
+mod asof;
 mod change;
 pub mod checkset;
 pub mod clock;
@@ -18,8 +19,10 @@ mod objects;
 mod pages;
 pub mod snapshot;
 mod stack;
+mod version;
 mod world;
 
+pub use asof::{BodyDiff, SectionLines};
 use bp_vault::{Code, Id, Index, Refusal};
 pub use change::{
     Change, ChangeDelta, ChangePullRequest, ChangeRefusal, DIFF_CAP, Diff, DiffFile, Layer, carried_deltas, change,

@@ -144,7 +144,7 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     assert_eq!(home["nodes"], serde_json::json!({ "design": 1, "issue": 1, "milestone": 1, "project": 1 }));
     assert_eq!(home["intents"], intents);
     assert_eq!(home["designs"][0]["id"], "projects/bp/designs/system");
-    assert_eq!((home["designs"][0]["diagrams"].as_u64(), home["designs"][0].get("accepted")), (Some(2), None));
+    assert!(home["designs"][0]["diagrams"] == 2 && home["designs"][0]["version"] == "no version", "{home}");
     assert_eq!(home["milestones"][0]["id"], "projects/bp/milestones/m");
     assert_eq!(home["milestones"][0]["issues"], serde_json::json!({}), "the issue sits under the design");
     assert_eq!(home["forge"], "not read", "no snapshot exists");
@@ -241,6 +241,21 @@ fn serves_the_page_objects_and_logs_the_page_routes() {
     assert!(log.lines().all(|l| l.as_bytes()[19] == b'Z'), "{log}");
 }
 
+/// A body or a diagram the client's sanitiser misses still fetches nothing from another host: the page's policy, on
+/// the root and on every page route, has the browser refuse it (32, design change 10).
+#[test]
+fn every_page_route_holds_a_policy_that_fetches_from_its_own_origin_only() {
+    let dir = vault();
+    let server = Server::start(dir.path(), &["--forge", "off"], None);
+    let policy = "content-security-policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+                  img-src 'self' data:; font-src 'self' data:; connect-src 'self'; base-uri 'none'; \
+                  form-action 'none'; frame-ancestors 'none'";
+    for page in ["/", "/bp", "/bp/moving", "/bp/design/projects/bp/designs/system?at=blueprint/bp/1"] {
+        let (status, head, _) = server.exchange("GET", page, &server.host());
+        assert!(status == 200 && head.lines().any(|l| l == policy), "{page}: {head}");
+    }
+}
+
 #[test]
 fn only_the_views_own_host_is_served() {
     let dir = vault();
@@ -259,6 +274,55 @@ fn only_the_views_own_host_is_served() {
         }
     }
     assert!(!dir.path().join(".bp/use.log").exists(), "a refused request logs nothing");
+}
+
+#[test]
+fn a_tag_with_slashes_in_the_query_serves_the_body_at_the_tag() {
+    let dir = vault();
+    let g = |args: &[&str]| git(dir.path(), &[&["-c", "user.name=t", "-c", "user.email=t@t"][..], args].concat());
+    g(&["tag", "blueprint/bp/1"]);
+    let path = dir.path().join("projects/bp/designs/system.md");
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("The vault.", "The vault.\n\nA probe line."))
+        .unwrap();
+    g(&["commit", "-qam", "probe"]);
+    let server = Server::start(dir.path(), &["--forge", "off"], None);
+    let design = "/api/bp/design/projects/bp/designs/system";
+    let d = server.json(design).1;
+    assert_eq!(
+        (d["version"].as_str(), d["version_tag"].as_str(), d["since"].as_str()),
+        (Some("changed since blueprint/bp/1"), Some("blueprint/bp/1"), Some("blueprint/bp/1")),
+        "the tag alone names the version, and the banner links the diff since it"
+    );
+    // Home, its design row and Projects read the same version (32, design change 9).
+    let (home, projects) = (server.json("/api/bp").1, server.json("/api/projects").1);
+    assert_eq!(
+        (home["version"].as_str(), home["designs"][0]["version"].as_str(), projects["rows"][0]["version"].as_str()),
+        (Some("blueprint/bp/1"), Some("changed since blueprint/bp/1"), Some("blueprint/bp/1"))
+    );
+    // The query's `/` arrives as written or escaped; either names the tag.
+    for at in ["blueprint/bp/1", "blueprint%2Fbp%2F1"] {
+        let (status, d) = server.json(&format!("{design}?at={at}"));
+        assert_eq!(
+            (status, d["version"].as_str(), d["body"].as_str()),
+            (200, Some("at blueprint/bp/1"), Some("## TL;DR\n\nThe vault.")),
+            "{at}"
+        );
+        assert_eq!(d["diff"]["sections"], serde_json::json!(["TL;DR"]), "{at}");
+        assert_eq!(d["diff"]["added"], serde_json::json!([{ "section": "TL;DR", "lines": ["A probe line."] }]), "{at}");
+    }
+    let (status, refusal) = server.json(&format!("{design}?at=blueprint/bp/9"));
+    assert_eq!((status, refusal["code"].as_str()), (404, Some("no_tag")));
+    assert_eq!(refusal["fix"], "git tag -l 'blueprint/bp/*' lists the versions");
+    let log = std::fs::read_to_string(dir.path().join(".bp/use.log")).unwrap();
+    let routes: Vec<&str> = log.lines().map(|l| l.split_once(' ').unwrap().1).collect();
+    assert_eq!(
+        routes,
+        ["/bp/design/projects/bp/designs/system projects/bp/designs/system", "/bp -", "/ -"]
+            .into_iter()
+            .chain(["/bp/design/projects/bp/designs/system projects/bp/designs/system"; 2])
+            .collect::<Vec<_>>(),
+        "a tag is the same page"
+    );
 }
 
 #[test]

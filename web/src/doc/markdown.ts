@@ -42,11 +42,14 @@ function escape(s: string): string {
 }
 
 // A body is text of the vault, not a part of the page (18, check 6). Past what runs, it must not restyle the page
-// (`<style>`, `style=`, a page class), post a form, take focus, join a row (`data-*`) or fetch from another origin.
+// (`<style>`, `style=`, a page class), post a form, take focus, join a row (`data-*`), fetch from another origin, or
+// pose as the page's own parts: an `id` would take an anchor the page sets, an `aria-*` or a `role` would relabel
+// its regions.
 const BODY: Config & { RETURN_DOM: true } = {
   ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: false,
   FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select", "audio", "video", "picture", "source"],
-  FORBID_ATTR: ["style", "tabindex", "autofocus", "srcset", "background"],
+  FORBID_ATTR: ["style", "tabindex", "autofocus", "srcset", "background", "id", "role"],
   RETURN_DOM: true,
 };
 
@@ -64,11 +67,82 @@ function local(src: string): boolean {
   }
 }
 
+/** The SVG elements that fetch their `href`: `<use>` and `<feImage>` as well as `<image>`. */
+const FETCHES = new Set(["image", "use", "feimage"]);
+
+/** The page's CSP is the first guard (`bp-view`'s `client.rs`); this is the second. It removes each SVG element that
+ * would fetch from another origin; each attribute (`mask`, `filter`, `clip-path`, `fill`, `stroke`, `marker-*`,
+ * `style` or any other) whose value would fetch; and, in each `<style>`, every `@import` and each declaration that
+ * would fetch. A fetch would tell its host the page was read. */
+function unfetch(root: Element): void {
+  for (const el of Array.from(root.querySelectorAll("*"))) {
+    const hrefs = Array.from(el.attributes).filter((a) => a.localName === "href");
+    if (FETCHES.has(el.localName.toLowerCase()) && hrefs.some((a) => !local(a.value))) {
+      el.remove();
+      continue;
+    }
+    for (const a of Array.from(el.attributes)) if (fetches(a.value)) el.removeAttributeNode(a);
+  }
+  for (const style of root.querySelectorAll("style")) style.textContent = localCss(style.textContent ?? "");
+}
+
+/** CSS escapes undone, so `\75 rl(` reads `url(` as the browser reads it. */
+function unescapeCss(s: string): string {
+  return s
+    .replace(/\\([0-9a-f]{1,6})[ \t\n\r\f]?/gi, (_, h: string) => {
+      const n = parseInt(h, 16);
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : "\ufffd";
+    })
+    .replace(/\\([^\n])/g, "$1");
+}
+
+/** A CSS value or an attribute that would load a URL: a `url(`, or an `image-set(`, `image(`, `cross-fade(` or
+ * `src(` with a string, whose target is not a `data:` URL or an `#id` of the page itself. */
+export function fetches(value: string): boolean {
+  const v = unescapeCss(value);
+  const strings = /(?:image-set|image|cross-fade|src)\(/i.test(v);
+  if (!strings && !/url\(/i.test(v)) return false;
+  const targets = [...v.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))|"([^"]*)"|'([^']*)'/gi)]
+    .filter((m) => strings || m[0].toLowerCase().startsWith("url("))
+    .map((m) => (m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5]).trim());
+  return targets.length === 0 || targets.some((t) => !/^(?:data:|#)/i.test(t));
+}
+
+/** A style sheet's text with every `@import` and each declaration that `fetches` cut. The browser's own CSS parser
+ * reads it (CSSOM), so an escape, a quote or an `image-set` reads here as the page would read it; a rule whose text
+ * still fetches after that loses all its declarations. The sheet is never applied, so it loads nothing. */
+export function localCss(css: string): string {
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(css);
+  scrub(sheet.cssRules, (i) => sheet.deleteRule(i));
+  return Array.from(sheet.cssRules, (r) => r.cssText).join("\n");
+}
+
+type Rule = CSSRule & { style?: CSSStyleDeclaration; cssRules?: CSSRuleList; deleteRule?: (i: number) => void };
+
+function scrub(rules: CSSRuleList, drop: (i: number) => void): void {
+  for (let i = rules.length - 1; i >= 0; i--) {
+    const rule = rules[i] as Rule;
+    if (/^\s*@import/i.test(rule.cssText)) {
+      drop(i);
+      continue;
+    }
+    const style = rule.style;
+    if (style) {
+      const names = Array.from({ length: style.length }, (_, k) => style.item(k));
+      for (const name of names) if (fetches(style.getPropertyValue(name))) style.removeProperty(name);
+      if (fetches(style.cssText)) style.cssText = "";
+    }
+    if (rule.cssRules && rule.deleteRule) scrub(rule.cssRules, (j) => rule.deleteRule!(j));
+  }
+}
+
 /** HTML from a body, made safe: nothing runs, restyles the page, joins a row or loads from another origin. A remote
  * image reads as a link to it. */
 export function clean(html: string): string {
-  // `RETURN_DOM` gives the `<body>` of DOMPurify's inert document, so no image there loads before it is replaced.
+  // `RETURN_DOM` gives the `<body>` of DOMPurify's inert document, so nothing there loads before it is removed.
   const body = DOMPurify.sanitize(html, BODY) as HTMLElement;
+  unfetch(body);
   for (const el of body.querySelectorAll("[class]")) {
     const kept = Array.from(el.classList).filter((c) => KEPT_CLASS.test(c));
     if (kept.length) el.setAttribute("class", kept.join(" "));
@@ -85,9 +159,12 @@ export function clean(html: string): string {
   return body.innerHTML;
 }
 
-/** A diagram's SVG, made safe with the SVG profile: its `<style>`, `<metadata>` and `data-*` attributes stay. */
+/** A diagram's SVG, made safe with the SVG profile: its `<style>`, `<metadata>` and `data-*` attributes stay; what
+ * would fetch from another origin does not. */
 export function cleanSvg(svg: string): string {
-  return DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
+  const body = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true }, RETURN_DOM: true }) as HTMLElement;
+  unfetch(body);
+  return body.innerHTML;
 }
 
 /** Markdown with no block structure of the page's own: a TL;DR, a lead. */
@@ -112,8 +189,9 @@ export function outlineOf(body: string): Heading[] {
 
 /** The body as blocks. A `## ` or `### ` heading takes the first unused outline entry of its depth and text. A
  * diagram follows the first block that names `diagrams/<name>` or `<name>.html`; one the body never cites follows
- * the body. */
-export function blocks(body: string, outline: Heading[], diagrams: string[] = []): Block[] {
+ * the body. `shown` names the `## ` sections the page shows above the body, by anchor, with `""` for the text before
+ * the first heading: they are left out, so the reader meets each sentence once, but a diagram they cite stays. */
+export function blocks(body: string, outline: Heading[], diagrams: string[] = [], shown: string[] = []): Block[] {
   const tokens = md.lexer(body);
   // `lexer` alone skips the `walkTokens` option, which `parse` runs.
   md.walkTokens(tokens, retarget);
@@ -122,6 +200,7 @@ export function blocks(body: string, outline: Heading[], diagrams: string[] = []
   const out: Block[] = [];
   let pending: Token[] = [];
   let section: string | undefined;
+  let skip = shown.includes("");
   const flush = () => {
     if (pending.length === 0) return;
     out.push({ kind: "html", html: clean(md.parser(Object.assign(pending, { links: tokens.links }))) });
@@ -130,13 +209,22 @@ export function blocks(body: string, outline: Heading[], diagrams: string[] = []
   for (const t of tokens) {
     if (t.type === "heading" && (t.depth === 2 || t.depth === 3)) {
       const h = outline.find((o) => !used.has(o) && o.depth === t.depth && o.heading === t.text);
+      if (t.depth === 2) skip = !!h && shown.includes(h.anchor);
       if (h) {
-        flush();
         used.add(h);
         section = h.anchor;
+        if (skip) continue;
+        flush();
         out.push({ kind: "heading", depth: t.depth, html: clean(md.parseInline(t.text, { async: false })), anchor: h.anchor });
         continue;
       }
+    }
+    if (skip) {
+      for (const name of diagrams.filter((n) => !placed.has(n) && cites(t.raw, n))) {
+        placed.add(name);
+        out.push({ kind: "figure", name, section });
+      }
+      continue;
     }
     if (t.type === "code" && /^check(\s|$)/.test(t.lang ?? "")) {
       flush();

@@ -4,7 +4,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { Document } from "./doc/Document";
-import { blocks, clean, outlineOf } from "./doc/markdown";
+import { blocks, clean, cleanSvg, fetches, localCss, outlineOf } from "./doc/markdown";
 import large from "./fixtures/research-stage.md?raw";
 
 afterEach(() => (cleanup(), vi.unstubAllGlobals(), vi.restoreAllMocks(), window.history.pushState(null, "", "/")));
@@ -41,6 +41,39 @@ test("a body's script, handler, style, form, data attribute and remote image nev
   expect(Array.from(prose.querySelectorAll("img")).map((i) => i.getAttribute("alt"))).toEqual([null, null, "inline", "here"]);
   expect(screen.getByRole("link", { name: "remote" }).getAttribute("href")).toBe("https://evil.example/pixel.png");
   expect(clean('<img src="x" onerror="alert(2)">')).toBe('<img src="x">');
+});
+
+// A remote `<image>`, `<use>` or `<feImage>`, or a remote `url()` in an SVG style, would fetch its URL when the page
+// holds it, and tell the host the page was read. A body's `id` would take a page anchor; its `aria-*` or `role` would
+// relabel the page's regions.
+const FETCHING =
+  '<svg viewBox="0 0 10 10"><image href="https://example.com/i.png"></image><image href="data:image/gif;base64,R0lGOD"></image>' +
+  '<image href="/assets/a.png"></image><use href="https://example.com/s.svg#a"></use><use href="#local"></use>' +
+  '<filter id="f"><feImage href="https://example.com/f.png"></feImage></filter>' +
+  '<g style="fill: url(https://example.com/p.svg#x)"></g><g style="fill: url(#grad)"></g></svg>';
+
+test("a body or a diagram fetches nothing from another origin; a body's ids, aria attributes and roles go", () => {
+  const remote = (root: Element) =>
+    Array.from(root.querySelectorAll("*")).flatMap((el) => Array.from(el.attributes).map((a) => a.value)).filter((v) => v.includes("example.com"));
+  const svg = document.createElement("div");
+  svg.innerHTML = cleanSvg(FETCHING);
+  expect(remote(svg)).toEqual([]);
+  expect(Array.from(svg.querySelectorAll("image")).map((i) => i.getAttribute("href"))).toEqual(["data:image/gif;base64,R0lGOD", "/assets/a.png"]);
+  expect(svg.querySelectorAll("g")[1].getAttribute("style")).toBe("fill: url(#grad)");
+  // happy-dom drops an SVG's `<style>` text (above); the headless-Chrome probe of the PR shows its `url()` and `@import`.
+  const body = [
+    "## Probe",
+    FETCHING,
+    '<p id="tl-dr" aria-label="outline" aria-hidden="true" role="note">posing</p>',
+    '<a id="fig-x" href="#probe" aria-current="location">jump</a>',
+  ].join("\n\n");
+  render(<Document body={body} outline={[{ depth: 2, heading: "Probe", anchor: "probe" }]} />);
+  const prose = document.querySelector(".prose")!;
+  expect(remote(prose)).toEqual([]);
+  expect(prose.querySelectorAll("image")).toHaveLength(2);
+  expect(Array.from(prose.querySelectorAll("[id]")).map((e) => e.id)).toEqual(["probe"]);
+  expect(Array.from(prose.querySelectorAll("*")).flatMap((e) => e.getAttributeNames().filter((n) => n.startsWith("aria-")))).toEqual([]);
+  expect(screen.getByText("posing").getAttributeNames()).toEqual([]);
 });
 
 test("headings take the outline's anchors, a table is a table, and a check block reads under its name", () => {
@@ -97,6 +130,16 @@ test("each diagram follows the block that cites it; one the body never cites fol
   expect(plan[1].kind === "html" && plan[1].html).toContain('href="#fig-ctx"');
 });
 
+test("a section the page shows above leaves the body, but a diagram it cites still opens the body", () => {
+  const body = "Lead.\n\n## TL;DR\n\nShort; see diagrams/ctx.\n\n### Inside\n\nx\n\n## Next\n\nText.";
+  const plan = blocks(body, outlineOf(body), ["ctx"], ["", "tl-dr"]);
+  const shape = plan.map((b) => (b.kind === "figure" ? `${b.name} in ${b.section}` : b.kind === "heading" ? b.anchor : b.kind));
+  expect(shape).toEqual(["ctx in tl-dr", "next", "html"]);
+  render(<Document body={body} shown={["", "tl-dr"]} />);
+  const links = screen.getByRole("navigation", { name: "outline" }).querySelectorAll("a");
+  expect(Array.from(links).map((a) => a.getAttribute("href"))).toEqual(["#tl-dr", "#next"]);
+});
+
 // No `<style>` here, and the `<script>` comes last: happy-dom's parser drops what follows a raw-text element inside
 // an `<svg>`. This test does not prove that the renderer's `<style>` survives `cleanSvg`; the staged copy's
 // `bp-containers` drawing, opened in a browser, does.
@@ -142,4 +185,41 @@ test("the largest design body in the converted vault renders as a document", () 
   console.info(`render research-stage.md (${large.length} bytes): ${ms.toFixed(0)} ms`);
   expect(document.querySelectorAll(".prose h2").length).toBe(outlineOf(large).filter((h) => h.depth === 2).length);
   expect(ms).toBeLessThan(3000);
+});
+
+// The vectors of the PR #84 review: a presentation attribute with a remote `url()`, and a diagram style whose
+// `url()` hides behind an inner quote, an `image-set` string, an escape or an `@font-face` source.
+test("a remote url in any attribute goes, and a style keeps only what fetches nothing", () => {
+  const svg = document.createElement("div");
+  svg.innerHTML = cleanSvg(
+    '<svg viewBox="0 0 10 10"><rect mask="url(https://example.com/m.svg#m)" fill="url(#grad)"></rect>' +
+      '<rect filter="url(https://example.com/f.svg#f)" clip-path="url(https://example.com/c.svg#c)" stroke="red"></rect>' +
+      '<rect fill="\\75 rl(https://example.com/e.svg#e)" marker-end="url(https://example.com/k.svg#k)"></rect></svg>',
+  );
+  const attrs = Array.from(svg.querySelectorAll("rect")).map((r) => r.getAttributeNames().join(" "));
+  expect(attrs).toEqual(["fill", "stroke", ""]);
+  expect(svg.querySelector("rect")?.getAttribute("fill")).toBe("url(#grad)");
+  for (const remote of [
+    "url(https://example.com/a.png)",
+    `url("https://example.com/q.png?a'b")`,
+    'image-set("https://example.com/i.png" 1x)',
+    "\\75 rl(https://example.com/e.png)",
+    "src(https://example.com/s.png)",
+  ]) {
+    expect(fetches(remote), remote).toBe(true);
+  }
+  for (const local of ["url(#grad)", 'url("data:font/woff2;base64,AA") format("woff2")', '"Geist Mono", monospace', "red"]) {
+    expect(fetches(local), local).toBe(false);
+  }
+  const css = localCss(
+    '.a { mask-image: image-set("https://example.com/i.png" 1x); fill: red } ' +
+      '@font-face { font-family: X; src: url("https://example.com/f.woff2") } ' +
+      '@font-face { font-family: Y; src: url(data:font/woff2;base64,AA) format("woff2") } .c { fill: url(#g) }',
+  );
+  expect(css).not.toContain("example.com");
+  expect(css).toContain("data:font/woff2;base64,AA");
+  expect(css).toContain("url(#g)");
+  expect(css).toContain("fill: red");
+  // happy-dom also drops the rule after an `@import`, so the import stands alone here.
+  expect(localCss("@import url(https://example.com/x.css);")).toBe("");
 });

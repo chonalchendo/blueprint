@@ -10,9 +10,14 @@ export type HomeDesign = {
  */
 diagrams: number, 
 /**
- * The newest version tag whose manifest holds the design's current hash; absent when none does.
+ * The design's version in words, as its Design page's banner reads it: "accepted at <tag>", "changed since
+ * <tag>" or "no version".
  */
-accepted?: string, 
+version: string, 
+/**
+ * The tag `version` ends with; absent with "no version".
+ */
+version_tag?: string, 
 /**
  * A learning's derived `stale` (13, Learning).
  */

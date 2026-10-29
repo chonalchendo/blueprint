@@ -23,10 +23,22 @@ const PLACEHOLDER: &str = concat!(
     "<body><div id=\"root\"></div><p>bp-view: the client is not built into this binary.</p></body></html>\n",
 );
 
+/// The page's content policy (32, design change 10): the page loads, connects to and frames nothing but its own
+/// origin. An image may also be a `data:` URL and a style inline; a font may be a `data:` URL because each inlined
+/// diagram carries its faces so (`bp-diagram`'s `font.rs`). A body or a diagram the sanitiser misses still fetches
+/// nothing from another host: the browser refuses it.
+const PAGE_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+                               img-src 'self' data:; font-src 'self' data:; connect-src 'self'; base-uri 'none'; \
+                               form-action 'none'; frame-ancestors 'none'";
+
 /// The file `uri` names in the build; else `index.html` for a page route; else 404 for an asset the build lacks.
+/// Each answer carries the page's policy, so the page holds it whatever route served it.
 pub async fn serve(uri: Uri) -> Response {
     match pick(uri.path(), |name| Dist::get(name).map(|f| f.data)) {
-        Some((kind, body)) => ([(header::CONTENT_TYPE, kind)], body.into_owned()).into_response(),
+        Some((kind, body)) => {
+            ([(header::CONTENT_TYPE, kind), (header::CONTENT_SECURITY_POLICY, PAGE_POLICY)], body.into_owned())
+                .into_response()
+        }
         None => (StatusCode::NOT_FOUND, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "no such asset\n")
             .into_response(),
     }

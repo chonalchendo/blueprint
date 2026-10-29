@@ -2,6 +2,7 @@
 // the staged copy's `projects/bp/designs/system` as `bp-view` served it.
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import asof from "./fixtures/design-asof.json";
 import system from "./fixtures/design-page.json";
 import { DesignView } from "./pages/Design";
 import { MilestoneView } from "./pages/Milestone";
@@ -109,6 +110,12 @@ test("the system design: version banner, facts, outline, and each diagram after 
     "deltas: not in vault",
   ]);
   expect(document.querySelector(".facts-line")?.textContent).toBe("level systemunder product3 diagramsbody 10 sections");
+  // The lead and the TL;DR show above the body, so the body leaves them out and the outline's TL;DR jumps above.
+  const prose = document.querySelector(".prose")!;
+  expect(prose.textContent).not.toContain(system.lead);
+  expect(prose.textContent).not.toContain(system.tldr.slice(0, 60));
+  expect(Array.from(prose.querySelectorAll("h2")).map((h) => h.id)).not.toContain("tl-dr");
+  expect(document.getElementById("tl-dr")?.className).toBe("group");
   // The outline names the body's sections, so it shows only while the body does.
   expect(screen.queryByRole("navigation", { name: "outline" })).toBeNull();
   const fold = document.querySelector("details.fold") as HTMLDetailsElement;
@@ -136,4 +143,51 @@ test("the system design: version banner, facts, outline, and each diagram after 
   expect(urls.sort()).toEqual(
     ["anvil-context", "anvil-runtime-flow", "anvil-two-loop"].map((n) => `/api/bp/design/projects/bp/designs/system/diagram/${n}`),
   );
+});
+
+const banner = () => Array.from(screen.getByRole("note").children).map((s) => s.textContent);
+const here = "/bp/design/projects/bp/designs/system";
+
+test("a design changed since the newest version links the diff since that tag, the tag in mono", () => {
+  const changed = { version: "changed since blueprint/bp/1", version_tag: "blueprint/bp/1", since: "blueprint/bp/1" };
+  render(<DesignView d={{ ...(system as Design), ...changed }} project="bp" />);
+  expect(banner()).toEqual(["changed since blueprint/bp/1", "status active", "deltas: not in vault", "diff since blueprint/bp/1"]);
+  expect(screen.getByRole("link", { name: "diff since blueprint/bp/1" }).getAttribute("href")).toBe(`${here}?at=blueprint/bp/1`);
+  const words = screen.getByRole("note").firstElementChild!;
+  expect([words.firstChild?.textContent, words.querySelector(".id")?.textContent]).toEqual(["changed since ", "blueprint/bp/1"]);
+  expect(screen.queryByText(/^Changed since/)).toBeNull();
+});
+
+test("a version whose tag the vault's git lacks keeps its words, drops the diff link and shows the fix", () => {
+  const fix = "blueprint/bp/3 is not in this vault's git: git fetch --tags";
+  const missing = { version: "changed since blueprint/bp/3", version_tag: "blueprint/bp/3", tag_fix: fix };
+  render(<DesignView d={{ ...(system as Design), ...missing }} project="bp" />);
+  expect(banner()).toEqual(["changed since blueprint/bp/3", "status active", "deltas: not in vault", fix]);
+  expect(screen.queryByRole("link", { name: /diff since/ })).toBeNull();
+});
+
+test("at a tag: the banner links back, and each changed section jumps to the body with its lines marked − and +", () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(SVG, { status: 200 })));
+  render(<DesignView d={asof as Design} project="bp" at="blueprint/bp/1" />);
+  expect(banner()).toEqual(["at blueprint/bp/1", "status active", "deltas: not in vault", "current body"]);
+  expect(screen.getByRole("link", { name: "current body" }).getAttribute("href")).toBe(here);
+  expect(screen.getByRole("heading", { name: "Changed since blueprint/bp/1 1 section" })).toBeTruthy();
+  const items = Array.from(document.querySelectorAll("ul.asof > li"));
+  expect(items.map((li) => [li.firstElementChild!.textContent, ...Array.from(li.querySelectorAll(".lines > div")).map((l) => l.textContent)])).toEqual([
+    ["TL;DR", "+ As-of probe line."],
+  ]);
+  // The body is the tag's, without the probe; the section link opens the fold at the TL;DR the page shows above.
+  expect(document.querySelector(".prose")?.textContent).not.toContain("As-of probe line.");
+  fireEvent.click(screen.getByRole("link", { name: "TL;DR" }));
+  expect((document.querySelector("details.fold") as HTMLDetailsElement).open).toBe(true);
+  expect(window.location.hash).toBe("#tl-dr");
+});
+
+test("a design the tag does not hold reads not at the tag, with no diff and a link back", () => {
+  const { tldr: _, ...rest } = system as Design;
+  const d: Design = { ...rest, version: "not at blueprint/bp/1", body: "", lead: "", outline: [], sections: [], diff: { sections: [], added: [], removed: [] } };
+  render(<DesignView d={d} project="bp" at="blueprint/bp/1" />);
+  expect(banner()).toEqual(["not at blueprint/bp/1", "status active", "deltas: not in vault", "current body"]);
+  expect(document.querySelector("ul.asof")).toBeNull();
+  expect(screen.queryByText(/^Changed since/)).toBeNull();
 });

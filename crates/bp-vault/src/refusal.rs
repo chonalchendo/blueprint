@@ -50,6 +50,7 @@ crate::closed_enum! {
         NotEditorial = "not_editorial",
         VerbOutsideRole = "verb_outside_role",
         FindingInvalid = "finding_invalid",
+        NoTag = "no_tag",
     }
 }
 

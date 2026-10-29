@@ -206,10 +206,10 @@ fn no_route(path: &str) -> Response {
     ))
 }
 
-/// The refusal envelope, under the status that names it: 404 for an id or route that names nothing.
+/// The refusal envelope, under the status that names it: 404 for an id, route or tag that names nothing.
 fn refused(refusal: &Refusal) -> Response {
     let status = match refusal.code {
-        Code::NoNode | Code::NoSection => StatusCode::NOT_FOUND,
+        Code::NoNode | Code::NoSection | Code::NoTag => StatusCode::NOT_FOUND,
         Code::Usage => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };

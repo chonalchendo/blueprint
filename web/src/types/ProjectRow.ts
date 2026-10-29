@@ -6,7 +6,7 @@ import type { Intent } from "./Intent";
  */
 export type ProjectRow = { 
 /**
- * The project's newest blueprint version tag; absent before its first stamp.
+ * The project's version tag, as its home reads it; absent before its first version.
  */
 version?: string, 
 /**
