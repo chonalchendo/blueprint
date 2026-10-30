@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use bp_vault::{Code, Index, Refusal, Vault};
 
-/// How often the view reads the forge for one project, at most (18, Forge reader: a choice).
-const EVERY: Duration = Duration::from_secs(60);
+/// How often the view reads the forge for one project, at most (18, Forge reader: a choice): the read verbs' age rule
+/// (34, design change 3).
+const EVERY: Duration = bp_read::snapshot::MAX_AGE;
 
 /// One project's reads.
 #[derive(Debug, PartialEq, Eq)]
@@ -39,13 +40,14 @@ impl Forge {
         &self.clone
     }
 
-    /// Rewrites the snapshot of `project`, a project the index holds, when its read is due. A failure leaves the
+    /// Rewrites the snapshot of `project`, a project the index holds, when its read is due and the snapshot is older
+    /// than the minute, as a read verb does: a repo verb's fresh write costs the view no call. A failure leaves the
     /// snapshot that exists, which the pages read.
     pub fn refresh(&self, vault: &Vault, index: &Index, project: &str) {
         if !self.on || !due(&mut self.reads.lock().expect("no request panics while it holds the lock"), project) {
             return;
         }
-        if let Err(r) = bp_read::snapshot::refresh(vault, index, &self.clone, project) {
+        if let Err(r) = bp_read::snapshot::refresh_if_stale(vault, index, &self.clone, project, EVERY) {
             let off = turns_off(&r);
             if off {
                 self.reads.lock().expect("no request panics while it holds the lock").insert(project.into(), Read::Off);

@@ -25,4 +25,8 @@ forge?: Forge,
 /**
  * The seconds since the oldest forge read in view.
  */
-forge_age?: number, };
+forge_age?: number, 
+/**
+ * Why a stale snapshot was not refreshed before the read (34, design change 3); the rows read the stale one.
+ */
+stale?: string, };

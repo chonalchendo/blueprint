@@ -8,7 +8,7 @@ use bp_install::Target;
 use bp_operation::Action;
 use bp_vault::{Code, Gap, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{node_id, subject, unknown};
 
@@ -48,6 +48,7 @@ fn harness() -> Result<Option<Target>, Refusal> {
     })
 }
 
+/// The seed's project is the one in view: a stale snapshot of it is refreshed before any read (34, design change 3).
 pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     let action: Action = walk.action.parse().map_err(|_| {
         let actions: Vec<&str> = Action::ALL.iter().map(|a| a.as_str()).collect();
@@ -85,12 +86,13 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             format!("{action} walks from: {}; bp list {} --json", kinds.join(", "), kinds[0]),
         ));
     }
+    let stale = bp_read::snapshot::refresh_for_read(&vault, &index, cwd, id.project());
     if walk.done {
         // A stop reads a few rows, and `list` opens its own read transaction.
         drop(reading);
         let mut forge_age = None;
         let done = crate::done::done(&vault, &index, &id, &header, action, &mut forge_age)?;
-        return Ok(serde_json::json!({ "id": id, "for": action, "done": done, "forge_age": forge_age }));
+        return Ok(with(json!({ "id": id, "for": action, "done": done, "forge_age": forge_age }), None, stale));
     }
     context(&vault, &index, &id, action)?;
     let mut reached = index.reach(id.as_str(), usize::from(walk.depth))?;
@@ -110,13 +112,13 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     let mut records = Vec::new();
     for kind in action.records() {
         if let Some(r) = index.records(id.as_str(), *kind)?.pop() {
-            records.push(serde_json::json!({ "id": r.id, "kind": kind, "header": r.header, "body": r.body }));
+            records.push(json!({ "id": r.id, "kind": kind, "header": r.header, "body": r.body }));
         }
     }
     records.extend(runs);
     let pull_request = pull_request(&vault, &index, &id, action)?;
     let line = |r: &bp_vault::Reached| -> Result<Value, Refusal> {
-        let mut v = serde_json::json!({ "id": r.id, "kind": r.kind, "title": r.title, "rank": r.rank });
+        let mut v = json!({ "id": r.id, "kind": r.kind, "title": r.title, "rank": r.rank });
         if r.kind == Kind::Learning {
             v["stale"] = read.stale(&r.id, &index.header(&r.id)?.unwrap_or_default())?.into();
         }
@@ -125,15 +127,10 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     if walk.ids {
         // The map keeps the fill's order: conventions close the tail (21).
         let (conventions, rest): (Vec<_>, Vec<_>) = reached.iter().partition(|r| r.kind == Kind::Convention);
-        let answered = records
-            .iter()
-            .map(|r| serde_json::json!({ "id": r["id"], "kind": r["kind"], "title": null, "rank": null }));
+        let answered = records.iter().map(|r| json!({ "id": r["id"], "kind": r["kind"], "title": null, "rank": null }));
         let lines = rest.into_iter().chain(conventions).map(line).collect::<Result<Vec<_>, _>>()?;
         let ids: Vec<Value> = answered.chain(lines).collect();
-        return Ok(with(
-            serde_json::json!({ "seed": id, "for": action, "ids": ids, "intents": intents }),
-            pull_request,
-        ));
+        return Ok(with(json!({ "seed": id, "for": action, "ids": ids, "intents": intents }), pull_request, stale));
     }
     // The intents, the answered records and the pull request are always sent, so they spend the budget before the
     // fill does.
@@ -152,11 +149,11 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         bodies.push(v);
     }
     let ids = f.ids.iter().map(|i| line(by_id(i))).collect::<Result<Vec<_>, _>>()?;
-    let slice = serde_json::json!({
+    let slice = json!({
         "seed": id, "for": action, "budget": budget, "used": f.used + named,
         "bodies": bodies, "ids": ids, "cut": f.cut + waiting, "intents": intents,
     });
-    Ok(with(slice, pull_request))
+    Ok(with(slice, pull_request, stale))
 }
 
 /// Review carries the pull request whose head its stop compares; null when no pull request is in view (27, issue
@@ -166,13 +163,16 @@ fn pull_request(vault: &Vault, index: &Index, id: &Id, action: Action) -> Result
         return Ok(None);
     }
     let open = crate::done::open(&vault.root, index, id, &mut None)?;
-    Ok(Some(open.map_or(Value::Null, |(p, _)| serde_json::json!({ "number": p.number, "head": p.head_ref_oid }))))
+    Ok(Some(open.map_or(Value::Null, |(p, _)| json!({ "number": p.number, "head": p.head_ref_oid }))))
 }
 
-/// The walk's answer, with the pull request when the action carries one.
-fn with(mut answer: Value, pull_request: Option<Value>) -> Value {
+/// The walk's answer, with the pull request when the action carries one, and the note of a refresh that failed.
+fn with(mut answer: Value, pull_request: Option<Value>, stale: Option<String>) -> Value {
     if let Some(p) = pull_request {
         answer["pull_request"] = p;
+    }
+    if let Some(note) = stale {
+        answer["stale"] = note.into();
     }
     answer
 }
@@ -194,7 +194,7 @@ fn intents<'a>(
     for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone | Kind::Design)) {
         let verdict = read.row(r.kind, &r.id, r.status.as_deref())?;
         if let Some(intent) = verdict.intent {
-            intents.push(serde_json::json!({ "id": r.id, "intent": intent, "note": verdict.note }));
+            intents.push(json!({ "id": r.id, "intent": intent, "note": verdict.note }));
         }
     }
     Ok((read, intents))
@@ -218,7 +218,7 @@ fn drift(
     all.sort_by_key(|(_, r)| std::cmp::Reverse(at(r)));
     let (mut runs, mut checked, mut used, mut waiting) = (Vec::new(), BTreeSet::new(), 0, 0);
     for (d, r) in all {
-        let run = serde_json::json!({ "id": r.id, "kind": Kind::Run, "header": r.header, "body": r.body });
+        let run = json!({ "id": r.id, "kind": Kind::Run, "header": r.header, "body": r.body });
         let tokens = run.to_string().len().div_ceil(4);
         if !runs.is_empty() && used + tokens > budget / 2 {
             waiting += 1;

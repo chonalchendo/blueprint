@@ -104,9 +104,9 @@ impl Read {
     pub(crate) fn of(vault: &Vault, index: &Index, project: &str) -> Result<Self, Refusal> {
         let of = |kind| Filter { kind, status: None, project: Some(project), under: None, limit: ALL };
         Ok(Self {
-            designs: list(vault, index, &of(Kind::Design), false)?.rows,
-            milestones: list(vault, index, &of(Kind::Milestone), false)?.rows,
-            issues: list(vault, index, &of(Kind::Issue), false)?,
+            designs: list(vault, index, &of(Kind::Design), false, None)?.rows,
+            milestones: list(vault, index, &of(Kind::Milestone), false, None)?.rows,
+            issues: list(vault, index, &of(Kind::Issue), false, None)?,
         })
     }
 
@@ -179,7 +179,7 @@ pub fn projects(vault: &Vault, index: &Index) -> Result<Projects, Refusal> {
     let filter = Filter { kind: Kind::Project, status: None, project: None, under: None, limit: ALL };
     let tags = Tags::new(vault);
     let mut rows = Vec::new();
-    for row in list(vault, index, &filter, false)?.rows {
+    for row in list(vault, index, &filter, false, None)?.rows {
         let Some((project, _)) = crate::split(&row.row.id) else { continue };
         let intents = Read::of(vault, index, project)?.intents();
         let version = ProjectVersion::of(index, project, &tags)?.map(|v| v.tag);
