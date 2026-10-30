@@ -324,10 +324,34 @@ fn a_chained_body_that_drops_the_chains_change_refuses_chain_reverts() {
     // The section T changed is edited from the committed text, not from T's (b).
     reverts(&format!("T's lead.\n\n## One\n\nOld, plus U.\n\n{t}"), "One", "Old, and T's line.");
     // The lead T added is lost.
-    reverts(&format!("{one}\n{t}"), "lead", "the lead before the first");
+    reverts(&format!("{one}\n{t}"), "(lead)", "the lead before the first");
     // The section T removed comes back (rm).
     reverts(&format!("T's lead.\n\n{one}\n## Two\n\nTwo old.\n\n{t}"), "Two", "brings it back");
+    let fix_says = "it does not rewrite a line the chain added";
+    reverts(&format!("{one}\n{t}"), "(lead)", fix_says);
     // On top of the tip, the new delta adds its own lines.
     let body = format!("T's lead.\n\n{one}And U's line.\n\n{t}\n## U\n\nU's.\n");
     assert_eq!(record_with(root, B, &body, &u).0, Some(0));
+}
+
+#[test]
+fn chain_reverts_keys_a_lead_heading_and_each_repeated_heading_apart() {
+    let v = vault(&[W]);
+    let root = v.path();
+    assert_eq!(bp(root, &["transition", B, "approved"]).0, Some(0));
+    // T adds a lead, a section headed `lead`, and a second `## One`.
+    let tip = "T's lead.\n\n## One\n\nOld.\n\n## lead\n\nT's lead section.\n\n## One\n\nT's second One.\n";
+    let first = id(record_with(root, B, tip, &["--field", "cause=shared/threads/t"]));
+    let on = format!("chains={first}");
+    let u = ["--field", "cause=shared/threads/u", "--field", &on];
+    let refused = |body: &str, subject: &str| {
+        let (exit, v) = record_with(root, B, body, &u);
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("chain_reverts")), "{subject}: {v}");
+        assert_eq!(v["subject"].as_str(), Some(format!("{first}#{subject}").as_str()), "{v}");
+    };
+    // The section headed `lead` is not the lead: dropping it refuses, though the lead stays.
+    refused("T's lead.\n\n## One\n\nOld.\n\n## One\n\nT's second One.\n", "lead");
+    // The second `## One` is a section of its own: dropping it refuses.
+    refused("T's lead.\n\n## One\n\nOld.\n\n## lead\n\nT's lead section.\n", "One#2");
+    assert_eq!(record_with(root, B, &format!("{tip}\n## U\n\nU's.\n"), &u).0, Some(0));
 }
