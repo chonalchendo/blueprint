@@ -86,10 +86,12 @@ impl Action {
     }
 
     /// The record kinds under the seed whose latest record the walk returns as a body, ahead of the fill: respond
-    /// answers the latest review, which no link reaches (21, the context column).
+    /// answers the latest review, which no link reaches (21, the context column), and complete and respond carry the
+    /// latest claim, whose `## Next` names a stranded layer's rebase (34, design change 5).
     pub fn records(self) -> &'static [Kind] {
         match self {
-            Self::Respond => &[Kind::Review],
+            Self::Complete => &[Kind::Claim],
+            Self::Respond => &[Kind::Review, Kind::Claim],
             _ => &[],
         }
     }

@@ -36,8 +36,8 @@ pub struct Pr {
 pub struct Land {
     /// The claimed issue whose pull request merges.
     pub issue: String,
-    /// Run every gate and print the refusal land would give at this head, or the head it would merge; never fetch,
-    /// push, merge, release or write.
+    /// Run every gate and print the refusal land would give at this head, or the head it would merge; fetch origin,
+    /// but never push, merge, release or write.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -98,8 +98,11 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
             ),
         ));
     }
-    let gh = Gh::new(&c.top);
+    // The forge merges no head behind its base, so `pr` refuses one before the runs and the push (34, design change 5).
+    git(&c.top, &["fetch", "-q", "origin"])?;
     let head = git(&c.worktree, &["rev-parse", "HEAD"])?;
+    holds_base(&c, &id, &head)?;
+    let gh = Gh::new(&c.top);
     let open = gh.prs_for_head(&c.branch)?.into_iter().find(PullRequest::is_open);
     let runs = bp_read::inputs::runs(&index, id.as_str())?;
     let carried = crate::carry::read(&vault, &index, &id)?;
@@ -190,11 +193,9 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let c = claimed(cwd, &index, &id)?;
     let gh = Gh::new(&c.top);
     let reviewer = reviewer(&index, &id, &gh.login()?)?;
-    // The diff an earlier approval saw is compared with the base as origin holds it now. A dry run writes nothing, so
-    // it compares with origin as the clone last fetched it.
-    if !l.dry_run {
-        git(&c.top, &["fetch", "-q", "origin"])?;
-    }
+    // The diff an earlier approval saw, and the head's ancestry, are tested against the base as origin holds it now.
+    // The dry run fetches too, so a dry run that passes is a land the forge accepts (34, design change 5).
+    git(&c.top, &["fetch", "-q", "origin"])?;
     let Some(pr) =
         gh.prs_for_head(&c.branch)?.into_iter().filter(|p| p.is_open() || merged(p)).max_by_key(|p| p.number)
     else {
@@ -217,11 +218,13 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
     // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
     let compare = c.from.as_deref().map(|from| (c.top.as_path(), from));
-    // The check set is the last gate, so a head the clone cannot read refuses only when every other gate holds.
+    // The check set and then the head's ancestry are the last gates, so a head the clone cannot read refuses only when
+    // every other gate holds.
     let named = carried.named_by(&c.top, &pr.head_ref_oid);
     let gate = match intents::gates(&read, &c.base, &runs, &blocks, named.as_ref().ok().copied()).unmet {
         Some(unmet) => Err(landing::refusal(&unmet, &id, &pr, &reviewer, compare)),
-        None => named.map(|_| ()),
+        // A merged head is behind its base by its own merge.
+        None => named.and_then(|_| if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid) }),
     };
     if let Err(mut r) = gate {
         if merged(&pr) {
@@ -254,7 +257,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let moved = crate::stack::restack(&gh, &children, &c.target, &c.branch)?;
     let kept = remove(&c, &pr.head_ref_oid, !moved.stranded.is_empty())?;
     let mut writer = vault.writer()?;
-    writer.clean([&id, &c.claim])?;
+    writer.clean([&id, &c.claim].into_iter().chain(moved.notes.iter().map(|(claim, _)| claim)))?;
     // Another write may have landed while the forge merged: the claim must still be the one this land read.
     if held(writer.index(), &id)?.is_none_or(|h| h.id != c.claim.as_str()) {
         return Err(Refusal::failed(
@@ -264,10 +267,14 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     }
     let to = crate::clock::instant(crate::clock::now()?);
     let more = format!("pull_request: {}\n", pr.number);
-    let changes = BTreeMap::from([
+    let mut changes = BTreeMap::from([
         (c.claim.clone(), crate::claim::released(&vault.text(&c.claim)?, &to, "landed", &more)),
         (id.clone(), bp_vault::set_field(&vault.text(&id)?, "status", &resolved.into())),
     ]);
+    // A stranded layer's step goes on its claim too, so its walk carries it to the next session (34, design change 5).
+    for (claim, step) in &moved.notes {
+        changes.insert(claim.clone(), crate::claim::next(&vault.text(claim)?, step));
+    }
     writer.trailer(format!("Bp-Claim: {}", c.claim));
     let written = writer.commit("land", role.as_str(), &format!("land {id}"), &changes)?;
     Ok(Wrote::Changed(json!({
@@ -283,6 +290,29 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         "commit": written.commit,
         "findings": written.findings,
     })))
+}
+
+/// `head_behind_base` unless `head` holds origin's `target` as last fetched: the forge merges no head behind its base
+/// (34, design change 5). The fix rebases the branch's own commits: those past the claim's base while the head holds
+/// it, else, as for a layer `land` moved, those past the point where the head leaves the base.
+fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
+    let tip = git(&c.top, &["rev-parse", &format!("refs/remotes/origin/{}", c.target)])?;
+    let fork = git(&c.top, &["merge-base", &tip, head])?;
+    if fork == tip {
+        return Ok(());
+    }
+    let own = |from: &String| git(&c.top, &["merge-base", "--is-ancestor", from, head]).is_ok();
+    let from = c.from.clone().filter(own).unwrap_or(fork);
+    Err(Refusal::new(
+        Code::HeadBehindBase,
+        id.as_str(),
+        "a head lands only when it holds origin's base branch: the forge merges no head behind it (34, design change 5)",
+        format!(
+            "{head} lacks origin/{t} at {tip}; git -C {w} rebase --onto origin/{t} {from} && bp pr {id}",
+            t = c.target,
+            w = c.worktree.display()
+        ),
+    ))
 }
 
 /// The project's reviewer identity, or `reviewer_invalid` when it is empty or the token's own `login`, case ignored.
