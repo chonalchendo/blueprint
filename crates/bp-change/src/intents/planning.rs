@@ -104,10 +104,15 @@ pub struct ConcernAnswer {
     pub stamp: String,
     /// `designed`, `waived` or `open`.
     pub state: String,
+    /// When the answer was decided, Unix seconds: `decided_at`, else the record's stamp when `decided_at` is absent or
+    /// not an instant. `None` only when neither is an instant, and then no stamp proves the answer.
+    pub decided_at: Option<i64>,
 }
 
-/// The concerns whose latest answer is `open` (21, needs shaping).
-pub fn open_concerns(answers: &[ConcernAnswer]) -> Vec<String> {
+/// The concerns that need shaping (21, needs shaping), as `<concern> <state>`: each whose latest answer is `open`, or
+/// `designed` with no `done` milestone of the project stamped after its `decided_at`. A `designed` answer is a bet;
+/// `last_stamp`, the project's latest stamp of a `done` milestone, proves it once it follows the answer.
+pub fn unproven_concerns(answers: &[ConcernAnswer], last_stamp: Option<i64>) -> Vec<String> {
     let mut latest: BTreeMap<&str, &ConcernAnswer> = BTreeMap::new();
     for a in answers {
         let slot = latest.entry(a.concern.as_str()).or_insert(a);
@@ -115,7 +120,9 @@ pub fn open_concerns(answers: &[ConcernAnswer]) -> Vec<String> {
             *slot = a;
         }
     }
-    latest.into_values().filter(|a| a.state == "open").map(|a| a.concern.clone()).collect()
+    let proven = |a: &ConcernAnswer| a.decided_at.zip(last_stamp).is_some_and(|(at, stamp)| stamp > at);
+    let unproven = |a: &&ConcernAnswer| a.state == "open" || (a.state == "designed" && !proven(a));
+    latest.into_values().filter(unproven).map(|a| format!("{} {}", a.concern, a.state)).collect()
 }
 
 /// A drift run (21, drifted; 13, Run): a run of a design's check that failed or timed out. An integrity run checks the
@@ -125,15 +132,15 @@ pub fn is_drift(verdict: &str, check_kind: &str) -> bool {
 }
 
 /// The intent of the design `id`: drifted, then needs shaping (21). `uncited` holds its failed drift runs that no
-/// delta or thread cites. `open` holds the project's [`open_concerns`] when `id` is the project's root design and is
-/// `active`, else none, so needs shaping is one node per project; `due` says that a milestone of the project is
+/// delta or thread cites. `unproven` holds the project's [`unproven_concerns`] when `id` is the project's root design
+/// and is `active`, else none, so needs shaping is one node per project; `due` says that a milestone of the project is
 /// `planned` or `approved`.
-pub fn design(id: &str, uncited: &[String], open: &[String], due: bool) -> Verdict {
+pub fn design(id: &str, uncited: &[String], unproven: &[String], due: bool) -> Verdict {
     if !uncited.is_empty() {
         return Verdict::of(Intent::Drifted, format!("{}; bp walk {id} --for triage-drift", uncited.join(", ")));
     }
-    if !open.is_empty() && !due {
-        return Verdict::of(Intent::NeedsShaping, format!("{} open; bp walk {id} --for shape", open.join(", ")));
+    if !unproven.is_empty() && !due {
+        return Verdict::of(Intent::NeedsShaping, format!("{}; bp walk {id} --for shape", unproven.join(", ")));
     }
     Verdict::NONE
 }

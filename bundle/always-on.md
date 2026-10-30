@@ -10,7 +10,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 ### Intent to action
 
 - A design is missing: run the skill `bp-design`.
-- `needs-shaping`: an active design has an open concern, and no milestone is `planned` or `approved`. Run the skill `bp-shape`.
+- `needs-shaping`: an active design has an unproven concern (latest answer `open`, or `designed` with no milestone stamped after it), and no milestone is `planned` or `approved`. Run the skill `bp-shape`.
 - `needs-derivation`: an approved milestone has fewer than three live issues, and a finish-line block that no issue covers. Run the skill `bp-derive`.
 - `ready`: an issue is open and unclaimed. Dispatch `bp-worker` with its `complete` template.
 - `needs-review`: dispatch `bp-reviewer` with its `review` template. Then record the review.

@@ -27,7 +27,7 @@ pub struct Intents<'a> {
     /// Each learning's creation, read once per call for `stale` with no evidence row. Every learning lives in
     /// `shared/learnings` (13), so one read serves them all.
     created: OnceCell<BTreeMap<String, String>>,
-    /// Each project's open concerns, and whether a milestone is `planned` or `approved` (needs shaping).
+    /// Each project's unproven concerns, and whether a milestone is `planned` or `approved` (needs shaping).
     shaping: RefCell<BTreeMap<String, (Vec<String>, bool)>>,
     /// Whether a file of each project fails to parse (needs acceptance).
     broken: RefCell<BTreeMap<String, bool>>,
@@ -75,7 +75,7 @@ impl<'a> Intents<'a> {
             Kind::Design => {
                 let uncited: Vec<String> = drift(self.index, id)?.into_iter().map(|r| r.id).collect();
                 // Shaping reads the project's concern answers only for its active root design, if it has not drifted.
-                let (open, due) = match project(id) {
+                let (unproven, due) = match project(id) {
                     Some(p)
                         if uncited.is_empty()
                             && status == DesignStatus::Active.as_str()
@@ -85,7 +85,7 @@ impl<'a> Intents<'a> {
                     }
                     _ => (Vec::new(), false),
                 };
-                Ok(intents::design(id, &uncited, &open, due))
+                Ok(intents::design(id, &uncited, &unproven, due))
             }
             _ => Ok(Verdict::NONE),
         }
@@ -182,21 +182,28 @@ fn root(index: &Index, project: &str, id: &str) -> Result<bool, Refusal> {
     Ok(id == system || (id == format!("projects/{project}/designs/product") && index.header(&system)?.is_none()))
 }
 
-/// The project's open concerns, and whether a milestone of it is `planned` or `approved` (21, needs shaping). The
-/// milestones are read only when a concern is open.
+/// The project's unproven concerns, and whether a milestone of it is `planned` or `approved` (21, needs shaping). The
+/// version records are read only when a concern could be unproven, and the milestones only when one is.
 fn shaping(index: &Index, project: &str) -> Result<(Vec<String>, bool), Refusal> {
-    let answers = index.records(&format!("projects/{project}/project"), Kind::ConcernAnswer)?;
-    let answers: Vec<intents::ConcernAnswer> = answers
+    let under = format!("projects/{project}/project");
+    let answers: Vec<intents::ConcernAnswer> = index
+        .records(&under, Kind::ConcernAnswer)?
         .iter()
         .map(|r| intents::ConcernAnswer {
             concern: text(&r.header, "concern").unwrap_or_default(),
             stamp: r.id.rsplit('/').next().unwrap_or_default().to_string(),
             state: text(&r.header, "state").unwrap_or_default(),
+            decided_at: text(&r.header, "decided_at")
+                .and_then(|t| intents::timestamp(&t))
+                .or_else(|| key_instant(r.id.rsplit('/').next().unwrap_or_default())),
         })
         .collect();
-    let open = intents::open_concerns(&answers);
-    if open.is_empty() {
-        return Ok((open, false));
+    if intents::unproven_concerns(&answers, None).is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let unproven = intents::unproven_concerns(&answers, last_stamp(index, &under)?);
+    if unproven.is_empty() {
+        return Ok((unproven, false));
     }
     let mut due = false;
     for status in [MilestoneStatus::Planned, MilestoneStatus::Approved] {
@@ -209,7 +216,28 @@ fn shaping(index: &Index, project: &str) -> Result<(Vec<String>, bool), Refusal>
         };
         due |= index.list(&f)?.1 > 0;
     }
-    Ok((open, due))
+    Ok((unproven, due))
+}
+
+/// The instant a concern answer's key holds (`Key::Concern`, `<concern>/<stamp>`): the stamp is the instant with `-`
+/// for `:`, and a `-N` suffix when two answers share a second. The fallback when `decided_at` is absent or not an instant.
+fn key_instant(stamp: &str) -> Option<i64> {
+    let mut b = stamp.get(..20)?.as_bytes().to_vec();
+    (b[13], b[16]) = (b':', b':');
+    intents::timestamp(std::str::from_utf8(&b).ok()?)
+}
+
+/// The project's latest stamp of a `done` milestone: the `accepted_at` of the version record `stamp` writes for it.
+fn last_stamp(index: &Index, project: &str) -> Result<Option<i64>, Refusal> {
+    let mut last = None;
+    for v in index.records(project, Kind::BlueprintVersion)? {
+        let Some(m) = text(&v.header, "milestone") else { continue };
+        let done = index.header(&m)?.and_then(|h| text(&h, "status"));
+        if done.as_deref() == Some(MilestoneStatus::Done.as_str()) {
+            last = last.max(text(&v.header, "accepted_at").and_then(|t| intents::timestamp(&t)));
+        }
+    }
+    Ok(last)
 }
 
 /// When a design last changed version: the latest `accepted_at` of its accepted deltas (13, Delta).

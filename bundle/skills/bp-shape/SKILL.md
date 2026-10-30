@@ -3,7 +3,7 @@ name: bp-shape
 description: Use when a design is `needs-shaping`. Propose the next milestone, and write it when the human agrees.
 ---
 
-Intent: `needs-shaping`. An active design has an open concern, and the project has no milestone `planned` or `approved`. You propose one milestone. The human decides its scope.
+Intent: `needs-shaping`. An active design has an unproven concern, and the project has no milestone `planned` or `approved`. A concern is unproven when its latest answer is `open`, or `designed` with no milestone stamped after it. You propose one milestone. The human decides its scope.
 
 Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at most once. Exit 3 means the call had nothing to do. In this text, `<p>` is the project slug.
 
@@ -11,7 +11,7 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
 2. Read the slice: `bp walk <seed> --for shape --json`. It holds the product and system designs, and the learnings that touch them.
 3. Read the concerns: `bp show projects/<p>/project --section Concerns --json`. A `no_section` refusal means that the project lists no concern.
 4. List the concern answers: `bp list concern-answer --under projects/<p>/project --limit 1000 --json`. Each id ends in its stamp.
-5. Read the latest answer of each concern with `bp show <answer> --json`. A concern is open when its `state` is `open`. With no section and no answer, no concern is open.
+5. Read the latest answer of each concern with `bp show <answer> --json`. A concern is unproven when its `state` is `open`, or `designed` with no milestone stamped after its `decided_at`. The intent's note names each unproven concern and its state. With no section and no answer, no concern is unproven.
 6. List the deltas: `bp list delta --project <p> --limit 1000 --json`.
 7. Read each delta with `bp show <delta> --no-body --json`. It gives `milestone` and `state`.
 8. Read the status of each `proposed` delta's milestone with `bp show <milestone> --no-body --json`. A delta whose milestone is `abandoned` needs a new carrier.
@@ -20,7 +20,7 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
    - The goal, and what is out of scope.
    - The finish line, as one predicate per line.
    - Each design change that it carries.
-10. One bet closes one open concern, or a small set that shares one design change. Leave the rest for a later milestone.
+10. One bet closes one unproven concern, or a small set that shares one design change. Leave the rest for a later milestone.
 11. Wait until the human agrees or changes the proposal. Write nothing before that.
 12. Get the body template: `bp create milestone --template --json`.
 13. Write the body to a file outside the vault. No `TODO(bp): ` line stays.
