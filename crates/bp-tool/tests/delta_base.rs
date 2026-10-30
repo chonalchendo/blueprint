@@ -182,7 +182,7 @@ fn delta_chains_within_milestone() {
     let (t, u, w) = ("cause=shared/threads/t", "cause=shared/threads/u", "cause=shared/threads/w");
     let first = id(record_with(root, B, "## One\n\nT's.\n", &["--field", t]));
     // Chaining needs the field: the record names the tip to read.
-    let (exit, v) = record_with(root, B, "## One\n\nT's, then U's.\n", &["--field", u]);
+    let (exit, v) = record_with(root, B, "## One\n\nT's.\nThen U's.\n", &["--field", u]);
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("delta_pending")), "{v}");
     let fix = v["fix"].as_str().unwrap();
     assert!(
@@ -190,7 +190,7 @@ fn delta_chains_within_milestone() {
         "{fix}"
     );
     let on = format!("chains={first}");
-    let (exit, v) = record_with(root, B, "## One\n\nT's, then U's.\n", &["--field", u, "--field", &on]);
+    let (exit, v) = record_with(root, B, "## One\n\nT's.\nThen U's.\n", &["--field", u, "--field", &on]);
     assert_eq!((exit, v["chains"].as_str()), (Some(0), Some(first.as_str())), "the result says it chained: {v}");
     let second = v["id"].as_str().unwrap().to_string();
     let shown = bp(root, &["show", &second, "--no-body"]).1;
@@ -217,7 +217,7 @@ fn delta_chains_within_milestone() {
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("delta_pending")), "a fork: {v}");
     assert!(v["fix"].as_str().unwrap().contains(&second), "the fix names the tip: {v}");
     let tip = format!("chains={second}");
-    let third = id(record_with(root, B, "## One\n\nT's, U's, then W's.\n", &["--field", w, "--field", &tip]));
+    let third = id(record_with(root, B, "## One\n\nT's.\nThen U's.\nThen W's.\n", &["--field", w, "--field", &tip]));
     assert_eq!(bp(root, &["show", &third, "--no-body"]).1["chains"].as_str(), Some(second.as_str()));
 
     // An editorial delta never chains.
@@ -244,12 +244,12 @@ fn stamp_accepts_chain_in_order() {
     let first = id(record_with(root, B, "## One\n\nT's.\n", &t));
     let on = format!("chains={first}");
     let u = ["--field", "cause=shared/threads/u", "--field", &on];
-    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &u));
+    let second = id(record_with(root, B, "## One\n\nT's.\nThen U's.\n", &u));
 
     let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", B]);
     assert_eq!(exit, Some(0), "{v}");
     assert_eq!(v["deltas"], serde_json::json!([first, second]), "in chain order: {v}");
-    assert_eq!(bp(root, &["show", S]).1["body"], "## One\n\nT's, then U's.");
+    assert_eq!(bp(root, &["show", S]).1["body"], "## One\n\nT's.\nThen U's.");
     assert_eq!(std::fs::read_to_string(root.join(&path)).unwrap(), changed, "the first's spec holds");
     for d in [&first, &second] {
         assert_eq!(bp(root, &["show", d]).1["state"], "accepted");
@@ -268,7 +268,7 @@ fn a_moved_link_refuses_and_its_cause_records_it_again() {
     let (t, u) = (["--field", "cause=shared/threads/t"], ["--field", "cause=shared/threads/u"]);
     let first = id(record_with(root, B, "## One\n\nT's.\n", &t));
     let on = format!("chains={first}");
-    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &[&u[..], &["--field", &on]].concat()));
+    let second = id(record_with(root, B, "## One\n\nT's.\nThen U's.\n", &[&u[..], &["--field", &on]].concat()));
     assert_eq!(record(root, A, "## One\n\nA's.\n").0, Some(0));
     assert_eq!(stamp(A).0, Some(0));
     let (exit, v) = stamp(B);
@@ -287,36 +287,47 @@ fn a_moved_link_refuses_and_its_cause_records_it_again() {
         "{fix}"
     );
     let on = format!("chains={renewed}");
-    let (exit, v) = record_with(root, B, "## One\n\nA's, T's, then U's.\n", &[&u[..], &["--field", &on]].concat());
+    let (exit, v) =
+        record_with(root, B, "## One\n\nA's, then T's.\nThen U's.\n", &[&u[..], &["--field", &on]].concat());
     assert_eq!((exit, v["rejected"].as_str()), (Some(0), Some(second.as_str())), "{v}");
     assert_eq!(stamp(B).0, Some(0));
-    assert_eq!(bp(root, &["show", S]).1["body"], "## One\n\nA's, T's, then U's.");
+    assert_eq!(bp(root, &["show", S]).1["body"], "## One\n\nA's, then T's.\nThen U's.");
 }
 
 #[test]
 fn a_chained_body_that_drops_the_chains_change_refuses_chain_reverts() {
     let v = vault(&[W]);
     let root = v.path();
+    let design = "---\nkind: design\ntitle: S\nstatus: active\n---\n\n## One\n\nOld.\n\n## Two\n\nTwo old.\n";
+    std::fs::write(root.join(format!("{S}.md")), design).unwrap();
+    common::git(root, &["commit", "-qam", "two sections"]);
     assert_eq!(bp(root, &["transition", B, "approved"]).0, Some(0));
-    let t = ["--field", "cause=shared/threads/t"];
-    let first = id(record_with(root, B, "## One\n\nOld, and T's line.\n\n## T\n\nT's section.\n", &t));
+    // T adds a lead line, changes `One`, removes `Two` and adds `T`.
+    let tip = "T's lead.\n\n## One\n\nOld, and T's line.\n\n## T\n\nT's section.\n";
+    let first = id(record_with(root, B, tip, &["--field", "cause=shared/threads/t"]));
     let on = format!("chains={first}");
     let u = ["--field", "cause=shared/threads/u", "--field", &on];
-
-    // Built on the design, not the tip: the section T added is gone.
-    let (exit, v) = record_with(root, B, "## One\n\nOld, and T's line.\n\n## U\n\nU's.\n", &u);
-    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("chain_reverts")), "{v}");
-    assert_eq!(v["subject"].as_str(), Some(format!("{first}#T").as_str()), "{v}");
-    let fix = v["fix"].as_str().unwrap();
-    assert!(fix.contains("adds the section") && fix.contains(&format!("bp show {first} --json")), "{fix}");
-    // The section T changed reads as committed again.
-    let (exit, v) = record_with(root, B, "## One\n\nOld.\n\n## T\n\nT's section.\n", &u);
-    assert_eq!(
-        (exit, v["code"].as_str(), v["subject"].as_str()),
-        (Some(2), Some("chain_reverts"), Some(format!("{first}#One").as_str()))
-    );
-    assert!(v["fix"].as_str().unwrap().contains("puts back the committed text"), "{v}");
-    // On top of the tip, a further change to T's section is the new delta's to make.
-    let body = "## One\n\nOld, and T's line, and U's.\n\n## T\n\nT's section, and U's.\n";
-    assert_eq!(record_with(root, B, body, &u).0, Some(0));
+    let reverts = |body: &str, section: &str, what: &str| {
+        let (exit, v) = record_with(root, B, body, &u);
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("chain_reverts")), "{section}: {v}");
+        assert_eq!(v["subject"].as_str(), Some(format!("{first}#{section}").as_str()), "{v}");
+        let fix = v["fix"].as_str().unwrap();
+        assert!(fix.contains(what) && fix.contains(&format!("bp show {first} --json")), "{fix}");
+    };
+    let one = "## One\n\nOld, and T's line.\n";
+    let t = "## T\n\nT's section.\n";
+    // The section T added is dropped.
+    reverts(&format!("T's lead.\n\n{one}\n## U\n\nU's.\n"), "T", "drops it");
+    // The section T changed is dropped (d), or reads as committed again.
+    reverts(&format!("T's lead.\n\n{t}"), "One", "drops it");
+    reverts(&format!("T's lead.\n\n## One\n\nOld.\n\n{t}"), "One", "lacks it");
+    // The section T changed is edited from the committed text, not from T's (b).
+    reverts(&format!("T's lead.\n\n## One\n\nOld, plus U.\n\n{t}"), "One", "Old, and T's line.");
+    // The lead T added is lost.
+    reverts(&format!("{one}\n{t}"), "lead", "the lead before the first");
+    // The section T removed comes back (rm).
+    reverts(&format!("T's lead.\n\n{one}\n## Two\n\nTwo old.\n\n{t}"), "Two", "brings it back");
+    // On top of the tip, the new delta adds its own lines.
+    let body = format!("T's lead.\n\n{one}And U's line.\n\n{t}\n## U\n\nU's.\n");
+    assert_eq!(record_with(root, B, &body, &u).0, Some(0));
 }

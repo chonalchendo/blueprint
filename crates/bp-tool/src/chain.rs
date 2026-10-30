@@ -211,38 +211,77 @@ fn pending(design: &Id, milestone: Option<&str>, chain: &[Proposed], moved: Opti
     )
 }
 
-/// Refuses `chain_reverts` when the new delta's body undoes a `## ` section that `on`, the link it goes on, holds
-/// against the committed design: one the chain added that the body drops, or one the chain changed that the body
-/// puts back as committed. The stamp writes the tip's body in whole, so such a body would drop the earlier change
-/// without a word (34, design change 4).
-fn kept(vault: &Vault, design: &Id, on: &Proposed, new: &New) -> Result<(), Refusal> {
-    let committed = vault.read(design)?.body;
-    let (chain, body) = (Body::parse(&on.body), Body::parse(new.body));
-    let text = |b: &Body, h: &str| b.sections_named(h).first().map(|s| s.text.clone());
-    for section in &chain.sections {
-        let (was, now) = (text(&committed, &section.heading), text(&body, &section.heading));
-        let what = match (was, now) {
-            (None, None) => "adds the section and this body drops it",
-            (Some(was), Some(now)) if was != section.text && now == was => {
-                "changes the section and this body puts back the committed text"
-            }
-            _ => continue,
-        };
-        let (delta, heading) = (&on.delta, &section.heading);
-        let mut again = vec![format!("bp record delta {design} {}", crate::delta::carrier(new.milestone))];
-        again.extend(new.cause.map(|c| format!("--field cause={c}")));
-        again.push(format!("--field chains={delta} --body-file <f>"));
-        return Err(Refusal::new(
-            Code::ChainReverts,
-            format!("{delta}#{heading}"),
-            "a delta on a pending chain keeps every section the chain added or changed, as the stamp writes the tip's \
-             body in whole (34, design change 4)",
-            format!(
-                "the chain up to {delta} {what}: `## {heading}`; read the tip: bp show {delta} --json; write the body \
-                 on top of it; rerun {}",
-                again.join(" ")
-            ),
-        ));
+/// The `## ` sections of a body, by heading, each as its non-blank lines; the text before the first heading is the
+/// section `lead`. A heading line inside a fenced block is text. A repeated heading keeps its first section.
+fn sections(body: &str) -> BTreeMap<String, Vec<String>> {
+    let mut out: Vec<(String, Vec<String>)> = vec![("lead".into(), Vec::new())];
+    let mut fence: Option<&str> = None;
+    for line in body.lines().map(str::trim_end) {
+        let mark = ["```", "~~~"].into_iter().find(|m| line.trim_start().starts_with(m));
+        match (fence, mark) {
+            (None, Some(m)) => fence = Some(m),
+            (Some(f), Some(m)) if f == m => fence = None,
+            _ => {}
+        }
+        match line.strip_prefix("## ") {
+            Some(heading) if fence.is_none() && mark.is_none() => out.push((heading.trim().to_string(), Vec::new())),
+            _ if !line.trim().is_empty() => out.last_mut().expect("the lead opens the list").1.push(line.to_string()),
+            _ => {}
+        }
     }
-    Ok(())
+    let mut map = BTreeMap::new();
+    for (heading, lines) in out {
+        map.entry(heading).or_insert(lines);
+    }
+    map
+}
+
+/// Refuses `chain_reverts` when the new delta's body undoes what `on`, the link it goes on, holds against the
+/// committed design, section by section, the lead included: a section the chain added or changed must stay, with
+/// every line the chain added to it; a section the chain removed must stay out. The stamp writes the tip's body in
+/// whole, so such a body would drop the earlier change without a word (34, design change 4).
+fn kept(vault: &Vault, design: &Id, on: &Proposed, new: &New) -> Result<(), Refusal> {
+    let committed = sections(&vault.read(design)?.body.text);
+    let (chain, body) = (sections(&on.body), sections(new.body));
+    let mut undone = None;
+    for (heading, lines) in &chain {
+        let was = committed.get(heading);
+        if was == Some(lines) {
+            continue;
+        }
+        undone = match body.get(heading) {
+            None => Some((heading, "adds or changes the section and this body drops it".to_string())),
+            Some(now) => lines
+                .iter()
+                .find(|l| !was.is_some_and(|w| w.contains(l)) && !now.contains(l))
+                .map(|l| (heading, format!("adds the line `{}` to the section and this body lacks it", l.trim()))),
+        };
+        if undone.is_some() {
+            break;
+        }
+    }
+    if undone.is_none() {
+        undone = committed
+            .keys()
+            .find(|h| !chain.contains_key(*h) && body.contains_key(*h))
+            .map(|h| (h, "removes the section and this body brings it back".to_string()));
+    }
+    let Some((heading, what)) = undone else { return Ok(()) };
+    let delta = &on.delta;
+    let mut again = vec![format!("bp record delta {design} {}", crate::delta::carrier(new.milestone))];
+    again.extend(new.cause.map(|c| format!("--field cause={c}")));
+    again.push(format!("--field chains={delta} --body-file <f>"));
+    let place =
+        if heading == "lead" { "the lead before the first `## `".to_string() } else { format!("`## {heading}`") };
+    Err(Refusal::new(
+        Code::ChainReverts,
+        format!("{delta}#{heading}"),
+        "a delta on a pending chain keeps every section the chain added or changed, with each line it added, and \
+         leaves out each section it removed, as the stamp writes the tip's body in whole (34, design change 4)",
+        format!(
+            "the chain up to {delta} {what}: {place}; read the tip: bp show {delta} --json; write the body on top of \
+             it; rerun {}",
+            again.join(" ")
+        ),
+    ))
 }
