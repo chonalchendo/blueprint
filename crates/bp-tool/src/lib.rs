@@ -319,7 +319,7 @@ fn list_(cwd: &Path, list: &List) -> Result<Value, Refusal> {
         under: under.as_ref().map(Id::as_str),
         limit: list.limit,
     };
-    Ok(sorted(&bp_read::list(&vault, &index, &filter, list.ready)?))
+    Ok(sorted(&bp_read::list(&vault, &index, &filter, list.ready, Some(cwd))?))
 }
 
 /// A kind argument, from the closed set.

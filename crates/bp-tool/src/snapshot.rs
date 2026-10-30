@@ -1,5 +1,5 @@
 //! The forge snapshot (27, design change 9): after its forge calls, a repo verb rewrites `.bp/forge/<project>/` in
-//! 24's format, so `list` and `walk` read the forge with no call of their own (22, constraint 8). `bp_read::World`
+//! 24's format. `list` and `walk` call `gh` only to refresh a snapshot a minute old or older (34, design change 3). `bp_read::World`
 //! reads it, and `bp_read::snapshot` writes it for the verbs and the view alike.
 
 use std::path::Path;

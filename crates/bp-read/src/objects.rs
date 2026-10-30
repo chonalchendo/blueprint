@@ -3,6 +3,7 @@
 //! the envelopes printed before. A field the JSON skips is optional in TypeScript (`?`), not `null`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use bp_change::intents::Intent;
 use bp_change::{IssueStatus, MilestoneStatus};
@@ -31,6 +32,10 @@ pub struct List {
     /// The seconds since the oldest forge read in view.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forge_age: Option<i64>,
+    /// Why a snapshot a minute old was not refreshed before the read (34, design change 3); the rows read the old
+    /// one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forge_error: Option<String>,
 }
 
 /// One row of `list`: the index's row, a learning's `stale`, and the intent with its note.
@@ -113,8 +118,15 @@ pub struct Search {
 }
 
 /// The rows `filter` matches, with intents for an issue, a milestone, a design or a learning. `ready` keeps only the
-/// open issues whose intent is `ready`, then limits.
-pub fn list(vault: &Vault, index: &Index, filter: &Filter<'_>, ready: bool) -> Result<List, Refusal> {
+/// open issues whose intent is `ready`, then limits. With `from`, the clone a read verb runs in, an issue list first
+/// refreshes each stale snapshot in view (34, design change 3); the view passes none, as it refreshes on its own.
+pub fn list(
+    vault: &Vault,
+    index: &Index,
+    filter: &Filter<'_>,
+    ready: bool,
+    from: Option<&Path>,
+) -> Result<List, Refusal> {
     let kind = filter.kind;
     let read = Filter {
         kind,
@@ -128,14 +140,25 @@ pub fn list(vault: &Vault, index: &Index, filter: &Filter<'_>, ready: bool) -> R
     if !matches!(kind, Kind::Issue | Kind::Milestone | Kind::Design | Kind::Learning) {
         let rows: Vec<ListRow> =
             rows.into_iter().map(|row| ListRow { row, stale: None, intent: None, note: None }).collect();
-        return Ok(List { truncated: total > rows.len(), rows, total, forge: None, forge_age: None });
+        return Ok(List {
+            truncated: total > rows.len(),
+            rows,
+            total,
+            forge: None,
+            forge_age: None,
+            forge_error: None,
+        });
     }
     // The projects in view: `project`, else the rows' own; a snapshot outside them is not read (27, design change 9).
     let projects: BTreeSet<&str> = match filter.project {
         Some(p) => BTreeSet::from([p]),
         None => rows.iter().filter_map(|r| crate::split(&r.id)).map(|(p, _)| p).collect(),
     };
-    let intents = Intents::new(vault, index, (kind == Kind::Issue).then_some(&projects))?;
+    let issues = kind == Kind::Issue;
+    let forge_error = from
+        .filter(|_| issues)
+        .and_then(|cwd| crate::snapshot::refresh_for_read(vault, index, cwd, projects.iter().copied()));
+    let intents = Intents::new(vault, index, issues.then_some(&projects))?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let verdict = intents.row(kind, &row.id, row.status.as_deref())?;
@@ -156,7 +179,7 @@ pub fn list(vault: &Vault, index: &Index, filter: &Filter<'_>, ready: bool) -> R
         Some(None) => (Some(Forge::NotRead), None),
         None => (None, None),
     };
-    Ok(List { truncated: total > out.len(), rows: out, total, forge, forge_age })
+    Ok(List { truncated: total > out.len(), rows: out, total, forge, forge_age, forge_error })
 }
 
 /// The counts after the index takes in every file, and the findings: statuses outside their kind's set, link

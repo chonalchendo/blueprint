@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use bp_vault::{Code, Index, Refusal, Vault};
 
-/// How often the view reads the forge for one project, at most (18, Forge reader: a choice).
-const EVERY: Duration = Duration::from_secs(60);
+/// How often the view reads the forge for one project, at most (18, Forge reader: a choice): the read verbs' minute
+/// (34, design change 3). Each due read rewrites the snapshot, so with the forge on it never grows a minute old.
+const EVERY: Duration = bp_read::snapshot::MAX_AGE;
 
 /// One project's reads.
 #[derive(Debug, PartialEq, Eq)]
