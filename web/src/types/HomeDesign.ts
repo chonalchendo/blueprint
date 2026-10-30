@@ -57,4 +57,16 @@ design_kind?: string,
 /**
  * A design's scope, from its path.
  */
-scope?: string, };
+scope?: string, 
+/**
+ * A delta's milestone; none for an editorial delta.
+ */
+milestone?: string, 
+/**
+ * A delta's cause.
+ */
+cause?: string, 
+/**
+ * The delta a delta chains on (34, design change 4), so a session finds a chain's tip from the list.
+ */
+chains?: string, };

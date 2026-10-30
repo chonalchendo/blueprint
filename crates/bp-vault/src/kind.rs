@@ -96,7 +96,7 @@ impl Kind {
     /// the index, as a node's links are.
     pub fn record_links(self) -> &'static [&'static str] {
         match self {
-            Self::Delta => &["milestone", "cause", "authorized_by", "version"],
+            Self::Delta => &["milestone", "cause", "authorized_by", "version", "chains"],
             Self::BlueprintVersion => &["milestone"],
             Self::ConcernAnswer => &["design"],
             Self::Evidence => &["issue"],

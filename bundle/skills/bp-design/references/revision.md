@@ -29,7 +29,7 @@ Load this reference when the design is past `draft`. Load it before the referenc
    - Render the diff: `bp diagram --base <old-spec> --spec-file <new-spec> --out <page> --json`. Show the page to the human.
    - A changed context or container diagram runs risk storming again on the changed region. Use `references/risk-threat.md`.
    - A child design whose diagram shows a changed noun gets a follow-up line in the delta's change.
-8. **Check the body diff**. Write the whole proposed body to a file outside the vault. Compare it with the current body. Each section that goes away needs the human's word. A net loss that the human did not ask for is a defect.
+8. **Check the body diff**. Write the whole proposed body to a file outside the vault. If a delta of the design from another cause pends under the milestone, read the tip (`bp list delta --under <design> --json`), write your body on top of its body (`bp show <tip> --json`), and add `--field chains=<tip>`. Compare it with the current body, or with the tip's body when a chain pends. Each section that goes away needs the human's word. A net loss that the human did not ask for is a defect.
 9. **Confirm and record**. Show the human the proposed body one changed section at a time. Then record one delta.
    - Milestone path: run `bp record delta <design> --field milestone=<milestone> --field cause=<id> --field change="<what changes>" --body-file <file> --json`.
    - Add `--field authorized_by=<decision>` when a decision authorizes the change.

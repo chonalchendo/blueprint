@@ -2,6 +2,7 @@
 //! `--json`; diagnostics go to stderr.
 
 mod carry;
+mod chain;
 mod check;
 mod claim;
 mod create;

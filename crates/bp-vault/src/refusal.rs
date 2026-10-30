@@ -51,6 +51,7 @@ crate::closed_enum! {
         VerbOutsideRole = "verb_outside_role",
         FindingInvalid = "finding_invalid",
         NoTag = "no_tag",
+        ChainReverts = "chain_reverts",
     }
 }
 

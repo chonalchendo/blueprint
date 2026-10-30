@@ -12,7 +12,7 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
 3. Read the named blocks in the `## Check` section of the issue. They define done.
 4. Make the change. Obey the conventions that the slice names. Commit in the worktree.
 5. Run the blocks before you push: `bp check <id> --json`.
-6. If the issue asks for a change that makes a target design false, propose a delta. Write the whole new design body to a file outside the vault. Then run `bp record delta <design> --field milestone=<milestone> --field cause=<id> --field change="<what changes>" --body-file <file> --json`. The milestone is the `under` of the issue.
+6. If the issue asks for a change that makes a target design false, propose a delta. Write the whole new design body to a file outside the vault. Then run `bp record delta <design> --field milestone=<milestone> --field cause=<id> --field change="<what changes>" --body-file <file> --json`. The milestone is the `under` of the issue. If a delta of the design from another issue pends under the milestone, read the tip (`bp list delta --under <design> --json`), write your body on top of its body (`bp show <tip> --json`), and add `--field chains=<tip>`.
 7. Open the pull request: `bp pr <id> --json`.
 
 Also escalate when the issue contradicts a target design and does not ask for that change. To escalate, run `bp release <id> --reason escalated --json`. Then stop, and reply with `escalated` and the cause.

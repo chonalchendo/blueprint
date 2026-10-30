@@ -41,7 +41,9 @@ pub struct CheckSet {
 /// Reads the check set of `issue`. "Since the claim" is the commit that added the issue's earliest claim, under any id
 /// the issue had, so neither `release` and `cut` again nor a `rename` moves the baseline past a change. Each owner is
 /// read at that commit under the id it had there. A delta's blocks are compared with its design's then, as its body
-/// is the proposed design body.
+/// is the proposed design body. A chained delta's are compared with the link it chains on as it is now, and only the
+/// blocks it adds, changes or removes count, so an issue binds no block another issue's link wrote (34, design
+/// change 4).
 ///
 /// # Panics
 ///
@@ -58,24 +60,38 @@ pub fn check_set(vault: &Vault, index: &Index, issue: &Id) -> Result<CheckSet, R
     let at = git(&vault.root, &args.collect::<Vec<_>>())?.lines().last().unwrap_or_default().to_string();
     let file = vault.read(issue)?;
     let deltas = crate::carried_deltas(index, issue)?;
-    // Each owner: its id, the file its claim-time text comes from, and its blocks now.
-    let mut now = vec![(issue.clone(), issue.clone(), hashes(&file.body))];
+    // Each owner: its id, the file its claim-time text comes from, its blocks now, and a chained delta's blocks then.
+    let mut now = vec![(issue.clone(), issue.clone(), hashes(&file.body), None)];
     if let Some(m) = file.header.and_then(|h| h.under) {
         let blocks = hashes(&vault.read(&m)?.body);
-        now.push((m.clone(), m, blocks));
+        now.push((m.clone(), m, blocks, None));
     }
     for (design, d) in &deltas {
         let delta = Id::parse(&d.id).expect("the index holds ids");
-        now.push((delta, design.clone(), hashes(&Body::parse(&d.body))));
+        let blocks = hashes(&Body::parse(&d.body));
+        let link = match d.header.get("chains").and_then(|v| v.as_str()) {
+            Some(p) => index.records(design.as_str(), Kind::Delta)?.into_iter().find(|r| r.id == p),
+            None => None,
+        };
+        now.push(match link {
+            Some(link) => {
+                let (then, blocks) = own(hashes(&Body::parse(&link.body)), blocks);
+                (delta, Id::parse(&link.id).expect("the index holds ids"), blocks, Some(then))
+            }
+            None => (delta, design.clone(), blocks, None),
+        });
     }
-    let (mut owners, mut set, mut claimed) = (Vec::new(), Vec::new(), Vec::new());
-    for (id, source, now) in now {
-        let (source, then) = then(vault, index, source, &at)?;
-        let errors = |b: &Blocks| -> Vec<String> { b.values().filter(|(_, e)| *e).map(|(h, _)| h.clone()).collect() };
-        set.extend(errors(&now));
-        claimed.extend(errors(&then));
+    let mut owners = Vec::new();
+    for (id, source, now, chained) in now {
+        let (source, then) = match chained {
+            Some(then) => (source, then),
+            None => then(vault, index, source, &at)?,
+        };
         owners.push(Owner { id, source, then, now });
     }
+    let errors = |b: &Blocks| -> Vec<String> { b.values().filter(|(_, e)| *e).map(|(h, _)| h.clone()).collect() };
+    let set: Vec<String> = owners.iter().flat_map(|o| errors(&o.now)).collect();
+    let claimed: Vec<String> = owners.iter().flat_map(|o| errors(&o.then)).collect();
     Ok(CheckSet {
         at,
         deltas,
@@ -107,6 +123,16 @@ fn then(vault: &Vault, index: &Index, id: Id, at: &str) -> Result<(Id, Blocks), 
         }
     }
     Ok((id, BTreeMap::new()))
+}
+
+/// `then` and `now` without the blocks they hold alike: what a chained delta adds, changes or removes.
+fn own(mut then: Blocks, mut now: Blocks) -> (Blocks, Blocks) {
+    let same: Vec<String> = now.iter().filter(|(n, b)| then.get(*n) == Some(*b)).map(|(n, _)| n.clone()).collect();
+    for name in &same {
+        then.remove(name);
+        now.remove(name);
+    }
+    (then, now)
 }
 
 /// The named blocks of `body`.

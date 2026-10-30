@@ -6,11 +6,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::fingerprint::{fingerprint, still};
-use crate::{Broken, BrokenFile, Code, Counts, File, FindingKind, Id, Kind, Refusal, Vault};
+use crate::{Broken, BrokenFile, Code, Counts, File, FindingKind, Hit, Id, Kind, Record, Refusal, Row, Vault};
 
 mod insert;
 mod integrity;
@@ -70,57 +69,6 @@ pub struct Index {
 /// while another process refreshes it.
 pub struct Reading<'a> {
     _tx: rusqlite::Transaction<'a>,
-}
-
-/// One row of `list`. A field it skips is optional in TypeScript, not null.
-#[derive(Debug, Serialize, ts_rs::TS)]
-#[ts(optional_fields)]
-pub struct Row {
-    /// The path id.
-    pub id: String,
-    /// The kind.
-    pub kind: String,
-    /// The title; records have none.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// The status; a record's is its `state`, where its kind has one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// The parent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub under: Option<String>,
-    /// A design's kind, from its path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub design_kind: Option<String>,
-    /// A design's scope, from its path.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-}
-
-/// One row of `search`.
-#[derive(Debug, Serialize, ts_rs::TS)]
-pub struct Hit {
-    /// The path id.
-    pub id: String,
-    /// The kind.
-    pub kind: String,
-    /// The title.
-    pub title: Option<String>,
-    /// BM25, higher is better.
-    pub rank: f64,
-    /// Matching text from the best column, the terms marked `«` and `»`.
-    pub snippet: String,
-}
-
-/// One record as `Index::records` reads it.
-#[derive(Debug)]
-pub struct Record {
-    /// The path id.
-    pub id: String,
-    /// The header, as `show` prints it.
-    pub header: Map<String, Value>,
-    /// The body: what the record's appends wrote.
-    pub body: String,
 }
 
 /// The filters of `list`.
@@ -303,9 +251,14 @@ impl Index {
             let (from, cols) = if is_record {
                 // A record's status is its `state`, where its kind has one: a delta, a concern answer (13). A skill
                 // reads it from the row, not one `show` per row (27, issue 12).
-                ("records", "id, kind, null, json_extract(header, '$.state'), under, null, null")
+                (
+                    "records",
+                    "id, kind, null, json_extract(header, '$.state'), under, null, null, \
+                     json_extract(header, '$.milestone'), json_extract(header, '$.cause'), \
+                     json_extract(header, '$.chains')",
+                )
             } else {
-                ("nodes", "id, kind, title, status, under, design_kind, scope")
+                ("nodes", "id, kind, title, status, under, design_kind, scope, null, null, null")
             };
             let status = if is_record {
                 "(?2 is null or json_extract(header, '$.state') = ?2)"
@@ -338,6 +291,9 @@ impl Index {
                         under: r.get(4)?,
                         design_kind: r.get(5)?,
                         scope: r.get(6)?,
+                        milestone: r.get(7)?,
+                        cause: r.get(8)?,
+                        chains: r.get(9)?,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?;
