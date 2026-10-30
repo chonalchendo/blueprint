@@ -338,12 +338,13 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     if !i.review_heads.contains(&pr.head) {
         return Verdict::of(Intent::NeedsReview, "");
     }
-    if !pr.green {
-        return Verdict::of(Intent::Working, "checks not green");
-    }
+    // A finding without a disposition needs a response whatever the checks say: the fix may be what turns them green.
     if !i.unanswered.is_empty() {
         let rows: Vec<String> = i.unanswered.iter().map(u64::to_string).collect();
         return Verdict::of(Intent::NeedsResponse, format!("no disposition: findings {}", rows.join(", ")));
+    }
+    if !pr.green {
+        return Verdict::of(Intent::Working, "checks not green");
     }
     Verdict::of(Intent::NeedsApproval, "")
 }
@@ -849,9 +850,23 @@ mod tests {
         };
         let v = issue(&reviewed, NOW);
         assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 2, 3"));
-        let red = Issue { pr: Some(pr("h", false, false)), ..reviewed.clone() };
-        assert_eq!(issue(&red, NOW).intent, Some(Intent::Working), "working comes first in the order");
         let answered = Issue { unanswered: Vec::new(), ..reviewed };
         assert_eq!(issue(&answered, NOW).intent, Some(Intent::NeedsApproval));
+    }
+
+    #[test]
+    fn needs_response_outranks_checks() {
+        let red = Issue {
+            status: "in-progress".into(),
+            claims: vec![Claim::default()],
+            review_heads: vec!["h".into()],
+            pr: Some(pr("h", false, false)),
+            unanswered: vec![1],
+            ..Issue::default()
+        };
+        let v = issue(&red, NOW);
+        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"), "checks not green");
+        let answered = Issue { unanswered: Vec::new(), ..red };
+        assert_eq!(issue(&answered, NOW), Verdict::of(Intent::Working, "checks not green"), "every finding answered");
     }
 }
