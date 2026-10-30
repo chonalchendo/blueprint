@@ -61,7 +61,12 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     let id = home(kind, title, create)?;
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let writer = if create.dry_run { None } else { Some(vault.writer()?) };
+    let writer = if create.dry_run {
+        vault.committed()?;
+        None
+    } else {
+        Some(vault.writer()?)
+    };
     let mut opened = None;
     let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
     // A file at the id that is not committed refuses first, dry run or not, before anything is read or compared

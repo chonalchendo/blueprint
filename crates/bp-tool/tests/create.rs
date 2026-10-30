@@ -307,3 +307,18 @@ fn a_template_writes_nothing_and_each_unfilled_slot_is_a_finding() {
     let (code, v) = bp(root, &["create", "run", "--template"]);
     assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "a record has no template: {v}");
 }
+
+#[test]
+fn a_dry_run_on_a_vault_with_no_commit_refuses_as_the_write_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("projects")).unwrap();
+    std::fs::create_dir_all(root.join("shared")).unwrap();
+    git(root, &["init", "-q"]);
+    let args = ["create", "project", "--title", "Recap", "--slug", "recap"];
+    let (code, write) = bp(root, &args);
+    assert_eq!((code, write["code"].as_str()), (Some(1), Some("could_not_run")), "{write}");
+    let (code, dry) = bp(root, &[&args[..], &["--dry-run"]].concat());
+    assert_eq!((code, &dry), (Some(1), &write), "the dry run refuses with the write's refusal");
+    assert!(!root.join(".bp").exists(), "nothing touched the disk");
+}
