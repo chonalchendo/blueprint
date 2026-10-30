@@ -18,7 +18,7 @@ use crate::{Show, show};
 #[derive(Serialize, TS)]
 #[ts(optional_fields)]
 pub struct Design {
-    /// The `show` object: the header, the lead, the section headings and the body.
+    /// The `show` object: the header, the lead, the section headings, the body and the diagrams.
     #[serde(flatten)]
     pub show: Show,
     /// The design's kind from its path: `product`, `system`, `data-model`, `glossary`, `container` or `component`.
@@ -26,8 +26,6 @@ pub struct Design {
     /// The text of its `## TL;DR` section; absent when it has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tldr: Option<String>,
-    /// The rendered diagrams in its `diagrams/` directory, by name.
-    pub diagrams: Vec<Diagram>,
     /// The delta records under it, in their order.
     pub deltas: Vec<DesignDelta>,
     /// The words Home's design row reads (32, design change 9): "accepted at <tag>", "changed since <tag>" or "no
@@ -69,6 +67,9 @@ pub struct Diagram {
     pub kind: Option<String>,
     /// The page's path in the vault.
     pub html_path: String,
+    /// The spec's path in the vault: `<name>.yaml`, or a converted `<name>.nodes.yaml`; absent with no spec.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<String>,
 }
 
 /// A delta record against the design.
@@ -144,7 +145,6 @@ pub fn design(vault: &Vault, index: &Index, project: &str, id: &str, at: Option<
     Ok(Design {
         level: level.to_string(),
         tldr: body.sections_named("TL;DR").first().map(|s| s.text.clone()),
-        diagrams: pages(vault, id.as_str()).into_iter().map(|name| diagram(vault, &id, name)).collect(),
         deltas,
         version,
         version_tag,
@@ -186,7 +186,13 @@ pub(crate) fn pages(vault: &Vault, id: &str) -> Vec<String> {
     names
 }
 
-/// The diagram `name` of the design `id`: its page's title and its spec's type.
+/// The rendered diagrams in the design `id`'s `diagrams/` directory, by name: the files of today, also for a design
+/// read at a commit.
+pub(crate) fn diagrams(vault: &Vault, id: &Id) -> Vec<Diagram> {
+    pages(vault, id.as_str()).into_iter().map(|name| diagram(vault, id, name)).collect()
+}
+
+/// The diagram `name` of the design `id`: its page's title, its spec's path and its spec's type.
 fn diagram(vault: &Vault, id: &Id, name: String) -> Diagram {
     let dir = vault.root.join(id.as_str()).join("diagrams");
     let page = std::fs::read_to_string(dir.join(format!("{name}.html"))).unwrap_or_default();
@@ -197,9 +203,10 @@ fn diagram(vault: &Vault, id: &Id, name: String) -> Diagram {
         .filter(|t| !t.is_empty());
     // A converted diagram has no spec yet, only the node list the conversion kept beside its page.
     let spec = [format!("{name}.yaml"), format!("{name}.nodes.yaml")]
-        .iter()
-        .find_map(|f| std::fs::read_to_string(dir.join(f)).ok());
-    let kind = spec.and_then(|s| {
+        .into_iter()
+        .find_map(|f| std::fs::read_to_string(dir.join(&f)).ok().map(|text| (f, text)));
+    let (spec, text) = spec.unzip();
+    let kind = text.and_then(|s| {
         let line = s.lines().find_map(|l| l.strip_prefix("type:"))?;
         Some(line.trim().trim_matches(['"', '\'']).to_string()).filter(|t| !t.is_empty() && t != "null")
     });
@@ -207,6 +214,7 @@ fn diagram(vault: &Vault, id: &Id, name: String) -> Diagram {
         html_path: format!("{id}/diagrams/{name}.html"),
         title: title.unwrap_or_else(|| name.clone()),
         kind,
+        spec: spec.map(|f| format!("{id}/diagrams/{f}")),
         name,
     }
 }
@@ -305,10 +313,11 @@ mod page_tests {
         let (_d, v) = vault();
         let index = Index::open(&v).unwrap();
         let d = design(&v, &index, "bp", "projects/bp/designs/system", None).unwrap();
+        let listed = d.show.diagrams.as_deref().unwrap();
         let diagrams: Vec<(&str, &str, Option<&str>)> =
-            d.diagrams.iter().map(|g| (g.name.as_str(), g.title.as_str(), g.kind.as_deref())).collect();
+            listed.iter().map(|g| (g.name.as_str(), g.title.as_str(), g.kind.as_deref())).collect();
         assert_eq!(diagrams, [("context", "Context & scope", Some("architecture")), ("old", "old", Some("sequence"))]);
-        assert_eq!(d.diagrams[0].html_path, "projects/bp/designs/system/diagrams/context.html");
+        assert_eq!(listed[0].html_path, "projects/bp/designs/system/diagrams/context.html");
         let outline: Vec<(u8, &str)> = d.outline.iter().map(|h| (h.depth, h.anchor.as_str())).collect();
         assert_eq!(outline, [(2, "tl-dr"), (2, "context"), (3, "inside")]);
         assert_eq!((d.level.as_str(), d.version.as_str(), d.tldr.as_deref()), ("system", "no version", Some("Short.")));
@@ -319,6 +328,37 @@ mod page_tests {
         for (project, id) in [("bp", "projects/bp/project"), ("two", "projects/bp/designs/system")] {
             assert_eq!(design(&v, &index, project, id, None).err().map(|r| r.code), Some(Code::NoNode), "{id}");
         }
+    }
+
+    #[test]
+    fn show_lists_a_design_s_diagrams_with_their_paths_and_no_other_kind_s() {
+        let (_d, v) = vault();
+        let index = Index::open(&v).unwrap();
+        let system = Id::parse("projects/bp/designs/system").unwrap();
+        let shown = show(&v, Some(&index), &system, None, None, true).unwrap();
+        let paths: Vec<(&str, &str, Option<&str>)> = shown
+            .diagrams
+            .as_deref()
+            .unwrap()
+            .iter()
+            .map(|g| (g.name.as_str(), g.html_path.as_str(), g.spec.as_deref()))
+            .collect();
+        let dir = "projects/bp/designs/system/diagrams";
+        let want = [
+            ("context", format!("{dir}/context.html"), Some(format!("{dir}/context.yaml"))),
+            ("old", format!("{dir}/old.html"), Some(format!("{dir}/old.nodes.yaml"))),
+        ];
+        let want: Vec<(&str, &str, Option<&str>)> =
+            want.iter().map(|(n, h, s)| (*n, h.as_str(), s.as_deref())).collect();
+        assert_eq!(paths, want, "--no-body keeps the diagrams");
+        let json = serde_json::to_value(&shown).unwrap();
+        assert_eq!(json["diagrams"][0]["spec"], "projects/bp/designs/system/diagrams/context.yaml");
+        let product = Id::parse("projects/bp/designs/product").unwrap();
+        let none = show(&v, Some(&index), &product, None, None, false).unwrap();
+        assert_eq!(serde_json::to_value(&none).unwrap()["diagrams"], serde_json::json!([]), "a design with none");
+        let project = Id::parse("projects/bp/project").unwrap();
+        let other = serde_json::to_value(show(&v, Some(&index), &project, None, None, false).unwrap()).unwrap();
+        assert!(other.get("diagrams").is_none(), "a project has no diagrams key: {other}");
     }
 
     #[test]

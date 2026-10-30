@@ -19,4 +19,8 @@ type?: string,
 /**
  * The page's path in the vault.
  */
-html_path: string, };
+html_path: string, 
+/**
+ * The spec's path in the vault: `<name>.yaml`, or a converted `<name>.nodes.yaml`; absent with no spec.
+ */
+spec?: string, };

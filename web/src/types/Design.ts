@@ -20,10 +20,6 @@ level: string,
  */
 tldr?: string, 
 /**
- * The rendered diagrams in its `diagrams/` directory, by name.
- */
-diagrams: Array<Diagram>, 
-/**
  * The delta records under it, in their order.
  */
 deltas: Array<DesignDelta>, 
@@ -97,4 +93,9 @@ sections?: Array<string>,
 /**
  * The body, unless it is left out.
  */
-body?: string, } & ({ [key in string]: number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null });
+body?: string, 
+/**
+ * A design's diagrams, by name, each with its page and its spec (34, design change 7); empty for a design with
+ * none, absent for any other kind. `--no-body` and `--section` keep them.
+ */
+diagrams?: Array<Diagram>, } & ({ [key in string]: number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null });
