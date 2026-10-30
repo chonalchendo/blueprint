@@ -1,11 +1,13 @@
 //! `bp pr <issue>` and `bp land <issue>`: the pull request and its merge (15, the repo verbs; 26, design changes 3,
-//! 4 and 6). `pr` runs the issue's blocks at the worktree's head with no lock held, pushes that head, opens or
-//! retargets the pull request, keeps its body current with what it carries (27, design change 8) and commits the
-//! runs; a changed check set first gets a commit that names it. `land` reads the forge with no lock held and refuses
-//! on the reviewer, the base, the approval at the head, the forge check, the run evidence and the check set the head
-//! names, in that order, for a pull request already merged too. It merges at the head it read and moves each layer
-//! cut from it onto the base. Then it removes the worktree and a branch the merged head holds, and commits the claim's
-//! release and the issue at `resolved`; the result names each moved layer's next step.
+//! 4 and 6). `pr` fetches origin and refuses a head behind its base (34, design change 5), runs the issue's blocks at
+//! the worktree's head with no lock held, pushes that head, opens or retargets the pull request, keeps its body
+//! current with what it carries (27, design change 8) and commits the runs, dropping the claim's `## Next`; a changed
+//! check set first gets a commit that names it. `land` reads the forge with no lock held and refuses on the reviewer,
+//! the base, the approval at the head, the forge check, the run evidence, the check set the head names and then a head
+//! behind its base, in that order, for a pull request already merged too, which skips the last. It merges at the head
+//! it read and moves each layer cut from it onto the base. Then it removes the worktree and a branch the merged head
+//! holds, and commits the claim's release and the issue at `resolved`; the result names each moved layer's next step,
+//! and a stranded layer's held claim takes its step as `## Next`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -157,7 +159,9 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
         gh.describe(number, &body)?;
     }
     let writer = ran.writer(&vault, &format!("bp pr {id}"))?;
-    let (changes, runs) = ran.records(&vault);
+    let (mut changes, runs) = ran.records(&vault);
+    // The head holds its base, so a stranding step on the claim is done (34, design change 5).
+    changes.extend(cleared(&vault, writer.index(), &id, &c.claim)?);
     let written = writer.commit("pr", role.as_str(), &format!("pr {id}"), &changes)?;
     let listed = json!({ "pull_request": number, "deltas": carried.deltas,
             "diagrams": carried.diagrams(), "check_changes": carried.changes() });
@@ -257,7 +261,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let moved = crate::stack::restack(&gh, &children, &c.target, &c.branch)?;
     let kept = remove(&c, &pr.head_ref_oid, !moved.stranded.is_empty())?;
     let mut writer = vault.writer()?;
-    writer.clean([&id, &c.claim].into_iter().chain(moved.notes.iter().map(|(claim, _)| claim)))?;
+    writer.clean([&id, &c.claim].into_iter().chain(moved.notes.iter().map(|(_, claim, _)| claim)))?;
     // Another write may have landed while the forge merged: the claim must still be the one this land read.
     if held(writer.index(), &id)?.is_none_or(|h| h.id != c.claim.as_str()) {
         return Err(Refusal::failed(
@@ -272,9 +276,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         (id.clone(), bp_vault::set_field(&vault.text(&id)?, "status", &resolved.into())),
     ]);
     // A stranded layer's step goes on its claim too, so its walk carries it to the next session (34, design change 5).
-    for (claim, step) in &moved.notes {
-        changes.insert(claim.clone(), crate::claim::next(&vault.text(claim)?, step));
-    }
+    changes.extend(noted(&vault, writer.index(), &moved)?);
     writer.trailer(format!("Bp-Claim: {}", c.claim));
     let written = writer.commit("land", role.as_str(), &format!("land {id}"), &changes)?;
     Ok(Wrote::Changed(json!({
@@ -294,7 +296,10 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
 
 /// `head_behind_base` unless `head` holds origin's `target` as last fetched: the forge merges no head behind its base
 /// (34, design change 5). The fix rebases the branch's own commits: those past the claim's base while the head holds
-/// it, else, as for a layer `land` moved, those past the point where the head leaves the base.
+/// it, else, as for a layer `land` moved, those past the point where the head leaves the base. That point is too low
+/// when the layer below was rewritten twice after this head left the claim's base: the rebase then replays the lower
+/// layer's older commits too, which git drops when their patches match and which conflict when they do not. Recording
+/// the base at each restack and each passing `pr` would close it.
 fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
     let tip = git(&c.top, &["rev-parse", &format!("refs/remotes/origin/{}", c.target)])?;
     let fork = git(&c.top, &["merge-base", &tip, head])?;
@@ -308,11 +313,31 @@ fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
         id.as_str(),
         "a head lands only when it holds origin's base branch: the forge merges no head behind it (34, design change 5)",
         format!(
-            "{head} lacks origin/{t} at {tip}; git -C {w} rebase --onto origin/{t} {from} && bp pr {id}",
+            "{head} lacks origin/{t} at {tip}; git -C {w} rebase --onto origin/{t} {from}, resolve any conflict, then bp pr {id}",
             t = c.target,
             w = c.worktree.display()
         ),
     ))
+}
+
+/// The `## Next` write for each layer `land` stranded, on its claim while that claim is still held: a layer released
+/// while the forge merged keeps `## Released` as its closing append (13, Claim).
+fn noted(vault: &Vault, index: &Index, moved: &crate::stack::Moved) -> Result<Vec<(Id, String)>, Refusal> {
+    let mut out = Vec::new();
+    for (layer, claim, step) in &moved.notes {
+        if held(index, layer)?.is_some_and(|h| h.id == claim.as_str()) {
+            out.push((claim.clone(), crate::claim::next(&vault.text(claim)?, step)));
+        }
+    }
+    Ok(out)
+}
+
+/// The held claim without its `## Next`, when it has one: `pr` passed the ancestry test, so the step is done.
+fn cleared(vault: &Vault, index: &Index, id: &Id, claim: &Id) -> Result<Option<(Id, String)>, Refusal> {
+    if held(index, id)?.is_none_or(|h| h.id != claim.as_str()) {
+        return Ok(None);
+    }
+    Ok(crate::claim::without_next(&vault.text(claim)?).map(|text| (claim.clone(), text)))
 }
 
 /// The project's reviewer identity, or `reviewer_invalid` when it is empty or the token's own `login`, case ignored.

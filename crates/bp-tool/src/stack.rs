@@ -127,12 +127,12 @@ pub(crate) fn children(index: &Index, below: &Id) -> Result<Vec<Child>, Refusal>
 
 /// What `land` did to the layers above: those moved onto the base, those stranded on the branch below, and the next
 /// step for each child, then the deletion of the branch below while one is stranded. `notes` holds each stranded
-/// layer's held claim with its step.
+/// layer, its held claim as `land` read it, and its step.
 pub(crate) struct Moved {
     pub(crate) restacked: Vec<Id>,
     pub(crate) stranded: Vec<Id>,
     pub(crate) next: Vec<String>,
-    pub(crate) notes: Vec<(Id, String)>,
+    pub(crate) notes: Vec<(Id, Id, String)>,
 }
 
 /// Moves each child onto `target` once the layer `below` has merged. It runs no blocks: a child's code runs where the
@@ -157,7 +157,7 @@ pub(crate) fn restack(gh: &Gh, children: &[Child], target: &str, below: &str) ->
             ),
         };
         moved.next.push(step.clone());
-        moved.notes.push((child.claim.clone(), step));
+        moved.notes.push((id.clone(), child.claim.clone(), step));
         moved.stranded.push(id.clone());
     }
     if !moved.stranded.is_empty() {

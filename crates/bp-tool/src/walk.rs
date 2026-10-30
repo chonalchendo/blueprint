@@ -108,13 +108,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     let (runs, waiting) =
         if action == Action::TriageDrift { drift(&index, &id, kind, budget, &mut reached)? } else { (Vec::new(), 0) };
     let (read, intents) = intents(&vault, &index, &reached)?;
-    // The latest record of each kind the action answers, latest by its time field, as `index.records` orders them.
-    let mut records = Vec::new();
-    for kind in action.records() {
-        if let Some(r) = index.records(id.as_str(), *kind)?.pop() {
-            records.push(json!({ "id": r.id, "kind": kind, "header": r.header, "body": r.body }));
-        }
-    }
+    let mut records = answered(&index, &id, action)?;
     records.extend(runs);
     let pull_request = pull_request(&vault, &index, &id, action)?;
     let line = |r: &bp_vault::Reached| -> Result<Value, Refusal> {
@@ -146,18 +140,32 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         .sum::<usize>();
     let f = bp_vault::fill(&reached, action.bodies(), budget.saturating_sub(named));
     let by_id = |want: &String| reached.iter().find(|r| &r.id == want).expect("the fill chose from the reached");
-    let mut bodies = records;
+    // The seed leads the slice and its claim follows it; a review, which respond answers, leads (24, walk-8).
+    let (claims, mut bodies): (Vec<Value>, Vec<Value>) = records.into_iter().partition(|r| r["kind"] == "claim");
     for b in &f.bodies {
         let mut v = line(by_id(b))?;
         v["body"] = index.body(b)?.into();
         bodies.push(v);
     }
+    let at = bodies.iter().position(|b| b["id"] == id.as_str()).map_or(0, |seed| seed + 1);
+    bodies.splice(at..at, claims);
     let ids = f.ids.iter().map(|i| line(by_id(i))).collect::<Result<Vec<_>, _>>()?;
     let slice = json!({
         "seed": id, "for": action, "budget": budget, "used": f.used + named,
         "bodies": bodies, "ids": ids, "cut": f.cut + waiting, "intents": intents,
     });
     Ok(with(slice, pull_request, forge_error))
+}
+
+/// The latest record of each kind the action answers, latest by its time field, as `index.records` orders them.
+fn answered(index: &Index, id: &Id, action: Action) -> Result<Vec<Value>, Refusal> {
+    let mut records = Vec::new();
+    for kind in action.records() {
+        if let Some(r) = index.records(id.as_str(), *kind)?.pop() {
+            records.push(json!({ "id": r.id, "kind": kind, "header": r.header, "body": r.body }));
+        }
+    }
+    Ok(records)
 }
 
 /// Review carries the pull request whose head its stop compares; null when no pull request is in view (27, issue

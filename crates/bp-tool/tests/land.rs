@@ -19,7 +19,7 @@ const S: &str = "projects/bp/designs/system";
 /// The vault, and a directory holding `origin.git`, its clone `code` and the fake `bin/gh`. The fake answers
 /// `api user` with `$FAKE_LOGIN`, `pr list --head <project>/<slug>` from `prs-<slug>.json` else `prs.json`, `pr view`
 /// with the one row of `prs.json`, `pr create` with a url, and logs `pr edit` and `pr merge`; a merge pushes the commit
-/// that `squash` names, if any, to origin's master, as the forge's squash merge does. It keeps the body in `body` and prints it as JSON with CRLF line ends, as a forge may
+/// that `squash` names, if any, to origin's master, as the forge's squash merge does, then runs `on-merge`, if any. It keeps the body in `body` and prints it as JSON with CRLF line ends, as a forge may
 /// store it, escaping only those: a body holds no quote. The vault holds [`ISSUE`], with one block, under [`M`], with
 /// none, and [`BARE`], with none.
 fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -46,7 +46,7 @@ case "$1 $2" in
   "pr create") echo "$*" > '{t}/created'; shift 9; printf '%s' "$1" > '{t}/body'; echo 'https://forge.invalid/o/r/pull/1' ;;
   "pr edit") if [ "$4" = --body ]; then printf '%s' "$5" > '{t}/body'; else echo "$*" > '{t}/edited'; fi ;;
   "pr view") if [ "$5" = body ]; then printf '{{"body":"'; awk 'BEGIN {{ ORS = "\\r\\n" }} {{ print }}' '{t}/body'; printf '"}}'; else sed 's/^\[//; s/\]$//' '{t}/prs.json'; fi ;;
-  "pr merge") echo "$*" > '{t}/merged'; [ ! -f '{t}/squash' ] || git -C '{t}/code' push -q origin "$(cat '{t}/squash')":refs/heads/master ;;
+  "pr merge") echo "$*" > '{t}/merged'; [ ! -f '{t}/squash' ] || git -C '{t}/code' push -q origin "$(cat '{t}/squash')":refs/heads/master; [ ! -f '{t}/on-merge' ] || sh '{t}/on-merge' ;;
   *) exit 9 ;;
 esac
 "#,
@@ -530,7 +530,7 @@ fn a_head_behind_its_base_refuses_until_the_rebase() {
     git(&code, &["push", "-q", "origin", "master"]);
     forge(t, &h, &[("r", &h)], &["SUCCESS"]);
     let fix = format!(
-        "{h} lacks origin/master at {tip}; git -C {} rebase --onto origin/master {from} && bp pr {ISSUE}",
+        "{h} lacks origin/master at {tip}; git -C {} rebase --onto origin/master {from}, resolve any conflict, then bp pr {ISSUE}",
         w.display()
     );
     for args in [&["pr", ISSUE][..], &["land", ISSUE, "--dry-run"], &["land", ISSUE]] {
@@ -544,13 +544,19 @@ fn a_head_behind_its_base_refuses_until_the_rebase() {
     assert_eq!((code, &out["runs"][0]["verdict"]), (Some(0), &json!("pass")), "{out}");
 }
 
-/// A layer `land` cannot move onto the base gets its step on its held claim as `## Next`, so the walks of complete and
-/// respond carry it, and its `pr` refuses `head_behind_base` until the rebase (34, design change 5).
-#[test]
-fn a_stranded_layer_carries_its_rebase_on_its_claim() {
-    const B: &str = "projects/bp/issues/b";
-    let (v, t) = setup();
-    let (v, t) = (v.path(), t.path());
+const B: &str = "projects/bp/issues/b";
+
+/// A stack ready for `land A`: B, cut from A's pull request head, edits the line A wrote, and the squash of A that the
+/// forge merges writes it another way, so B's rebase conflicts.
+struct Stack {
+    wb: std::path::PathBuf,
+    ha: String,
+    hb: String,
+    squash: String,
+    claim: String,
+}
+
+fn stacked(v: &Path, t: &Path) -> Stack {
     let code = t.join("code");
     let issue = format!(
         "---\nkind: issue\ntitle: B\nstatus: open\nunder: {M}\ncites: [{S}]\n---\n\nBody.\n\n## Check\n\n```check shell {{name=has expect=0}}\ntest -f b.txt\n```\n"
@@ -582,29 +588,38 @@ fn a_stranded_layer_carries_its_rebase_on_its_claim() {
     assert_eq!(bp(v, t, &[], &["pr", B]).0, Some(0));
     pr("b", 2, &hb, "bp/a", &[]);
     common::bp(v, &["set", "projects/bp/project", "reviewer", "r"]);
-    // The forge's squash of A writes `f.txt` its own way, so B's edit of it conflicts on the rebase.
     std::fs::write(code.join("hello.txt"), "hi\n").unwrap();
     std::fs::write(code.join("f.txt"), "A\n").unwrap();
     let squash = commit(&code, &["add", "."], "squash of a");
     git(&code, &["reset", "-q", "--hard", "HEAD~1"]);
     std::fs::write(t.join("squash"), &squash).unwrap();
+    Stack { wb, ha, hb, squash, claim: b["claim"].as_str().unwrap().to_string() }
+}
 
+/// A layer `land` cannot move onto the base gets its step on its held claim as `## Next`, after the seed in the walks
+/// of complete and respond. Its `pr` refuses `head_behind_base` until the rebase; the passing `pr` drops the step
+/// (34, design change 5).
+#[test]
+fn a_stranded_layer_carries_its_rebase_on_its_claim_until_pr_passes() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let Stack { wb, ha, hb, squash, claim } = stacked(v, t);
     let (status, out) = bp(v, t, &[], &["land", ISSUE]);
     assert_eq!((status, &out["stranded"]), (Some(0), &json!([B])), "{out}");
     let step =
         format!("in {}: git rebase --onto origin/master {ha}, resolve the conflict, then bp pr {B}", wb.display());
     assert_eq!(out["next"][0], step.as_str(), "{out}");
-    let claim = b["claim"].as_str().unwrap();
-    let text = std::fs::read_to_string(v.join(format!("{claim}.md"))).unwrap();
-    assert!(text.ends_with(&format!("\n\n## Next\n\n{step}\n")), "{text}");
+    let text = || std::fs::read_to_string(v.join(format!("{claim}.md"))).unwrap();
+    assert!(text().ends_with(&format!("\n\n## Next\n\n{step}\n")), "{}", text());
     for action in ["complete", "respond"] {
         let (_, slice) = bp(v, t, &[], &["walk", B, "--for", action]);
         let bodies = slice["bodies"].as_array().unwrap_or_else(|| panic!("{action}: {slice}"));
-        let held = bodies.iter().find(|x| x["id"] == claim).unwrap_or_else(|| panic!("{action}: {slice}"));
-        assert!(held["body"].as_str().unwrap().contains(&step), "{action}: {held}");
+        let at = bodies.iter().position(|x| x["id"] == claim.as_str()).unwrap_or_else(|| panic!("{action}: {slice}"));
+        assert_eq!((&bodies[0]["id"], at), (&json!(B), 1), "{action}: the seed leads, its claim follows");
+        assert!(bodies[at]["body"].as_str().unwrap().contains(&step), "{action}: {}", bodies[at]);
     }
     let fix = format!(
-        "{hb} lacks origin/master at {squash}; git -C {} rebase --onto origin/master {ha} && bp pr {B}",
+        "{hb} lacks origin/master at {squash}; git -C {} rebase --onto origin/master {ha}, resolve any conflict, then bp pr {B}",
         wb.display()
     );
     let (status, out) = bp(v, t, &[], &["pr", B]);
@@ -613,4 +628,31 @@ fn a_stranded_layer_carries_its_rebase_on_its_claim() {
         (Some(2), Some("head_behind_base"), Some(fix.as_str())),
         "{out}"
     );
+    let rebase = std::process::Command::new("git")
+        .args(["-C", wb.to_str().unwrap(), "rebase", "-q", "--onto", "origin/master", &ha])
+        .output()
+        .unwrap();
+    assert!(!rebase.status.success(), "the rebase conflicts");
+    std::fs::write(wb.join("f.txt"), "b\n").unwrap();
+    git(&wb, &["add", "f.txt"]);
+    git(&wb, &["-c", "core.editor=true", "rebase", "--continue"]);
+    let (status, out) = bp(v, t, &[], &["pr", B]);
+    assert_eq!((status, &out["runs"][0]["verdict"]), (Some(0), &json!("pass")), "{out}");
+    assert!(!text().contains("## Next"), "a passing pr drops the step: {}", text());
+}
+
+/// A layer released while the forge merges keeps `## Released` as its closing section: `land` writes no `## Next`
+/// on a claim it no longer holds (13, Claim).
+#[test]
+fn land_notes_no_step_on_a_layer_released_during_the_merge() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let Stack { claim, .. } = stacked(v, t);
+    let release = format!("'{}' release {B} --reason escalated --json > /dev/null\n", env!("CARGO_BIN_EXE_bp"));
+    std::fs::write(t.join("on-merge"), release).unwrap();
+    let (status, out) = bp(v, t, &[], &["land", ISSUE]);
+    assert_eq!((status, &out["stranded"]), (Some(0), &json!([B])), "{out}");
+    let text = std::fs::read_to_string(v.join(format!("{claim}.md"))).unwrap();
+    assert!(text.ends_with("reason: escalated\n") && !text.contains("## Next"), "{text}");
+    assert_eq!(git(v, &["status", "--porcelain"]), "");
 }
