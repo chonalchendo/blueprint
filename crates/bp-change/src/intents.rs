@@ -866,6 +866,9 @@ mod tests {
         };
         let v = issue(&red, NOW);
         assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"), "checks not green");
+        let approved = Issue { pr: Some(pr("h", false, true)), ..red.clone() };
+        let v = issue(&approved, NOW);
+        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"), "approved, checks not green");
         let answered = Issue { unanswered: Vec::new(), ..red };
         assert_eq!(issue(&answered, NOW), Verdict::of(Intent::Working, "checks not green"), "every finding answered");
     }

@@ -104,7 +104,8 @@ pub struct ConcernAnswer {
     pub stamp: String,
     /// `designed`, `waived` or `open`.
     pub state: String,
-    /// `decided_at`, Unix seconds; `None` when it is not an instant, and then no stamp proves the answer.
+    /// When the answer was decided, Unix seconds: `decided_at`, else the record's stamp when `decided_at` is absent or
+    /// not an instant. `None` only when neither is an instant, and then no stamp proves the answer.
     pub decided_at: Option<i64>,
 }
 

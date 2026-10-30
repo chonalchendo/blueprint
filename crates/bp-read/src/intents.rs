@@ -193,7 +193,9 @@ fn shaping(index: &Index, project: &str) -> Result<(Vec<String>, bool), Refusal>
             concern: text(&r.header, "concern").unwrap_or_default(),
             stamp: r.id.rsplit('/').next().unwrap_or_default().to_string(),
             state: text(&r.header, "state").unwrap_or_default(),
-            decided_at: text(&r.header, "decided_at").and_then(|t| intents::timestamp(&t)),
+            decided_at: text(&r.header, "decided_at")
+                .and_then(|t| intents::timestamp(&t))
+                .or_else(|| key_instant(r.id.rsplit('/').next().unwrap_or_default())),
         })
         .collect();
     if intents::unproven_concerns(&answers, None).is_empty() {
@@ -215,6 +217,14 @@ fn shaping(index: &Index, project: &str) -> Result<(Vec<String>, bool), Refusal>
         due |= index.list(&f)?.1 > 0;
     }
     Ok((unproven, due))
+}
+
+/// The instant a concern answer's key holds (`Key::Concern`, `<concern>/<stamp>`): the stamp is the instant with `-`
+/// for `:`, and a `-N` suffix when two answers share a second. The fallback when `decided_at` is absent or not an instant.
+fn key_instant(stamp: &str) -> Option<i64> {
+    let mut b = stamp.get(..20)?.as_bytes().to_vec();
+    (b[13], b[16]) = (b':', b':');
+    intents::timestamp(std::str::from_utf8(&b).ok()?)
 }
 
 /// The project's latest stamp of a `done` milestone: the `accepted_at` of the version record `stamp` writes for it.

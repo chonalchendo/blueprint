@@ -276,4 +276,14 @@ fn a_designed_concern_needs_shaping_until_a_milestone_stamped_after_it() {
     version(3, "m", "2026-10-20T10:00:00Z");
     let v = list(r, &["design", "--project", "q"], false);
     assert_eq!(intent(&v, "projects/q/designs/product"), ("-", "-"), "a stamp after the answer proves it");
+    // A `decided_at` that is not an instant falls back to the record's stamp.
+    let dated = "---\nkind: concern-answer\nunder: projects/q/project\nconcern: e\nstate: designed\n\
+                 design: projects/q/designs/product\ndecided_at: 2026-10-30\n---\n";
+    write(r, "projects/q/concerns/e/2026-10-30T09-00-00Z.md", dated);
+    let v = list(r, &["design", "--project", "q"], false);
+    let note = "e designed; bp walk projects/q/designs/product --for shape";
+    assert_eq!(intent(&v, "projects/q/designs/product"), ("needs-shaping", note), "a date before any later stamp");
+    version(4, "m", "2026-10-30T10:00:00Z");
+    let v = list(r, &["design", "--project", "q"], false);
+    assert_eq!(intent(&v, "projects/q/designs/product"), ("-", "-"), "a stamp after the record's own stamp");
 }
