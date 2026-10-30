@@ -94,8 +94,11 @@ pub fn refresh_for_read<'a>(
         .filter(|p| vault.root.join(".bp/forge").join(p).join("open-prs.json").is_file())
         .filter_map(|p| match refresh_if_stale(vault, index, cwd, p) {
             Err(r) if r.code != Code::NoClone => {
-                let text = format!("{p}: {} ({})", r.fix, r.subject);
-                Some(text.lines().next().unwrap_or_default().chars().take(ERROR_MAX).collect())
+                // The fix's first line is cut to fit, so the command that failed always shows.
+                let call = format!(" ({})", r.subject);
+                let fix = format!("{p}: {}", r.fix.lines().next().unwrap_or_default());
+                let room = ERROR_MAX.saturating_sub(call.chars().count());
+                Some(fix.chars().take(room).chain(call.chars()).take(ERROR_MAX).collect())
             }
             _ => None,
         })

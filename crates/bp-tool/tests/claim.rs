@@ -397,7 +397,13 @@ fn a_read_verb_refreshes_a_stale_snapshot_once_and_names_a_failed_refresh() {
     assert_eq!((list(&[("BP_FORGE_SNAPSHOT", &over)]).0, calls()), (Some(0), 3));
     let (code, _) = common::bp_env(v, &[("PATH", path.as_str())], &["list", "issue", "--project", "bp"]);
     assert_eq!((code, calls()), (Some(0), 3), "the vault is no clone");
-    let (code, out) = bp(v, t, &[("PATH", "/usr/bin:/bin")], &["list", "issue", "--project", "bp"]);
+    // `PATH` holds only `git`: a runner may ship a `gh` in `/usr/bin`.
+    let bare = t.join("bare");
+    std::fs::create_dir(&bare).unwrap();
+    let found = std::process::Command::new("sh").args(["-c", "command -v git"]).output().unwrap();
+    std::os::unix::fs::symlink(String::from_utf8(found.stdout).unwrap().trim(), bare.join("git")).unwrap();
+    let only_git = bare.display().to_string();
+    let (code, out) = bp(v, t, &[("PATH", &only_git)], &["list", "issue", "--project", "bp"]);
     assert_eq!((code, calls(), out.get("forge_error")), (Some(0), 3, None), "no gh: {out}");
     // A failed refresh keeps the stale snapshot and names the error's first line; the read still answers.
     std::fs::write(&fail, "").unwrap();
@@ -405,7 +411,8 @@ fn a_read_verb_refreshes_a_stale_snapshot_once_and_names_a_failed_refresh() {
     assert_eq!((code, out["forge"].as_str(), calls()), (Some(0), Some("snapshot"), 4), "{out}");
     assert!(secs() >= 180, "the stale snapshot stays");
     let error = out["forge_error"].as_str().unwrap_or_default();
-    assert!(error.starts_with("bp: gh exited") && error.ends_with("one"), "{out}");
+    assert!(error.starts_with("bp: gh exited") && error.contains(": one (gh pr list --state open"), "{out}");
+    assert!(error.ends_with(')'), "the failed command stays whole: {out}");
     assert!(error.chars().count() <= 200 && !error.contains("two"), "{out}");
     // `walk` refreshes its seed's project too, and carries the error.
     let (code, out) = bp(v, t, &[("PATH", path.as_str())], &["walk", ISSUE, "--for", "complete", "--done"]);
