@@ -246,3 +246,34 @@ fn needs_shaping_is_one_row_per_project_on_its_root_design() {
     let v = list(r, &["concern-answer", "--status", "open"], false);
     assert_eq!(v["rows"][0]["status"], "open", "{v}");
 }
+
+#[test]
+fn a_designed_concern_needs_shaping_until_a_milestone_stamped_after_it() {
+    let d = vault();
+    let r = d.path();
+    write(r, "projects/q/project.md", "---\nkind: project\ntitle: Q\nstatus: active\n---\n");
+    write(r, "projects/q/designs/product.md", "---\nkind: design\ntitle: D\nstatus: active\n---\n\nBody.\n");
+    let answer = "---\nkind: concern-answer\nunder: projects/q/project\nconcern: c\nstate: designed\n\
+                  design: projects/q/designs/product\ndecided_at: 2026-10-19T10:00:00Z\n---\n";
+    write(r, "projects/q/concerns/c/2026-10-19T10-00-00Z.md", answer);
+    write(r, "projects/q/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: done\n---\n\nGoal.\n");
+    let version = |n: u32, m: &str, at: &str| {
+        let text = format!(
+            "---\nkind: blueprint-version\nunder: projects/q/project\nmilestone: projects/q/milestones/{m}\nn: {n}\n\
+             tag: blueprint/q/{n}\naccepted_at: {at}\nmanifest: {{}}\n---\n"
+        );
+        write(r, &format!("projects/q/versions/{n}.md"), &text);
+    };
+    version(1, "m", "2026-10-18T10:00:00Z");
+    let v = list(r, &["design", "--project", "q"], false);
+    let note = "c designed; bp walk projects/q/designs/product --for shape";
+    assert_eq!(intent(&v, "projects/q/designs/product"), ("needs-shaping", note), "a stamp before the answer");
+    // Only a `done` milestone's stamp proves it.
+    write(r, "projects/q/milestones/n.md", "---\nkind: milestone\ntitle: N\nstatus: abandoned\n---\n\nGoal.\n");
+    version(2, "n", "2026-10-20T10:00:00Z");
+    let v = list(r, &["design", "--project", "q"], false);
+    assert_eq!(intent(&v, "projects/q/designs/product"), ("needs-shaping", note), "a stamp of a milestone not done");
+    version(3, "m", "2026-10-20T10:00:00Z");
+    let v = list(r, &["design", "--project", "q"], false);
+    assert_eq!(intent(&v, "projects/q/designs/product"), ("-", "-"), "a stamp after the answer proves it");
+}

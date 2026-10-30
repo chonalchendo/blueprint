@@ -805,17 +805,36 @@ mod tests {
     }
 
     #[test]
-    fn a_design_needs_shaping_while_a_concern_is_open_and_no_milestone_is_due() {
-        let answer = |concern: &str, stamp: &str, state: &str| ConcernAnswer {
+    fn a_design_needs_shaping_while_a_concern_is_unproven_and_no_milestone_is_due() {
+        let answer = |concern: &str, stamp: &str, state: &str, at: Option<i64>| ConcernAnswer {
             concern: concern.into(),
             stamp: stamp.into(),
             state: state.into(),
+            decided_at: at,
         };
-        let answers = [answer("a", "2", "designed"), answer("a", "1", "open"), answer("b", "1", "open")];
-        let open = open_concerns(&answers);
-        assert_eq!(open, ["b"], "the latest answer of a is designed");
-        assert_eq!(design("d", &[], &open, false), Verdict::of(Intent::NeedsShaping, "b open; bp walk d --for shape"));
-        assert_eq!(design("d", &[], &open, true), Verdict::NONE, "a planned or approved milestone");
+        let answers = [
+            answer("a", "2", "designed", Some(NOW)),
+            answer("a", "1", "open", Some(NOW - 60)),
+            answer("b", "1", "open", Some(NOW)),
+            answer("c", "1", "waived", Some(NOW)),
+        ];
+        let unproven = unproven_concerns(&answers, None);
+        assert_eq!(unproven, ["a designed", "b open"], "no stamp proves the designed a; c is waived");
+        let note = "a designed, b open; bp walk d --for shape";
+        assert_eq!(design("d", &[], &unproven, false), Verdict::of(Intent::NeedsShaping, note));
+        assert_eq!(design("d", &[], &unproven, true), Verdict::NONE, "a planned or approved milestone");
+        assert_eq!(
+            unproven_concerns(&answers, Some(NOW)),
+            ["a designed", "b open"],
+            "a stamp at the answer is no proof"
+        );
+        assert_eq!(unproven_concerns(&answers, Some(NOW + 1)), ["b open"], "a stamp after the answer proves it");
+        let undated = [answer("a", "1", "designed", None)];
+        assert_eq!(
+            unproven_concerns(&undated, Some(NOW)),
+            ["a designed"],
+            "no stamp follows an answer with no instant"
+        );
     }
 
     #[test]
