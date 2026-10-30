@@ -55,12 +55,15 @@ fn review(index: &Index, issue: &Id, head: &str, body: &str) -> Result<(), Refus
                    row says no finding";
         return Err(refuse("table", fix.into()));
     }
+    // A second table's header would read as a finding with a bad location, so its separator is refused first.
+    if let Some(n) =
+        table[2..].iter().position(|r| r.contains('-') && r.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')))
+    {
+        let fix = "the body holds a second table; keep one findings table";
+        return Err(refuse(&format!("finding {}", n + 1), fix.into()));
+    }
     let mut diff = None;
     for (n, row) in table[2..].iter().enumerate().map(|(i, r)| (i + 1, r)) {
-        if row.contains('-') && row.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
-            let fix = "the body holds a second table; a review holds one";
-            return Err(refuse(&format!("finding {n}"), fix.into()));
-        }
         let inner = row[1..].strip_suffix('|').unwrap_or(&row[1..]);
         let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
         if cells.len() < 3 || cells[..3].iter().any(|c| c.is_empty()) {

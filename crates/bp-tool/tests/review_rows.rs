@@ -123,6 +123,9 @@ fn refuses_a_second_table() {
     let rows = ["| warn | src/a.rs:2 | Fine. |", "|---|---|---|", "| warn | src/a.rs:3 | Fine. |"];
     let fix = w.refused(ISSUE, &w.body(&rows));
     assert!(fix.contains("second table"), "{fix}");
+    let headed = ["| warn | src/a.rs:2 | Fine. |", "", "| x | y | z |", "|---|---|---|", "| a | b | c |"];
+    let fix = w.refused(ISSUE, &w.body(&headed));
+    assert_eq!(fix, "the body holds a second table; keep one findings table", "not a location fix for its header");
 }
 
 #[test]
@@ -206,4 +209,14 @@ fn a_renamed_file_with_no_hunk_is_cited_by_its_bare_path() {
     let (exit, v) = w.review(ISSUE, &w.body(&["| error | src/new.rs | Wrong. |"]));
     assert_eq!(exit, Some(0), "a 100% rename shows no hunk: {v}");
     w.refused(ISSUE, &w.body(&["| error | src/new.rs:1 | Wrong. |"]));
+}
+
+#[test]
+fn record_review_returns_rows() {
+    let w = world();
+    let (exit, v) = w.review(ISSUE, &w.body(&["| error | src/a.rs:12 | Wrong. |", "| warn | src/b.rs:30 | Slow. |"]));
+    assert_eq!(exit, Some(0), "{v}");
+    assert_eq!((v["rows"].as_u64(), v["findings"].as_array().map(Vec::len)), (Some(2), Some(0)), "{v}");
+    let (exit, v) = w.review(ISSUE, &w.body(&[]));
+    assert_eq!((exit, v["rows"].as_u64()), (Some(0), Some(0)), "an empty table is no finding: {v}");
 }

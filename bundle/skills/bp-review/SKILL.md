@@ -29,11 +29,12 @@ Write the review in this shape:
 
 - Line 1: `head: <sha>`.
 - Then the table: `| severity | location | finding |`, its separator line, and one row for each finding. The review body holds exactly one table, the findings table. A table with no row means no finding. No other line starts with `|`, because the tool counts the table rows as findings.
-- `severity` is `error` when the finding blocks the issue's goal, else `warn`.
+- `severity` is `error` only when the reproduction shows the head failing the issue's goal or a cited design's rule. A style or wording point is `warn`.
 - `location` is `<path>:<line>` in the diff, or a node id.
 - The finding says what is wrong and what would pass, then gives the reproduction.
 - After the table, the line `What holds:` and one line for each failed attack: what you ran, in backticks.
 - For an attack that timed out or needs a verb the role denies, start the line with `not run:`. Name the attack and the cause. A `not run:` line is never a pass.
+- If every row is `warn`, the review is approvable: say so on the line before the last.
 - Last line: the call that the session runs to record the review. Do not run it: `bp record review <id> --field head=<sha> --field role=reviewer --body-file <file> --json`.
 
 Stop: return the review. The session records it, and then `bp walk <id> --for review --done --json` returns `done` true.

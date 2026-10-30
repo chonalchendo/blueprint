@@ -1,6 +1,6 @@
 //! The arms of an eval (29, design change 1). An arm is a `bp` binary that embeds another bundle: the manifest check
 //! (17, check 7) refuses an installed file that differs from the embedded one, so the skill cannot be taken out of an
-//! install. `without` has no skill directory and no preload, and its dispatch keeps the five lines of the shipped one
+//! install. `without` has no skill directory and no preload, and its dispatch keeps the four lines of the shipped one
 //! with `Skill: none`: the baseline tests the missing body, not a different protocol. The role body is the shipped
 //! one. `filler` keeps the structure and replaces the skill's body with equal-length text that holds no instruction.
 //! An arm from a git ref, such as `old` (30, design change 2), is the bundle at that commit, from `git archive`, with
@@ -141,7 +141,7 @@ pub fn bins(
 
 /// The dispatch prompt: the role's template for the action, from the arm's `bundle`, with the node filled in, under
 /// the line the owner's replay typed to a session so that it dispatches the role and adds nothing (27, the replay). A
-/// research fixture's question fills the template's `<question>`, below the five lines (31, design change 3).
+/// research fixture's question fills the template's `<question>`, below the four lines (31, design change 3).
 pub fn prompt(bundle: &Path, skill: &Skill, id: &str, question: Option<&str>) -> Result<String> {
     let file = bundle.join(format!("roles/{}/{}.md", skill.role_file(), skill.action));
     let template = std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn the_without_arm_keeps_the_five_line_dispatch_and_the_role_body() {
+    fn the_without_arm_keeps_the_four_line_dispatch_and_the_role_body() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let dest = tempfile::tempdir().unwrap();
         let skill = Skill::parse("bp-review").unwrap();
@@ -183,7 +183,7 @@ mod tests {
         let (shipped, arm) = (root.join("bundle"), dest.path().join("b"));
         let read = |dir: &Path, f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
         let (want, have) = (read(&shipped, "roles/bp-reviewer/review.md"), read(&arm, "roles/bp-reviewer/review.md"));
-        assert_eq!(have.lines().count(), 5);
+        assert_eq!(have.lines().count(), 4);
         assert_eq!(have, want.replace("Skill: bp-review", "Skill: none"), "only the Skill line differs");
         let role = read(&shipped, "roles/bp-reviewer.md");
         assert_eq!(read(&arm, "roles/bp-reviewer.md"), role.replace("skills: bp-review\n", ""), "only the preload");
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn fills_the_question_below_the_five_lines() {
+    fn fills_the_question_below_the_four_lines() {
         let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bundle");
         let skill = Skill::parse("bp-research").unwrap();
         let q = "How many lines does the check module in bp-tool's src have? Report under `## Findings` as a table.";
@@ -217,9 +217,9 @@ mod tests {
         let (head, dispatch) = text.split_once("\n\n").unwrap();
         assert_eq!(head, "Dispatch the bp-researcher agent with exactly this prompt and add nothing to it:");
         let lines: Vec<&str> = dispatch.lines().collect();
-        let keys: Vec<&str> = lines[..5].iter().map(|l| l.split_once(':').unwrap().0).collect();
-        assert_eq!(keys, ["Node", "Skill", "Budget", "Forbidden", "Stop"]);
-        assert_eq!((lines[0], lines[5], lines[6], lines.len()), ("Node: projects/bp/project", "", q, 7));
+        let keys: Vec<&str> = lines[..4].iter().map(|l| l.split_once(':').unwrap().0).collect();
+        assert_eq!(keys, ["Node", "Skill", "Forbidden", "Stop"]);
+        assert_eq!((lines[0], lines[4], lines[5], lines.len()), ("Node: projects/bp/project", "", q, 6));
         assert!(!text.contains("<question>") && !text.contains("<id>"), "{text}");
     }
 

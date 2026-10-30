@@ -192,9 +192,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
     let mut opened = None;
     let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
     let parent = if kind == Kind::Handoff && r.parent == "shared" { None } else { Some(subject(index, &r.parent)?) };
-    if let Some(p) = &parent {
-        parent_fits(&vault, index, kind, p)?;
-    }
+    parent.as_ref().map_or(Ok(()), |p| parent_fits(&vault, index, kind, p))?;
     let mut fields = BTreeMap::new();
     for (name, ty, _) in &spec.fields {
         let Some(text) = given.get(name) else { continue };
@@ -267,6 +265,9 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
     }
     let mut changes = BTreeMap::from([(id.clone(), text)]);
     let mut result = serde_json::json!({ "id": id, "kind": kind, "under": parent });
+    if kind == Kind::Review {
+        result["rows"] = bp_read::inputs::rows(&body).into();
+    }
     let moves = crate::delta::close(&vault, &id, onto.as_ref(), &diagrams, now, &mut changes, &mut result)?;
     let Some(writer) = writer else {
         let (_, findings) = index.propose(&vault, &changes)?;

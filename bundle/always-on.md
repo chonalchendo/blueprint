@@ -14,7 +14,8 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - `needs-derivation`: an approved milestone has fewer than three live issues, and a finish-line block that no issue covers. Run the skill `bp-derive`.
 - `ready`: an issue is open and unclaimed. Dispatch `bp-worker` with its `complete` template.
 - `needs-review`: dispatch `bp-reviewer` with its `review` template. Then record the review.
-- After the worker pushes fixes for a review, the pull request has a new head: run the walk again. `needs-review` then means dispatch `bp-reviewer` again with the same five lines, then record the review.
+- After the worker pushes fixes for a review, the pull request has a new head: run the walk again. `needs-review` then means dispatch `bp-reviewer` again with the same four lines, then record the review.
+- A review whose rows are all `warn` is approvable: tell the human so in one line. A third review of one issue with an `error` row goes to the human, not a fourth dispatch.
 - `needs-response`: a review has a finding with no disposition. Dispatch `bp-worker` with its `respond` template.
 - `drifted`: a drift run failed, and nothing cites it. Run the skill `bp-triage-drift`.
 - The context cannot answer a question: run the skill `bp-deliberate`.
@@ -30,10 +31,10 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 ### Dispatch
 
 - A dispatch template is a file `<role>-<action>.md` in the `bp/dispatch/` directory beside the skill directory.
-- Copy the template. Fill its five lines: `Node:`, `Skill:`, `Budget:`, `Forbidden:` and `Stop:`. Add no text above the five lines.
-- A research dispatch holds its question below the five lines.
+- Copy the template. Fill its four lines: `Node:`, `Skill:`, `Forbidden:` and `Stop:`. Add no text above the four lines.
+- A research dispatch holds its question below the four lines.
 - The reviewer writes nothing in the vault or in a worktree; it probes in a copy. Write its review, from `head:` to the end of its `What holds:` list, to a file outside the vault.
-- Then run the record call on the last line of the reply. Its `--body-file` names that file.
+- Then run the record call on the last line of the reply. Its `--body-file` names that file. The record call returns `rows`, the count of the review's findings; its `findings` are the body lint, not the review's.
 
 ### The human's acts
 

@@ -63,7 +63,7 @@ Verify: the `findings` of the dry run. A draft adds `--dry-run` to its create or
 Run it on the draft after the create call, before the human confirms the draft. For a revision, run it on the proposed body file before `record delta`.
 
 1. Fill the research template of the `bp-researcher` role. Put the design id on the `Node:` line.
-2. After the five lines, write this question. For a revision, replace the second line with the path of the body file.
+2. After the four lines, write this question. For a revision, replace the second line with the path of the body file.
 
 ```text
 Skip steps 1 to 3 of your role.

@@ -10,8 +10,8 @@ use bp_operation::{Action, READ_VERBS, Role};
 use bp_vault::{Code, Kind};
 use clap::{CommandFactory, Parser};
 
-/// The five slots of a dispatch template, in 17's order (Interfaces 3).
-const SLOTS: [&str; 5] = ["Node:", "Skill:", "Budget:", "Forbidden:", "Stop:"];
+/// The four slots of a dispatch template, in 17's order (Interfaces 3); the budget line bound nothing and left (34).
+const SLOTS: [&str; 4] = ["Node:", "Skill:", "Forbidden:", "Stop:"];
 
 /// A skill body's cap in tokens, counted as bytes / 4 (17, Skill set).
 const TOKENS: usize = 5_000;
@@ -265,22 +265,21 @@ fn role(stem: &str, text: &str, skills: &BTreeSet<&str>, errors: &mut Vec<String
     preloads
 }
 
-/// A dispatch template: the five slots in order, a skill its role preloads, its action's budget, the complement of
-/// its role's verbs as the forbidden list (21, rule 6), and its action's stop.
+/// A dispatch template: the four slots in order, a skill its role preloads, the complement of its role's verbs as the
+/// forbidden list (21, rule 6), and its action's stop.
 fn template(path: &str, text: &str, preloads: Option<&BTreeSet<String>>, errors: &mut Vec<String>) {
     let (role, action) = path.strip_prefix("roles/").and_then(|p| p.strip_suffix(".md")?.split_once('/')).unwrap();
-    let order: Vec<&str> = text.lines().filter_map(|l| SLOTS.into_iter().find(|s| l.starts_with(s))).collect();
-    if order != SLOTS {
-        errors.push(format!("{path}: the five slots, once each, in 17's order: {}", SLOTS.join(" ")));
+    // The lines before the first blank one are the four slots and nothing else, so a dropped slot such as `Budget:`
+    // cannot come back unseen; a research question sits below the blank line.
+    let head: Vec<&str> = text.lines().take_while(|l| !l.trim().is_empty()).collect();
+    if head.len() != SLOTS.len() || head.iter().zip(SLOTS).any(|(l, s)| !l.starts_with(s)) {
+        errors
+            .push(format!("{path}: the four slots, once each, in 17's order, and no other line: {}", SLOTS.join(" ")));
     }
     let slot = |s: &str| text.lines().find_map(|l| l.strip_prefix(s)).map(str::trim).unwrap_or_default();
     let skill = slot("Skill:");
     if !skill.is_empty() && !preloads.is_some_and(|p| p.contains(skill)) {
         errors.push(format!("{path}: Skill: {skill}, which roles/{role}.md does not preload"));
-    }
-    let want = action.parse::<Action>().map(Action::budget);
-    if want.is_err() || slot("Budget:").parse().ok() != want.ok() {
-        errors.push(format!("{path}: Budget: the {action} row's budget alone (21, rule 6)"));
     }
     let stop = slot("Stop:");
     if !(if action == "research" { stop == RESEARCH_STOP } else { stops_on(stop, action) }) {
@@ -392,7 +391,7 @@ fn each_planted_fault_names_itself() {
         let role = "---\nname: bp-researcher\ndescription: Use to research.\n---\n\nStop: return the report.\n";
         let forbidden =
             "check, create, cut, diagram, install, land, link, pr, record, release, rename, set, stamp, transition";
-        let tmpl = format!("Node: <id>\nSkill:\nBudget: 8000\nForbidden: {forbidden}.\nStop: {stop}\n");
+        let tmpl = format!("Node: <id>\nSkill:\nForbidden: {forbidden}.\nStop: {stop}\n");
         f.insert("roles/bp-researcher.md".into(), role.into());
         f.insert("roles/bp-researcher/research.md".into(), tmpl);
     };
@@ -415,12 +414,15 @@ fn each_planted_fault_names_itself() {
             }),
         ),
         ("complete.md: Forbidden:", Box::new(move |f| edit(f, tc, "set, stamp", "stamp"))),
-        ("complete.md: the five slots", Box::new(move |f| edit(f, tc, "Forbidden:", "Banned:"))),
+        ("complete.md: the four slots", Box::new(move |f| edit(f, tc, "Forbidden:", "Banned:"))),
         (
-            "complete.md: the five slots",
+            "complete.md: the four slots",
             Box::new(move |f| edit(f, tc, "Node: <id>\nSkill: bp-complete", "Skill: bp-complete\nNode: <id>")),
         ),
-        ("complete.md: Budget:", Box::new(move |f| edit(f, tc, "Budget: 15000", "Budget: 15000 tokens, or 8000"))),
+        (
+            "complete.md: the four slots",
+            Box::new(move |f| edit(f, tc, "Skill: bp-complete\n", "Skill: bp-complete\nBudget: 15000\n")),
+        ),
         ("respond.md: Skill: bp-capture", Box::new(move |f| edit(f, tr, "Skill: bp-respond", "Skill: bp-capture"))),
         ("respond.md: Stop:", Box::new(move |f| edit(f, tr, "--for respond --done", "--for complete --done"))),
         ("research.md: Stop:", Box::new(move |f| researcher(f, "return the findings."))),
