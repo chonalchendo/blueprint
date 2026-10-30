@@ -181,9 +181,24 @@ fn delta_chains_within_milestone() {
     assert_eq!(bp(root, &["transition", B, "approved"]).0, Some(0));
     let (t, u, w) = ("cause=shared/threads/t", "cause=shared/threads/u", "cause=shared/threads/w");
     let first = id(record_with(root, B, "## One\n\nT's.\n", &["--field", t]));
-    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &["--field", u]));
+    // Chaining needs the field: the record names the tip to read.
+    let (exit, v) = record_with(root, B, "## One\n\nT's, then U's.\n", &["--field", u]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("delta_pending")), "{v}");
+    let fix = v["fix"].as_str().unwrap();
+    assert!(
+        fix.contains(&format!("bp show {first} --json")) && fix.contains(&format!("--field chains={first}")),
+        "{fix}"
+    );
+    let on = format!("chains={first}");
+    let (exit, v) = record_with(root, B, "## One\n\nT's, then U's.\n", &["--field", u, "--field", &on]);
+    assert_eq!((exit, v["chains"].as_str()), (Some(0), Some(first.as_str())), "the result says it chained: {v}");
+    let second = v["id"].as_str().unwrap().to_string();
     let shown = bp(root, &["show", &second, "--no-body"]).1;
     assert_eq!(shown["chains"].as_str(), Some(first.as_str()), "{shown}");
+    let (_, listed) = bp(root, &["list", "delta", "--under", S]);
+    let row = listed["rows"].as_array().unwrap().iter().find(|r| r["id"] == second.as_str()).unwrap().clone();
+    assert_eq!((row["milestone"].as_str(), row["cause"].as_str()), (Some(B), Some("shared/threads/u")), "{row}");
+    assert_eq!(row["chains"].as_str(), Some(first.as_str()), "{row}");
 
     // The second's base is the hash of the design as the first leaves it: a delta's base on a design with that body.
     let on = vault(&[]);
@@ -227,7 +242,9 @@ fn stamp_accepts_chain_in_order() {
     let flag = format!("one={}", file.display());
     let t = ["--field", "cause=shared/threads/t", "--diagram", &flag];
     let first = id(record_with(root, B, "## One\n\nT's.\n", &t));
-    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &["--field", "cause=shared/threads/u"]));
+    let on = format!("chains={first}");
+    let u = ["--field", "cause=shared/threads/u", "--field", &on];
+    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &u));
 
     let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", B]);
     assert_eq!(exit, Some(0), "{v}");
@@ -250,7 +267,8 @@ fn a_moved_link_refuses_and_its_cause_records_it_again() {
     }
     let (t, u) = (["--field", "cause=shared/threads/t"], ["--field", "cause=shared/threads/u"]);
     let first = id(record_with(root, B, "## One\n\nT's.\n", &t));
-    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &u));
+    let on = format!("chains={first}");
+    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &[&u[..], &["--field", &on]].concat()));
     assert_eq!(record(root, A, "## One\n\nA's.\n").0, Some(0));
     assert_eq!(stamp(A).0, Some(0));
     let (exit, v) = stamp(B);
@@ -259,10 +277,46 @@ fn a_moved_link_refuses_and_its_cause_records_it_again() {
     // The first's cause proposes it again on the new design; the second now chains on a rejected delta.
     let (exit, v) = record_with(root, B, "## One\n\nA's, then T's.\n", &t);
     assert_eq!((exit, v["rejected"].as_str()), (Some(0), Some(first.as_str())), "{v}");
+    let renewed = v["id"].as_str().unwrap().to_string();
     let (exit, v) = stamp(B);
     assert_eq!((exit, v["code"].as_str(), v["subject"].as_str()), (Some(2), Some("base_moved"), Some(second.as_str())));
-    let (exit, v) = record_with(root, B, "## One\n\nA's, T's, then U's.\n", &u);
+    // The fix names the link before it now, not the design.
+    let fix = v["fix"].as_str().unwrap();
+    assert!(
+        fix.contains(&format!("bp show {renewed} --json")) && fix.contains(&format!("--field chains={renewed}")),
+        "{fix}"
+    );
+    let on = format!("chains={renewed}");
+    let (exit, v) = record_with(root, B, "## One\n\nA's, T's, then U's.\n", &[&u[..], &["--field", &on]].concat());
     assert_eq!((exit, v["rejected"].as_str()), (Some(0), Some(second.as_str())), "{v}");
     assert_eq!(stamp(B).0, Some(0));
     assert_eq!(bp(root, &["show", S]).1["body"], "## One\n\nA's, T's, then U's.");
+}
+
+#[test]
+fn a_chained_body_that_drops_the_chains_change_refuses_chain_reverts() {
+    let v = vault(&[W]);
+    let root = v.path();
+    assert_eq!(bp(root, &["transition", B, "approved"]).0, Some(0));
+    let t = ["--field", "cause=shared/threads/t"];
+    let first = id(record_with(root, B, "## One\n\nOld, and T's line.\n\n## T\n\nT's section.\n", &t));
+    let on = format!("chains={first}");
+    let u = ["--field", "cause=shared/threads/u", "--field", &on];
+
+    // Built on the design, not the tip: the section T added is gone.
+    let (exit, v) = record_with(root, B, "## One\n\nOld, and T's line.\n\n## U\n\nU's.\n", &u);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("chain_reverts")), "{v}");
+    assert_eq!(v["subject"].as_str(), Some(format!("{first}#T").as_str()), "{v}");
+    let fix = v["fix"].as_str().unwrap();
+    assert!(fix.contains("adds the section") && fix.contains(&format!("bp show {first} --json")), "{fix}");
+    // The section T changed reads as committed again.
+    let (exit, v) = record_with(root, B, "## One\n\nOld.\n\n## T\n\nT's section.\n", &u);
+    assert_eq!(
+        (exit, v["code"].as_str(), v["subject"].as_str()),
+        (Some(2), Some("chain_reverts"), Some(format!("{first}#One").as_str()))
+    );
+    assert!(v["fix"].as_str().unwrap().contains("puts back the committed text"), "{v}");
+    // On top of the tip, a further change to T's section is the new delta's to make.
+    let body = "## One\n\nOld, and T's line, and U's.\n\n## T\n\nT's section, and U's.\n";
+    assert_eq!(record_with(root, B, body, &u).0, Some(0));
 }

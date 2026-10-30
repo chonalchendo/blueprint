@@ -473,3 +473,43 @@ fn the_baseline_is_the_earliest_claim_through_a_release_and_a_rename() {
     let at = then.rsplit(' ').next().unwrap();
     assert_eq!(common::bp(v, &["show", ISSUE, "--at", at]).1["title"], "A", "the command reads the old text");
 }
+
+#[test]
+fn a_chained_delta_carries_only_what_its_own_link_changes() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    opened(v, t, &[]);
+    let spec = "type: architecture\nlevel: container\ntitle: One\nlede: One box.\nnodes:\n  - {id: o, noun: One, at: [0, 0]}\n";
+    let record = |cause: &str, body: &str, spec: &str, extra: &[&str]| {
+        let (file, yaml) = (v.join(".bp/body.md"), v.join(".bp/one.yaml"));
+        std::fs::write(&file, body).unwrap();
+        std::fs::write(&yaml, spec).unwrap();
+        let (ms, cause, diagram) =
+            (format!("milestone={M}"), format!("cause={cause}"), format!("one={}", yaml.display()));
+        let args = ["record", "delta", S, "--field", &ms, "--field", &cause, "--diagram", &diagram];
+        let (code, d) = common::bp(v, &[&args[..], extra, &["--body-file", file.to_str().unwrap()]].concat());
+        assert_eq!(code, Some(0), "{d}");
+        d["id"].as_str().unwrap().to_string()
+    };
+    // BARE's link adds a block and a spec; the issue's link builds on it, adds a block and replaces the spec.
+    let t_body = "## One\n\nOld.\n\n~~~check shell {name=t-only expect=0}\ntrue\n~~~\n";
+    let first = record(BARE, t_body, spec, &[]);
+    let u_body = format!("{t_body}\n~~~check shell {{name=u-only expect=0}}\ntrue\n~~~\n");
+    let on = format!("chains={first}");
+    let second = record(ISSUE, &u_body, &spec.replace("One box.", "The box."), &["--field", &on]);
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, &out["deltas"]), (Some(0), &json!([second])), "{out}");
+    let rows: Vec<(&str, &str, &str)> = out["check_changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["owner"].as_str().unwrap(), c["name"].as_str().unwrap(), c["change"].as_str().unwrap()))
+        .collect();
+    assert_eq!(rows, [(second.as_str(), "u-only", "added")], "t-only is BARE's: {out}");
+    assert_eq!(out["check_changes"][0]["show"][0], format!("bp show {first}"), "{out}");
+    let drawn = &out["diagrams"][0];
+    assert_eq!((drawn["name"].as_str(), drawn["change"].as_str()), (Some("one"), Some("replaced")), "{out}");
+    // The design has no `one`: only the first link's spec gives the page a base to compare with.
+    assert!(v.join(drawn["diff"].as_str().unwrap()).exists(), "{out}");
+}

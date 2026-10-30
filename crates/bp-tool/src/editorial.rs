@@ -148,7 +148,7 @@ pub(crate) fn stamp(cwd: &Path, delta: &Id, s: &crate::stamp::Stamp) -> Result<W
     }
     writer.clean([&design, delta])?;
     crate::delta::clean_specs(vault, std::slice::from_ref(&design), &[])?;
-    crate::delta::moved(vault, &design, delta, &header, None, &crate::delta::base(vault, &design)?)?;
+    crate::delta::moved(vault, &design, delta, &header, None, &crate::delta::base(vault, &design)?, None)?;
     let diagrams = crate::delta::carried(vault, delta, &header)?;
     let designs = crate::delta::all(writer.index(), design.project().expect("a design sits in a project"))?;
     let carried = [(&design, file.body.text.as_str(), &diagrams)];

@@ -4,9 +4,10 @@
 //! design with the delta's `## Accepted`, its diagrams written and rendered (28, design change 7), the version record
 //! and the milestone at `done`, with `Bp-Version` and one `Bp-Delta` per delta. A design's deltas go in chain order,
 //! each onto the body the one before wrote (34, design change 4); a delta whose design, or whose link before it,
-//! changed since it was proposed refuses `base_moved` (28, design change 8). A local tag `blueprint/<project>/<n>` names the commit;
-//! the human pushes it (07, Deployment). After the finish line it runs the block of each open waiver of the project,
-//! which a pass closes (27, design change 10). `bp stamp <delta>` accepts an editorial delta alone (`editorial`).
+//! changed since it was proposed refuses `base_moved` (28, design change 8). A local tag `blueprint/<project>/<n>`
+//! names the commit; the human pushes it (07, Deployment). After the finish line it runs the block of each open
+//! waiver of the project, which a pass closes (27, design change 10). `bp stamp <delta>` accepts an editorial delta
+//! alone (`editorial`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -253,8 +254,8 @@ fn retag(vault: &Vault, index: &Index, id: &Id, done: Value) -> Result<Stamped, 
 }
 
 /// What the gate read: the finish line's named blocks, each design of the project, each proposed delta the
-/// milestone carries, by design in chain order, and each open waiver of the project. The blocks run against these reads, so the read under the
-/// lock must equal them.
+/// milestone carries, by design in chain order, and each open waiver of the project. The blocks run against these
+/// reads, so the read under the lock must equal them.
 struct Gate {
     finish: Vec<Check>,
     designs: Vec<Id>,

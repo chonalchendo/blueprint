@@ -1,5 +1,6 @@
 //! What a pull request carries (27, design change 8; 13, Delta): each proposed delta the issue caused, each diagram
-//! such a delta adds, replaces or removes (28, design change 7), and each named
+//! such a delta adds, replaces or removes against the link before it (28, design change 7; 34, design change 4), and
+//! each named
 //! block of the issue, its milestone or such a delta whose `check_hash` changed since the claim. The body names a
 //! changed block and the `bp show` commands for its two texts, never the text, so a weakened block reaches the
 //! reviewer as a row to read, not as prose to trust (E3). The check set binds those blocks to the approval: the head
@@ -10,7 +11,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use bp_read::checkset::{Blocks, CheckSet};
-use bp_vault::{Id, Index, Refusal, Vault};
+use bp_vault::{Id, Index, Kind, Refusal, Vault};
 use serde_json::{Value, json};
 
 use crate::claim::git;
@@ -44,12 +45,14 @@ pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id) -> Result<Carried, 
     let (mut deltas, mut diagrams) = (Vec::new(), Vec::new());
     for (design, d) in &set.deltas {
         let delta = Id::parse(&d.id).expect("the index holds ids");
+        // A chained delta's diagrams count against the specs the links before it leave (34, design change 4).
+        let held = crate::chain::before(vault, index, design, &delta, &d.header)?;
         for (name, spec) in crate::delta::carried(vault, &delta, &d.header)? {
             let page = format!("{delta}/{name}.diff.html");
             let diff = vault.root.join(&page).exists().then_some(page);
             let change = match spec {
                 None => "removed",
-                Some(_) if vault.root.join(format!("{design}/diagrams/{name}.yaml")).exists() => "replaced",
+                Some(_) if held.contains_key(&name) => "replaced",
                 Some(_) => "added",
             };
             diagrams.push((delta.clone(), name, change, diff));
@@ -63,7 +66,12 @@ pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id) -> Result<Carried, 
             let hash = |blocks: &Blocks| blocks.get(name).map(|(h, _)| h.clone());
             let (from, to) = (hash(&o.then), hash(&o.now));
             if from != to {
-                let then = format!("bp show {} --at {}", o.source, set.at);
+                // A chained delta's blocks compare with the link before it, as it is now.
+                let then = if Kind::Delta.fits(&o.source) {
+                    format!("bp show {}", o.source)
+                } else {
+                    format!("bp show {} --at {}", o.source, set.at)
+                };
                 let now = format!("bp show {}", o.id);
                 changes.push(Change { owner: o.id.clone(), name: name.clone(), from, to, then, now });
             }

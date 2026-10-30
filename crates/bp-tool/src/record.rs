@@ -201,9 +201,9 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
         fields.insert((*name).to_string(), value(index, kind, name, ty, text)?);
     }
     let milestone = fields.get("milestone").and_then(Value::as_str).map(str::to_string);
-    let stale = match &parent {
+    let onto = match &parent {
         Some(design) if kind == Kind::Delta => {
-            crate::delta::propose(&vault, index, design, milestone.as_deref(), &body, &diagrams, &mut fields)?
+            Some(crate::delta::propose(&vault, index, design, milestone.as_deref(), &body, &diagrams, &mut fields)?)
         }
         _ => None,
     };
@@ -255,7 +255,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
         .filter_map(|(name, _, _)| Id::parse(header.fields.get(*name)?.as_str()?).ok())
         .chain(parent.clone())
         .chain([id.clone()])
-        .chain(stale.clone())
+        .chain(onto.as_ref().and_then(|o| o.stale.clone()))
         .collect();
     match &writer {
         Some(w) => w.clean(&targets)?,
@@ -267,7 +267,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
     }
     let mut changes = BTreeMap::from([(id.clone(), text)]);
     let mut result = serde_json::json!({ "id": id, "kind": kind, "under": parent });
-    let moves = crate::delta::close(&vault, &id, stale.as_ref(), &diagrams, now, &mut changes, &mut result)?;
+    let moves = crate::delta::close(&vault, &id, onto.as_ref(), &diagrams, now, &mut changes, &mut result)?;
     let Some(writer) = writer else {
         let (_, findings) = index.propose(&vault, &changes)?;
         result["findings"] = serde_json::to_value(findings).expect("a plain struct serialises");
