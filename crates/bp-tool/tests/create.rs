@@ -197,7 +197,22 @@ fn a_dry_run_writes_nothing() {
 fn a_case_variant_alias_and_inbox_slug_resolve_to_one_id() {
     let dir = vault();
     let root = dir.path();
-    let case = ["create", "issue", "--project", "bp", "--title", "Case", "--slug", "0003.case", "--under", M];
+    // The fixture's node has an empty body, so the retry passes one; without a body file, the template is the body.
+    let empty = body(root, "");
+    let case = [
+        "create",
+        "issue",
+        "--project",
+        "bp",
+        "--title",
+        "Case",
+        "--slug",
+        "0003.case",
+        "--under",
+        M,
+        "--body-file",
+        &empty,
+    ];
     let (code, v) = bp(root, &case);
     assert_eq!((code, v["id"].as_str()), (Some(3), Some("projects/bp/issues/0003.Case")), "one id up to case: {v}");
     let (code, v) = bp(root, &["create", "inbox", "--title", "x", "--slug", "no-date"]);
@@ -306,6 +321,22 @@ fn a_template_writes_nothing_and_each_unfilled_slot_is_a_finding() {
     assert_eq!((code, codes(&v)), (Some(0), vec![]), "a filled template: {v}");
     let (code, v) = bp(root, &["create", "run", "--template"]);
     assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "a record has no template: {v}");
+}
+
+#[test]
+fn create_without_a_body_file_writes_the_template_body() {
+    let dir = vault();
+    let root = dir.path();
+    let (code, v) = bp(root, &["create", "project", "--title", "Recap"]);
+    assert_eq!((code, v["id"].as_str()), (Some(0), Some("projects/recap/project")), "{v}");
+    let template =
+        bp(root, &["create", "project", "--template"]).1["template"].as_str().unwrap().trim_end().to_string();
+    let shown = bp(root, &["show", "projects/recap/project", "--section", "Concerns"]).1;
+    assert!(shown["section"].as_str().unwrap().contains("| Concern | Answer |"), "{shown}");
+    assert_eq!(bp(root, &["show", "projects/recap/project"]).1["body"].as_str(), Some(template.as_str()));
+    let (code, v) = bp(root, &["create", "learning", "--title", "Lesson"]);
+    let codes: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["code"].as_str().unwrap()).collect();
+    assert_eq!((code, codes), (Some(0), vec!["placeholder"]), "every node kind takes its template: {v}");
 }
 
 #[test]

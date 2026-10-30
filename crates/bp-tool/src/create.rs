@@ -56,7 +56,12 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     let title = create.title.as_deref().expect("clap requires --title without --template");
     schema::title(&format!("create {kind} title"), title)?;
     let under = create.under.as_deref().map(node_id).transpose()?;
-    let body = create.body_file.as_deref().map(body_file).transpose()?.unwrap_or_default();
+    // With no body file, the body is the kind's template: each `TODO(bp): ` slot is a finding the session fills,
+    // so an unwritten body is not read as an empty answer (34, design change 7).
+    let body = match create.body_file.as_deref() {
+        Some(path) => body_file(path)?,
+        None => bp_install::template(kind).expect("a node kind has a template").to_string(),
+    };
     let vault = Vault::discover(cwd)?;
     let id = home(kind, title, create)?;
     let role = set::role()?;
