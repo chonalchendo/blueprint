@@ -160,3 +160,109 @@ fn a_header_change_leaves_the_base() {
     let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", B]);
     assert_eq!(exit, Some(0), "the stamp rewrites the body only, so a title changes nothing it reverts: {v}");
 }
+
+const W: (&str, &str) = ("shared/threads/w.md", "---\nkind: thread\ntitle: W\nstatus: open\n---\n");
+
+/// The `base` a recorded delta holds.
+fn base(root: &Path, delta: &str) -> serde_json::Value {
+    bp(root, &["show", delta, "--no-body"]).1["base"].clone()
+}
+
+/// The id `record` returned, after it exited 0.
+fn id((exit, v): (Option<i32>, serde_json::Value)) -> String {
+    assert_eq!(exit, Some(0), "{v}");
+    v["id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn delta_chains_within_milestone() {
+    let v = vault(&[W]);
+    let root = v.path();
+    assert_eq!(bp(root, &["transition", B, "approved"]).0, Some(0));
+    let (t, u, w) = ("cause=shared/threads/t", "cause=shared/threads/u", "cause=shared/threads/w");
+    let first = id(record_with(root, B, "## One\n\nT's.\n", &["--field", t]));
+    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &["--field", u]));
+    let shown = bp(root, &["show", &second, "--no-body"]).1;
+    assert_eq!(shown["chains"].as_str(), Some(first.as_str()), "{shown}");
+
+    // The second's base is the hash of the design as the first leaves it: a delta's base on a design with that body.
+    let on = vault(&[]);
+    let design = "---\nkind: design\ntitle: S\nstatus: active\n---\n\n## One\n\nT's.\n";
+    std::fs::write(on.path().join(format!("{S}.md")), design).unwrap();
+    common::git(on.path(), &["commit", "-qam", "T's"]);
+    assert_eq!(bp(on.path(), &["transition", B, "approved"]).0, Some(0));
+    let plain = id(record(on.path(), B, "## One\n\nAny.\n"));
+    assert_eq!(base(root, &second), base(on.path(), &plain));
+    assert_ne!(base(root, &second), base(root, &first));
+
+    let (exit, v) = record_with(root, B, "## One\n\nT's again.\n", &["--field", t]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("delta_pending")), "the first cause: {v}");
+    let fork = format!("chains={first}");
+    let (exit, v) = record_with(root, B, "## One\n\nT's, then W's.\n", &["--field", w, "--field", &fork]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("delta_pending")), "a fork: {v}");
+    assert!(v["fix"].as_str().unwrap().contains(&second), "the fix names the tip: {v}");
+    let tip = format!("chains={second}");
+    let third = id(record_with(root, B, "## One\n\nT's, U's, then W's.\n", &["--field", w, "--field", &tip]));
+    assert_eq!(bp(root, &["show", &third, "--no-body"]).1["chains"].as_str(), Some(second.as_str()));
+
+    // An editorial delta never chains.
+    let body = root.join(".bp/editorial.md");
+    std::fs::write(&body, "## One\n\nOld,\n").unwrap();
+    let (exit, v) =
+        bp(root, &["record", "delta", S, "--editorial", "--field", &fork, "--body-file", body.to_str().unwrap()]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("delta_pending")), "{v}");
+}
+
+#[test]
+fn stamp_accepts_chain_in_order() {
+    let spec = "type: architecture\nlevel: container\ntitle: One\nlede: One box.\nnodes:\n  - {id: o, noun: One, at: [0, 0]}\n";
+    let path = format!("{S}/diagrams/one.yaml");
+    let v = vault(&[(&path, spec)]);
+    let code = common::vault(&[("marker.txt", "here\n")]);
+    let (root, code) = (v.path(), code.path());
+    assert_eq!(bp(root, &["transition", B, "approved"]).0, Some(0));
+    let file = root.join(".bp/one.yaml");
+    let changed = spec.replace("lede: One box.", "lede: T's box.");
+    std::fs::write(&file, &changed).unwrap();
+    let flag = format!("one={}", file.display());
+    let t = ["--field", "cause=shared/threads/t", "--diagram", &flag];
+    let first = id(record_with(root, B, "## One\n\nT's.\n", &t));
+    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &["--field", "cause=shared/threads/u"]));
+
+    let (exit, v) = bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", B]);
+    assert_eq!(exit, Some(0), "{v}");
+    assert_eq!(v["deltas"], serde_json::json!([first, second]), "in chain order: {v}");
+    assert_eq!(bp(root, &["show", S]).1["body"], "## One\n\nT's, then U's.");
+    assert_eq!(std::fs::read_to_string(root.join(&path)).unwrap(), changed, "the first's spec holds");
+    for d in [&first, &second] {
+        assert_eq!(bp(root, &["show", d]).1["state"], "accepted");
+    }
+}
+
+#[test]
+fn a_moved_link_refuses_and_its_cause_records_it_again() {
+    let v = vault(&[]);
+    let code = common::vault(&[("marker.txt", "here\n")]);
+    let (root, code) = (v.path(), code.path());
+    let stamp = |m: &str| bp_env(code, &[("BP_VAULT", root.to_str().unwrap())], &["stamp", m]);
+    for m in [A, B] {
+        assert_eq!(bp(root, &["transition", m, "approved"]).0, Some(0));
+    }
+    let (t, u) = (["--field", "cause=shared/threads/t"], ["--field", "cause=shared/threads/u"]);
+    let first = id(record_with(root, B, "## One\n\nT's.\n", &t));
+    let second = id(record_with(root, B, "## One\n\nT's, then U's.\n", &u));
+    assert_eq!(record(root, A, "## One\n\nA's.\n").0, Some(0));
+    assert_eq!(stamp(A).0, Some(0));
+    let (exit, v) = stamp(B);
+    assert_eq!((exit, v["code"].as_str(), v["subject"].as_str()), (Some(2), Some("base_moved"), Some(first.as_str())));
+
+    // The first's cause proposes it again on the new design; the second now chains on a rejected delta.
+    let (exit, v) = record_with(root, B, "## One\n\nA's, then T's.\n", &t);
+    assert_eq!((exit, v["rejected"].as_str()), (Some(0), Some(first.as_str())), "{v}");
+    let (exit, v) = stamp(B);
+    assert_eq!((exit, v["code"].as_str(), v["subject"].as_str()), (Some(2), Some("base_moved"), Some(second.as_str())));
+    let (exit, v) = record_with(root, B, "## One\n\nA's, T's, then U's.\n", &u);
+    assert_eq!((exit, v["rejected"].as_str()), (Some(0), Some(second.as_str())), "{v}");
+    assert_eq!(stamp(B).0, Some(0));
+    assert_eq!(bp(root, &["show", S]).1["body"], "## One\n\nA's, T's, then U's.");
+}

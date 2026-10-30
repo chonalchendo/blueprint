@@ -2,8 +2,9 @@
 //! line with no lock held, but the blocks the human waives. A failed `error` block commits the runs and refuses
 //! `check_failed`. Otherwise one commit holds the runs, a waiver per waived block, each carried delta's body in its
 //! design with the delta's `## Accepted`, its diagrams written and rendered (28, design change 7), the version record
-//! and the milestone at `done`, with `Bp-Version` and one `Bp-Delta` per delta. A delta whose design changed since it
-//! was proposed refuses `base_moved` (28, design change 8). A local tag `blueprint/<project>/<n>` names the commit;
+//! and the milestone at `done`, with `Bp-Version` and one `Bp-Delta` per delta. A design's deltas go in chain order,
+//! each onto the body the one before wrote (34, design change 4); a delta whose design, or whose link before it,
+//! changed since it was proposed refuses `base_moved` (28, design change 8). A local tag `blueprint/<project>/<n>` names the commit;
 //! the human pushes it (07, Deployment). After the finish line it runs the block of each open waiver of the project,
 //! which a pass closes (27, design change 10). `bp stamp <delta>` accepts an editorial delta alone (`editorial`).
 
@@ -13,10 +14,11 @@ use std::process::{Command, ExitCode};
 
 use bp_change::{IssueStatus, MilestoneStatus};
 use bp_read::inputs::{Reask, open_waivers};
-use bp_vault::{Body, Check, Code, DeltaState, File, Filter, Header, Id, Index, Kind, Moves, Refusal, Vault};
+use bp_vault::{Check, Code, File, Filter, Header, Id, Index, Kind, Moves, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
+use crate::chain::Proposed;
 use crate::waiver;
 use crate::{Wrote, finish, subject};
 
@@ -191,17 +193,22 @@ fn manifest(
     Ok((manifest, drawn))
 }
 
-/// Puts each carried delta into `changes`, with `close` appended, and its body into its design. The body is the
-/// proposed design body, so acceptance writes it in whole (13, Design). Returns the deltas.
+/// Puts each carried delta into `changes`, with `close` appended, and its body into its design, in chain order. The
+/// body is the proposed design body, so acceptance writes it in whole (13, Design), and a chain's tip writes last.
+/// Returns the deltas.
 fn accept(
     vault: &Vault,
-    carried: &[Carried],
+    carried: &[Proposed],
     close: &str,
     changes: &mut BTreeMap<Id, String>,
 ) -> Result<Vec<Id>, Refusal> {
     let mut deltas = Vec::new();
     for c in carried {
-        if let Some(text) = crate::set::rebody(&vault.text(&c.design)?, &c.body) {
+        let held = match changes.get(&c.design) {
+            Some(text) => text.clone(),
+            None => vault.text(&c.design)?,
+        };
+        if let Some(text) = crate::set::rebody(&held, &c.body) {
             changes.insert(c.design.clone(), text);
         }
         changes.insert(c.delta.clone(), crate::delta::append(&vault.text(&c.delta)?, close));
@@ -246,24 +253,13 @@ fn retag(vault: &Vault, index: &Index, id: &Id, done: Value) -> Result<Stamped, 
 }
 
 /// What the gate read: the finish line's named blocks, each design of the project, each proposed delta the
-/// milestone carries, and each open waiver of the project. The blocks run against these reads, so the read under the
+/// milestone carries, by design in chain order, and each open waiver of the project. The blocks run against these reads, so the read under the
 /// lock must equal them.
 struct Gate {
     finish: Vec<Check>,
     designs: Vec<Id>,
-    deltas: Vec<Carried>,
+    deltas: Vec<Proposed>,
     reasked: Vec<Reask>,
-}
-
-/// A proposed delta the milestone carries: its design, its id, its body, the proposed design body, its base and its
-/// diagrams.
-#[derive(PartialEq)]
-struct Carried {
-    design: Id,
-    delta: Id,
-    body: String,
-    header: serde_json::Map<String, Value>,
-    diagrams: crate::delta::Diagrams,
 }
 
 /// What the stamp refuses about its deltas and diagrams, before the blocks run and again under the lock: a dirty
@@ -274,20 +270,33 @@ fn early(vault: &Vault, id: &Id, gate: &Gate) -> Result<(), Refusal> {
     // Before `moved` hashes the working specs: a dirty spec is `path_dirty`, not a moved base.
     let designs: Vec<Id> = gate.deltas.iter().map(|c| c.design.clone()).collect();
     crate::delta::clean_specs(vault, &designs, &[])?;
-    let mut deltas = gate.deltas.iter();
-    deltas.try_for_each(|c| crate::delta::moved(vault, &c.design, &c.delta, &c.header, Some(id.as_str())))?;
-    crate::redraw::ready(vault, id, &gate.designs, &carried(gate))
+    for chain in gate.deltas.chunk_by(|a, b| a.design == b.design) {
+        if let Some((_, moved)) = crate::chain::walk(vault, &chain[0].design, chain, Some(id.as_str()))?.moved {
+            return Err(moved);
+        }
+    }
+    let folded = folded(gate);
+    crate::redraw::ready(vault, id, &gate.designs, &folded.iter().map(|(d, b, g)| (*d, *b, g)).collect::<Vec<_>>())
 }
 
-/// The carried deltas as `delta` reads them: the design, the proposed body and the diagrams.
-fn carried(gate: &Gate) -> Vec<(&Id, &str, &crate::delta::Diagrams)> {
-    gate.deltas.iter().map(|c| (&c.design, c.body.as_str(), &c.diagrams)).collect()
+/// The carried deltas as `redraw` reads them, one per design: the design, its chain tip's body, and the diagrams of
+/// its chain applied in order.
+fn folded(gate: &Gate) -> Vec<(&Id, &str, crate::delta::Diagrams)> {
+    let chains = gate.deltas.chunk_by(|a, b| a.design == b.design);
+    chains
+        .map(|chain| {
+            let tip = &chain[chain.len() - 1];
+            (&tip.design, tip.body.as_str(), chain.iter().flat_map(|c| c.diagrams.clone()).collect())
+        })
+        .collect()
 }
 
 /// The diagram writes of the deltas `gate` read, and each spec's hash for the manifest (`delta::stamped`).
 type Drawn = (crate::delta::Writes, BTreeMap<String, String>);
 fn diagrams(vault: &Vault, index: &Index, id: &Id, gate: &Gate) -> Result<Drawn, Refusal> {
-    crate::redraw::stamped(vault, index, id, &gate.designs, &carried(gate))
+    let folded = folded(gate);
+    let carried: Vec<_> = folded.iter().map(|(d, b, g)| (*d, *b, g)).collect();
+    crate::redraw::stamped(vault, index, id, &gate.designs, &carried)
 }
 
 /// The gate's answer: the stamp goes on, or the milestone is already `done`, a repeat.
@@ -358,14 +367,7 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Re
     let designs: Vec<Id> = index.list(&all)?.0.iter().filter_map(|r| Id::parse(&r.id).ok()).collect();
     let mut deltas = Vec::new();
     for design in &designs {
-        for d in index.records(design.as_str(), Kind::Delta)? {
-            let carried = d.header.get("milestone").and_then(Value::as_str) == Some(id.as_str());
-            if carried && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed {
-                let delta = Id::parse(&d.id).expect("the index holds ids");
-                let diagrams = crate::delta::carried(vault, &delta, &d.header)?;
-                deltas.push(Carried { design: design.clone(), delta, body: d.body, header: d.header, diagrams });
-            }
-        }
+        deltas.extend(crate::chain::chain(vault, index, design, Some(id.as_str()))?);
     }
     Ok(Gated::Open(Gate { finish, designs, deltas, reasked }))
 }

@@ -101,6 +101,8 @@ fn spec(kind: Kind) -> Option<Spec> {
                 ("cause", Type::Link(&[Kind::Thread, Kind::Issue, Kind::Run]), false),
                 ("pull_request", Type::Int, false),
                 ("authorized_by", Type::Link(&[Kind::Decision]), false),
+                // The tool writes it (`delta::propose`); a caller who names it names the chain's tip.
+                ("chains", Type::Link(&[Kind::Delta]), false),
             ],
         ),
         Kind::Review => (

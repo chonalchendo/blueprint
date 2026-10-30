@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use bp_check::nodes::{Names, is_name, specs};
 use bp_diagram::Finding;
-use bp_vault::{Body, Code, DeltaState, Filter, Id, Index, Kind, Moves, Refusal, Vault};
+use bp_vault::{Code, Filter, Id, Index, Kind, Moves, Refusal, Vault};
 use serde_json::{Map, Value};
 
 use crate::diagram::{Refused, invalid, page, rows};
@@ -86,21 +86,30 @@ pub(crate) fn carried(vault: &Vault, delta: &Id, header: &Map<String, Value>) ->
 }
 
 /// The content hash `base` holds (28, design change 8; 13, Delta): blake3 over the design's body, the part `stamp`
-/// rewrites, then each spec under its `diagrams/` as its name and its text, by name. Each part goes with its length
-/// first, so two sets of parts never hash alike. A header-only change moves nothing.
+/// rewrites, then each spec under its `diagrams/` as its name and its text, by name. A header-only change moves
+/// nothing.
 pub(crate) fn base(vault: &Vault, design: &Id) -> Result<String, Refusal> {
     let text = vault.text(design)?;
     let body = &text[bp_vault::header_end(&text).expect("a design has a header")..];
+    Ok(hash(body, &specs(vault, design).0.into_iter().collect()))
+}
+
+/// The specs of a design, by name, as a chain of deltas leaves them.
+pub(crate) type Specs = BTreeMap<String, String>;
+
+/// The hash of a design body and its specs. Each part goes with its length first, so two sets of parts never hash
+/// alike.
+pub(crate) fn hash(body: &str, specs: &Specs) -> String {
     let mut hasher = blake3::Hasher::new();
     let mut part = |bytes: &[u8]| {
         hasher.update(&(bytes.len() as u64).to_le_bytes()).update(bytes);
     };
     part(body.as_bytes());
-    for (name, spec) in specs(vault, design).0 {
+    for (name, spec) in specs {
         part(name.as_bytes());
         part(spec.as_bytes());
     }
-    Ok(hasher.finalize().to_hex().to_string())
+    hasher.finalize().to_hex().to_string()
 }
 
 /// What the record of `delta` writes beside its file: each spec in its directory, the diff page of each spec that
@@ -141,7 +150,7 @@ pub(crate) fn append(held: &str, close: &str) -> String {
     format!("{held}{gap}{close}")
 }
 
-/// The glossary text a delta's diagrams resolve against: the body of the glossary's proposed delta under the same
+/// The glossary text a delta's diagrams resolve against: the body of the tip of the glossary's chain under the same
 /// milestone, which the stamp writes with them, else the glossary as committed. An editorial delta (no milestone)
 /// is stamped alone, so it reads the glossary as committed.
 pub(crate) fn glossary(
@@ -151,12 +160,11 @@ pub(crate) fn glossary(
     milestone: Option<&str>,
 ) -> Result<Option<String>, Refusal> {
     let id = glossary_id(project);
-    let proposed = index.records(id.as_str(), Kind::Delta)?.into_iter().find(|d| {
-        milestone.is_some()
-            && d.header.get("milestone").and_then(Value::as_str) == milestone
-            && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed
-    });
-    Ok(match proposed {
+    let tip = match milestone {
+        Some(_) => crate::chain::chain(vault, index, &id, milestone)?.pop(),
+        None => None,
+    };
+    Ok(match tip {
         Some(d) => Some(d.body),
         None => std::fs::read_to_string(vault.root.join(format!("{id}.md"))).ok(),
     })
@@ -172,10 +180,10 @@ pub(crate) fn carrier(milestone: Option<&str>) -> String {
     milestone.map_or_else(|| "--editorial".into(), |m| format!("--field milestone={m}"))
 }
 
-/// What `record delta` adds to the record (28, design changes 7 and 8): its `base`, its `diagrams` and
-/// `remove_diagrams`, and the `nodes` check of its body and specs together. It reads each spec it checks as
-/// committed. Returns the pending delta with the same cause whose base moved, which the new one closes as rejected.
-/// An editorial delta has no `milestone`: at most one is pending per design, as one is per milestone.
+/// What `record delta` adds to the record (28, design changes 7 and 8; 34, design change 4): its `base`, its
+/// `chains`, its `diagrams` and `remove_diagrams`, and the `nodes` check of its body and specs together. It reads
+/// each spec as committed, with the diagrams of the chain it builds on. Returns the pending delta with the same cause
+/// whose base moved, which the new one closes as rejected. An editorial delta has no `milestone` and never chains.
 pub(crate) fn propose(
     vault: &Vault,
     index: &Index,
@@ -191,9 +199,10 @@ pub(crate) fn propose(
     // The design too: an editorial delta is judged against the design as committed.
     clean_specs(vault, &designs, &[format!("{design}.md")])?;
     let cause = fields.get("cause").and_then(Value::as_str);
-    let stale = pending(vault, index, design, milestone, cause)?;
+    let given = fields.get("chains").and_then(Value::as_str);
+    let onto = crate::chain::onto(vault, index, design, milestone, cause, given)?;
     for name in diagrams.iter().filter(|(_, s)| s.is_none()).map(|(n, _)| n) {
-        if !vault.root.join(format!("{design}/diagrams/{name}.yaml")).exists() {
+        if !onto.specs.contains_key(name) {
             return Err(Refusal::new(
                 Code::UnknownValue,
                 format!("--remove-diagram {name}"),
@@ -205,7 +214,7 @@ pub(crate) fn propose(
     }
     let glossary = if is_glossary { Some(body.to_string()) } else { glossary(vault, index, project, milestone)? };
     let names = Names::with(glossary.as_deref(), design, body);
-    check(vault, design, &names, diagrams, &format!("rerun bp record delta {design}"))?;
+    check(vault, design, &onto.specs, &names, diagrams, &format!("rerun bp record delta {design}"))?;
     if is_glossary {
         let specs_of = |d: &Id| specs(vault, d).0.into_iter().collect();
         let body_of = |d: &Id| if d == design { Ok(body.to_string()) } else { vault.read(d).map(|f| f.body.text) };
@@ -215,7 +224,10 @@ pub(crate) fn propose(
         crate::editorial::refuse(vault, design, body, diagrams)?;
         fields.insert("editorial".into(), true.into());
     }
-    fields.insert("base".into(), base(vault, design)?.into());
+    fields.insert("base".into(), onto.base.into());
+    if let Some(on) = onto.chains {
+        fields.insert("chains".into(), on.as_str().into());
+    }
     for (field, puts) in [("diagrams", true), ("remove_diagrams", false)] {
         let listed: Vec<Value> =
             diagrams.iter().filter(|(_, s)| s.is_some() == puts).map(|(n, _)| n.as_str().into()).collect();
@@ -223,7 +235,7 @@ pub(crate) fn propose(
             fields.insert(field.into(), listed.into());
         }
     }
-    Ok(stale)
+    Ok(onto.stale)
 }
 
 /// Every design of `project`.
@@ -258,15 +270,22 @@ pub(crate) fn in_vault(path: &str, findings: &[Finding], fix: &str) -> Refused {
 }
 
 /// The `nodes` check on the proposed body and the proposed specs together (28, design change 7): each spec the delta
-/// puts renders and breaks no hard rule, and each spec the design keeps still resolves, so a body change cannot
+/// puts renders and breaks no hard rule, and each spec of `held` it keeps still resolves, so a body change cannot
 /// orphan a diagram node. `then` reruns the record.
-fn check(vault: &Vault, design: &Id, names: &Names, diagrams: &Diagrams, then: &str) -> Result<(), Refused> {
+fn check(
+    vault: &Vault,
+    design: &Id,
+    held: &Specs,
+    names: &Names,
+    diagrams: &Diagrams,
+    then: &str,
+) -> Result<(), Refused> {
     let project = design.project().expect("a design sits in a project");
     let specs_of = |c: &Id| specs(vault, c).0.into_iter().map(|(_, t)| t).collect();
     for spec in diagrams.values().flatten() {
         page(&spec.text, project, names, &specs_of).map_err(|f| invalid(&spec.file, &f, then))?;
     }
-    for (name, text) in specs(vault, design).0.iter().filter(|(n, _)| !diagrams.contains_key(n)) {
+    for (name, text) in held.iter().filter(|(n, _)| !diagrams.contains_key(*n)) {
         let mut findings = bp_diagram::outline(text, &|l| names.resolves(l)).map_or_else(|f| f, |(_, f)| f);
         if !findings.is_empty() {
             names.explain(&mut findings);
@@ -314,58 +333,18 @@ pub(crate) fn terms_hold(
     Err(in_vault(first, &findings, &fix))
 }
 
-/// The proposed delta of `design` under `milestone`, or its editorial one, if any. One whose base moved can never be
-/// accepted: when it has the new delta's `cause`, the new delta closes it as rejected; any other refuses
-/// `delta_pending` (13, Delta).
-fn pending(
-    vault: &Vault,
-    index: &Index,
-    design: &Id,
-    milestone: Option<&str>,
-    cause: Option<&str>,
-) -> Result<Option<Id>, Refusal> {
-    let Some(d) = index.records(design.as_str(), Kind::Delta)?.into_iter().find(|d| {
-        d.header.get("milestone").and_then(Value::as_str) == milestone
-            && DeltaState::of(&Body::parse(&d.body)) == DeltaState::Proposed
-    }) else {
-        return Ok(None);
-    };
-    let delta = Id::parse(&d.id).expect("the index holds ids");
-    let theirs = d.header.get("cause").and_then(Value::as_str);
-    let fix = match moved(vault, design, &delta, &d.header, milestone) {
-        Ok(()) if milestone.is_none() => {
-            format!("the human accepts the pending editorial delta first: bp stamp {delta}; then propose this one")
-        }
-        Ok(()) => format!(
-            "the pending delta carries the change until the milestone is stamped: bp list delta --under {design}"
-        ),
-        Err(r) if r.code == Code::BaseMoved && theirs == cause => return Ok(Some(delta)),
-        Err(r) if r.code == Code::BaseMoved => format!(
-            "{delta} can never be stamped, and its cause is {}, not this one; its owner proposes it again: {}",
-            theirs.unwrap_or("design work"),
-            r.fix
-        ),
-        Err(r) => return Err(r),
-    };
-    Err(Refusal::new(
-        Code::DeltaPending,
-        format!("{design} {}", milestone.unwrap_or("editorial")),
-        "a design carries at most one proposed delta per milestone, and one editorial delta (13, Delta)",
-        fix,
-    ))
-}
-
-/// Refuses `base_moved` when `design` changed since `delta`, whose header is `header`, was proposed on its `base`
-/// (28, design change 8). A header with no `base` reads as moved. The fix proposes the same change again: the same
-/// carrier, cause, specs and removals.
+/// Refuses `base_moved` when `delta`, whose header is `header`, was not proposed on `want`: the hash of `design`, or
+/// of the delta it chains on, as the stamp would find it (28, design change 8). A header with no `base` reads as
+/// moved. The fix proposes the same change again: the same carrier, cause, specs and removals.
 pub(crate) fn moved(
     vault: &Vault,
     design: &Id,
     delta: &Id,
     header: &Map<String, Value>,
     milestone: Option<&str>,
+    want: &str,
 ) -> Result<(), Refusal> {
-    if header.get("base").and_then(Value::as_str) == Some(base(vault, design)?.as_str()) {
+    if header.get("base").and_then(Value::as_str) == Some(want) {
         return Ok(());
     }
     let mut again = vec![format!("bp record delta {design} {}", carrier(milestone))];
@@ -383,8 +362,8 @@ pub(crate) fn moved(
         "a delta is accepted only onto the design it was proposed on, so a stamp never reverts a change the delta did \
          not see (28, design change 8)",
         format!(
-            "{design} or a spec under its diagrams/ changed since {delta} was proposed; read it (bp show {design}), \
-             then propose the change on it: {}, which rejects {delta}; then bp stamp {}",
+            "{design}, a spec under its diagrams/ or the delta it chains on changed since {delta} was proposed; read \
+             it (bp show {design}), then propose the change on it: {}, which rejects {delta}; then bp stamp {}",
             again.join(" "),
             milestone.unwrap_or("<the new delta>")
         ),
