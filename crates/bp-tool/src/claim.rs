@@ -179,6 +179,21 @@ pub(crate) fn released(claim: &str, to: &str, reason: &str, more: &str) -> Strin
     format!("{}\n\n## Released\n\nto: {to}\nreason: {reason}\n{more}", claim.trim_end_matches('\n'))
 }
 
+/// The claim's text with a `## Next` append: the step a layer `land` stranded takes before its next `pr` (34, design
+/// change 5). It replaces an earlier `## Next`, so the claim holds the latest step only.
+pub(crate) fn next(claim: &str, step: &str) -> String {
+    let claim = without_next(claim).unwrap_or_else(|| claim.to_string());
+    format!("{}\n\n## Next\n\n{step}\n", claim.trim_end_matches('\n'))
+}
+
+/// The claim's text without its `## Next` section, or `None` when it has none.
+pub(crate) fn without_next(claim: &str) -> Option<String> {
+    let at = claim.find("\n## Next\n")?;
+    let after = at + "\n## Next\n".len();
+    let rest = claim[after..].find("\n## ").map_or("", |end| &claim[after + end..]);
+    Some(format!("{}\n{rest}", claim[..at].trim_end_matches('\n')))
+}
+
 /// The claim and status `cut` starts from: the active claim's repeat (exit 3, its fields) or `already_claimed`, then
 /// `illegal_transition` unless the issue (`text`) is `open`.
 fn gate(

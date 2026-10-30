@@ -86,6 +86,8 @@ pub(crate) fn below(
 /// branch below.
 pub(crate) struct Child {
     pub(crate) id: Id,
+    /// The held claim, which takes a stranded layer's step.
+    claim: Id,
     pub(crate) worktree: PathBuf,
     branch: String,
     /// The claim's `base`, the head below it was cut from: its own commits are those past it.
@@ -117,40 +119,45 @@ pub(crate) fn children(index: &Index, below: &Id) -> Result<Vec<Child>, Refusal>
                 format!("commit and bp pr {n}, or stash, the changes in {}, then rerun", worktree.display()),
             ));
         }
-        out.push(Child { branch: branch(&n), from: field(&h, "base").unwrap_or_default(), id: n, worktree });
+        let claim = Id::parse(&h.id).expect("the index holds ids");
+        out.push(Child { branch: branch(&n), from: field(&h, "base").unwrap_or_default(), id: n, claim, worktree });
     }
     Ok(out)
 }
 
 /// What `land` did to the layers above: those moved onto the base, those stranded on the branch below, and the next
-/// step for each child, then the deletion of the branch below while one is stranded.
+/// step for each child, then the deletion of the branch below while one is stranded. `notes` holds each stranded
+/// layer, its held claim as `land` read it, and its step.
 pub(crate) struct Moved {
     pub(crate) restacked: Vec<Id>,
     pub(crate) stranded: Vec<Id>,
     pub(crate) next: Vec<String>,
+    pub(crate) notes: Vec<(Id, Id, String)>,
 }
 
 /// Moves each child onto `target` once the layer `below` has merged. It runs no blocks: a child's code runs where the
 /// agent runs it, at `pr`, which the next step names, and the push needs the reviewer's approval again.
 pub(crate) fn restack(gh: &Gh, children: &[Child], target: &str, below: &str) -> Result<Moved, Refusal> {
-    let mut moved = Moved { restacked: Vec::new(), stranded: Vec::new(), next: Vec::new() };
+    let mut moved = Moved { restacked: Vec::new(), stranded: Vec::new(), next: Vec::new(), notes: Vec::new() };
     for child in children {
         let (id, w) = (&child.id, child.worktree.display());
-        match move_onto(gh, child, target)? {
+        let step = match move_onto(gh, child, target)? {
             Onto::Moved => {
                 moved.next.push(format!("bp pr {id}; then the reviewer approves its new head"));
                 moved.restacked.push(id.clone());
                 continue;
             }
-            Onto::Conflict => moved.next.push(format!(
+            Onto::Conflict => format!(
                 "in {w}: git rebase --onto origin/{target} {}, resolve the conflict, then bp pr {id}",
                 child.from
-            )),
-            Onto::Behind(at) => moved.next.push(format!(
+            ),
+            Onto::Behind(at) => format!(
                 "in {w}: git merge {at}, which the forge holds, then git rebase --onto origin/{target} {}, then bp pr {id}",
                 child.from
-            )),
-        }
+            ),
+        };
+        moved.next.push(step.clone());
+        moved.notes.push((id.clone(), child.claim.clone(), step));
         moved.stranded.push(id.clone());
     }
     if !moved.stranded.is_empty() {

@@ -24,6 +24,7 @@ crate::closed_enum! {
         DiffChanged = "diff_changed",
         BaseUnmerged = "base_unmerged",
         BaseMismatch = "base_mismatch",
+        HeadBehindBase = "head_behind_base",
         BundleMismatch = "bundle_mismatch",
         BundleInvalid = "bundle_invalid",
         ForgePrecondition = "forge_precondition",
