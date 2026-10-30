@@ -32,7 +32,7 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
 16. Derive covers a predicate when an issue holds a block with the same name. Choose names that say what the block proves.
 17. Validate the node first: `bp create milestone --project <p> --title "<title>" --under <design> --body-file <file> --dry-run --json`. `<design>` is the design that the milestone changes, usually `projects/<p>/designs/system`.
 18. Fix each item of `findings` in the file. Then run the same call without `--dry-run`.
-19. Record each design change that the milestone carries. Write the whole proposed design body to a file outside the vault.
+19. Record each design change that the milestone carries. Write the whole proposed design body to a file outside the vault. If a delta of the design from another cause pends under the milestone, read the tip (`bp list delta --under <design> --json`), write your body on top of its body (`bp show <tip> --json`), and add `--field chains=<tip>`.
    - Then run `bp record delta <design> --field milestone=<milestone> --field change="<what changes>" --body-file <file> --json`.
    - When an accepted decision permits the change, add `--field authorized_by=<decision>` to that call.
 20. Tell the human that the milestone is `planned`. Approval is the human's act.
