@@ -342,15 +342,18 @@ fn a_refusal_before_the_forge_calls_no_gh_and_a_failed_refresh_says_so() {
 }
 
 #[test]
-fn a_read_verb_refreshes_a_stale_snapshot_once_and_notes_a_failed_refresh() {
+fn a_read_verb_refreshes_a_stale_snapshot_once_and_names_a_failed_refresh() {
     let (v, t) = setup();
     let (v, t) = (v.path(), t.path());
-    // A `gh` that logs each call, answers an empty open list, and fails while `fail` exists.
+    // A `gh` that logs each call, answers an empty open list, and fails with two lines of stderr while `fail` exists.
     let bin = t.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let (log, fail) = (t.join("calls"), t.join("fail"));
-    let fake =
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\n[ -e '{}' ] && exit 1\necho '[]'\n", log.display(), fail.display());
+    let fake = format!(
+        "#!/bin/sh\necho \"$*\" >> '{}'\n[ -e '{}' ] && {{ echo one >&2; echo two >&2; exit 1; }}\necho '[]'\n",
+        log.display(),
+        fail.display()
+    );
     std::fs::write(bin.join("gh"), fake).unwrap();
     std::fs::set_permissions(bin.join("gh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
@@ -370,7 +373,7 @@ fn a_read_verb_refreshes_a_stale_snapshot_once_and_notes_a_failed_refresh() {
     // No snapshot yet: a read in the clone, with `gh` on `PATH`, calls nothing and writes nothing.
     let (code, out) = list(&[]);
     assert_eq!((code, out["forge"].as_str(), calls()), (Some(0), Some("not read"), 0), "{out}");
-    assert!(out.get("stale").is_none() && !v.join(".bp/forge").exists(), "{out}");
+    assert!(out.get("forge_error").is_none() && !v.join(".bp/forge").exists(), "{out}");
     let (code, _) = bp(v, t, &[("PATH", path.as_str())], &["walk", ISSUE, "--for", "complete", "--done"]);
     assert_eq!((code, calls(), v.join(".bp/forge").exists()), (Some(0), 0, false));
     // A repo verb writes the snapshot; a read then reads it.
@@ -378,27 +381,34 @@ fn a_read_verb_refreshes_a_stale_snapshot_once_and_notes_a_failed_refresh() {
     assert_eq!((code, calls()), (Some(0), 1));
     let (code, out) = list(&[]);
     assert_eq!((code, out["forge"].as_str(), calls()), (Some(0), Some("snapshot"), 1), "{out}");
-    assert!(out.get("stale").is_none(), "{out}");
+    assert!(out.get("forge_error").is_none(), "{out}");
     // Under a minute old: no call.
     assert_eq!((list(&[]).0, calls()), (Some(0), 1));
     // Three minutes old: one call, and the snapshot is fresh again.
     age(180);
     assert_eq!((list(&[]).0, calls(), secs() < 60), (Some(0), 2, true));
-    // `BP_FORGE_SNAPSHOT` set, or a read outside the clone, stays offline.
+    // Dated after now (a skewed clock): stale, so one call, which rewrites the time.
+    let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(86_400);
+    std::fs::File::options().write(true).open(&open).unwrap().set_modified(ahead).unwrap();
+    assert_eq!((list(&[]).0, calls(), secs() < 60), (Some(0), 3, true));
+    // `BP_FORGE_SNAPSHOT` set, a read outside the clone, or no `gh` on `PATH` stays offline and names no error.
     age(180);
     let over = v.join(".bp/forge/bp").display().to_string();
-    assert_eq!((list(&[("BP_FORGE_SNAPSHOT", &over)]).0, calls()), (Some(0), 2));
+    assert_eq!((list(&[("BP_FORGE_SNAPSHOT", &over)]).0, calls()), (Some(0), 3));
     let (code, _) = common::bp_env(v, &[("PATH", path.as_str())], &["list", "issue", "--project", "bp"]);
-    assert_eq!((code, calls()), (Some(0), 2), "the vault is no clone");
-    // A failed refresh keeps the stale snapshot and names the error; the read still answers.
+    assert_eq!((code, calls()), (Some(0), 3), "the vault is no clone");
+    let (code, out) = bp(v, t, &[("PATH", "/usr/bin:/bin")], &["list", "issue", "--project", "bp"]);
+    assert_eq!((code, calls(), out.get("forge_error")), (Some(0), 3, None), "no gh: {out}");
+    // A failed refresh keeps the stale snapshot and names the error's first line; the read still answers.
     std::fs::write(&fail, "").unwrap();
     let (code, out) = list(&[]);
-    assert_eq!((code, out["forge"].as_str(), calls()), (Some(0), Some("snapshot"), 3), "{out}");
+    assert_eq!((code, out["forge"].as_str(), calls()), (Some(0), Some("snapshot"), 4), "{out}");
     assert!(secs() >= 180, "the stale snapshot stays");
-    let note = out["stale"].as_str().unwrap_or_default();
-    assert!(note.starts_with("snapshot of bp not refreshed: gh pr list --state open"), "{out}");
-    // `walk` refreshes its seed's project too, and carries the note.
+    let error = out["forge_error"].as_str().unwrap_or_default();
+    assert!(error.starts_with("bp: gh exited") && error.ends_with("one"), "{out}");
+    assert!(error.chars().count() <= 200 && !error.contains("two"), "{out}");
+    // `walk` refreshes its seed's project too, and carries the error.
     let (code, out) = bp(v, t, &[("PATH", path.as_str())], &["walk", ISSUE, "--for", "complete", "--done"]);
-    assert_eq!((code, calls()), (Some(0), 4), "{out}");
-    assert!(out["stale"].as_str().is_some_and(|s| s == note), "{out}");
+    assert_eq!((code, calls()), (Some(0), 5), "{out}");
+    assert!(out["forge_error"].as_str().is_some_and(|s| s == error), "{out}");
 }

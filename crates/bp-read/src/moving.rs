@@ -12,11 +12,14 @@ use ts_rs::TS;
 
 use crate::inputs::{claims, field, held, runs};
 use crate::pages::{Read, no_project};
+use crate::snapshot::MAX_AGE;
 use crate::{Forge, World};
 
-/// A snapshot read this many seconds ago or less is read: the land command shows (32, design change 4). The view
-/// refreshes at most once a minute, so with the forge on a fresh snapshot is never older.
-const FRESH: i64 = 60;
+/// A snapshot read under [`MAX_AGE`] ago is fresh: the land command shows (32, design change 4). With the forge on,
+/// the view rewrites the snapshot once a minute, so it never grows older.
+fn fresh(age: i64) -> bool {
+    u64::try_from(age).is_ok_and(|a| a < MAX_AGE.as_secs())
+}
 
 /// The five groups in page order: id, words, and the intents each holds (32, design change 7). The first two owe the
 /// human a decision. Every intent sits in exactly one group.
@@ -186,10 +189,10 @@ pub fn moving(vault: &Vault, index: &Index, project: &str) -> Result<Moving, Ref
 }
 
 /// "forge not read since <time>" when the snapshot of `age` seconds is not fresh, or "forge not read" when none
-/// exists; `None` when it was read within [`FRESH`].
+/// exists; `None` when it is [`fresh`].
 pub(crate) fn unread(world: &World, age: Option<i64>) -> Option<String> {
     match age {
-        Some(a) if a <= FRESH => None,
+        Some(a) if fresh(a) => None,
         Some(a) => Some(format!("forge not read since {}", crate::clock::instant(world.now - a))),
         None => Some("forge not read".to_string()),
     }
@@ -469,7 +472,7 @@ mod tests {
             (Intent::Blocked, 1),
         ]);
         assert_eq!(counts(&m), want);
-        assert!(matches!(m.forge, Forge::Snapshot) && m.forge_age.is_some_and(|a| a <= FRESH));
+        assert!(matches!(m.forge, Forge::Snapshot) && m.forge_age.is_some_and(fresh));
         let row = |id: &str| m.groups.iter().flat_map(|g| &g.rows).find(|r| r.id.ends_with(id)).unwrap();
         let ready = row("0001.ready");
         assert_eq!(ready.command.as_deref(), Some("bp cut projects/bp/issues/0001.ready"));
@@ -507,7 +510,7 @@ mod tests {
         std::fs::File::options().write(true).open(&snapshot).unwrap().set_modified(hour_ago).unwrap();
         let index = Index::open(&vault).unwrap();
         let m = moving(&vault, &index, "bp").unwrap();
-        assert!(m.forge_age.is_some_and(|a| a > FRESH), "{:?}", m.forge_age);
+        assert!(m.forge_age.is_some_and(|a| !fresh(a)), "{:?}", m.forge_age);
         let issues: Vec<&MovingRow> = m.groups.iter().flat_map(|g| &g.rows).filter(|r| r.kind == "issue").collect();
         assert!(!issues.is_empty());
         for r in issues {

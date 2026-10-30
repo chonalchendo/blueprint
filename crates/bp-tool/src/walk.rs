@@ -86,13 +86,13 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
             format!("{action} walks from: {}; bp list {} --json", kinds.join(", "), kinds[0]),
         ));
     }
-    let stale = bp_read::snapshot::refresh_for_read(&vault, &index, cwd, id.project());
+    let forge_error = bp_read::snapshot::refresh_for_read(&vault, &index, cwd, id.project());
     if walk.done {
         // A stop reads a few rows, and `list` opens its own read transaction.
         drop(reading);
         let mut forge_age = None;
         let done = crate::done::done(&vault, &index, &id, &header, action, &mut forge_age)?;
-        return Ok(with(json!({ "id": id, "for": action, "done": done, "forge_age": forge_age }), None, stale));
+        return Ok(with(json!({ "id": id, "for": action, "done": done, "forge_age": forge_age }), None, forge_error));
     }
     context(&vault, &index, &id, action)?;
     let mut reached = index.reach(id.as_str(), usize::from(walk.depth))?;
@@ -130,7 +130,11 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         let answered = records.iter().map(|r| json!({ "id": r["id"], "kind": r["kind"], "title": null, "rank": null }));
         let lines = rest.into_iter().chain(conventions).map(line).collect::<Result<Vec<_>, _>>()?;
         let ids: Vec<Value> = answered.chain(lines).collect();
-        return Ok(with(json!({ "seed": id, "for": action, "ids": ids, "intents": intents }), pull_request, stale));
+        return Ok(with(
+            json!({ "seed": id, "for": action, "ids": ids, "intents": intents }),
+            pull_request,
+            forge_error,
+        ));
     }
     // The intents, the answered records and the pull request are always sent, so they spend the budget before the
     // fill does.
@@ -153,7 +157,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
         "seed": id, "for": action, "budget": budget, "used": f.used + named,
         "bodies": bodies, "ids": ids, "cut": f.cut + waiting, "intents": intents,
     });
-    Ok(with(slice, pull_request, stale))
+    Ok(with(slice, pull_request, forge_error))
 }
 
 /// Review carries the pull request whose head its stop compares; null when no pull request is in view (27, issue
@@ -166,13 +170,13 @@ fn pull_request(vault: &Vault, index: &Index, id: &Id, action: Action) -> Result
     Ok(Some(open.map_or(Value::Null, |(p, _)| json!({ "number": p.number, "head": p.head_ref_oid }))))
 }
 
-/// The walk's answer, with the pull request when the action carries one, and the note of a refresh that failed.
-fn with(mut answer: Value, pull_request: Option<Value>, stale: Option<String>) -> Value {
+/// The walk's answer, with the pull request when the action carries one, and the error of a refresh that failed.
+fn with(mut answer: Value, pull_request: Option<Value>, forge_error: Option<String>) -> Value {
     if let Some(p) = pull_request {
         answer["pull_request"] = p;
     }
-    if let Some(note) = stale {
-        answer["stale"] = note.into();
+    if let Some(error) = forge_error {
+        answer["forge_error"] = error.into();
     }
     answer
 }

@@ -32,9 +32,10 @@ pub struct List {
     /// The seconds since the oldest forge read in view.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forge_age: Option<i64>,
-    /// Why a stale snapshot was not refreshed before the read (34, design change 3); the rows read the stale one.
+    /// Why a snapshot a minute old was not refreshed before the read (34, design change 3); the rows read the old
+    /// one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stale: Option<String>,
+    pub forge_error: Option<String>,
 }
 
 /// One row of `list`: the index's row, a learning's `stale`, and the intent with its note.
@@ -139,7 +140,14 @@ pub fn list(
     if !matches!(kind, Kind::Issue | Kind::Milestone | Kind::Design | Kind::Learning) {
         let rows: Vec<ListRow> =
             rows.into_iter().map(|row| ListRow { row, stale: None, intent: None, note: None }).collect();
-        return Ok(List { truncated: total > rows.len(), rows, total, forge: None, forge_age: None, stale: None });
+        return Ok(List {
+            truncated: total > rows.len(),
+            rows,
+            total,
+            forge: None,
+            forge_age: None,
+            forge_error: None,
+        });
     }
     // The projects in view: `project`, else the rows' own; a snapshot outside them is not read (27, design change 9).
     let projects: BTreeSet<&str> = match filter.project {
@@ -147,7 +155,7 @@ pub fn list(
         None => rows.iter().filter_map(|r| crate::split(&r.id)).map(|(p, _)| p).collect(),
     };
     let issues = kind == Kind::Issue;
-    let stale = from
+    let forge_error = from
         .filter(|_| issues)
         .and_then(|cwd| crate::snapshot::refresh_for_read(vault, index, cwd, projects.iter().copied()));
     let intents = Intents::new(vault, index, issues.then_some(&projects))?;
@@ -171,7 +179,7 @@ pub fn list(
         Some(None) => (Some(Forge::NotRead), None),
         None => (None, None),
     };
-    Ok(List { truncated: total > out.len(), rows: out, total, forge, forge_age, stale })
+    Ok(List { truncated: total > out.len(), rows: out, total, forge, forge_age, forge_error })
 }
 
 /// The counts after the index takes in every file, and the findings: statuses outside their kind's set, link

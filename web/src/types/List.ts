@@ -27,6 +27,7 @@ forge?: Forge,
  */
 forge_age?: number, 
 /**
- * Why a stale snapshot was not refreshed before the read (34, design change 3); the rows read the stale one.
+ * Why a snapshot a minute old was not refreshed before the read (34, design change 3); the rows read the old
+ * one.
  */
-stale?: string, };
+forge_error?: string, };

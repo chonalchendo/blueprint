@@ -4,9 +4,12 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use bp_vault::Refusal;
 use serde::Deserialize;
@@ -28,12 +31,21 @@ pub struct Gh {
     dir: PathBuf,
     /// A `PATH` for `gh` alone. A test puts a fake first on it; a process-wide `PATH` change would be unsafe.
     path: Option<OsString>,
+    /// How long one call may run before it is killed; none waits as long as `gh` takes.
+    deadline: Option<Duration>,
 }
 
 impl Gh {
     /// `gh` from `PATH`, run in `dir`.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), path: None }
+        Self { dir: dir.into(), path: None, deadline: None }
+    }
+
+    /// The same `gh`, with each call killed after `limit` and refused `could_not_run`: a read verb must not hang on
+    /// the network (34, design change 3).
+    #[must_use]
+    pub fn within(self, limit: Duration) -> Self {
+        Self { deadline: Some(limit), ..self }
     }
 
     /// Whether this process has run `gh` yet. A repo verb refused before any forge call refreshes no snapshot (27,
@@ -151,8 +163,17 @@ impl Gh {
         if let Some(path) = &self.path {
             cmd.env("PATH", path);
         }
-        let out = cmd.output().map_err(|e| {
-            Refusal::failed(Self::subject(args), format!("{e}; install gh and put it on PATH, then `gh auth login`"))
+        let out = match self.deadline {
+            None => cmd.output(),
+            Some(limit) => output_within(&mut cmd, limit),
+        }
+        .map_err(|e| {
+            let fix = if e.kind() == std::io::ErrorKind::TimedOut {
+                e.to_string()
+            } else {
+                format!("{e}; install gh and put it on PATH, then `gh auth login`")
+            };
+            Refusal::failed(Self::subject(args), fix)
         })?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
@@ -174,6 +195,43 @@ impl Gh {
     }
 }
 
+/// `cmd`'s output, or `TimedOut` once it has run `limit`: the child is killed then. Each pipe drains on its own
+/// thread, so a full pipe never stalls the child while the poll waits.
+fn output_within(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() >= limit {
+            // The child may have exited between the poll and the kill; either way it is gone.
+            let _ = child.kill();
+            child.wait()?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("gh did not answer within {limit:?}"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let joined = |h: JoinHandle<Vec<u8>>| h.join().unwrap_or_default();
+    Ok(Output { status, stdout: joined(stdout), stderr: joined(stderr) })
+}
+
+/// Reads a child's pipe to its end on a thread of its own.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            // A read error leaves what was read; the exit status still decides the call.
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -188,7 +246,7 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("gh"), format!("#!/bin/sh\n{script}\n")).unwrap();
         std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        Gh { dir: dir.to_path_buf(), path: Some(format!("{}:/usr/bin:/bin", bin.display()).into()) }
+        Gh { dir: dir.to_path_buf(), path: Some(format!("{}:/usr/bin:/bin", bin.display()).into()), deadline: None }
     }
 
     // One test writes and runs every fake: a fork in a parallel test while a fake is open for writing makes its exec
@@ -247,7 +305,21 @@ esac"#,
         assert_eq!(fake(garbled.path(), "echo not-json").pr(1).unwrap_err().code, Code::CouldNotRun);
 
         let none = tempfile::tempdir().unwrap();
-        let gh = Gh { dir: none.path().to_path_buf(), path: Some(none.path().as_os_str().to_owned()) };
+        let gh = Gh { dir: none.path().to_path_buf(), path: Some(none.path().as_os_str().to_owned()), deadline: None };
         assert_eq!(gh.login().unwrap_err().code, Code::CouldNotRun, "no gh on PATH");
+
+        // A deadline kills a call that hangs, and leaves a quick one as it was.
+        let slow = tempfile::tempdir().unwrap();
+        let gh = fake(
+            slow.path(),
+            "[ \"$1\" = api ] && exec sleep 30; echo '{\"number\":1,\"headRefName\":\"bp/q\",\"headRefOid\":\"h\"}'",
+        )
+        .within(Duration::from_millis(300));
+        let start = Instant::now();
+        let e = gh.login().unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        assert_eq!((e.code, e.subject.as_str()), (Code::CouldNotRun, "gh api user"));
+        assert!(e.fix == "gh did not answer within 300ms", "{}", e.fix);
+        assert_eq!(gh.pr(1).unwrap().head_ref_oid, "h");
     }
 }
