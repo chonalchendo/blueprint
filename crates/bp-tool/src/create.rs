@@ -66,12 +66,8 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     let id = home(kind, title, create)?;
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let writer = if create.dry_run {
-        vault.committed()?;
-        None
-    } else {
-        Some(vault.writer()?)
-    };
+    // A dry run takes no writer, so it runs the writer's commit precondition itself (34, design change 7).
+    let writer = if create.dry_run { vault.committed().map(|()| None)? } else { Some(vault.writer()?) };
     let mut opened = None;
     let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
     // A file at the id that is not committed refuses first, dry run or not, before anything is read or compared
@@ -108,7 +104,7 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
         format!("---\n{}---\n\n{body}\n", header.emit())
     };
     let new = File::from_bytes(id.clone(), text.as_bytes())?;
-    if let Some(already) = taken(&vault, index, &id, &new)? {
+    if let Some(already) = taken(&vault, index, &id, &new, create.body_file.is_none())? {
         return Ok(already);
     }
     let changes = BTreeMap::from([(id.clone(), text)]);
@@ -252,14 +248,21 @@ pub(crate) fn stored(body: &str) -> String {
 
 /// The answer when a file or a live alias holds `id`, up to case (25, design change 2): exit 3 when the file is this
 /// create's own node, so a retry makes no second one (14), else `id_taken`. The same node has the same kind, title,
-/// parent and body; a status, a label or a link a later verb wrote does not make it another.
-fn taken(vault: &Vault, index: &Index, id: &Id, new: &File) -> Result<Option<Wrote>, Refusal> {
+/// parent and body; a status, a label or a link a later verb wrote does not make it another. With no body file, a node
+/// whose body is empty is the same node too: `create` wrote it before the template became the default body.
+fn taken(vault: &Vault, index: &Index, id: &Id, new: &File, templated: bool) -> Result<Option<Wrote>, Refusal> {
     let Some((holder, alias)) = index.holder(id)? else { return Ok(None) };
     if !alias {
         let text = vault.text(&holder)?;
         let old = File::from_bytes(holder.clone(), text.as_bytes()).ok();
         let key = |f: &File| f.header.as_ref().map(|h| (h.kind, h.title.clone(), h.under.clone(), f.body.text.clone()));
-        if old.as_ref().and_then(key).is_some_and(|k| Some(k) == key(new)) {
+        let same = match (old.as_ref().and_then(key), key(new)) {
+            (Some(o), Some(n)) => {
+                o == n || (templated && o.3.trim().is_empty() && (o.0, &o.1, &o.2) == (n.0, &n.1, &n.2))
+            }
+            _ => false,
+        };
+        if same {
             return Ok(Some(Wrote::Already(serde_json::json!({ "id": holder }))));
         }
     }

@@ -54,7 +54,7 @@ pub struct Design {
     pub rows_not_in_vault: Vec<String>,
 }
 
-/// A rendered diagram of the design (28, design change 12).
+/// A diagram of the design (28, design change 12): a page, a spec, or both.
 #[derive(Serialize, TS)]
 #[ts(optional_fields)]
 pub struct Diagram {
@@ -65,8 +65,9 @@ pub struct Diagram {
     /// The spec's `type`: from `<name>.yaml`, or a converted `<name>.nodes.yaml`; absent with no spec.
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// The page's path in the vault.
-    pub html_path: String,
+    /// The page's path in the vault; absent with no page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html_path: Option<String>,
     /// The spec's path in the vault: `<name>.yaml`, or a converted `<name>.nodes.yaml`; absent with no spec.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec: Option<String>,
@@ -174,29 +175,46 @@ pub(crate) fn design_id(index: &Index, project: &str, id: &str) -> Result<(Id, D
     ))
 }
 
+/// The names of the files in the design's `diagrams/` directory; a directory there is no diagram.
+fn files(vault: &Vault, id: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(vault.root.join(id).join("diagrams")) else { return Vec::new() };
+    entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect()
+}
+
 /// The names of the rendered pages in the design's `diagrams/` directory, sorted: each `<name>.html`. The home's
 /// diagram count is their number.
 pub(crate) fn pages(vault: &Vault, id: &str) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(vault.root.join(id).join("diagrams")) else { return Vec::new() };
-    let mut names: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter_map(|e| e.file_name().to_str()?.strip_suffix(".html").map(str::to_string))
-        .collect();
+    let mut names: Vec<String> =
+        files(vault, id).into_iter().filter_map(|f| f.strip_suffix(".html").map(str::to_string)).collect();
     names.sort();
     names
 }
 
-/// The rendered diagrams in the design `id`'s `diagrams/` directory, by name: the files of today, also for a design
-/// read at a commit.
+/// The diagrams in the design `id`'s `diagrams/` directory, by name: each name with a page, a spec or both, so a
+/// spec whose render is missing still shows. The files of today, also for a design read at a commit.
 pub(crate) fn diagrams(vault: &Vault, id: &Id) -> Vec<Diagram> {
-    pages(vault, id.as_str()).into_iter().map(|name| diagram(vault, id, name)).collect()
+    let names: std::collections::BTreeSet<String> = files(vault, id.as_str())
+        .into_iter()
+        .filter_map(|f| {
+            let stem =
+                f.strip_suffix(".html").or_else(|| f.strip_suffix(".nodes.yaml")).or_else(|| f.strip_suffix(".yaml"));
+            stem.map(str::to_string)
+        })
+        .collect();
+    names.into_iter().map(|name| diagram(vault, id, name)).collect()
 }
 
 /// The diagram `name` of the design `id`: its page's title, its spec's path and its spec's type.
 fn diagram(vault: &Vault, id: &Id, name: String) -> Diagram {
     let dir = vault.root.join(id.as_str()).join("diagrams");
-    let page = std::fs::read_to_string(dir.join(format!("{name}.html"))).unwrap_or_default();
+    let page = std::fs::read_to_string(dir.join(format!("{name}.html"))).ok();
     let title = page
+        .as_deref()
+        .unwrap_or_default()
         .split_once("<title>")
         .and_then(|(_, t)| t.split_once("</title>"))
         .map(|(t, _)| unescape(t.trim()))
@@ -211,7 +229,7 @@ fn diagram(vault: &Vault, id: &Id, name: String) -> Diagram {
         Some(line.trim().trim_matches(['"', '\'']).to_string()).filter(|t| !t.is_empty() && t != "null")
     });
     Diagram {
-        html_path: format!("{id}/diagrams/{name}.html"),
+        html_path: page.map(|_| format!("{id}/diagrams/{name}.html")),
         title: title.unwrap_or_else(|| name.clone()),
         kind,
         spec: spec.map(|f| format!("{id}/diagrams/{f}")),
@@ -317,7 +335,7 @@ mod page_tests {
         let diagrams: Vec<(&str, &str, Option<&str>)> =
             listed.iter().map(|g| (g.name.as_str(), g.title.as_str(), g.kind.as_deref())).collect();
         assert_eq!(diagrams, [("context", "Context & scope", Some("architecture")), ("old", "old", Some("sequence"))]);
-        assert_eq!(listed[0].html_path, "projects/bp/designs/system/diagrams/context.html");
+        assert_eq!(listed[0].html_path.as_deref(), Some("projects/bp/designs/system/diagrams/context.html"));
         let outline: Vec<(u8, &str)> = d.outline.iter().map(|h| (h.depth, h.anchor.as_str())).collect();
         assert_eq!(outline, [(2, "tl-dr"), (2, "context"), (3, "inside")]);
         assert_eq!((d.level.as_str(), d.version.as_str(), d.tldr.as_deref()), ("system", "no version", Some("Short.")));
@@ -333,26 +351,32 @@ mod page_tests {
     #[test]
     fn show_lists_a_design_s_diagrams_with_their_paths_and_no_other_kind_s() {
         let (_d, v) = vault();
+        let dir = "projects/bp/designs/system/diagrams";
+        // A spec whose page is missing still lists; a directory named like a page does not.
+        std::fs::write(v.root.join(dir).join("bare.yaml"), "type: sequence\n").unwrap();
+        std::fs::create_dir(v.root.join(dir).join("folder.html")).unwrap();
         let index = Index::open(&v).unwrap();
         let system = Id::parse("projects/bp/designs/system").unwrap();
         let shown = show(&v, Some(&index), &system, None, None, true).unwrap();
-        let paths: Vec<(&str, &str, Option<&str>)> = shown
+        let paths: Vec<(&str, Option<&str>, Option<&str>)> = shown
             .diagrams
             .as_deref()
             .unwrap()
             .iter()
-            .map(|g| (g.name.as_str(), g.html_path.as_str(), g.spec.as_deref()))
+            .map(|g| (g.name.as_str(), g.html_path.as_deref(), g.spec.as_deref()))
             .collect();
-        let dir = "projects/bp/designs/system/diagrams";
+        let (bare, context, old) = (format!("{dir}/bare.yaml"), format!("{dir}/context"), format!("{dir}/old"));
         let want = [
-            ("context", format!("{dir}/context.html"), Some(format!("{dir}/context.yaml"))),
-            ("old", format!("{dir}/old.html"), Some(format!("{dir}/old.nodes.yaml"))),
+            ("bare", None, Some(bare)),
+            ("context", Some(format!("{context}.html")), Some(format!("{context}.yaml"))),
+            ("old", Some(format!("{old}.html")), Some(format!("{old}.nodes.yaml"))),
         ];
-        let want: Vec<(&str, &str, Option<&str>)> =
-            want.iter().map(|(n, h, s)| (*n, h.as_str(), s.as_deref())).collect();
+        let want: Vec<(&str, Option<&str>, Option<&str>)> =
+            want.iter().map(|(n, h, s)| (*n, h.as_deref(), s.as_deref())).collect();
         assert_eq!(paths, want, "--no-body keeps the diagrams");
         let json = serde_json::to_value(&shown).unwrap();
-        assert_eq!(json["diagrams"][0]["spec"], "projects/bp/designs/system/diagrams/context.yaml");
+        assert!(json["diagrams"][0].get("html_path").is_none(), "no page, no key: {json}");
+        assert_eq!(json["diagrams"][1]["spec"], "projects/bp/designs/system/diagrams/context.yaml");
         let product = Id::parse("projects/bp/designs/product").unwrap();
         let none = show(&v, Some(&index), &product, None, None, false).unwrap();
         assert_eq!(serde_json::to_value(&none).unwrap()["diagrams"], serde_json::json!([]), "a design with none");

@@ -197,22 +197,7 @@ fn a_dry_run_writes_nothing() {
 fn a_case_variant_alias_and_inbox_slug_resolve_to_one_id() {
     let dir = vault();
     let root = dir.path();
-    // The fixture's node has an empty body, so the retry passes one; without a body file, the template is the body.
-    let empty = body(root, "");
-    let case = [
-        "create",
-        "issue",
-        "--project",
-        "bp",
-        "--title",
-        "Case",
-        "--slug",
-        "0003.case",
-        "--under",
-        M,
-        "--body-file",
-        &empty,
-    ];
+    let case = ["create", "issue", "--project", "bp", "--title", "Case", "--slug", "0003.case", "--under", M];
     let (code, v) = bp(root, &case);
     assert_eq!((code, v["id"].as_str()), (Some(3), Some("projects/bp/issues/0003.Case")), "one id up to case: {v}");
     let (code, v) = bp(root, &["create", "inbox", "--title", "x", "--slug", "no-date"]);
@@ -334,6 +319,15 @@ fn create_without_a_body_file_writes_the_template_body() {
     let shown = bp(root, &["show", "projects/recap/project", "--section", "Concerns"]).1;
     assert!(shown["section"].as_str().unwrap().contains("| Concern | Answer |"), "{shown}");
     assert_eq!(bp(root, &["show", "projects/recap/project"]).1["body"].as_str(), Some(template.as_str()));
+    // A thread of the converted vault, made before the template was the default body: a retry is the same node.
+    let thread = "---\nkind: thread\ntitle: set-id-form probe (issue anvil.0180)\nstatus: open\ntags: [\"domain/cli\", \"activity/testing\"]\n---\n";
+    std::fs::create_dir_all(root.join("shared/threads")).unwrap();
+    std::fs::write(root.join("shared/threads/set-id-form-probe-issue-anvil-0180.md"), thread).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "converted thread"]);
+    let retry = ["create", "thread", "--title", "set-id-form probe (issue anvil.0180)"];
+    let (code, v) = bp(root, &[&retry[..], &["--slug", "set-id-form-probe-issue-anvil-0180"]].concat());
+    assert_eq!((code, v["id"].as_str()), (Some(3), Some("shared/threads/set-id-form-probe-issue-anvil-0180")), "{v}");
     let (code, v) = bp(root, &["create", "learning", "--title", "Lesson"]);
     let codes: Vec<&str> = v["findings"].as_array().unwrap().iter().map(|f| f["code"].as_str().unwrap()).collect();
     assert_eq!((code, codes), (Some(0), vec!["placeholder"]), "every node kind takes its template: {v}");
@@ -352,4 +346,13 @@ fn a_dry_run_on_a_vault_with_no_commit_refuses_as_the_write_does() {
     let (code, dry) = bp(root, &[&args[..], &["--dry-run"]].concat());
     assert_eq!((code, &dry), (Some(1), &write), "the dry run refuses with the write's refusal");
     assert!(!root.join(".bp").exists(), "nothing touched the disk");
+    // Every dry run runs the same precondition before its clean test, which would refuse the untracked file.
+    let inbox = root.join("shared/inbox/2026-10-30-hi.md");
+    std::fs::create_dir_all(inbox.parent().unwrap()).unwrap();
+    std::fs::write(&inbox, "---\nkind: inbox\ntitle: hi\nstatus: open\n---\n").unwrap();
+    let set = ["set", "shared/inbox/2026-10-30-hi", "title", "hey"];
+    let (code, write) = bp(root, &set);
+    let (dry_code, dry) = bp(root, &[&set[..], &["--dry-run"]].concat());
+    assert_eq!((code, write["code"].as_str()), (Some(1), Some("could_not_run")), "{write}");
+    assert_eq!((dry_code, &dry), (code, &write), "set's dry run refuses with the write's refusal");
 }

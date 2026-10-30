@@ -39,7 +39,8 @@ pub(crate) fn rename(cwd: &Path, rename: &Rename) -> Result<Wrote, Refusal> {
     let vault = Vault::discover(cwd)?;
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let writer = if rename.dry_run { None } else { Some(vault.writer()?) };
+    // A dry run takes no writer, so it runs the writer's commit precondition itself (34, design change 7).
+    let writer = if rename.dry_run { vault.committed().map(|()| None)? } else { Some(vault.writer()?) };
     let mut opened = None;
     let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
     // The index, not the file system, names the node: a case-blind file system would take a wrong-case id as a file.

@@ -8,7 +8,7 @@ Risk storming comes from Brown, risk storming. Richards and Ford, *Fundamentals 
 
 1. Start from the `architecture` diagram of the design, at level `context` or `container`. Each risk sits on one node or one edge. Name a node by its id, and an edge as `<from>→<to>`.
 2. Ask the human to list and score risks alone, before you show any. Score likelihood and impact each as 1 (low), 2 (medium) or 3 (high). The risk score is their product.
-3. Dispatch the `bp-researcher` role with its `research` template. Below its four lines, give the diagram and the design, but not the human's list. Its report returns a scored list of risks.
+3. Dispatch the `bp-researcher` role with its `research` template. Below its four lines, give the diagram and the design, but not the human's list. `bp show <design> --json` lists `diagrams`; read a spec at its `spec` path from the vault root. Its report returns a scored list of risks.
 4. Merge the two lists. Group the risks that are alike.
 5. Discuss only the differences: a risk that one side alone raised, and a score that the two sides disagree on.
 6. Plan a mitigation for each high risk first, then for each medium risk. A score of 6 or 9 is high. A score of 3 or 4 is medium.

@@ -33,8 +33,9 @@ export function DesignView({ d, project, at }: { d: DesignObject; project: strin
   const under = typeof d.under === "string" ? d.under : undefined;
   const sections = d.outline.filter((o) => o.depth === 2).length;
   const proposed = d.deltas.filter((x) => x.state === "proposed").length;
-  // `show` carries the diagrams of a design only, so the type has them optional; a design page always has them.
-  const diagrams = d.diagrams ?? [];
+  // `show` carries the diagrams of a design only, so the type has them optional; a design page always has them. A spec
+  // whose page is missing has nothing to render here.
+  const diagrams = (d.diagrams ?? []).filter((g) => g.html_path);
   const figures = diagrams.map((g) => ({ name: g.name, title: g.title, src: `/api/${api(project, d.id)}/diagram/${encodeURIComponent(g.name)}` }));
   const absent = (kind: string) => d.rows_not_in_vault.includes(kind);
   const here = `/${project}/design/${d.id}`;
