@@ -28,7 +28,7 @@ The cut by language comes from Evans and from Fowler, "BoundedContext". The canv
 3. Fill the messages from code: imports, calls and events. Ask the human for the purpose and the business decisions.
 4. Write a verification metric for each context. The metric shows when the boundary is wrong.
 5. Test each boundary against the cut reasons of `references/system.md`, step 9.
-6. Dispatch the `bp-researcher` role with its `research` template. Below its five lines, give the evidence and ask for an independent cut. Do not give your cut.
+6. Dispatch the `bp-researcher` role with its `research` template. Below its four lines, give the evidence and ask for an independent cut. Do not give your cut.
 7. The report returns the second cut, with a reason for each boundary. Compare the two cuts. Write each difference as a hotspot in `## Open`.
 
 Output: `## Bounded contexts`, one `###` heading for each context. Each holds its purpose in one sentence of business language. It also holds its terms, messages, decisions, assumptions and metrics. Each term goes to the glossary. Many open questions on a canvas show high uncertainty.

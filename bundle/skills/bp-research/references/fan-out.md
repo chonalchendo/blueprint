@@ -3,7 +3,7 @@
 Read this when the question has parts or asks for a judgement. You are the lead.
 
 1. **Split.** Split the question into parts that one source each can settle. For a judgement, write two opposing briefs: two points of view, not two reads of one page.
-2. **Dispatch.** With the `Agent` tool, call it once per part, at most three, all in one message, with `subagent_type: bp-researcher`. The prompt is your five dispatch lines, unchanged, `Budget:` too, then a brief:
+2. **Dispatch.** With the `Agent` tool, call it once per part, at most three, all in one message, with `subagent_type: bp-researcher`. The prompt is your four dispatch lines, unchanged, then a brief:
    - `Objective:` the part to settle.
    - `Questions:` the claims of the part, one line each.
    - `Sources:` the paths or nodes to prefer.

@@ -183,7 +183,7 @@ fn a_research_trial_seeds_hides_the_sets_and_stores_the_session() {
     let prompt = read(&fake.path("out/prompt.txt"));
     let dispatch = prompt.split_once("\n\n").unwrap().1;
     let lines: Vec<&str> = dispatch.lines().collect();
-    assert_eq!((lines[0], lines[5], lines[6]), ("Node: projects/bp/project", "", fake.question.as_str()), "{prompt}");
+    assert_eq!((lines[0], lines[4], lines[5]), ("Node: projects/bp/project", "", fake.question.as_str()), "{prompt}");
     assert_eq!(read(&fake.path("out/status.txt")), "", "the hidden sets leave git status clean");
     let vault = read(&fake.path("out/vault.txt"));
     assert!(vault.starts_with(&format!("bp scratch <scratch@bp.invalid>|create learning {NODE}\n")), "{vault}");
