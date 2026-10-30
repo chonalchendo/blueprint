@@ -367,7 +367,15 @@ fn a_read_verb_refreshes_a_stale_snapshot_once_and_notes_a_failed_refresh() {
     // `BP_NOW` is fixed in the past, so `forge_age` reads 0; the file's own age shows the refresh.
     let secs = || std::fs::metadata(&open).unwrap().modified().unwrap().elapsed().unwrap().as_secs();
 
-    // No snapshot yet: the list in the clone writes one, then reads it.
+    // No snapshot yet: a read in the clone, with `gh` on `PATH`, calls nothing and writes nothing.
+    let (code, out) = list(&[]);
+    assert_eq!((code, out["forge"].as_str(), calls()), (Some(0), Some("not read"), 0), "{out}");
+    assert!(out.get("stale").is_none() && !v.join(".bp/forge").exists(), "{out}");
+    let (code, _) = bp(v, t, &[("PATH", path.as_str())], &["walk", ISSUE, "--for", "complete", "--done"]);
+    assert_eq!((code, calls(), v.join(".bp/forge").exists()), (Some(0), 0, false));
+    // A repo verb writes the snapshot; a read then reads it.
+    let (code, _) = bp(v, t, &[("PATH", path.as_str())], &["cut", ISSUE]);
+    assert_eq!((code, calls()), (Some(0), 1));
     let (code, out) = list(&[]);
     assert_eq!((code, out["forge"].as_str(), calls()), (Some(0), Some("snapshot"), 1), "{out}");
     assert!(out.get("stale").is_none(), "{out}");

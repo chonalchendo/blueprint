@@ -64,8 +64,10 @@ pub fn refresh_if_stale(
 }
 
 /// The read verbs' refresh (34, design change 3): each of `projects` whose snapshot is over [`MAX_AGE`] old is
-/// rewritten from the clone that holds `cwd`. With `BP_FORGE_SNAPSHOT` set, or outside a clone of the project, the read
-/// stays offline. A failed refresh keeps the stale snapshot and never refuses the read: the note names the error.
+/// rewritten from the clone that holds `cwd`. A read refreshes only a snapshot a repo verb already wrote, so a vault
+/// no repo verb touched stays offline and unwritten: `list` and `walk` never create one. With `BP_FORGE_SNAPSHOT`
+/// set, or outside a clone of the project, the read stays offline too. A failed refresh keeps the stale snapshot and
+/// never refuses the read: the note names the error.
 pub fn refresh_for_read<'a>(
     vault: &Vault,
     index: &Index,
@@ -77,6 +79,7 @@ pub fn refresh_for_read<'a>(
     }
     let notes: Vec<String> = projects
         .into_iter()
+        .filter(|p| vault.root.join(".bp/forge").join(p).join("open-prs.json").is_file())
         .filter_map(|p| match refresh_if_stale(vault, index, cwd, p, MAX_AGE) {
             Err(r) if r.code != Code::NoClone => {
                 Some(format!("snapshot of {p} not refreshed: {}: {}", r.subject, r.fix))
