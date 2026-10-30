@@ -34,7 +34,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - Copy the template. Fill its four lines: `Node:`, `Skill:`, `Forbidden:` and `Stop:`. Add no text above the four lines.
 - A research dispatch holds its question below the four lines.
 - The reviewer writes nothing in the vault or in a worktree; it probes in a copy. Write its review, from `head:` to the end of its `What holds:` list, to a file outside the vault.
-- Then run the record call on the last line of the reply. Its `--body-file` names that file.
+- Then run the record call on the last line of the reply. Its `--body-file` names that file. The record call returns `rows`, the count of the review's findings; its `findings` are the body lint, not the review's.
 
 ### The human's acts
 

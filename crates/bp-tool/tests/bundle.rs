@@ -269,9 +269,12 @@ fn role(stem: &str, text: &str, skills: &BTreeSet<&str>, errors: &mut Vec<String
 /// forbidden list (21, rule 6), and its action's stop.
 fn template(path: &str, text: &str, preloads: Option<&BTreeSet<String>>, errors: &mut Vec<String>) {
     let (role, action) = path.strip_prefix("roles/").and_then(|p| p.strip_suffix(".md")?.split_once('/')).unwrap();
-    let order: Vec<&str> = text.lines().filter_map(|l| SLOTS.into_iter().find(|s| l.starts_with(s))).collect();
-    if order != SLOTS {
-        errors.push(format!("{path}: the four slots, once each, in 17's order: {}", SLOTS.join(" ")));
+    // The lines before the first blank one are the four slots and nothing else, so a dropped slot such as `Budget:`
+    // cannot come back unseen; a research question sits below the blank line.
+    let head: Vec<&str> = text.lines().take_while(|l| !l.trim().is_empty()).collect();
+    if head.len() != SLOTS.len() || head.iter().zip(SLOTS).any(|(l, s)| !l.starts_with(s)) {
+        errors
+            .push(format!("{path}: the four slots, once each, in 17's order, and no other line: {}", SLOTS.join(" ")));
     }
     let slot = |s: &str| text.lines().find_map(|l| l.strip_prefix(s)).map(str::trim).unwrap_or_default();
     let skill = slot("Skill:");
@@ -415,6 +418,10 @@ fn each_planted_fault_names_itself() {
         (
             "complete.md: the four slots",
             Box::new(move |f| edit(f, tc, "Node: <id>\nSkill: bp-complete", "Skill: bp-complete\nNode: <id>")),
+        ),
+        (
+            "complete.md: the four slots",
+            Box::new(move |f| edit(f, tc, "Skill: bp-complete\n", "Skill: bp-complete\nBudget: 15000\n")),
         ),
         ("respond.md: Skill: bp-capture", Box::new(move |f| edit(f, tr, "Skill: bp-respond", "Skill: bp-capture"))),
         ("respond.md: Stop:", Box::new(move |f| edit(f, tr, "--for respond --done", "--for complete --done"))),

@@ -123,6 +123,9 @@ fn refuses_a_second_table() {
     let rows = ["| warn | src/a.rs:2 | Fine. |", "|---|---|---|", "| warn | src/a.rs:3 | Fine. |"];
     let fix = w.refused(ISSUE, &w.body(&rows));
     assert!(fix.contains("second table"), "{fix}");
+    let headed = ["| warn | src/a.rs:2 | Fine. |", "", "| x | y | z |", "|---|---|---|", "| a | b | c |"];
+    let fix = w.refused(ISSUE, &w.body(&headed));
+    assert_eq!(fix, "the body holds a second table; keep one findings table", "not a location fix for its header");
 }
 
 #[test]

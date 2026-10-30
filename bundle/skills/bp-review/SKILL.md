@@ -34,8 +34,7 @@ Write the review in this shape:
 - The finding says what is wrong and what would pass, then gives the reproduction.
 - After the table, the line `What holds:` and one line for each failed attack: what you ran, in backticks.
 - For an attack that timed out or needs a verb the role denies, start the line with `not run:`. Name the attack and the cause. A `not run:` line is never a pass.
+- If every row is `warn`, the review is approvable: say so on the line before the last.
 - Last line: the call that the session runs to record the review. Do not run it: `bp record review <id> --field head=<sha> --field role=reviewer --body-file <file> --json`.
-
-A review whose rows are all `warn` is approvable; say so in the last line before the record call.
 
 Stop: return the review. The session records it, and then `bp walk <id> --for review --done --json` returns `done` true.
