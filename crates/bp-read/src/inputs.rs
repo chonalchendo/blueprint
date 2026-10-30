@@ -41,11 +41,17 @@ fn named(body: &str, heading: &str) -> Vec<Block> {
     out
 }
 
+/// The number of findings in a review body: the rows of its table after the header and separator lines (21,
+/// respond). `record review` echoes it beside the body lint's `findings`, which a session misread as the review's (33).
+#[must_use]
+pub fn rows(body: &str) -> usize {
+    body.lines().filter(|l| l.trim_start().starts_with('|')).count().saturating_sub(2)
+}
+
 /// The findings of a review that no disposition answers, counted from 1, and whether a disposition is `fixed` (21,
-/// respond). The findings are the rows of the body's table after its header and separator lines; a disposition of
-/// an index past the last row answers nothing.
+/// respond). The findings are the [`rows`] of the body; a disposition of an index past the last row answers nothing.
 pub fn findings(index: &Index, review: &Record) -> Result<(Vec<u64>, bool), Refusal> {
-    let rows = review.body.lines().filter(|l| l.trim_start().starts_with('|')).count().saturating_sub(2);
+    let rows = rows(&review.body);
     let dispositions = index.records(&review.id, Kind::Disposition)?;
     let answered: BTreeSet<u64> = dispositions.iter().filter_map(|d| d.header.get("finding")?.as_u64()).collect();
     let fixed = dispositions.iter().any(|d| text(&d.header, "as").as_deref() == Some("fixed"));
