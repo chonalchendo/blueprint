@@ -30,6 +30,7 @@ Create the glossary right after the create call of the system design draft. Writ
 2. Write one glossary row for each term. A `## Vocabulary` row `| <Noun> | <definition> |` becomes ``- `<slug>` — <definition>.``. The slug is the noun in lower case, with each space as a hyphen.
 3. Write the rows to a file outside the vault. Create the glossary: `bp create design --project <p> --title Glossary --slug glossary --under projects/<p>/designs/system --body-file <file> --json`.
 4. Leave the product design as it is. From now on, each new term goes to the glossary only.
+5. Keep the glossary `draft` until the human activates the system design. Ask the human to activate both at once. An active glossary changes only through a delta under a milestone (`references/revision.md`).
 
 ## Diagram
 
