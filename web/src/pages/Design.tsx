@@ -33,7 +33,10 @@ export function DesignView({ d, project, at }: { d: DesignObject; project: strin
   const under = typeof d.under === "string" ? d.under : undefined;
   const sections = d.outline.filter((o) => o.depth === 2).length;
   const proposed = d.deltas.filter((x) => x.state === "proposed").length;
-  const figures = d.diagrams.map((g) => ({ name: g.name, title: g.title, src: `/api/${api(project, d.id)}/diagram/${encodeURIComponent(g.name)}` }));
+  // `show` carries the diagrams of a design only, so the type has them optional; a design page always has them. A spec
+  // whose page is missing has nothing to render here.
+  const diagrams = (d.diagrams ?? []).filter((g) => g.html_path);
+  const figures = diagrams.map((g) => ({ name: g.name, title: g.title, src: `/api/${api(project, d.id)}/diagram/${encodeURIComponent(g.name)}` }));
   const absent = (kind: string) => d.rows_not_in_vault.includes(kind);
   const here = `/${project}/design/${d.id}`;
   // The lead and the TL;DR show above the body, so the body leaves them out.
@@ -64,7 +67,7 @@ export function DesignView({ d, project, at }: { d: DesignObject; project: strin
           under <b>{under ? <Link to={pagePath(under, "design")}>{under.split("/").slice(-1)[0]}</Link> : "nothing"}</b>
         </span>
         <span>
-          <b>{many(d.diagrams.length, "diagram")}</b>
+          <b>{many(diagrams.length, "diagram")}</b>
         </span>
         <span>
           body <b>{many(sections, "section")}</b>
@@ -91,13 +94,13 @@ export function DesignView({ d, project, at }: { d: DesignObject; project: strin
           <p className="empty">nothing</p>
         )}
         <h2 className="group">
-          Diagrams<span className="n">{d.diagrams.length}</span>
+          Diagrams<span className="n">{diagrams.length}</span>
         </h2>
-        {d.diagrams.length === 0 ? (
+        {diagrams.length === 0 ? (
           <p className="empty">nothing</p>
         ) : (
           <div className="gates strip">
-            {d.diagrams.map((g) => (
+            {diagrams.map((g) => (
               <a className="g" key={g.name} href={`#fig-${g.name}`}>
                 <span className="k">{g.type ?? "diagram"}</span>
                 <span className="id">{g.name}</span>

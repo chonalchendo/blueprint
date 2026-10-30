@@ -206,6 +206,8 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         return Err(landing::no_pull_request(&id));
     };
     let n = pr.number;
+    // The dry run takes no writer, so it runs the writer's commit precondition here (34, design change 7).
+    vault.committed()?;
     vault.clean([&id, &c.claim])?;
     if c.worktree.is_dir() && !git(&c.worktree, &["status", "--porcelain"])?.is_empty() {
         return Err(Refusal::new(

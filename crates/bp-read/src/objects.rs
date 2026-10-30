@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 use ts_rs::TS;
 
 use crate::Intents;
+use crate::design::Diagram;
 
 /// The rows of `list <kind>`: each with its intent where its kind has one, and the forge the intents read.
 #[derive(Serialize, TS)]
@@ -108,6 +109,10 @@ pub struct Show {
     /// The body, unless it is left out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// A design's diagrams, by name, each with its page and its spec (34, design change 7); empty for a design with
+    /// none, absent for any other kind. `--no-body` and `--section` keep them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagrams: Option<Vec<Diagram>>,
 }
 
 /// The rows of `search`.
@@ -266,6 +271,7 @@ pub fn show(
         section: None,
         sections: None,
         body: None,
+        diagrams: (head.kind == Kind::Design).then(|| crate::design::diagrams(vault, id)),
     };
     let headings: Vec<&str> = file.body.sections.iter().map(|s| s.heading.as_str()).collect();
     let Some(heading) = section else {

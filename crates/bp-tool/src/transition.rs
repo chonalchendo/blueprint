@@ -78,7 +78,8 @@ pub(crate) fn transition(cwd: &Path, t: &Transition) -> Result<Wrote, Refusal> {
     }
     let vault = Vault::discover(cwd)?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
-    let writer = if t.dry_run { None } else { Some(vault.writer()?) };
+    // A dry run takes no writer, so it runs the writer's commit precondition itself (34, design change 7).
+    let writer = if t.dry_run { vault.committed().map(|()| None)? } else { Some(vault.writer()?) };
     let mut opened = None;
     let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
     let id = subject(index, &t.id)?;

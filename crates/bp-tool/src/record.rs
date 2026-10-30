@@ -188,7 +188,8 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
     let role = crate::set::role()?;
     let now = crate::clock::now()?;
     // The lock comes before the reads, so the key this write takes is still free when it commits.
-    let writer = if r.dry_run { None } else { Some(vault.writer()?) };
+    // A dry run takes no writer, so it runs the writer's commit precondition itself (34, design change 7).
+    let writer = if r.dry_run { vault.committed().map(|()| None)? } else { Some(vault.writer()?) };
     let mut opened = None;
     let index = crate::index(&vault, writer.as_ref(), &mut opened)?;
     let parent = if kind == Kind::Handoff && r.parent == "shared" { None } else { Some(subject(index, &r.parent)?) };

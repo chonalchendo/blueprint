@@ -108,16 +108,7 @@ impl Vault {
     /// Refuses a vault with no git commit, then takes `.bp/lock`, waiting up to 5 s, then refuses `vault_locked`.
     /// Before anything is read, the files a writer that died before its commit left go back to their pre-images.
     pub fn writer(&self) -> Result<Writer<'_>, Refusal> {
-        // A write ends in a commit; without a head, nothing may touch the disk, `.bp/` included.
-        if crate::git::Repo::find(&self.root).and_then(|r| r.head()).is_none() {
-            let root = self.root.display();
-            return Err(Refusal::failed(
-                root.to_string(),
-                format!(
-                    "a write commits to the vault's git repository, which has no commit; git -C {root} init, commit once, then rerun"
-                ),
-            ));
-        }
+        self.committed()?;
         let path = bp_dir(&self.root)?.join("lock");
         let lock = std::fs::OpenOptions::new()
             .create(true)
@@ -145,6 +136,22 @@ impl Vault {
         }
         restore(&self.root)?;
         Ok(Writer { index: Index::open(self)?, vault: self, clean: Cell::new(None), trailers: Vec::new(), _lock: lock })
+    }
+
+    /// Refuses a vault whose git repository has no commit, as [`Vault::writer`] does, so a dry run that takes no
+    /// writer refuses what its write would (34, design change 7). A write ends in a commit; without a head, nothing
+    /// may touch the disk, `.bp/` included.
+    pub fn committed(&self) -> Result<(), Refusal> {
+        if crate::git::Repo::find(&self.root).and_then(|r| r.head()).is_some() {
+            return Ok(());
+        }
+        let root = self.root.display();
+        Err(Refusal::failed(
+            root.to_string(),
+            format!(
+                "a write commits to the vault's git repository, which has no commit; git -C {root} init, commit once, then rerun"
+            ),
+        ))
     }
 
     /// Refuses `path_dirty` when a file of `ids` differs from HEAD in the working tree or git's index, or is on disk
