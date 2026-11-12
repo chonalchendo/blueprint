@@ -47,7 +47,6 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use bp_operation::Action;
 
 use crate::eval_plant::Research;
 
@@ -249,24 +248,6 @@ impl Fixture {
     pub fn assign(&self, findings: &[Finding]) -> Vec<Option<usize>> {
         let all = || self.truth.iter().enumerate();
         findings.iter().map(|f| self.best(all(), &f.location, &f.text)).collect()
-    }
-
-    /// The issue body the sandbox writes. The sandbox, not the agent, opens a review or respond trial's pull request,
-    /// and the fixture's block is the touched crates' tests: a guard that passes before the change too, so `pr` would
-    /// refuse it as vacuous (37, design change 10). Each block of those trials that names no `prior` is marked
-    /// `prior=pass`. A complete trial's agent runs `pr` on the blocks as the fixture wrote them.
-    pub fn issue_for(&self, action: Action) -> String {
-        if action == Action::Complete {
-            return self.issue.clone();
-        }
-        let mark = |l: &str| {
-            let fence = l.starts_with("~~~check ") || l.starts_with("```check ");
-            match l.rfind('}') {
-                Some(end) if fence && !l.contains("prior=") => format!("{} prior=pass{}", &l[..end], &l[end..]),
-                _ => l.to_string(),
-            }
-        };
-        self.issue.lines().map(mark).collect::<Vec<_>>().join("\n")
     }
 
     /// The genre of this fixture's planted items: the mutant's, or `escape`; none for a control or a past review.
@@ -508,16 +489,6 @@ mod tests {
         let both = "first cfg(test) skip tests, 500 and 501";
         assert_eq!(one("x.rs:20", both), Some(0), "equal words: the nearer line");
         assert_eq!(one("x.rs:34", both), Some(2));
-    }
-
-    #[test]
-    fn a_trial_the_sandbox_opens_carries_each_block_as_a_guard() {
-        let text = "base: b\nhead: h\ntitle: T\ntruth:\n- a/x.rs:20 | one\n---\n## Check\n\n~~~check shell {name=a expect=0}\ntrue\n~~~\n\n```check shell {name=b prior=pass}\nx\n```\n";
-        let f = Fixture::parse("pr-1", text).unwrap();
-        assert_eq!(f.issue_for(Action::Complete), f.issue, "the agent runs pr on the blocks as written");
-        let want = "## Check\n\n~~~check shell {name=a expect=0 prior=pass}\ntrue\n~~~\n\n```check shell {name=b prior=pass}\nx\n```";
-        assert_eq!(f.issue_for(Action::Review), want);
-        assert_eq!(f.issue_for(Action::Respond), want);
     }
 
     #[test]

@@ -18,6 +18,6 @@ A wording fix to an active design needs a milestone today: `set --body-file` ref
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-diagram -p bp-tool -p bp-vault
 ~~~

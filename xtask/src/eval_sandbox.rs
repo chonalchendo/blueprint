@@ -103,7 +103,7 @@ impl Sandbox {
             ],
         )?;
         sb.bp(&code, None, &["transition", m, "approved"])?;
-        sb.issue = sb.create_issue(&code, m, &fx.title, &fx.issue_for(skill.action))?;
+        sb.issue = sb.create_issue(&code, m, &fx.title, &fx.issue)?;
         // A rule the fixture's truth rests on has to be in the reviewer's walk, and the walk carries the body of a
         // design only (21, the context column): the rule is a component of the system design, cited by the issue.
         for (title, text) in &fx.rules {

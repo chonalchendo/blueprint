@@ -59,7 +59,7 @@ fn setup() -> Option<Setup> {
     let head = git(&repo, &["rev-parse", "HEAD"]);
 
     let fixture = format!(
-        "base: {base}\nhead: {head}\ntitle: A fixture\ntruth:\n- src/a.rs:1 | The count is wrong. | match: count, wrong\n---\n## Problem\n\nx\n\n## Check\n\n~~~check shell {{name=sandbox expect=0}}\ntest -f README.md\n~~~\n"
+        "base: {base}\nhead: {head}\ntitle: A fixture\ntruth:\n- src/a.rs:1 | The count is wrong. | match: count, wrong\n---\n## Problem\n\nx\n\n## Check\n\n~~~check shell {{name=sandbox expect=0 prior=pass}}\ntest -f README.md\n~~~\n"
     );
     write(&t.join("bp-review/pr-1.md"), &fixture);
     write(&t.join("bp-review/pr-2.md"), &fixture);

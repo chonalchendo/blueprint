@@ -142,7 +142,7 @@ fn worker(g: &mut Graded, skill: &Skill, fx: &Fixture, calls: &[BpCall], log: &s
     let called = |verb: &str| calls.iter().any(|c| c.verb == verb);
     let walked = calls.iter().any(|c| c.verb == "walk" && c.args.contains(&format!("--for {}", skill.action)));
     g.end = End::parse(log);
-    let stopped = g.end.done && !g.end.escalated() && g.end.kept(fx, skill.action);
+    let stopped = g.end.done && !g.end.escalated() && g.end.kept(fx);
     let mut steps = vec![("walk".to_string(), walked)];
     if skill.action == Action::Complete {
         steps.extend(

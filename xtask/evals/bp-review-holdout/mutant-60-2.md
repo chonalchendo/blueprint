@@ -44,6 +44,6 @@ The match words come from each item's own text, not from the runs. Item 1: `cfg(
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-install -p xtask
 ~~~

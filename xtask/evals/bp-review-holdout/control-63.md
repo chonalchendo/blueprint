@@ -25,6 +25,6 @@ The review eval has one fixture, `pr-20`. Its truth comes from a past review, so
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p xtask
 ~~~

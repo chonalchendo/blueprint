@@ -45,6 +45,6 @@ A worker can still write in the main checkout and background a command, and the 
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-install -p bp-tool -p xtask
 ~~~

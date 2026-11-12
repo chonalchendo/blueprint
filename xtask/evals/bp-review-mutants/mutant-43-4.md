@@ -44,6 +44,6 @@ The spike's `bp-diagram` look copies the diagram-design plugin. It has a mono ey
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-diagram
 ~~~

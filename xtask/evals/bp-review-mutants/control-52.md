@@ -28,6 +28,6 @@ Five render gaps from issues 5 and 10 are open. The owner decided them on 2026-1
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-diagram
 ~~~
