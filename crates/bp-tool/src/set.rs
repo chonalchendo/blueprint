@@ -76,6 +76,7 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
         if was.as_ref() == Some(&value) {
             return Ok(Wrote::Already(serde_json::json!({ "id": id })));
         }
+        lowers(header.kind, &id, field, was.as_ref(), &value)?;
         let new = bp_vault::set_field(&text, field, &value);
         (new, serde_json::json!({ "id": id, "field": field, "value": value, "was": was }), field.as_str())
     };
@@ -94,6 +95,22 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     result["commit"] = written.commit.into();
     result["findings"] = serde_json::to_value(written.findings).expect("a plain struct serialises");
     Ok(Wrote::Changed(result))
+}
+
+/// `not_a_label` when the write lowers an issue's `risk`: only the human's signed record lowers a level (37, design
+/// change 2), so `set` writes a first level or a higher one only.
+fn lowers(kind: Kind, id: &Id, field: &str, was: Option<&Value>, value: &Value) -> Result<(), Refusal> {
+    let rank = |v: Option<&Value>| v.and_then(Value::as_str).and_then(|l| schema::RISK.iter().position(|r| *r == l));
+    match (rank(was), rank(Some(value))) {
+        (Some(was), Some(now)) if kind == Kind::Issue && field == "risk" && now < was => Err(Refusal::new(
+            Code::NotALabel,
+            format!("{id} risk"),
+            "only a signed human record lowers a risk level; set writes a first level or a higher one (37, design \
+             change 2)",
+            format!("the human runs bp lower {id} <level> --reason <why> from a shell"),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The file with its body replaced: the header's bytes as they were, then the body as `create` stores it. `None`
