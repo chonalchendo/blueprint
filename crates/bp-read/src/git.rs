@@ -6,10 +6,10 @@ use std::process::Command;
 
 use bp_vault::Refusal;
 
-/// Runs git in the code repository and returns its stdout, trimmed. A failure is `could_not_run` with git's own words.
-pub fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
-    let out = Command::new("git")
-        .arg("-C")
+/// git in the code repository at `dir`, with no argument yet. Every git call on a code repository starts here.
+pub fn command(dir: &Path) -> Command {
+    let mut git = Command::new("git");
+    git.arg("-C")
         .arg(dir)
         .env("LC_ALL", "C")
         // A git hook that runs bp sets these; each would turn `-C <dir>` to another repository, index or worktree.
@@ -18,10 +18,13 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_COMMON_DIR")
         // A credential prompt would wait on a terminal no agent reads; the fetch fails instead.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .args(args)
-        .output()
-        .map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;
+        .env("GIT_TERMINAL_PROMPT", "0");
+    git
+}
+
+/// Runs git in the code repository and returns its stdout, trimmed. A failure is `could_not_run` with git's own words.
+pub fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
+    let out = command(dir).args(args).output().map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }

@@ -222,6 +222,28 @@ fn a_dry_run_refuses_as_land_does_and_writes_nothing() {
     assert_ne!(fetched(), at, "the dry run fetches");
 }
 
+/// A git hook that runs bp sets git's location variables. Here each names the vault's own index or tree: right for
+/// the vault's git, wrong for the worktree's. `cut` still fills the worktree's own index, and `land` still checks the
+/// worktree's own files.
+#[test]
+fn git_s_index_and_tree_variables_never_reach_the_claim_s_worktree() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let index = v.join(".git/index").display().to_string();
+    let (code, cut) = bp(v, t, &[("GIT_INDEX_FILE", &index)], &["cut", ISSUE]);
+    assert_eq!(code, Some(0), "{cut}");
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    assert_eq!(git(&w, &["status", "--porcelain"]), "", "cut checked the worktree out into its own index");
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    let h = commit(&w, &["add", "hello.txt"], "hello");
+    common::bp(v, &["set", "projects/bp/project", "reviewer", "r"]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(0));
+    forge(t, &h, &[("r", &h)], &["SUCCESS"]);
+    let tree = v.display().to_string();
+    let (code, out) = bp(v, t, &[("GIT_WORK_TREE", &tree)], &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, &out["head"]), (Some(0), &json!(h)), "the worktree is clean: {out}");
+}
+
 /// `check` on an issue with a held claim runs at the claim's worktree head, as `pr` does, wherever the caller stands.
 #[test]
 fn check_runs_the_blocks_in_the_held_claims_worktree() {
