@@ -297,6 +297,33 @@ fn the_rules_and_the_base_are_fetched_and_a_failed_fetch_refuses() {
     assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "old refs are not judged: {v}");
 }
 
+/// The base and the pushed head are the shas origin's server names, so the clone's own refspec, which an agent edits
+/// with no push, cannot set either.
+#[test]
+fn a_refspec_in_the_clone_moves_neither_the_base_nor_the_head() {
+    let mut w = world(Some("low"), Some("high: [infra/, src/]\nlow: [docs/]\n"));
+    w.cut();
+    let wt = w.worktree.clone().unwrap();
+    let base = w.rev("origin/master");
+    // A lenient branch on origin, mapped onto `origin/master`; nothing maps `bp/a`, so `origin/bp/a` never moves.
+    let lenient = w.push_master(&[(".bp/risk.yml", "low: [src/, infra/, docs/]\n")]);
+    git(&w.t.path().join("other"), &["push", "-q", "-f", "origin", &format!("{lenient}:refs/heads/lenient")]);
+    git(&w.t.path().join("other"), &["push", "-q", "-f", "origin", &format!("{base}:refs/heads/master")]);
+    git(&w.code, &["config", "--unset-all", "remote.origin.fetch"]);
+    git(&w.code, &["config", "--add", "remote.origin.fetch", "+refs/heads/lenient:refs/remotes/origin/master"]);
+    git(&w.code, &["fetch", "-q", "origin"]);
+    // The pushed head edits a high path; the local branch is moved back to a low commit.
+    let pushed = w.commit(&[("src/big.rs", "fn big() {}\n")]);
+    git(&wt, &["push", "-q", "origin", "HEAD:bp/a"]);
+    git(&wt, &["reset", "-q", "--hard", "HEAD~1"]);
+    let local = w.commit(&[("docs/a.md", "One.\n")]);
+    let v = w.risk();
+    assert_eq!(pick(&v), json!(["high", "low", "high"]), "{v}");
+    assert_eq!((&v["base"], &v["head"]), (&json!(base), &json!([local, pushed])), "{v}");
+    assert_eq!(v["reasons"], json!(["src/big.rs matches the high pattern src/"]));
+    assert_eq!(w.rev("origin/master"), lenient, "the poisoned ref moved, and the level did not read it");
+}
+
 #[test]
 fn the_diff_is_from_the_merge_base_so_master_s_own_changes_do_not_count() {
     let mut w = world(Some("low"), Some("high: [infra/]\nlow: [docs/]\n"));
@@ -478,6 +505,15 @@ fn an_exact_pattern_that_names_a_directory_refuses() {
         assert!(
             fix.starts_with(&format!("the pattern {dir:?} names a directory, so it matches no path: write {dir}/"))
         );
+    }
+    // The check folds ASCII case, and reads each head's tree too: a directory the branch adds is one.
+    for (rules, dir) in [("high: [SRC]\n", "SRC"), ("high: [newdir]\n", "newdir")] {
+        let mut w = world(None, Some(rules));
+        w.cut();
+        w.commit(&[("newdir/a.rs", "fn a() {}\n")]);
+        let (exit, v) = w.bp(&["risk", ISSUE]);
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("risk_file_invalid")), "{v}");
+        assert!(v["fix"].as_str().unwrap().starts_with(&format!("the pattern {dir:?} names a directory")), "{v}");
     }
     let mut w = world(None, Some("high: [src/b.rs, nothing/here]\n"));
     w.cut();
