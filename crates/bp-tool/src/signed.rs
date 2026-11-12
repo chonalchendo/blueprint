@@ -7,8 +7,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use bp_change::risk::{Config, RISK_FILE};
 use bp_vault::{Code, Id, Refusal};
-use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::claim::git;
 
@@ -145,8 +145,7 @@ pub(crate) fn signer(top: &Path) -> Result<String, Refusal> {
         ));
     };
     git(top, &["fetch", "-q", "origin", sha])?;
-    let text = git(top, &["show", &format!("{sha}:.bp/risk.yml")]).unwrap_or_default();
-    // Issue 0 of milestone 12 (`risk-level`) reads the same file with yaml-rust2. At rebase, read its `signer` here.
+    let text = git(top, &["show", &format!("{sha}:{RISK_FILE}")]).unwrap_or_default();
     signer_of(&text).ok_or_else(|| {
         Refusal::new(
             Code::SignerMissing,
@@ -161,16 +160,11 @@ pub(crate) fn signer(top: &Path) -> Result<String, Refusal> {
     })
 }
 
-/// The `signer` key of a risk file as yaml-rust2 reads it: one document, a mapping, and a one-line string that holds a
-/// public key. A duplicate key fails the parse, so no second `signer` line can shadow the first.
+/// The `signer` key of a risk file, as [`Config::parse`] reads it for the level: one reader of `.bp/risk.yml`. A file
+/// that does not parse names no signer, and a duplicate key fails the parse, so no second `signer` line can shadow
+/// the first.
 fn signer_of(text: &str) -> Option<String> {
-    let docs = YamlLoader::load_from_str(text).ok()?;
-    let [doc] = docs.as_slice() else { return None };
-    let value = doc.as_hash()?.get(&Yaml::String("signer".into()))?.as_str()?;
-    if value.contains(['\n', '\r']) {
-        return None;
-    }
-    public_key(value)
+    Config::parse(text).ok()?.signer.as_deref().and_then(public_key)
 }
 
 /// A full commit sha: 40 or 64 lower-case hex digits. A head that is not one never enters a message or a path.

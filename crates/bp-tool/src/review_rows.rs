@@ -1,11 +1,13 @@
 //! The row checks of `record` (15, record; 29 design change 6). A review holds the head it read and one findings
 //! table, and each row names a severity, a place in the diff of that head and what is wrong; a declined disposition
-//! says why. A review the responder cannot count or place is refused when it is written, not when it is answered.
+//! says why. A review the responder cannot count or place is refused when it is written, not when it is answered. A
+//! `risk` row raises the issue's level (37, design change 2), so a misspelt one is refused too.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use bp_change::DispositionAs;
+use bp_change::risk::RISK_ROW;
 use bp_read::inputs::{field, held};
 use bp_vault::{Code, Id, Index, Kind, Refusal};
 
@@ -68,8 +70,17 @@ fn review(index: &Index, issue: &Id, head: &str, body: &str) -> Result<(), Refus
         let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
         if cells.len() < 3 || cells[..3].iter().any(|c| c.is_empty()) {
             let fix = format!(
-                "fill row {n}: `| error or warn | <path>:<line> or a node id | what is wrong, and what would pass |`"
+                "fill row {n}: `| error, warn or risk | <path>:<line> or a node id | what is wrong, and what would pass |`"
             );
+            return Err(refuse(&format!("finding {n}"), fix));
+        }
+        // Only the exact word raises the level, so a near miss (`Risk`, `risk/error`, a zero-width space inside)
+        // would raise nothing and say nothing.
+        let severity = cells[0].trim_matches('`');
+        let letters: String = severity.chars().filter(|c| c.is_alphanumeric()).collect();
+        if severity != RISK_ROW && letters.to_lowercase().contains(RISK_ROW) {
+            let fix =
+                format!("row {n}'s severity is `{severity}`: write `{RISK_ROW}`, in lower case, to raise the level");
             return Err(refuse(&format!("finding {n}"), fix));
         }
         let at = cells[1].trim_matches('`');

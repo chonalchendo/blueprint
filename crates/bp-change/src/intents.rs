@@ -93,6 +93,8 @@ pub struct Run {
     /// The verdict was `pass`, or `skipped`: a `when=post-land` block holds only after the merge. Only these count as
     /// evidence for a land; a run that could not run proves nothing.
     pub passed: bool,
+    /// The level `pr` computed for `commit`'s diff after its fetch; `None` on a run `pr` did not write.
+    pub risk: Option<crate::risk::Level>,
 }
 
 /// An integrity run of a project, reduced (25, issue 11).
@@ -392,6 +394,12 @@ pub fn evidence<'a>(runs: &'a [Run], head: &str, blocks: &'a [Block]) -> Result<
     }
 }
 
+/// The highest level that a run at `head` records: the computed level an intent reads, as it fetches nothing (22,
+/// constraint 8). `None` when no run there records one, which a gate reads as not computed, never as low.
+pub fn recorded_risk(runs: &[Run], head: &str) -> Option<crate::risk::Level> {
+    runs.iter().filter(|r| r.commit == head).filter_map(|r| r.risk).max()
+}
+
 /// The latest run of an `error` check at `head` failed: blocked's first test, and the view's "red at head".
 pub fn failed_at(runs: &[Run], head: &str) -> bool {
     latest_at(runs, head).values().any(|r| r.failed)
@@ -483,6 +491,7 @@ mod tests {
             error: true,
             failed,
             passed: !failed,
+            risk: None,
         }
     }
 

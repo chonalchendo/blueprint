@@ -1,8 +1,9 @@
 //! Change domain: milestone, issue, check rows, run, claim, review, disposition, waiver; the Intents function.
 //! This milestone holds the status sets, their machines (25, design change 3), the issue's severity and the
-//! disposition values of the logical data model (13), and the `Intents` function (21).
+//! disposition values of the logical data model (13), the `Intents` function (21), and the risk level (37).
 
 pub mod intents;
+pub mod risk;
 
 bp_vault::closed_enum! {
     /// A milestone's status. Running is derived from a claim under it.

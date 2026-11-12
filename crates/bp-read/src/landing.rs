@@ -4,7 +4,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use bp_change::intents::Unmet;
 use bp_forge::PullRequest;
@@ -164,18 +164,14 @@ fn unapproved(id: &Id, pr: &PullRequest, reviewer: &str, clone: Option<(&Path, &
 pub fn diff_unchanged(top: &Path, from: &str, reviewed: &str, p: &PullRequest) -> Option<bool> {
     let base = p.base_ref_name.as_ref()?;
     let id = |range: String| -> Option<String> {
-        let diff = Command::new("git")
-            .arg("-C")
-            .arg(top)
+        let diff = crate::git::command(top)
             .args(["diff", "--no-ext-diff", "--no-color", "--end-of-options", &range])
             .output()
             .ok()?;
         if !diff.status.success() || diff.stdout.is_empty() {
             return None;
         }
-        let mut child = Command::new("git")
-            .arg("-C")
-            .arg(top)
+        let mut child = crate::git::command(top)
             .args(["patch-id", "--verbatim"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

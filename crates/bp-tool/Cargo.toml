@@ -30,7 +30,6 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 blake3.workspace = true
-yaml-rust2.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

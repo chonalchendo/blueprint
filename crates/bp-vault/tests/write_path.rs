@@ -262,8 +262,8 @@ fn a_killed_writer_is_undone_and_the_next_write_commits_only_its_own_file() {
 }
 
 /// The labels `set` writes (13): the line writer's whole domain.
-const LABELS: [&str; 9] =
-    ["title", "tags", "applies", "class", "repository", "forge", "cue", "severity", "walkthrough"];
+const LABELS: [&str; 11] =
+    ["title", "tags", "applies", "class", "repository", "forge", "cue", "severity", "walkthrough", "risk", "complex"];
 
 /// The header text and the body of a file as `File` reads them: the body starts after the first line that is
 /// exactly `---` after the opening one.

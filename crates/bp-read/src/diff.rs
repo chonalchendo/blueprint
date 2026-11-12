@@ -2,7 +2,6 @@
 //! on request, cut at [`DIFF_CAP`].
 
 use std::path::Path;
-use std::process::Command;
 
 use serde::Serialize;
 use ts_rs::TS;
@@ -43,9 +42,7 @@ pub struct DiffFile {
 pub(crate) fn diff(top: &Path, p: &bp_forge::PullRequest, text: bool) -> Diff {
     let range = format!("refs/remotes/origin/{}...{}", p.base_ref_name.as_deref().unwrap_or("HEAD"), p.head_ref_oid);
     let git = |args: &[&str]| {
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(top)
+        let out = crate::git::command(top)
             .args(["diff", "--no-ext-diff", "--no-color"])
             .args(args)
             .args(["--end-of-options", &range])

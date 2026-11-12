@@ -18,6 +18,7 @@ mod record;
 mod redraw;
 mod rename;
 mod review_rows;
+mod risk;
 mod row;
 mod schema;
 mod set;
@@ -75,6 +76,9 @@ pub enum Verb {
     Search(Search),
     /// The ranked slice an action needs, under its budget, with the scope's intents.
     Walk(walk::Walk),
+    /// An issue's risk level in force: the highest of its declared label, the level its claim's diff computes against
+    /// `.bp/risk.yml`, and each review's risk row; with the rules that set it.
+    Risk(risk::Risk),
     /// One header label of one node: one changed line, one commit.
     Set(set::Set),
     /// One node from flags, keyed by its slug; a same-content repeat is a no-op.
@@ -199,6 +203,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::List(list) => finish(list_(cwd, list), cli.json, out),
         Verb::Search(search) => finish(search_(cwd, search), cli.json, out),
         Verb::Walk(w) => finish(walk::walk(cwd, w), cli.json, out),
+        Verb::Risk(r) => finish(risk::risk(cwd, r), cli.json, out),
         Verb::Set(s) => wrote(set::set(cwd, s), cli.json, out),
         Verb::Create(c) => wrote(create::create(cwd, c), cli.json, out),
         Verb::Link(l) => wrote(link::link(cwd, l), cli.json, out),

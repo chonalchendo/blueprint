@@ -1,5 +1,6 @@
 //! The per-kind schema rules that live in the domain crates, composed for `create`, `link` and `set` (23, rule 2).
 
+use bp_change::risk::Level;
 use bp_change::{IssueStatus, MilestoneStatus, Severity};
 use bp_design::{DesignStatus, ProjectClass, ProjectStatus};
 use bp_reasoning::{ConventionStatus, DecisionStatus, InboxStatus, LearningStatus, ThreadStatus};
@@ -62,12 +63,20 @@ pub fn parents(kind: Kind) -> &'static [Kind] {
 }
 
 /// Every label field of any kind, for the fix that lists one kind's.
-const LABELS: [&str; 11] =
-    ["title", "tags", "applies", "class", "repository", "forge", "reviewer", "cue", "severity", "walkthrough", "risk"];
-
-/// An issue's risk levels, lowest first (37, design change 1). Issue 0 of milestone 12 (`risk-level`) adds the
-/// `bp_change` level type; at rebase this order reads from it.
-pub const RISK: [&str; 3] = ["low", "medium", "high"];
+const LABELS: [&str; 12] = [
+    "title",
+    "tags",
+    "applies",
+    "class",
+    "repository",
+    "forge",
+    "reviewer",
+    "cue",
+    "severity",
+    "walkthrough",
+    "risk",
+    "complex",
+];
 
 /// What a label holds.
 enum Vocab {
@@ -92,8 +101,8 @@ fn vocab(kind: Kind, field: &str) -> Option<Vocab> {
         (_, "tags") | (Kind::Convention, "applies") => Vocab::Tags,
         (Kind::Project, "class") => closed(ProjectClass::ALL, ProjectClass::as_str),
         (Kind::Issue, "severity") => closed(Severity::ALL, Severity::as_str),
-        (Kind::Issue, "risk") => Vocab::Closed(RISK.to_vec()),
-        (Kind::Issue, "walkthrough") => Vocab::Bool,
+        (Kind::Issue, "risk") => closed(Level::ALL, Level::as_str),
+        (Kind::Issue, "walkthrough" | "complex") => Vocab::Bool,
         _ => return None,
     })
 }

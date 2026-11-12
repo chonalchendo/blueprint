@@ -57,6 +57,7 @@ crate::closed_enum! {
         SignatureInvalid = "signature_invalid",
         ApprovalMissing = "approval_missing",
         KeyInAgent = "key_in_agent",
+        RiskFileInvalid = "risk_file_invalid",
     }
 }
 

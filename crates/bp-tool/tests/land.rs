@@ -222,6 +222,48 @@ fn a_dry_run_refuses_as_land_does_and_writes_nothing() {
     assert_ne!(fetched(), at, "the dry run fetches");
 }
 
+/// A git hook that runs bp sets git's location variables. Here each names the vault's own index or tree: right for
+/// the vault's git, wrong for the worktree's. `cut` still fills the worktree's own index, and `land` still checks the
+/// worktree's own files.
+#[test]
+fn git_s_index_and_tree_variables_never_reach_the_claim_s_worktree() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let index = v.join(".git/index").display().to_string();
+    let (code, cut) = bp(v, t, &[("GIT_INDEX_FILE", &index)], &["cut", ISSUE]);
+    assert_eq!(code, Some(0), "{cut}");
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    assert_eq!(git(&w, &["status", "--porcelain"]), "", "cut checked the worktree out into its own index");
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    let h = commit(&w, &["add", "hello.txt"], "hello");
+    common::bp(v, &["set", "projects/bp/project", "reviewer", "r"]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(0));
+    forge(t, &h, &[("r", &h)], &["SUCCESS"]);
+    let tree = v.display().to_string();
+    let (code, out) = bp(v, t, &[("GIT_WORK_TREE", &tree)], &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, &out["head"]), (Some(0), &json!(h)), "the worktree is clean: {out}");
+}
+
+/// `pr` records the computed level of the head it pushes on each run it writes there, so an intent reads the level
+/// with no fetch (22, constraint 8). A head whose runs record no level is no repeat.
+#[test]
+fn pr_records_the_risk_level_of_its_head_on_each_run() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, h) = opened(v, t, &[]);
+    let run = v.join(format!("{ISSUE}/runs/hello-{h}-1.md"));
+    let text = std::fs::read_to_string(&run).unwrap();
+    assert!(text.contains("\nrisk: medium\n"), "hello.txt matches no low pattern: {text}");
+    forge(t, &h, &[], &[]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "the level is recorded at the head");
+    std::fs::write(&run, text.replace("risk: medium\n", "")).unwrap();
+    git(v, &["commit", "-qam", "no level"]);
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, &out["head"]), (Some(0), &json!(h)), "{out}");
+    let again = std::fs::read_to_string(v.join(format!("{ISSUE}/runs/hello-{h}-2.md"))).unwrap();
+    assert!(again.contains("\nrisk: medium\n"), "{again}");
+}
+
 /// `check` on an issue with a held claim runs at the claim's worktree head, as `pr` does, wherever the caller stands.
 #[test]
 fn check_runs_the_blocks_in_the_held_claims_worktree() {
