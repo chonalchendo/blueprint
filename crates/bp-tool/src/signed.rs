@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use bp_vault::{Code, Id, Refusal};
+use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::claim::git;
 
@@ -123,7 +124,7 @@ impl Drop for Scratch {
     }
 }
 
-/// The signer: the public key of the `signer:` line of `.bp/risk.yml` on the forge's default branch, as `<type>
+/// The signer: the public key of the `signer` key of `.bp/risk.yml` on the forge's default branch, as `<type>
 /// <base64>`. The forge protects that branch, so an agent's edit of the file in a worktree, in the clone or on its own
 /// branch names no signer. Else `signer_missing`: `bp` cannot trust a human act without a key.
 ///
@@ -145,10 +146,8 @@ pub(crate) fn signer(top: &Path) -> Result<String, Refusal> {
     };
     git(top, &["fetch", "-q", "origin", sha])?;
     let text = git(top, &["show", &format!("{sha}:.bp/risk.yml")]).unwrap_or_default();
-    // Issue 0 of milestone 12 (`risk-level`) parses the whole file with yaml-rust2. At rebase, read its `signer`
-    // here; until then this reads the one top-level key.
-    let value = text.lines().find_map(|l| l.strip_prefix("signer:")).map(|v| v.trim().trim_matches(['"', '\'']));
-    value.and_then(public_key).ok_or_else(|| {
+    // Issue 0 of milestone 12 (`risk-level`) reads the same file with yaml-rust2. At rebase, read its `signer` here.
+    signer_of(&text).ok_or_else(|| {
         Refusal::new(
             Code::SignerMissing,
             format!("origin/{branch}:.bp/risk.yml at {sha}"),
@@ -160,6 +159,18 @@ pub(crate) fn signer(top: &Path) -> Result<String, Refusal> {
             ),
         )
     })
+}
+
+/// The `signer` key of a risk file as yaml-rust2 reads it: one document, a mapping, and a one-line string that holds a
+/// public key. A duplicate key fails the parse, so no second `signer` line can shadow the first.
+fn signer_of(text: &str) -> Option<String> {
+    let docs = YamlLoader::load_from_str(text).ok()?;
+    let [doc] = docs.as_slice() else { return None };
+    let value = doc.as_hash()?.get(&Yaml::String("signer".into()))?.as_str()?;
+    if value.contains(['\n', '\r']) {
+        return None;
+    }
+    public_key(value)
 }
 
 /// A full commit sha: 40 or 64 lower-case hex digits. A head that is not one never enters a message or a path.
@@ -196,7 +207,26 @@ pub(crate) fn armour(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_sha;
+    use super::{is_sha, signer_of};
+
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey";
+    const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther";
+
+    #[test]
+    fn signer_reads_as_yaml() {
+        let one = signer_of;
+        assert_eq!(one(&format!("high:\n  - .bp/\nsigner: {KEY} human\n")).as_deref(), Some(KEY));
+        assert_eq!(one(&format!("signer: \"{KEY}\" # the human\n")).as_deref(), Some(KEY));
+        // A second `signer` fails the parse: neither line names the signer.
+        assert_eq!(one(&format!("signer: {OTHER}\nsigner: {KEY}\n")), None, "a duplicate key");
+        assert_eq!(one(&format!("signer: |\n  {KEY}\n")), None, "a block scalar ends in a newline");
+        assert_eq!(one(&format!("signer: >\n  {KEY}\n")), None, "a folded scalar ends in a newline");
+        assert_eq!(one(&format!("signer:\n  - {KEY}\n")), None, "a list is not a string");
+        assert_eq!(one("signer: 12\n"), None, "a number is not a string");
+        assert_eq!(one(&format!("x:\n  signer: {KEY}\n")), None, "only the top-level key names the signer");
+        assert_eq!(one(&format!("signer: {KEY}\n---\nsigner: {OTHER}\n")), None, "two documents");
+        assert_eq!(one(""), None, "an empty file");
+    }
 
     #[test]
     fn a_head_is_a_full_lower_case_sha() {
