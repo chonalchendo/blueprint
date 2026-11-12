@@ -309,22 +309,6 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
 /// when the layer below was rewritten twice after this head left the claim's base: the rebase then replays the lower
 /// layer's older commits too, which git drops when their patches match and which conflict when they do not. Recording
 /// the base at each restack and each passing `pr` would close it.
-/// What the pull request carries, after red-first: a block that passes where the head leaves the target refuses
-/// before the runs at the head and the push (37, design change 10).
-fn red_first(
-    vault: &Vault,
-    index: &Index,
-    id: &Id,
-    c: &Claimed,
-    head: &str,
-    role: &str,
-    clock: &dyn Fn() -> String,
-) -> Result<crate::carry::Carried, Refusal> {
-    let from = crate::red_first::base(&c.top, &c.target, head)?;
-    let based = crate::red_first::base_runs(vault, index, id, &c.top, &from, role, clock)?;
-    crate::carry::read(vault, index, id, based)
-}
-
 fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
     let tip = git(&c.top, &["rev-parse", &format!("refs/remotes/origin/{}", c.target)])?;
     let fork = git(&c.top, &["merge-base", &tip, head])?;
@@ -343,6 +327,22 @@ fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
             w = c.worktree.display()
         ),
     ))
+}
+
+/// What the pull request carries, after red-first: a block that passes where the head leaves the target refuses
+/// before the runs at the head and the push (37, design change 10).
+fn red_first(
+    vault: &Vault,
+    index: &Index,
+    id: &Id,
+    c: &Claimed,
+    head: &str,
+    role: &str,
+    clock: &dyn Fn() -> String,
+) -> Result<crate::carry::Carried, Refusal> {
+    let from = crate::red_first::base(&c.top, &c.target, head)?;
+    let based = crate::red_first::base_runs(vault, index, id, &c.top, &from, role, clock)?;
+    crate::carry::read(vault, index, id, based)
 }
 
 /// The `## Next` write for each layer `land` stranded, on its claim while that claim is still held: a layer released
