@@ -202,7 +202,7 @@ impl Grade {
         if let Some(why) = &t.failure {
             lines.push(format!("- FAILED: {why}; a failed trial counts as a fail"));
         }
-        if self.skill.action != Action::Review && !t.end.kept(self.fixture(&t.fixture)) {
+        if self.skill.action != Action::Review && !t.end.kept(self.fixture(&t.fixture), self.skill.action) {
             lines.push("- the issue's body differs from the fixture's: the worker edited the issue".into());
         }
         if self.skill.action != Action::Review {

@@ -112,6 +112,14 @@ pub fn skips(check: &Check) -> Option<String> {
     }
 }
 
+/// The block runs at the claim's base before `pr` runs it at the head (37, design change 10): an `error` block that
+/// runs in the code tree, so its verdict can change with the commit, and that does not carry `prior=pass`, the mark of
+/// a guard that holds before the change too. A skipped or broken block proves nothing at either commit, and an
+/// integrity or nodes block judges the vault, which no code commit moves.
+pub fn red_first(check: &Check) -> bool {
+    check.is_error() && !check.attrs.contains_key("prior") && matches!(judge::plan(check, ""), Plan::Run(_))
+}
+
 /// Runs the named blocks of `owner`, or the one `only` names, from the git repository that holds `repo`, and commits
 /// one run record per block; none when the owner has no named block. `clock` gives the instant,
 /// `YYYY-MM-DDTHH:MM:SSZ`; its date decides `until`.

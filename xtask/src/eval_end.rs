@@ -90,10 +90,11 @@ impl End {
         self.files.iter().all(|f| scope.contains(&crate_of(f)))
     }
 
-    /// Whether the issue's body is the fixture's: a worker that edits the issue file in the scratch vault can weaken
-    /// a check block, and the guard confines Edit and Write only in the main checkout.
-    pub fn kept(&self, fx: &Fixture) -> bool {
-        crate::eval_grade::hash_object(fx.issue.trim()).ok().is_some_and(|h| self.issue.as_deref() == Some(&h))
+    /// Whether the issue's body is the one the sandbox wrote for `action`: a worker that edits the issue file in the
+    /// scratch vault can weaken a check block, and the guard confines Edit and Write only in the main checkout.
+    pub fn kept(&self, fx: &Fixture, action: Action) -> bool {
+        let wrote = fx.issue_for(action);
+        crate::eval_grade::hash_object(wrote.trim()).ok().is_some_and(|h| self.issue.as_deref() == Some(&h))
     }
 }
 

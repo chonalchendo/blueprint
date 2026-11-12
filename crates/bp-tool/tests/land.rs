@@ -435,8 +435,8 @@ fn pr_targets_the_claim_base_and_reruns_until_each_block_passes_as_written() {
     }
     assert_eq!(
         commits(v).parse::<u32>().unwrap(),
-        before.parse::<u32>().unwrap() + 6,
-        "two pr, two edits, two failed pr"
+        before.parse::<u32>().unwrap() + 8,
+        "two pr, two edits, the base run of each edit, two failed pr"
     );
 }
 
@@ -516,7 +516,8 @@ fn the_baseline_is_the_earliest_claim_through_a_release_and_a_rename() {
     let (v, t) = (v.path(), t.path());
     opened(v, t, &[]);
     let path = v.join(format!("{ISSUE}.md"));
-    let text = std::fs::read_to_string(&path).unwrap().replace("test -f hello.txt", "true");
+    // Still red without the change, so `pr` does not refuse it as vacuous (37, design change 10).
+    let text = std::fs::read_to_string(&path).unwrap().replace("test -f hello.txt", "test -e hello.txt");
     std::fs::write(&path, text).unwrap();
     git(v, &["commit", "-qam", "weaken"]);
     let later = [("BP_NOW", "2026-10-19T09:00:00Z")];
@@ -828,4 +829,95 @@ fn a_level_rise_after_round_one_adds_its_missing_lenses() {
         assert_eq!(code, Some(0), "{lens}: {got}");
     }
     assert_eq!(intent(v), (json!("needs-approval"), json!("")));
+/// Replaces the `## Check` section of [`ISSUE`] with `blocks` and commits the vault.
+fn checks(v: &Path, blocks: &str) {
+    let path = v.join(format!("{ISSUE}.md"));
+    let old = std::fs::read_to_string(&path).unwrap();
+    let (head, _) = old.split_once("## Check\n").unwrap();
+    std::fs::write(&path, format!("{head}## Check\n\n{blocks}")).unwrap();
+    git(v, &["commit", "-qam", "checks"]);
+}
+
+/// Red-first (37, design change 10): `pr` runs each error block at the claim's base, in a checkout it removes, and
+/// refuses `check_vacuous` before the push when one passes there. The base run is a run record at the base commit, so
+/// a second `pr` runs nothing there, and a failed base run blocks nothing: the intents read runs at the head.
+#[test]
+fn pr_refuses_check_that_passes_at_base() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    checks(v, "```check shell {name=hello expect=0}\ntest -f README.md\n```\n");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+    let before = commits(v).parse::<u32>().unwrap();
+    let worktrees = || git(&t.join("code"), &["worktree", "list", "--porcelain"]).matches("worktree ").count();
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_vacuous")), "{out}");
+    let run = format!("{ISSUE}/runs/hello-{base}-1");
+    assert_eq!(out["subject"], run.as_str(), "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.starts_with(&format!("hello passed at the base {base}")) && fix.contains("prior=pass"), "{fix}");
+    let (_, shown) = common::bp(v, &["show", &run]);
+    assert_eq!((shown["verdict"].as_str(), shown["commit"].as_str()), (Some("pass"), Some(base.as_str())), "{shown}");
+    assert_eq!(commits(v).parse::<u32>().unwrap(), before + 1, "the base runs, in one commit");
+    assert!(!t.join("created").exists(), "no pull request");
+    assert_eq!(git(&t.join("origin.git"), &["branch", "--list", "bp/a"]), "", "no push");
+    assert_eq!(worktrees(), 2, "the clone and the claim's worktree: the base checkout is gone");
+    assert_eq!(git(&w, &["status", "--porcelain"]), "", "the claim's worktree is untouched");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["subject"].as_str()), (Some(2), Some(run.as_str())), "{out}");
+    assert_eq!(commits(v).parse::<u32>().unwrap(), before + 1, "a known base run does not run again");
+
+    // The block now fails without the change: `pr` passes, and its failed base run blocks nothing.
+    checks(v, "```check shell {name=hello expect=0}\ntest -f hello.txt\n```\n");
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["runs"][0]["verdict"].as_str()), (Some(0), Some("pass")), "{out}");
+    let (_, red) = common::bp(v, &["show", &format!("{ISSUE}/runs/hello-{base}-2")]);
+    assert_eq!((red["verdict"].as_str(), red["commit"].as_str()), (Some("fail"), Some(base.as_str())), "{red}");
+    let head = out["head"].as_str().unwrap().to_string();
+    assert_ne!(head, base);
+    forge(t, &head, &[("agent", &head)], &[]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "the evidence at the head holds; nothing runs at the base");
+    let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "issue"]);
+    let row = list["rows"].as_array().unwrap().iter().find(|r| r["id"] == ISSUE).unwrap().clone();
+    assert_eq!(row["intent"], "needs-review", "a failed base run is not a failed run at the head: {row}");
+    assert_eq!(worktrees(), 2);
+}
+
+/// `prior=pass` marks a guard that holds before the change too: `pr` runs it at the head only, so it passes at the
+/// base and nothing refuses. Any other value is a `check_malformed` finding and no way out: the block cannot run.
+#[test]
+fn pr_accepts_prior_pass() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let hello = "```check shell {name=hello expect=0}\ntest -f hello.txt\n```\n";
+    checks(v, &format!("{hello}\n```check shell {{name=guard expect=0 prior=pass}}\ntest -f README.md\n```\n"));
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    let verdicts: Vec<(&str, &str)> = out["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap(), r["verdict"].as_str().unwrap()))
+        .collect();
+    assert_eq!((code, verdicts), (Some(0), vec![("hello", "pass"), ("guard", "pass")]), "{out}");
+    let (_, red) = common::bp(v, &["show", &format!("{ISSUE}/runs/hello-{base}-1")]);
+    assert_eq!(red["verdict"], "fail", "hello ran at the base: {red}");
+    assert!(!v.join(format!("{ISSUE}/runs/guard-{base}-1.md")).exists(), "a guard runs at the head only");
+
+    checks(v, &format!("{hello}\n```check shell {{name=guard expect=0 prior=yes}}\ntest -f README.md\n```\n"));
+    let (_, shown) = common::bp(v, &["show", ISSUE]);
+    assert!(shown.to_string().contains("prior=yes: the one value is pass"), "{shown}");
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_failed")), "{out}");
+    assert!(out["fix"].as_str().unwrap().starts_with("guard could-not-run: prior=yes"), "{out}");
 }

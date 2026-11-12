@@ -289,7 +289,8 @@ fn closed(block: &str) -> bool {
 }
 
 /// `<runner> {k=v k=v}` after the word `check` (15). Values hold no spaces and no quotes. Text after the closing
-/// brace, a duplicate key, a word with no `=` or a missing runner is a `check_malformed` finding; the block is kept.
+/// brace, a duplicate key, a word with no `=`, a missing runner or a `prior` other than `pass` is a `check_malformed`
+/// finding; the block is kept.
 fn check_header(rest: &str, line: usize, findings: &mut Vec<Finding>) -> Check {
     let rest = rest.trim();
     let (runner, attrs) = rest.split_once('{').unwrap_or((rest, "}"));
@@ -312,6 +313,11 @@ fn check_header(rest: &str, line: usize, findings: &mut Vec<Finding>) -> Check {
             Some((k, _)) => bad(&format!("`{k}` twice")),
             None => bad(&format!("`{word}` is not key=value")),
         }
+    }
+    // `prior=pass` lets a block pass at the claim's base (37, design change 10); any other value would silently read
+    // as the opt-out to a reader that tests only the key.
+    if let Some(p) = map.get("prior").filter(|p| *p != "pass") {
+        bad(&format!("prior={p}: the one value is pass"));
     }
     Check { runner: runner.trim().to_string(), attrs: map, text: String::new() }
 }
@@ -435,6 +441,13 @@ mod tests {
         let b = Body::parse("```check shell {name=x}trailing\n```\n\n```check {name=a name=b \"q\"}\n```\n");
         let kinds: Vec<FindingKind> = b.findings.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, [FindingKind::CheckMalformed; 4], "{:?}", b.findings);
+        let b =
+            Body::parse("```check shell {name=a prior=pass}\nx\n```\n\n```check shell {name=b prior=yes}\nx\n```\n");
+        let details: Vec<(FindingKind, &str)> = b.findings.iter().map(|f| (f.kind, f.detail.as_str())).collect();
+        assert_eq!(
+            details,
+            [(FindingKind::CheckMalformed, "check shell {name=b prior=yes}: prior=yes: the one value is pass")]
+        );
     }
 
     #[test]

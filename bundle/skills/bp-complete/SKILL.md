@@ -9,7 +9,7 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
 
 1. Read the slice: `bp walk <id> --for complete --json`. It holds the issue, its milestone, its target designs and the learnings. Read a node from `ids` with `bp show <node> --json` only when a step needs it.
 2. Claim the issue: `bp cut <id> --json`. Edit and commit only in the `worktree` that it returns.
-3. Read the named blocks in the `## Check` section of the issue. They define done.
+3. Read the named blocks in the `## Check` section of the issue. They define done. Each block must fail without the change; only a guard that holds before and after it carries `prior=pass`.
 4. Make the change. Obey the conventions that the slice names. Commit in the worktree.
 5. Run the blocks before you push: `bp check <id> --json`.
 6. If the issue asks for a change that makes a target design false, propose a delta. Write the whole new design body to a file outside the vault. Then run `bp record delta <design> --field milestone=<milestone> --field cause=<id> --field change="<what changes>" --body-file <file> --json`. The milestone is the `under` of the issue. A delta of the design from another cause can pend under the milestone. Then read the rows of `bp list delta --under <design> --json`. The tip is the `proposed` row of the milestone that no row's `chains` names. Write your body on top of the tip's body (`bp show <tip> --json`), and add `--field chains=<tip>`.

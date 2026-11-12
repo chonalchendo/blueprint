@@ -1,13 +1,14 @@
-//! `bp pr <issue>` and `bp land <issue>`: the pull request and its merge (15, the repo verbs; 26, design changes 3,
-//! 4 and 6). `pr` fetches origin and refuses a head behind its base (34, design change 5), runs the issue's blocks at
-//! the worktree's head with no lock held, pushes that head, opens or retargets the pull request, keeps its body
-//! current with what it carries (27, design change 8) and commits the runs, dropping the claim's `## Next`; a changed
-//! check set first gets a commit that names it. `land` reads the forge with no lock held and refuses on the reviewer,
-//! the base, the approval at the head, the forge check, the run evidence, the check set the head names and then a head
-//! behind its base, in that order, for a pull request already merged too, which skips the last. It merges at the head
-//! it read and moves each layer cut from it onto the base. Then it removes the worktree and a branch the merged head
-//! holds, and commits the claim's release and the issue at `resolved`; the result names each moved layer's next step,
-//! and a stranded layer's held claim takes its step as `## Next`.
+//! `bp pr <issue>` and `bp land <issue>`: the pull request and its merge (15, the repo verbs; 26, design changes 3, 4
+//! and 6). `pr` fetches origin and refuses a head behind its base (34, design change 5), refuses a block that passes at
+//! the claim's base (37, design change 10), runs the issue's blocks at the worktree's head with no lock held, pushes
+//! that head, opens or retargets the pull request, keeps its body current with what it carries (27, design change 8)
+//! and commits the runs, dropping the claim's `## Next`; a changed check set first gets a commit that names it. `land`
+//! reads the forge with no lock held and refuses on the reviewer, the base, the approval at the head, the forge check,
+//! the run evidence, the check set the head names and then a head behind its base, in that order, for a pull request
+//! already merged too, which skips the last. It merges at the head it read and moves each layer cut from it onto the
+//! base. Then it removes the worktree and a branch the merged head holds, and commits the claim's release and the issue
+//! at `resolved`; the result names each moved layer's next step, and a stranded layer's held claim takes its step as
+//! `## Next`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -104,6 +105,12 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     git(&c.top, &["fetch", "-q", "origin"])?;
     let head = git(&c.worktree, &["rev-parse", "HEAD"])?;
     holds_base(&c, &id, &head)?;
+    // Each block runs at the claim's base first, and one that passes there refuses before the push (37, design change
+    // 10). A converted claim names no base: the head leaves origin's base branch where the two meet.
+    let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
+    let tip = format!("refs/remotes/origin/{}", c.target);
+    let from = c.from.clone().map_or_else(|| git(&c.top, &["merge-base", &tip, &head]), Ok)?;
+    crate::red_first::base_runs(&vault, &index, &id, &c.top, &from, role.as_str(), &clock)?;
     let gh = Gh::new(&c.top);
     let open = gh.prs_for_head(&c.branch)?.into_iter().find(PullRequest::is_open);
     let runs = bp_read::inputs::runs(&index, id.as_str())?;
@@ -138,7 +145,6 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     if !named {
         carried.name_set(&c.worktree, &head)?;
     }
-    let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
     let ran = bp_check::run(&vault, &id, &c.worktree, None, &[], &clock)?.expect("an error block is a named block");
     // The head the runs name is the one pushed, even if a commit landed in the worktree while they ran.
     let head = ran.commit().to_string();
