@@ -860,8 +860,10 @@ fn pr_refuses_check_that_passes_at_base() {
     assert_eq!(out["subject"], run.as_str(), "{out}");
     let fix = out["fix"].as_str().unwrap();
     assert!(fix.starts_with(&format!("hello passed at the base {base}")) && fix.contains("prior=pass"), "{fix}");
+    assert!(fix.contains(&format!("bp release {ISSUE} --reason escalated")), "the worker's way out: {fix}");
     let (_, shown) = common::bp(v, &["show", &run]);
     assert_eq!((shown["verdict"].as_str(), shown["commit"].as_str()), (Some("pass"), Some(base.as_str())), "{shown}");
+    assert!(shown["risk"].is_null(), "the level is of the head, not of a base run: {shown}");
     assert_eq!(commits(v).parse::<u32>().unwrap(), before + 1, "the base runs, in one commit");
     assert!(!t.join("created").exists(), "no pull request");
     assert_eq!(git(&t.join("origin.git"), &["branch", "--list", "bp/a"]), "", "no push");
@@ -878,6 +880,8 @@ fn pr_refuses_check_that_passes_at_base() {
     assert_eq!((code, out["runs"][0]["verdict"].as_str()), (Some(0), Some("pass")), "{out}");
     let (_, red) = common::bp(v, &["show", &format!("{ISSUE}/runs/hello-{base}-2")]);
     assert_eq!((red["verdict"].as_str(), red["commit"].as_str()), (Some("fail"), Some(base.as_str())), "{red}");
+    let (_, at_head) = common::bp(v, &["show", out["runs"][0]["id"].as_str().unwrap()]);
+    assert!(red["risk"].is_null() && at_head["risk"].is_string(), "{red} {at_head}");
     let head = out["head"].as_str().unwrap().to_string();
     assert_ne!(head, base);
     forge(t, &head, &[("agent", &head)], &[]);
@@ -920,4 +924,194 @@ fn pr_accepts_prior_pass() {
     let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_failed")), "{out}");
     assert!(out["fix"].as_str().unwrap().starts_with("guard could-not-run: prior=yes"), "{out}");
+}
+
+/// The red-first base is where the head leaves origin's target, found at each `pr`, not the claim's `base`: after the
+/// rebase that `head_behind_base` orders, a block that the target's new commit makes pass refuses `check_vacuous`.
+#[test]
+fn pr_runs_red_first_where_the_rebased_head_leaves_the_target() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    checks(v, "```check shell {name=shared expect=0}\ntest -f shared.txt\n```\n");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let cut_at = cut["base"].as_str().unwrap().to_string();
+    let code = t.join("code");
+    std::fs::write(code.join("shared.txt"), "on master\n").unwrap();
+    let moved = commit(&code, &["add", "shared.txt"], "shared");
+    git(&code, &["push", "-q", "origin", "master"]);
+    std::fs::write(w.join("own.txt"), "mine\n").unwrap();
+    commit(&w, &["add", "own.txt"], "own");
+
+    let (code_, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code_, out["code"].as_str()), (Some(2), Some("head_behind_base")), "{out}");
+    git(&w, &["rebase", "-q", "--onto", "origin/master", &cut_at]);
+    let (code_, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code_, out["code"].as_str()), (Some(2), Some("check_vacuous")), "{out}");
+    assert_eq!(out["subject"], format!("{ISSUE}/runs/shared-{moved}-1"), "the base moved with the rebase: {out}");
+    assert!(!v.join(format!("{ISSUE}/runs/shared-{cut_at}-1.md")).exists(), "nothing ran at the cut's commit");
+}
+
+/// A claim's `base` field is not read: a claim with none runs red-first where the head leaves the target too.
+#[test]
+fn pr_finds_the_red_first_base_of_a_claim_with_no_base() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    checks(v, "```check shell {name=hello expect=0}\ntest -f README.md\n```\n");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    let claim = v.join(format!("{}.md", cut["claim"].as_str().unwrap()));
+    let text = std::fs::read_to_string(&claim).unwrap();
+    let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with("base:")).collect();
+    assert_eq!(kept.len() + 1, text.lines().count(), "the claim had one base line: {text}");
+    std::fs::write(&claim, kept.join("\n") + "\n").unwrap();
+    git(v, &["commit", "-qam", "a converted claim"]);
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_vacuous")), "{out}");
+    assert_eq!(out["subject"], format!("{ISSUE}/runs/hello-{base}-1"), "{out}");
+}
+
+/// Cargo judges an artifact fresh by file time, so a build directory that the base run shares with the head run hands
+/// the head the base's build. The base run builds into its own directory, whatever `CARGO_TARGET_DIR` says.
+#[test]
+fn the_base_run_never_shares_a_build_directory_with_the_head() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let code = t.join("code");
+    std::fs::write(code.join("src.txt"), "old\n").unwrap();
+    commit(&code, &["add", "src.txt"], "src");
+    git(&code, &["push", "-q", "origin", "master"]);
+    // A build cached by file time: the output is rebuilt only when the source is newer.
+    let build = r#"d=${CARGO_TARGET_DIR:-target}; mkdir -p "$d"; [ -f "$d/out" ] && [ ! src.txt -nt "$d/out" ] || cp src.txt "$d/out"; grep -q new "$d/out""#;
+    checks(v, &format!("```check shell {{name=built expect=0}}\n{build}\n```\n"));
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("src.txt"), "new\n").unwrap();
+    commit(&w, &["add", "src.txt"], "new");
+
+    let shared = t.join("shared");
+    let env = [("CARGO_TARGET_DIR", shared.to_str().unwrap())];
+    let (code_, out) = bp(v, t, &env, &["pr", ISSUE]);
+    assert_eq!((code_, out["runs"][0]["verdict"].as_str()), (Some(0), Some("pass")), "{out}");
+    assert_eq!(out["base_runs"][0]["verdict"], "fail", "{out}");
+    assert_eq!(out["base_runs"][0]["id"], format!("{ISSUE}/runs/built-{base}-1"), "{out}");
+    assert_eq!(std::fs::read_to_string(shared.join("out")).unwrap(), "new\n", "the shared directory holds the head's");
+}
+
+/// A base run that timed out or could not run is no proof that the block depends on the change, and no refusal: `pr`
+/// names it in `base_runs` and in the pull request body, beside the blocks that failed there.
+#[test]
+fn pr_names_each_base_run_that_did_not_fail() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let hello = "```check shell {name=hello expect=0}\ntest -f hello.txt\n```\n";
+    checks(v, &format!("{hello}\n```check shell {{name=inside expect=0 cwd=newdir}}\ntest -f x\n```\n"));
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::create_dir(w.join("newdir")).unwrap();
+    std::fs::write(w.join("newdir/x"), "x\n").unwrap();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt", "newdir/x"], "hello");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!(code, Some(0), "a base run that could not run refuses nothing: {out}");
+    let rows: Vec<(&str, &str)> = out["base_runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap(), r["verdict"].as_str().unwrap()))
+        .collect();
+    assert_eq!(rows, [("hello", "fail"), ("inside", "could-not-run")], "{out}");
+    let body = std::fs::read_to_string(t.join("body")).unwrap();
+    let listed = format!("- `inside`: could-not-run; `bp show {ISSUE}/runs/inside-{base}-1`");
+    assert!(body.contains("## Red-first runs that did not fail") && body.contains(&listed), "{body}");
+    assert!(!body.contains("`hello`"), "a block that failed at the base proves its change: {body}");
+}
+
+/// Red-first reads the latest attempt at the base: a block that failed there once and then passed refuses.
+#[test]
+fn pr_judges_the_latest_attempt_at_the_base() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    checks(v, "```check shell {name=hello expect=0}\ntest -n \"$FLAG\"\n```\n");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    // Before the first commit the worktree's head is the base, so `check` runs there.
+    assert_eq!(bp(v, t, &[], &["check", ISSUE]).1["runs"][0]["verdict"], "fail");
+    assert_eq!(bp(v, t, &[("FLAG", "1")], &["check", ISSUE]).1["runs"][0]["verdict"], "pass");
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_vacuous")), "{out}");
+    assert_eq!(out["subject"], format!("{ISSUE}/runs/hello-{base}-2"), "{out}");
+}
+
+/// A signal runs no drop, so a killed `pr` leaves its base checkout. The next `pr` removes each one whose `pr` is dead
+/// and never touches one whose `pr` is alive.
+#[test]
+fn pr_sweeps_the_base_checkouts_of_a_killed_pr() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+    let tmp = t.join("tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = child.id();
+    child.wait().unwrap();
+    let (dead, live) =
+        (tmp.join(format!("bp-base-{dead_pid}-1")), tmp.join(format!("bp-base-{}-2", std::process::id())));
+    let code = t.join("code");
+    for d in [&dead, &live] {
+        git(&code, &["worktree", "add", "-q", "--detach", d.to_str().unwrap(), &base]);
+    }
+
+    let (code_, out) = bp(v, t, &[("TMPDIR", tmp.to_str().unwrap())], &["pr", ISSUE]);
+    assert_eq!(code_, Some(0), "{out}");
+    let listed = git(&code, &["worktree", "list", "--porcelain"]);
+    assert!(!dead.exists() && !listed.contains(dead.file_name().unwrap().to_str().unwrap()), "{listed}");
+    assert!(live.is_dir() && listed.contains(live.file_name().unwrap().to_str().unwrap()), "{listed}");
+    let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left, [live.file_name().unwrap()], "this pr's own checkout is gone too");
+}
+
+/// A red-first base that git cannot fetch refuses `could_not_run`, and the fix names the commit.
+#[test]
+fn pr_names_a_base_it_cannot_fetch() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+    // A git that refuses a fetch by sha, as a server does for a commit it no longer holds.
+    let real = std::process::Command::new("sh").args(["-c", "command -v git"]).output().unwrap();
+    let real = String::from_utf8(real.stdout).unwrap();
+    let fake = t.join("fake");
+    std::fs::create_dir(&fake).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *\" fetch -q origin \"[0-9a-f]*) echo 'fatal: not our ref' >&2; exit 128 ;; esac\nexec {} \"$@\"\n",
+        real.trim()
+    );
+    std::fs::write(fake.join("git"), script).unwrap();
+    std::fs::set_permissions(fake.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}:{}", fake.display(), t.join("bin").display(), std::env::var("PATH").unwrap());
+
+    let (code, out) = bp(v, t, &[("PATH", &path)], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.starts_with(&format!("git cannot fetch {base}, origin's master")), "{fix}");
+    assert!(!t.join("created").exists(), "no pull request");
 }

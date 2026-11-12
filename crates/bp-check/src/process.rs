@@ -123,8 +123,9 @@ fn lock(out: &Mutex<Output>) -> MutexGuard<'_, Output> {
     out.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Runs `script` under `bash -e` in `dir`, with `BP_VAULT` set to `vault`, for at most `timeout`.
-pub(crate) fn run(script: &str, dir: &Path, vault: &Path, timeout: Duration) -> Ran {
+/// Runs `script` under `bash -e` in `dir`, with `BP_VAULT` set to `vault` and `env` over the caller's, for at most
+/// `timeout`.
+pub(crate) fn run(script: &str, dir: &Path, vault: &Path, env: &[(&str, &Path)], timeout: Duration) -> Ran {
     let not_started = |why: String| Ran { end: End::NotStarted(why), tail: Vec::new(), dropped: 0, evidence: None };
     let spool = match spool() {
         Ok(f) => f,
@@ -139,6 +140,7 @@ pub(crate) fn run(script: &str, dir: &Path, vault: &Path, timeout: Duration) -> 
         .arg(script)
         .current_dir(dir)
         .env("BP_VAULT", vault)
+        .envs(env.iter().copied())
         .env_remove("BP_NOW")
         .env_remove("BP_ROLE")
         .env_remove("BP_SESSION")
@@ -282,7 +284,7 @@ mod tests {
 
     fn run_here(script: &str, timeout: Duration) -> Ran {
         let dir = std::env::temp_dir();
-        run(script, &dir, &dir, timeout)
+        run(script, &dir, &dir, &[], timeout)
     }
 
     /// Whether a process whose command line holds `marker` is alive, after a moment for a killed one to be reaped.
@@ -378,7 +380,7 @@ mod tests {
 
     #[test]
     fn a_missing_directory_cannot_start() {
-        let ran = run("true", Path::new("/no/such/dir"), Path::new("/"), Duration::from_secs(1));
+        let ran = run("true", Path::new("/no/such/dir"), Path::new("/"), &[], Duration::from_secs(1));
         assert!(matches!(ran.end, End::NotStarted(_)), "{:?}", ran.end);
     }
 }

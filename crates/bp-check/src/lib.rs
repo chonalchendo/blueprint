@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use bp_vault::{Check, Code, Header, Held, Id, Kind, Refusal, Vault};
 use serde_json::Value;
 
-use crate::judge::Plan;
+use crate::judge::{Plan, Test};
 
 bp_vault::closed_enum! {
     /// A run's verdict (13, Run). A failure to run differs from a violation (15, E6).
@@ -112,12 +112,15 @@ pub fn skips(check: &Check) -> Option<String> {
     }
 }
 
-/// The block runs at the claim's base before `pr` runs it at the head (37, design change 10): an `error` block that
+/// The block runs at the red-first base before `pr` runs it at the head (37, design change 10): an `error` block that
 /// runs in the code tree, so its verdict can change with the commit, and that does not carry `prior=pass`, the mark of
-/// a guard that holds before the change too. A skipped or broken block proves nothing at either commit, and an
-/// integrity or nodes block judges the vault, which no code commit moves.
+/// a guard that holds before the change too. A skipped or broken block proves nothing at either commit, an integrity
+/// or nodes block judges the vault, which no code commit moves, and a quarantine (`expect=fail until=`) passes while
+/// the thing is broken, so it passes at the base by design.
 pub fn red_first(check: &Check) -> bool {
-    check.is_error() && !check.attrs.contains_key("prior") && matches!(judge::plan(check, ""), Plan::Run(_))
+    check.is_error()
+        && !check.attrs.contains_key("prior")
+        && matches!(judge::plan(check, ""), Plan::Run(s) if s.test != Test::Fails)
 }
 
 /// Runs the named blocks of `owner`, or the one `only` names, from the git repository that holds `repo`, and commits
@@ -131,7 +134,7 @@ pub fn check(
     role: &str,
     clock: &dyn Fn() -> String,
 ) -> Result<Option<Checked>, Refusal> {
-    let Some(ran) = run(vault, owner, repo, only, &[], clock)? else { return Ok(None) };
+    let Some(ran) = run(vault, owner, repo, only, &[], &[], clock)? else { return Ok(None) };
     let writer = ran.writer(vault, &format!("bp check {owner}"))?;
     let (changes, runs) = ran.records(vault);
     let written = writer.commit("check", role, &format!("check {owner}"), &changes)?;
@@ -139,7 +142,8 @@ pub fn check(
 }
 
 /// Runs the named blocks of `owner` but those `skip` names, or the one `only` names, from the git repository that
-/// holds `repo`, holding no lock, so a block may call `bp`. `None` when no block is left to run.
+/// holds `repo`, holding no lock, so a block may call `bp`. Each block's process gets `env` over the caller's. `None`
+/// when no block is left to run.
 ///
 /// # Panics
 ///
@@ -150,6 +154,7 @@ pub fn run(
     repo: &Path,
     only: Option<&str>,
     skip: &[&str],
+    env: &[(&str, &Path)],
     clock: &dyn Fn() -> String,
 ) -> Result<Option<Ran>, Refusal> {
     let file = vault.read(owner)?;
@@ -206,7 +211,7 @@ pub fn run(
                 Plan::Broken(why) => done(Verdict::CouldNotRun, why),
                 Plan::Run(spec) => {
                     let dir = spec.cwd.as_ref().map_or_else(|| top.clone(), |d| top.join(d));
-                    let ran = process::run(&check.text, &dir, &vault.root, spec.timeout);
+                    let ran = process::run(&check.text, &dir, &vault.root, env, spec.timeout);
                     let (verdict, note) = judge::judge(&spec.test, &ran.end);
                     Done { tail: ran.tail, dropped: ran.dropped, evidence: ran.evidence, ..done(verdict, note) }
                 }
@@ -394,6 +399,40 @@ fn body(note: &str, tail: &[String], dropped: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check(runner: &str, attrs: &str) -> Check {
+        let attrs = attrs.split_whitespace().filter_map(|w| w.split_once('='));
+        Check { runner: runner.into(), attrs: attrs.map(|(k, v)| (k.into(), v.into())).collect(), text: "true".into() }
+    }
+
+    #[test]
+    fn red_first_skips_warn_blocks() {
+        assert!(red_first(&check("shell", "name=a")), "an error block runs at the base");
+        assert!(red_first(&check("shell", "name=a severity=error")));
+        assert!(!red_first(&check("shell", "name=a severity=warn")), "a warn block blocks nothing at either commit");
+    }
+
+    #[test]
+    fn red_first_skips_vault_blocks() {
+        assert!(red_first(&check("scenario", "name=a measure=n max=1")), "a scenario runs in the code tree");
+        assert!(!red_first(&check("integrity", "name=a")), "integrity judges the vault, which no commit moves");
+        assert!(!red_first(&check("nodes", "name=a")), "nodes judges the vault, which no commit moves");
+    }
+
+    #[test]
+    fn red_first_skips_what_proves_nothing_at_a_base() {
+        for (runner, attrs) in [
+            ("shell", "name=a prior=pass"),
+            ("shell", "name=a expect=fail until=2099-01-01"),
+            ("shell", "name=a expect=fail until=2020-01-01"),
+            ("shell", "name=a when=post-land"),
+            ("deps", "name=a"),
+            ("shell", "name=a expct=1"),
+            ("shell", "name=a prior=yes"),
+        ] {
+            assert!(!red_first(&check(runner, attrs)), "{runner} {attrs}");
+        }
+    }
 
     #[test]
     fn output_stays_text_in_the_body() {

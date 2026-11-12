@@ -82,11 +82,11 @@ fn stamp(cwd: &Path, s: &Stamp) -> Result<Stamped, Refusal> {
     drop(index);
     let skip: Vec<&str> = s.waive.iter().map(String::as_str).collect();
     let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
-    let ran = bp_check::run(&vault, &id, cwd, None, &skip, &clock)?;
+    let ran = bp_check::run(&vault, &id, cwd, None, &skip, &[], &clock)?;
     // An open waiver waived again runs nothing.
     let mut asked = Vec::new();
     for r in read.reasked.iter().filter(|r| !s.waive.contains(&r.key())) {
-        asked.extend(bp_check::run(&vault, &r.milestone, cwd, Some(&r.name), &[], &clock)?.map(|ran| (r, ran)));
+        asked.extend(bp_check::run(&vault, &r.milestone, cwd, Some(&r.name), &[], &[], &clock)?.map(|ran| (r, ran)));
     }
     let mut writer = match ran.as_ref().or(asked.first().map(|(_, ran)| ran)) {
         Some(r) => r.writer(&vault, &format!("bp stamp {id}"))?,

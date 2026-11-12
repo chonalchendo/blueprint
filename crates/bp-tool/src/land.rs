@@ -1,6 +1,6 @@
 //! `bp pr <issue>` and `bp land <issue>`: the pull request and its merge (15, the repo verbs; 26, design changes 3, 4
 //! and 6). `pr` fetches origin and refuses a head behind its base (34, design change 5), refuses a block that passes at
-//! the claim's base (37, design change 10), runs the issue's blocks at the worktree's head with no lock held, pushes
+//! the red-first base (37, design change 10), runs the issue's blocks at the worktree's head with no lock held, pushes
 //! that head, opens or retargets the pull request, keeps its body current with what it carries (27, design change 8)
 //! and commits the runs, dropping the claim's `## Next`; a changed check set first gets a commit that names it. `land`
 //! reads the forge with no lock held and refuses on the reviewer, the base, the approval at the head, the forge check,
@@ -105,17 +105,11 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     git(&c.top, &["fetch", "-q", "origin"])?;
     let head = git(&c.worktree, &["rev-parse", "HEAD"])?;
     holds_base(&c, &id, &head)?;
-    // Each block runs at the claim's base first, and one that passes there refuses before the push (37, design change
-    // 10). A converted claim names no base: the head leaves origin's base branch where the two meet.
     let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
-    let tip = format!("refs/remotes/origin/{}", c.target);
-    let from = c.from.clone().map_or_else(|| git(&c.top, &["merge-base", &tip, &head]), Ok)?;
-    crate::red_first::base_runs(&vault, &index, &id, &c.top, &from, role.as_str(), &clock)?;
+    let carried = red_first(&vault, &index, &id, &c, &head, role.as_str(), &clock)?;
     let gh = Gh::new(&c.top);
     let open = gh.prs_for_head(&c.branch)?.into_iter().find(PullRequest::is_open);
-    let runs = bp_read::inputs::runs(&index, id.as_str())?;
-    let carried = crate::carry::read(&vault, &index, &id)?;
-    let body = carried.body();
+    let (runs, body) = (bp_read::inputs::runs(&index, id.as_str())?, carried.body());
     // The forge's body, read once: a stale one is rewritten at any head.
     let stale = open.as_ref().map(|o| gh.body(o.number).map(|b| !carried.describes(&b))).transpose()?.unwrap_or(true);
     let named = carried.named_by(&c.worktree, &head)?;
@@ -134,6 +128,7 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
             "deltas": carried.deltas,
             "diagrams": carried.diagrams(),
             "check_changes": carried.changes(),
+            "base_runs": carried.base_runs(),
         }))));
     }
     let base = c.target.clone();
@@ -145,7 +140,7 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     if !named {
         carried.name_set(&c.worktree, &head)?;
     }
-    let ran = bp_check::run(&vault, &id, &c.worktree, None, &[], &clock)?.expect("an error block is a named block");
+    let ran = bp_check::run(&vault, &id, &c.worktree, None, &[], &[], &clock)?.expect("the issue has a named block");
     // The head the runs name is the one pushed, even if a commit landed in the worktree while they ran.
     let head = ran.commit().to_string();
     // Each run records the level of the head it names, judged after a fetch: an intent reads it there and fetches
@@ -174,8 +169,8 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     // The head holds its base, so a stranding step on the claim is done (34, design change 5).
     changes.extend(cleared(&vault, writer.index(), &id, &c.claim)?);
     let written = writer.commit("pr", role.as_str(), &format!("pr {id}"), &changes)?;
-    let listed = json!({ "pull_request": number, "deltas": carried.deltas,
-            "diagrams": carried.diagrams(), "check_changes": carried.changes() });
+    let listed = json!({ "pull_request": number, "deltas": carried.deltas, "diagrams": carried.diagrams(),
+            "check_changes": carried.changes(), "base_runs": carried.base_runs() });
     if let Some(at) = runs.iter().position(bp_check::Run::failed) {
         return Ok(Opened::Failed { at, commit: written.commit, runs, listed });
     }
@@ -186,8 +181,9 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
         "branch": c.branch,
         "base": base,
         "runs": crate::check::rows(&runs),
+        "base_runs": carried.base_runs(),
         "deltas": carried.deltas,
-            "diagrams": carried.diagrams(),
+        "diagrams": carried.diagrams(),
         "check_changes": carried.changes(),
         "commit": written.commit,
         "findings": written.findings,
@@ -231,7 +227,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let runs = bp_read::inputs::runs(&index, id.as_str())?;
     let blocks = bp_read::inputs::blocks(&vault, id.as_str())?;
     let read = bp_read::inputs::pull_request(&pr, &reviewer);
-    let carried = crate::carry::read(&vault, &index, &id)?;
+    let carried = crate::carry::read(&vault, &index, &id, Vec::new())?;
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
     // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
     let compare = c.from.as_deref().map(|from| (c.top.as_path(), from));
@@ -313,6 +309,22 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
 /// when the layer below was rewritten twice after this head left the claim's base: the rebase then replays the lower
 /// layer's older commits too, which git drops when their patches match and which conflict when they do not. Recording
 /// the base at each restack and each passing `pr` would close it.
+/// What the pull request carries, after red-first: a block that passes where the head leaves the target refuses
+/// before the runs at the head and the push (37, design change 10).
+fn red_first(
+    vault: &Vault,
+    index: &Index,
+    id: &Id,
+    c: &Claimed,
+    head: &str,
+    role: &str,
+    clock: &dyn Fn() -> String,
+) -> Result<crate::carry::Carried, Refusal> {
+    let from = crate::red_first::base(&c.top, &c.target, head)?;
+    let based = crate::red_first::base_runs(vault, index, id, &c.top, &from, role, clock)?;
+    crate::carry::read(vault, index, id, based)
+}
+
 fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
     let tip = git(&c.top, &["rev-parse", &format!("refs/remotes/origin/{}", c.target)])?;
     let fork = git(&c.top, &["merge-base", &tip, head])?;

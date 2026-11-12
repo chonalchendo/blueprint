@@ -152,12 +152,13 @@ pub(crate) fn judge(top: &Path, target: &str, heads: Vec<String>) -> Result<Judg
 /// The sha origin's server names for `refs/heads/<branch>`, fetched; `None` when it holds no such branch. A failed
 /// call refuses: old refs would judge another head by stale rules. Nothing of the clone's own names the sha: a
 /// `remote.origin.fetch` refspec, `git update-ref` or `git remote set-head` moves each local ref with no push.
-fn at_origin(top: &Path, branch: &str) -> Result<Option<String>, Refusal> {
+pub(crate) fn at_origin(top: &Path, branch: &str) -> Result<Option<String>, Refusal> {
     let want = format!("refs/heads/{branch}");
     let listed = git(top, &["ls-remote", "origin", &want])?;
     let sha = listed.lines().find_map(|l| l.split_once('\t').filter(|(_, r)| *r == want).map(|(sha, _)| sha));
     let Some(sha) = sha.filter(|s| s.len() >= 40 && s.bytes().all(|b| b.is_ascii_hexdigit())) else { return Ok(None) };
-    git(top, &["fetch", "-q", "origin", sha])?;
+    git(top, &["fetch", "-q", "origin", sha])
+        .map_err(|e| Refusal::failed(e.subject, format!("git cannot fetch {sha}, origin's {branch}: {}", e.fix)))?;
     Ok(Some(sha.to_string()))
 }
 

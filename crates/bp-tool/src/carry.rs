@@ -15,6 +15,7 @@ use bp_vault::{Id, Index, Kind, Refusal, Vault};
 use serde_json::{Value, json};
 
 use crate::claim::git;
+use crate::red_first::BaseRun;
 
 /// The deltas and the block changes, in the order the body lists them, and the check set now and at the claim.
 pub(crate) struct Carried {
@@ -25,6 +26,8 @@ pub(crate) struct Carried {
     diagrams: Vec<(Id, String, &'static str, Option<String>)>,
     changes: Vec<Change>,
     set: CheckSet,
+    /// Each red-first block's latest run at the red-first base (37, design change 10).
+    based: Vec<BaseRun>,
 }
 
 /// One named block whose hash differs from its hash at the claim's commit.
@@ -39,8 +42,8 @@ struct Change {
 }
 
 /// Reads what `issue` carries: its check set ([`bp_read::checkset`]), each diagram a carried delta changes, and each
-/// named block whose hash changed since the claim.
-pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id) -> Result<Carried, Refusal> {
+/// named block whose hash changed since the claim; `based` holds the red-first runs that `pr` read.
+pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id, based: Vec<BaseRun>) -> Result<Carried, Refusal> {
     let set = bp_read::checkset::check_set(vault, index, issue)?;
     let (mut deltas, mut diagrams) = (Vec::new(), Vec::new());
     for (design, d) in &set.deltas {
@@ -77,7 +80,7 @@ pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id) -> Result<Carried, 
             }
         }
     }
-    Ok(Carried { issue: issue.clone(), deltas, diagrams, changes, set })
+    Ok(Carried { issue: issue.clone(), deltas, diagrams, changes, set, based })
 }
 
 impl Carried {
@@ -121,6 +124,11 @@ impl Carried {
             .collect()
     }
 
+    /// The result's `base_runs`.
+    pub(crate) fn base_runs(&self) -> Value {
+        self.based.iter().map(BaseRun::row).collect()
+    }
+
     /// Whether the forge's body is this body. A forge may store CRLF line ends or trim trailing whitespace, so both
     /// sides compare with LF ends and no trailing whitespace; else every `pr` rewrites the body and none exits 3.
     pub(crate) fn describes(&self, forge: &str) -> bool {
@@ -157,7 +165,23 @@ impl Carried {
                 rows.concat()
             )
         };
-        format!("Issue: {}\n\n## Deltas\n\n{deltas}\n## Check changes since the claim\n\n{changes}", self.issue)
+        let body =
+            format!("Issue: {}\n\n## Deltas\n\n{deltas}\n## Check changes since the claim\n\n{changes}", self.issue);
+        // A base run that did not finish is no proof that the block depends on the change, and no refusal: the
+        // reviewer reads it here (37, design change 10).
+        let unproved: Vec<String> = self
+            .based
+            .iter()
+            .filter(|r| r.verdict != "fail")
+            .map(|r| format!("- `{}`: {}; `bp show {}`\n", r.name, r.verdict, r.id))
+            .collect();
+        if unproved.is_empty() {
+            return body;
+        }
+        format!(
+            "{body}\n## Red-first runs that did not fail\n\nA block proves the change only when it fails at the base, without the change. Each block below did not fail there, so it may pass without the change too:\n\n{}",
+            unproved.concat()
+        )
     }
 }
 
