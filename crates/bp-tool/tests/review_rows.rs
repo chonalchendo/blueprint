@@ -120,7 +120,8 @@ fn refuses_an_empty_finding_row() {
 #[test]
 fn refuses_a_misspelt_risk_row() {
     let w = world();
-    for severity in ["Risk", "RISK", "**risk**", "risk:"] {
+    let near = ["Risk", "RISK", "**risk**", "risk:", "risk/error", "risk (raise)", "risk row", "ri\u{200b}sk", "Brisk"];
+    for severity in near {
         let fix =
             w.refused(ISSUE, &w.body(&["| risk | src/a.rs:2 | Auth. |", &format!("| {severity} | src/a.rs:1 | X. |")]));
         assert_eq!(fix, format!("row 2's severity is `{severity}`: write `risk`, in lower case, to raise the level"));

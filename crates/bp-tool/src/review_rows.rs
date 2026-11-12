@@ -74,10 +74,11 @@ fn review(index: &Index, issue: &Id, head: &str, body: &str) -> Result<(), Refus
             );
             return Err(refuse(&format!("finding {n}"), fix));
         }
-        // Only the exact word raises the level, so a misspelt `risk` would raise nothing and say nothing.
+        // Only the exact word raises the level, so a near miss (`Risk`, `risk/error`, a zero-width space inside)
+        // would raise nothing and say nothing.
         let severity = cells[0].trim_matches('`');
-        if severity != RISK_ROW && severity.trim_matches(|c: char| !c.is_alphanumeric()).eq_ignore_ascii_case(RISK_ROW)
-        {
+        let letters: String = severity.chars().filter(|c| c.is_alphanumeric()).collect();
+        if severity != RISK_ROW && letters.to_lowercase().contains(RISK_ROW) {
             let fix =
                 format!("row {n}'s severity is `{severity}`: write `{RISK_ROW}`, in lower case, to raise the level");
             return Err(refuse(&format!("finding {n}"), fix));
