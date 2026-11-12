@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use common::{commits, git};
@@ -1054,8 +1055,22 @@ fn pr_judges_the_latest_attempt_at_the_base() {
     assert_eq!(out["subject"], format!("{ISSUE}/runs/hello-{base}-2"), "{out}");
 }
 
+/// A base checkout as `pr` makes one: detached, in `dir`, locked with the reason that names `pid`.
+fn base_checkout(code: &Path, dir: &Path, pid: u32, base: &str) {
+    let reason = format!("bp red-first base, pid {pid}");
+    git(code, &["worktree", "add", "-q", "--detach", "--lock", "--reason", &reason, dir.to_str().unwrap(), base]);
+}
+
+/// A pid that no process holds: a child's, after it exits.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
+}
+
 /// A signal runs no drop, so a killed `pr` leaves its base checkout. The next `pr` removes each one whose `pr` is dead
-/// and never touches one whose `pr` is alive.
+/// and never touches one whose `pr` is alive, nor one that git does not hold locked as a base checkout.
 #[test]
 fn pr_sweeps_the_base_checkouts_of_a_killed_pr() {
     let (v, t) = setup();
@@ -1067,23 +1082,80 @@ fn pr_sweeps_the_base_checkouts_of_a_killed_pr() {
     commit(&w, &["add", "hello.txt"], "hello");
     let tmp = t.join("tmp");
     std::fs::create_dir(&tmp).unwrap();
-    let mut child = std::process::Command::new("true").spawn().unwrap();
-    let dead_pid = child.id();
-    child.wait().unwrap();
-    let (dead, live) =
-        (tmp.join(format!("bp-base-{dead_pid}-1")), tmp.join(format!("bp-base-{}-2", std::process::id())));
+    let pid = dead_pid();
+    let (dead, live, unlocked) = (
+        tmp.join(format!("bp-base-{pid}-1")),
+        tmp.join(format!("bp-base-{}-2", std::process::id())),
+        tmp.join(format!("bp-base-{pid}-3")),
+    );
     let code = t.join("code");
-    for d in [&dead, &live] {
-        git(&code, &["worktree", "add", "-q", "--detach", d.to_str().unwrap(), &base]);
-    }
+    base_checkout(&code, &dead, pid, &base);
+    base_checkout(&code, &live, std::process::id(), &base);
+    git(&code, &["worktree", "add", "-q", "--detach", unlocked.to_str().unwrap(), &base]);
 
     let (code_, out) = bp(v, t, &[("TMPDIR", tmp.to_str().unwrap())], &["pr", ISSUE]);
     assert_eq!(code_, Some(0), "{out}");
+    assert_eq!(out["base_checkouts_left"], json!([]), "{out}");
     let listed = git(&code, &["worktree", "list", "--porcelain"]);
     assert!(!dead.exists() && !listed.contains(dead.file_name().unwrap().to_str().unwrap()), "{listed}");
-    assert!(live.is_dir() && listed.contains(live.file_name().unwrap().to_str().unwrap()), "{listed}");
-    let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().map(|e| e.unwrap().file_name()).collect();
-    assert_eq!(left, [live.file_name().unwrap()], "this pr's own checkout is gone too");
+    for kept in [&live, &unlocked] {
+        assert!(kept.is_dir() && listed.contains(kept.file_name().unwrap().to_str().unwrap()), "{listed}");
+    }
+    let left: BTreeSet<_> = std::fs::read_dir(&tmp).unwrap().map(|e| e.unwrap().file_name()).collect();
+    let kept = BTreeSet::from([live.file_name().unwrap().to_owned(), unlocked.file_name().unwrap().to_owned()]);
+    assert_eq!(left, kept, "this pr's own checkout is gone too");
+}
+
+/// A claim's worktree named like a base checkout, in the directory `pr` makes checkouts in and locked with a base
+/// checkout's reason and a dead pid, survives another issue's `pr` with its uncommitted work: it carries a branch.
+#[test]
+fn pr_keeps_a_claim_worktree_named_like_a_base_checkout() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let slug = "bp-base-99999999-quokka";
+    let quokka = format!("projects/bp/issues/{slug}");
+    let text = "---\nkind: issue\ntitle: Q\nstatus: open\nunder: projects/bp/milestones/m\n---\n\nBody.\n\n## Check\n\n```check shell {name=q expect=0}\ntest -f q.txt\n```\n";
+    std::fs::write(v.join(format!("{quokka}.md")), text).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "quokka"]);
+    let (code_, cut) = bp(v, t, &[], &["cut", &quokka]);
+    assert_eq!(code_, Some(0), "{cut}");
+    let q = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    assert_eq!(q.file_name().unwrap(), slug);
+    std::fs::write(q.join("work.txt"), "uncommitted\n").unwrap();
+    let reason = format!("bp red-first base, pid {}", dead_pid());
+    git(&t.join("code"), &["worktree", "lock", "--reason", &reason, q.to_str().unwrap()]);
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code_, out) = bp(v, t, &[("TMPDIR", q.parent().unwrap().to_str().unwrap())], &["pr", ISSUE]);
+    assert_eq!(code_, Some(0), "{out}");
+    assert_eq!(std::fs::read_to_string(q.join("work.txt")).unwrap(), "uncommitted\n");
+    let listed = git(&t.join("code"), &["worktree", "list", "--porcelain"]);
+    assert!(listed.contains(&format!("worktree {}\n", q.canonicalize().unwrap().display())), "{listed}");
+}
+
+/// A clone whose directory is named like a base checkout, in the directory `pr` makes checkouts in, survives its own
+/// `pr` with its uncommitted work: it is the first entry git lists, and git holds it unlocked.
+#[test]
+fn pr_keeps_a_clone_named_like_a_base_checkout() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let clone = t.join("bp-base-99999999-code");
+    std::fs::rename(t.join("code"), &clone).unwrap();
+    std::os::unix::fs::symlink(&clone, t.join("code")).unwrap();
+    std::fs::write(clone.join("work.txt"), "uncommitted\n").unwrap();
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code_, out) = bp(v, t, &[("TMPDIR", t.to_str().unwrap())], &["pr", ISSUE]);
+    assert_eq!(code_, Some(0), "{out}");
+    assert!(clone.join(".git").is_dir(), "the clone holds its git directory");
+    assert_eq!(std::fs::read_to_string(clone.join("work.txt")).unwrap(), "uncommitted\n");
 }
 
 /// A red-first base that git cannot fetch refuses `could_not_run`, and the fix names the commit.

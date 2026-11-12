@@ -14,9 +14,19 @@ use serde_json::{Value, json};
 
 use crate::claim::git;
 
-/// Each base checkout's directory name starts so, then the pid of its `pr` and an instant, so a later `pr` finds the
-/// checkouts of a killed one.
+/// Each base checkout's directory name starts so, then the pid of its `pr` and an instant.
 const PREFIX: &str = "bp-base-";
+
+/// Git locks each base checkout with this reason and the pid of its `pr`, so a later `pr` finds the checkouts of a
+/// killed one by git's own record, never by a directory name alone.
+const REASON: &str = "bp red-first base, pid ";
+
+/// What `pr` read at the red-first base: each block's latest run, and each base checkout that git did not remove.
+#[derive(Default)]
+pub(crate) struct Based {
+    pub(crate) runs: Vec<BaseRun>,
+    pub(crate) left: Vec<String>,
+}
 
 /// A red-first block's latest run at the base, of its current text.
 pub(crate) struct BaseRun {
@@ -58,8 +68,8 @@ pub(crate) fn base_runs(
     base: &str,
     role: &str,
     clock: &dyn Fn() -> String,
-) -> Result<Vec<BaseRun>, Refusal> {
-    sweep(top);
+) -> Result<Based, Refusal> {
+    let mut left = sweep(top);
     let file = vault.read(id)?;
     let named = file.body.named_checks();
     let runs = bp_read::inputs::runs(index, id.as_str())?;
@@ -82,7 +92,7 @@ pub(crate) fn base_runs(
         let target = checkout.path.join("target");
         let env = [("CARGO_TARGET_DIR", target.as_path())];
         let ran = bp_check::run(vault, id, &checkout.path, None, &skip, &env, clock)?;
-        drop(checkout);
+        left.extend(checkout.close());
         if let Some(ran) = ran {
             let writer = ran.writer(vault, &format!("bp pr {id}"))?;
             let (changes, new) = ran.records(vault);
@@ -95,7 +105,7 @@ pub(crate) fn base_runs(
     let order: Vec<&str> = named.iter().map(|c| c.attrs["name"].as_str()).collect();
     rows.sort_by_key(|r| order.iter().position(|n| *n == r.name));
     let passed: Vec<&BaseRun> = rows.iter().filter(|r| r.verdict == "pass").collect();
-    let Some(first) = passed.first() else { return Ok(rows) };
+    let Some(first) = passed.first() else { return Ok(Based { runs: rows, left }) };
     let blocks: Vec<&str> = passed.iter().map(|r| r.name.as_str()).collect();
     Err(Refusal::new(
         Code::CheckVacuous,
@@ -109,47 +119,76 @@ pub(crate) fn base_runs(
 }
 
 /// Removes each base checkout of the clone at `top` that a killed `pr` left: a signal runs no drop, so the directory and
-/// git's entry for it stay. A checkout whose `pr` is alive, or whose pid `ps` cannot judge, stays.
-fn sweep(top: &Path) {
-    let Ok(listed) = git(top, &["worktree", "list", "--porcelain"]) else { return };
-    for path in listed.lines().filter_map(|l| l.strip_prefix("worktree ")) {
-        let name = Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        let Some((pid, _)) = name.strip_prefix(PREFIX).and_then(|rest| rest.split_once('-')) else { continue };
-        let number = !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit());
+/// git's entry for it stay. An entry is a base checkout only when git lists it as locked with [`REASON`], detached, and
+/// not first (the clone's own working tree), and its directory is in [`checkouts`] with [`PREFIX`]: a claim's worktree
+/// carries a branch, so a slug or a clone named like a checkout stays. A checkout whose `pr` is alive, or whose pid
+/// `ps` cannot judge, stays. Returns each checkout that git did not remove.
+fn sweep(top: &Path) -> Vec<String> {
+    let Ok(listed) = git(top, &["worktree", "list", "--porcelain"]) else { return Vec::new() };
+    let home = checkouts();
+    let mut left = Vec::new();
+    for entry in listed.split("\n\n").skip(1) {
+        let lines: Vec<&str> = entry.lines().collect();
+        let Some(path) = lines.iter().find_map(|l| l.strip_prefix("worktree ")).map(Path::new) else { continue };
+        let named = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(PREFIX));
+        let ours = named && path.parent() == Some(home.as_path()) && lines.contains(&"detached");
+        let pid = lines.iter().find_map(|l| l.strip_prefix("locked ")?.strip_prefix(REASON));
+        let Some(pid) = pid.filter(|p| ours && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) else {
+            continue;
+        };
         // `ps -p` exits non-zero only when no process has the pid, whoever owns it.
-        if number && Command::new("ps").args(["-p", pid]).output().is_ok_and(|o| !o.status.success()) {
-            remove(top, Path::new(path));
+        if Command::new("ps").args(["-p", pid]).output().is_ok_and(|o| !o.status.success()) {
+            left.extend(remove(top, path));
         }
     }
+    left
 }
 
-/// Removes a base checkout and git's entry for it. `--force`: a block may leave build output in the checkout. If git
-/// cannot remove it, the directory goes and the prune drops git's note of it.
-fn remove(top: &Path, path: &Path) {
-    if git(top, &["worktree", "remove", "--force", &path.display().to_string()]).is_err() {
-        let _ = std::fs::remove_dir_all(path);
-        let _ = git(top, &["worktree", "prune"]);
-    }
+/// The directory `pr` makes base checkouts in: the system's temporary directory, canonical, as git lists a worktree.
+fn checkouts() -> PathBuf {
+    let dir = std::env::temp_dir();
+    dir.canonicalize().unwrap_or(dir)
 }
 
-/// A detached checkout of a base commit in the system's temporary directory, removed on drop, so a block that
+/// Removes a base checkout and git's entry for it, or returns its path when git refuses. `--force`: a block may leave
+/// build output in the checkout. Only git removes it: a path that git refuses may not be a base checkout.
+fn remove(top: &Path, path: &Path) -> Option<String> {
+    let path = path.display().to_string();
+    let _ = git(top, &["worktree", "unlock", &path]);
+    git(top, &["worktree", "remove", "--force", &path]).err().map(|_| path)
+}
+
+/// A detached checkout of a base commit in [`checkouts`], locked with [`REASON`] and removed on drop, so a block that
 /// refuses or panics leaves no worktree behind.
 struct Checkout {
     top: PathBuf,
     path: PathBuf,
+    open: bool,
 }
 
 impl Checkout {
     fn new(top: &Path, base: &str) -> Result<Self, Refusal> {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
-        let path = std::env::temp_dir().join(format!("{PREFIX}{}-{nanos}", std::process::id()));
-        git(top, &["worktree", "add", "-q", "--detach", &path.display().to_string(), base])?;
-        Ok(Self { top: top.to_path_buf(), path })
+        let pid = std::process::id();
+        let path = checkouts().join(format!("{PREFIX}{pid}-{nanos}"));
+        let reason = format!("{REASON}{pid}");
+        let add =
+            ["worktree", "add", "-q", "--detach", "--lock", "--reason", &reason, &path.display().to_string(), base];
+        git(top, &add)?;
+        Ok(Self { top: top.to_path_buf(), path, open: true })
+    }
+
+    /// Removes the checkout, or returns its path when git refuses.
+    fn close(mut self) -> Option<String> {
+        self.open = false;
+        remove(&self.top, &self.path)
     }
 }
 
 impl Drop for Checkout {
     fn drop(&mut self) {
-        remove(&self.top, &self.path);
+        if self.open {
+            let _ = remove(&self.top, &self.path);
+        }
     }
 }

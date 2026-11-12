@@ -121,15 +121,8 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
         && !stale
         && named
     {
-        return Ok(Opened::Wrote(Wrote::Already(json!({
-            "id": id,
-            "pull_request": o.number,
-            "head": head,
-            "deltas": carried.deltas,
-            "diagrams": carried.diagrams(),
-            "check_changes": carried.changes(),
-            "base_runs": carried.base_runs(),
-        }))));
+        let row = json!({ "id": id, "pull_request": o.number, "head": head });
+        return Ok(Opened::Wrote(Wrote::Already(carried.listed(row))));
     }
     let base = c.target.clone();
     let title = index.header(id.as_str())?.and_then(|h| h.get("title")?.as_str().map(str::to_string));
@@ -169,25 +162,20 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     // The head holds its base, so a stranding step on the claim is done (34, design change 5).
     changes.extend(cleared(&vault, writer.index(), &id, &c.claim)?);
     let written = writer.commit("pr", role.as_str(), &format!("pr {id}"), &changes)?;
-    let listed = json!({ "pull_request": number, "deltas": carried.deltas, "diagrams": carried.diagrams(),
-            "check_changes": carried.changes(), "base_runs": carried.base_runs() });
+    let listed = carried.listed(json!({ "pull_request": number }));
     if let Some(at) = runs.iter().position(bp_check::Run::failed) {
         return Ok(Opened::Failed { at, commit: written.commit, runs, listed });
     }
-    Ok(Opened::Wrote(Wrote::Changed(json!({
+    Ok(Opened::Wrote(Wrote::Changed(carried.listed(json!({
         "id": id,
         "pull_request": number,
         "head": head,
         "branch": c.branch,
         "base": base,
         "runs": crate::check::rows(&runs),
-        "base_runs": carried.base_runs(),
-        "deltas": carried.deltas,
-        "diagrams": carried.diagrams(),
-        "check_changes": carried.changes(),
         "commit": written.commit,
         "findings": written.findings,
-    }))))
+    })))))
 }
 
 pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
@@ -227,7 +215,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let runs = bp_read::inputs::runs(&index, id.as_str())?;
     let blocks = bp_read::inputs::blocks(&vault, id.as_str())?;
     let read = bp_read::inputs::pull_request(&pr, &reviewer);
-    let carried = crate::carry::read(&vault, &index, &id, Vec::new())?;
+    let carried = crate::carry::read(&vault, &index, &id, crate::red_first::Based::default())?;
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
     // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
     let compare = c.from.as_deref().map(|from| (c.top.as_path(), from));

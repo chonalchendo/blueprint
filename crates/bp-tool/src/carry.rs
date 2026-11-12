@@ -15,7 +15,7 @@ use bp_vault::{Id, Index, Kind, Refusal, Vault};
 use serde_json::{Value, json};
 
 use crate::claim::git;
-use crate::red_first::BaseRun;
+use crate::red_first::{BaseRun, Based};
 
 /// The deltas and the block changes, in the order the body lists them, and the check set now and at the claim.
 pub(crate) struct Carried {
@@ -26,8 +26,8 @@ pub(crate) struct Carried {
     diagrams: Vec<(Id, String, &'static str, Option<String>)>,
     changes: Vec<Change>,
     set: CheckSet,
-    /// Each red-first block's latest run at the red-first base (37, design change 10).
-    based: Vec<BaseRun>,
+    /// Each red-first block's latest run at the red-first base, and each base checkout left (37, design change 10).
+    based: Based,
 }
 
 /// One named block whose hash differs from its hash at the claim's commit.
@@ -43,7 +43,7 @@ struct Change {
 
 /// Reads what `issue` carries: its check set ([`bp_read::checkset`]), each diagram a carried delta changes, and each
 /// named block whose hash changed since the claim; `based` holds the red-first runs that `pr` read.
-pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id, based: Vec<BaseRun>) -> Result<Carried, Refusal> {
+pub(crate) fn read(vault: &Vault, index: &Index, issue: &Id, based: Based) -> Result<Carried, Refusal> {
     let set = bp_read::checkset::check_set(vault, index, issue)?;
     let (mut deltas, mut diagrams) = (Vec::new(), Vec::new());
     for (design, d) in &set.deltas {
@@ -126,7 +126,18 @@ impl Carried {
 
     /// The result's `base_runs`.
     pub(crate) fn base_runs(&self) -> Value {
-        self.based.iter().map(BaseRun::row).collect()
+        self.based.runs.iter().map(BaseRun::row).collect()
+    }
+
+    /// `row` with what the pull request carries: `deltas`, `diagrams`, `check_changes`, `base_runs`, and
+    /// `base_checkouts_left`, each base checkout that git did not remove: bp never deletes a path that git refuses.
+    pub(crate) fn listed(&self, mut row: Value) -> Value {
+        let carried = json!({ "deltas": self.deltas, "diagrams": self.diagrams(), "check_changes": self.changes(),
+            "base_runs": self.base_runs(), "base_checkouts_left": self.based.left });
+        if let (Some(row), Value::Object(carried)) = (row.as_object_mut(), carried) {
+            row.extend(carried);
+        }
+        row
     }
 
     /// Whether the forge's body is this body. A forge may store CRLF line ends or trim trailing whitespace, so both
@@ -171,6 +182,7 @@ impl Carried {
         // reviewer reads it here (37, design change 10).
         let unproved: Vec<String> = self
             .based
+            .runs
             .iter()
             .filter(|r| r.verdict != "fail")
             .map(|r| format!("- `{}`: {}; `bp show {}`\n", r.name, r.verdict, r.id))
