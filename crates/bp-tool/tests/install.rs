@@ -452,6 +452,33 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
     }
 }
 
+/// The signed acts are the human's, in a terminal: the hook denies them to every agent role (37, design change 4).
+#[test]
+fn the_role_hook_denies_the_signed_acts_to_every_agent_role() {
+    let w = World::new();
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    let path = std::env::var("PATH").unwrap();
+    for (agent, role) in [
+        (None, "session"),
+        (Some("bp-worker"), "worker"),
+        (Some("bp-reviewer"), "reviewer"),
+        (Some("bp-researcher"), "researcher"),
+    ] {
+        for command in ["bp approve x --key k", "BP_ROLE=human bp lower x low --reason r"] {
+            let mut input = serde_json::json!({ "session_id": "s-one", "tool_input": { "command": command } });
+            if let Some(a) = agent {
+                input["agent_id"] = "a-one".into();
+                input["agent_type"] = a.into();
+            }
+            let out = w.hook("bp-role.sh", &input.to_string(), &path, &[]);
+            let verb = command.split_whitespace().find(|w| ["approve", "lower"].contains(w)).unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{role} {command}");
+            assert!(stderr.contains(&format!("bp {verb} is outside the {role} role")), "{stderr}");
+        }
+    }
+}
+
 /// A researcher dispatches sub-researchers only; the session and every other caller pass (31, design change 6).
 #[test]
 fn the_agent_hook_keeps_a_researcher_to_researchers() {

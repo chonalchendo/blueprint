@@ -38,7 +38,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 
 ### The human's acts
 
-Give the human these commands:
+Give the human these commands. Only the human runs `bp approve <issue>` and `bp lower <issue> low --reason <why>`, in a terminal, and the signing key never goes into an agent.
 
 - `needs-approval`: approve the pull request on the forge.
 - `needs-milestone-approval`: `bp transition <milestone> approved --json`.

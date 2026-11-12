@@ -25,6 +25,8 @@ crate::closed_enum! {
         Handoff = "handoff",
         Evidence = "evidence",
         BlueprintVersion = "blueprint-version",
+        Approval = "approval",
+        Lowering = "lowering",
     }
 }
 
@@ -43,6 +45,8 @@ impl Kind {
                 | Self::Handoff
                 | Self::Evidence
                 | Self::BlueprintVersion
+                | Self::Approval
+                | Self::Lowering
         )
     }
 
@@ -68,6 +72,8 @@ impl Kind {
             Self::Handoff => "handoffs",
             Self::Evidence => "evidence",
             Self::BlueprintVersion => "versions",
+            Self::Approval => "approvals",
+            Self::Lowering => "lowerings",
         }
     }
 
@@ -77,11 +83,11 @@ impl Kind {
 
     /// The kinds a record of this kind sits under (13): a claim and a review under an issue, a run under a check's
     /// owner, a delta under a design, a waiver under a milestone, evidence under a learning, a disposition under a
-    /// review. The project's own records sit under the project node; a handoff may also sit in `shared/`. Empty for
+    /// review, and the human's signed approval and lowering under an issue (37, design change 4). The project's own records sit under the project node; a handoff may also sit in `shared/`. Empty for
     /// a node.
     pub fn parents(self) -> &'static [Self] {
         match self {
-            Self::Claim | Self::Review => &[Self::Issue],
+            Self::Claim | Self::Review | Self::Approval | Self::Lowering => &[Self::Issue],
             Self::Run => &Self::CHECK_OWNERS,
             Self::Delta => &[Self::Design],
             Self::Waiver => &[Self::Milestone],
@@ -117,7 +123,7 @@ impl Kind {
     pub fn time_field(self) -> Option<&'static str> {
         match self {
             Self::Claim => Some("from"),
-            Self::Run | Self::Review | Self::Evidence => Some("at"),
+            Self::Run | Self::Review | Self::Evidence | Self::Approval | Self::Lowering => Some("at"),
             Self::Delta => Some("stamp"),
             Self::ConcernAnswer => Some("decided_at"),
             Self::Handoff => Some("started_at"),
@@ -167,7 +173,9 @@ impl Kind {
             | Self::Delta
             | Self::Waiver
             | Self::Evidence
-            | Self::Disposition => under(),
+            | Self::Disposition
+            | Self::Approval
+            | Self::Lowering => under(),
         }
     }
 }
@@ -240,6 +248,11 @@ mod tests {
         assert!(!fits(Kind::Waiver, "projects/bp/issues/x/waivers/w"), "a waiver sits under a milestone");
         assert!(fits(Kind::Waiver, "projects/bp/milestones/m/waivers/w"));
         assert!(fits(Kind::Evidence, "shared/learnings/l/evidence/e"));
+        assert!(
+            fits(Kind::Approval, "projects/bp/issues/x/approvals/h")
+                && fits(Kind::Lowering, "projects/bp/issues/x/lowerings/h")
+        );
+        assert!(!fits(Kind::Approval, "projects/bp/milestones/m/approvals/h"), "an approval sits under an issue");
         assert!(fits(Kind::Handoff, "projects/bp/handoffs/2026-05-31-7c08a6ac"));
         assert!(fits(Kind::Handoff, "shared/handoffs/2026-05-31-7c08a6ac"));
         assert!(fits(Kind::ConcernAnswer, "projects/bp/concerns/data-retention/2026-10-19T10-00-00Z"));

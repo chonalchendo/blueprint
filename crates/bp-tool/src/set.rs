@@ -135,7 +135,7 @@ pub(crate) fn rebody(text: &str, body: &str) -> Option<String> {
     Some(if body.is_empty() { format!("{head}{eol}") } else { format!("{head}{eol}\n{body}\n") })
 }
 
-/// The role of a human act (`stamp`, `land`, a `transition` to `approved` or `active`), tested before any other: an agent
+/// The role of a human act (`stamp`, `land`, `approve`, `lower`, a `transition` to `approved` or `active`), tested before any other: an agent
 /// role refuses `role_forbidden` (27, design change 3). An agent can forge the label, so this stops a slip, not an
 /// attack; the forge stays the gate. So a milestone's approval is its latest such commit with `Bp-Role: human` (13).
 pub(crate) fn human(act: String) -> Result<Role, Refusal> {
@@ -147,7 +147,8 @@ pub(crate) fn human(act: String) -> Result<Role, Refusal> {
     Err(Refusal::new(
         Code::RoleForbidden,
         act,
-        "BP_ROLE names an agent role, and the verb is the human's: stamp, land, or transition to approved or active",
+        "BP_ROLE names an agent role, and the verb is the human's: stamp, land, approve, lower, or transition to approved \
+         or active",
         fix,
     ))
 }

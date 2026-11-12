@@ -168,6 +168,10 @@ fn not_recorded(text: &str) -> Refusal {
         Ok(Kind::Claim) => "bp cut <issue> writes the claim".into(),
         Ok(Kind::Waiver) => "bp stamp <milestone> --waive <predicate> --reason <why> writes a waiver".into(),
         Ok(Kind::BlueprintVersion) => "bp stamp <milestone> writes the version".into(),
+        Ok(Kind::Approval) => "only the human's bp approve <issue> writes an approval, signed".into(),
+        Ok(Kind::Lowering) => {
+            "only the human's bp lower <issue> <level> --reason <why> writes a lowering, signed".into()
+        }
         Ok(k) if !k.is_record() => format!("kind {k} is a node: bp create {k}"),
         _ => "record writes one of: delta, review, disposition, concern-answer, evidence, handoff".into(),
     };

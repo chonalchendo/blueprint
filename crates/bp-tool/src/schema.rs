@@ -103,6 +103,8 @@ pub fn owner(kind: Kind, id: &Id, field: &str) -> Option<String> {
             Kind::Claim => format!("bp release {parent} --reason <reason>"),
             Kind::Waiver => format!("bp stamp {parent} --waive <predicate> --reason <why>"),
             Kind::BlueprintVersion => "bp stamp <milestone>".into(),
+            Kind::Approval => format!("bp approve {parent}"),
+            Kind::Lowering => format!("bp lower {parent} <level> --reason <why>"),
             _ => format!("bp record {kind} {parent}"),
         };
         return Some(format!("a record is never edited (13, rule 6); a correction is a new one: {verb}"));

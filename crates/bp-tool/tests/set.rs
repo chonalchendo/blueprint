@@ -299,9 +299,11 @@ fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
     let dir = vault();
     let root = dir.path();
     // Ids that name nothing: the role refuses first, so no other refusal shows.
-    let acts: [&[&str]; 4] = [
+    let acts: [&[&str]; 6] = [
         &["stamp", "projects/bp/milestones/none"],
         &["land", "projects/bp/issues/none"],
+        &["approve", "projects/bp/issues/none"],
+        &["lower", "projects/bp/issues/none", "low", "--reason", "docs only"],
         &["transition", "projects/bp/milestones/none", "approved"],
         &["transition", "projects/bp/designs/none", "active", "--dry-run"],
     ];
