@@ -143,6 +143,41 @@ fn approve_and_lower_sign_the_head_with_the_signers_key() {
 }
 
 #[test]
+fn approve_reads_the_signer_from_the_forge_not_a_local_ref() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let code = t.join("code");
+    let agent = t.join("agent").display().to_string();
+    let pr =
+        json!([{ "number": 4, "state": "OPEN", "headRefName": "bp/a", "headRefOid": HEAD, "baseRefName": "master" }]);
+    std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
+    risk(t, "human", true);
+    // The agent pushes its own branch, which names its key, as normal work.
+    git(&code, &["checkout", "-q", "-b", "bp/x"]);
+    risk(t, "agent", false);
+    git(&code, &["push", "-q", "origin", "bp/x"]);
+    git(&code, &["checkout", "-q", "master"]);
+    let approve = || bp(v, t, &[("BP_ROLE", "human")], &["approve", ISSUE, "--key", &agent]);
+
+    // Poison one: origin/HEAD names the agent's pushed branch, with no push.
+    git(&code, &["remote", "set-head", "origin", "bp/x"]);
+    assert!(git(&code, &["show", "origin/HEAD:.bp/risk.yml"]).contains(&public(t, "agent").trim().to_string()));
+    let (code_, out) = approve();
+    assert_eq!((code_, out["code"].as_str()), (Some(2), Some("signature_invalid")), "{out}");
+
+    // Poison two: origin/master is a local commit that names the agent's key, and the fetch that `approve` runs
+    // keeps it there.
+    git(&code, &["remote", "set-head", "origin", "master"]);
+    risk(t, "agent", false);
+    git(&code, &["update-ref", "refs/remotes/origin/master", "HEAD"]);
+    git(&code, &["config", "remote.origin.fetch", "+refs/heads/bp/x:refs/remotes/origin/master"]);
+    let (code_, out) = approve();
+    assert_eq!((code_, out["code"].as_str()), (Some(2), Some("signature_invalid")), "{out}");
+    assert!(git(&code, &["show", "origin/master:.bp/risk.yml"]).contains(&public(t, "agent").trim().to_string()));
+    assert!(!v.join(ISSUE).join("approvals").exists(), "no approval is written");
+}
+
+#[test]
 fn approve_refuses_a_head_that_is_not_a_full_sha() {
     let (v, t) = setup();
     let (v, t) = (v.path(), t.path());

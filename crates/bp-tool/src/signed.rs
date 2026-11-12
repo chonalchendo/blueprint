@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 use bp_vault::{Code, Id, Refusal};
 
-use crate::claim::{default_branch, git};
+use crate::claim::git;
 
 /// The signature namespace: a signature made for git commits or for another tool never verifies here.
 const NAMESPACE: &str = "bp";
@@ -123,23 +123,40 @@ impl Drop for Scratch {
     }
 }
 
-/// The signer: the public key of the `signer:` line of `.bp/risk.yml` on origin's default branch, as `<type>
+/// The signer: the public key of the `signer:` line of `.bp/risk.yml` on the forge's default branch, as `<type>
 /// <base64>`. The forge protects that branch, so an agent's edit of the file in a worktree, in the clone or on its own
 /// branch names no signer. Else `signer_missing`: `bp` cannot trust a human act without a key.
+///
+/// The branch and its sha come from the server, by `git ls-remote --symref origin HEAD`, never from a local ref. The
+/// shared `default_branch` reads `refs/remotes/origin/HEAD`, and `git remote set-head` or `git update-ref` moves that
+/// ref and `refs/remotes/origin/*` with no push: an agent would point them at a branch that names its own key. The
+/// other verbs keep `default_branch`, because a wrong base there costs a bad claim, not a forged human act.
 pub(crate) fn signer(top: &Path) -> Result<String, Refusal> {
-    let branch = default_branch(top)?;
-    let text = git(top, &["show", &format!("refs/remotes/origin/{branch}:.bp/risk.yml")]).unwrap_or_default();
+    let listed = git(top, &["ls-remote", "--symref", "origin", "HEAD"])?;
+    let branch = listed.lines().find_map(|l| l.strip_prefix("ref: refs/heads/")?.strip_suffix("\tHEAD"));
+    let sha = listed.lines().find_map(|l| l.strip_suffix("\tHEAD").filter(|s| is_sha(s)));
+    let (Some(branch), Some(sha)) = (branch, sha) else {
+        return Err(Refusal::new(
+            Code::SignerMissing,
+            "git ls-remote --symref origin HEAD",
+            "bp reads the signer from the default branch that the forge names (37, design change 4)",
+            "origin names no default branch; set it on the forge, then rerun",
+        ));
+    };
+    git(top, &["fetch", "-q", "origin", sha])?;
+    let text = git(top, &["show", &format!("{sha}:.bp/risk.yml")]).unwrap_or_default();
     // Issue 0 of milestone 12 (`risk-level`) parses the whole file with yaml-rust2. At rebase, read its `signer`
     // here; until then this reads the one top-level key.
     let value = text.lines().find_map(|l| l.strip_prefix("signer:")).map(|v| v.trim().trim_matches(['"', '\'']));
     value.and_then(public_key).ok_or_else(|| {
         Refusal::new(
             Code::SignerMissing,
-            format!("origin/{branch}:.bp/risk.yml"),
+            format!("origin/{branch}:.bp/risk.yml at {sha}"),
             "bp trusts a human act only with a signature by the key that .bp/risk.yml names (37, design change 4)",
             format!(
-                "ssh-keygen -t ed25519 -f ~/.ssh/bp_human with a passphrase; add the line `signer: <the .pub file's \
-                 type and key>` to .bp/risk.yml; commit it and push it to origin/{branch} from a shell; then rerun"
+                "ssh-keygen -t ed25519 -f ~/.ssh/bp_human with a passphrase; add the one line `signer: <the .pub \
+                 file's type and key>` to .bp/risk.yml; commit it and push it to origin/{branch} from a shell; then \
+                 rerun"
             ),
         )
     })

@@ -215,7 +215,7 @@ mod tests {
     use serde_json::Value;
 
     use super::{approved, lowered, record_text};
-    use crate::signed::{Act, sign};
+    use crate::signed::{Act, sign, signer};
 
     const ISSUE: &str = "projects/bp/issues/a";
     const H1: &str = "1111111111111111111111111111111111111111";
@@ -365,5 +365,50 @@ mod tests {
             forged,
         );
         assert_eq!(level().as_deref(), Some("low"), "a later forged lowering changes nothing");
+    }
+
+    #[test]
+    fn approved_reads_the_signer_from_the_forge_not_a_local_ref() {
+        let keys = tempfile::tempdir().unwrap();
+        let (_, human) = key(keys.path(), "human");
+        let (agent, agent_public) = key(keys.path(), "agent");
+        let t = tempfile::tempdir().unwrap();
+        let code = t.path().join("code");
+        let commit = |text: &str| {
+            put(&code, ".bp/risk.yml", text);
+            run(&code, "git", &["add", "-A"]);
+            run(&code, "git", &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "risk"]);
+        };
+        run(t.path(), "git", &["init", "-q", "--bare", "-b", "master", "origin.git"]);
+        run(t.path(), "git", &["init", "-q", "-b", "master", "code"]);
+        run(&code, "git", &["remote", "add", "origin", &t.path().join("origin.git").display().to_string()]);
+        commit(&format!("signer: {human}\n"));
+        run(&code, "git", &["push", "-q", "-u", "origin", "master"]);
+        // The agent pushes its own branch, which names its key, as normal work.
+        run(&code, "git", &["checkout", "-q", "-b", "bp/x"]);
+        commit(&format!("signer: {agent_public}\n"));
+        run(&code, "git", &["push", "-q", "origin", "bp/x"]);
+        run(&code, "git", &["checkout", "-q", "master"]);
+
+        let (_dir, v) = vault();
+        let issue = Id::parse(ISSUE).unwrap();
+        let message = Act { verb: "approve", node: &issue, pull_request: 1, head: H1, more: &[] }.message();
+        forge(&v, Kind::Approval, H1, fields(H1, 1, "01", &[]), &sign(&message, &agent).unwrap());
+        let gate = || approved(&Index::open(&v).unwrap(), &issue, H1, &signer(&code).unwrap()).unwrap_err().code;
+        let local = |r: &str| run(&code, "git", &["show", &format!("{r}:.bp/risk.yml")]);
+
+        // Poison one: origin/HEAD names the agent's pushed branch, with no push.
+        run(&code, "git", &["remote", "set-head", "origin", "bp/x"]);
+        assert!(local("origin/HEAD").contains(&agent_public), "the local ref names the agent's key");
+        assert_eq!(signer(&code).unwrap(), human, "the signer is the server's default branch's");
+        assert_eq!(gate(), Code::SignatureInvalid, "the agent's approval does not verify");
+
+        // Poison two: origin/master is a local commit that names the agent's key.
+        run(&code, "git", &["remote", "set-head", "origin", "master"]);
+        commit(&format!("signer: {agent_public}\n"));
+        run(&code, "git", &["update-ref", "refs/remotes/origin/master", "HEAD"]);
+        assert!(local("origin/master").contains(&agent_public), "the local ref names the agent's key");
+        assert_eq!(signer(&code).unwrap(), human, "the signer is the server's default branch's");
+        assert_eq!(gate(), Code::SignatureInvalid, "the agent's approval does not verify");
     }
 }
