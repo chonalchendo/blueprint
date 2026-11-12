@@ -43,6 +43,11 @@ fn vault() -> tempfile::TempDir {
     for head in ["aaaa", "ffff"] {
         write(r, &format!("{pr7}/reviews/{head}.md"), &format!("---\nkind: review\nunder: {pr7}\nhead: {head}\n---\n"));
     }
+    // A converted review reads round 1 and `conformance`; a medium head needs the failure-paths lens too (37).
+    let lens = |under: &str, head: &str| {
+        format!("---\nkind: review\nunder: {under}\nhead: {head}\nlens: failure-paths\n---\n")
+    };
+    write(r, &format!("{pr7}/reviews/aaaa-2.md"), &lens(pr7, "aaaa"));
     let pr8 = "projects/bp/issues/0008.twochecks";
     write(r, &format!("{pr8}.md"), &issue("in-progress", ""));
     write(r, &format!("{pr8}/reviews/bbbb.md"), &format!("---\nkind: review\nunder: {pr8}\nhead: bbbb\n---\n"));
@@ -65,6 +70,7 @@ fn vault() -> tempfile::TempDir {
         write(r, &format!("{id}.md"), &format!("{}\n{block}", issue("in-progress", "")));
         if slug == "0010.twin" {
             write(r, &format!("{id}/reviews/cccc.md"), &format!("---\nkind: review\nunder: {id}\nhead: cccc\n---\n"));
+            write(r, &format!("{id}/reviews/cccc-2.md"), &lens(&id, "cccc"));
         }
         write(
             r,
@@ -127,7 +133,8 @@ fn the_forge_snapshot_moves_the_review_path_and_unblocks_dependents() {
     let d = vault();
     let v = list(d.path(), &["issue"], true);
     assert_eq!(v["forge"], "snapshot");
-    assert_eq!(intent(&v, "projects/bp/issues/0003.held"), ("needs-review", ""));
+    let lenses = "round 1: missing lenses: conformance, failure-paths";
+    assert_eq!(intent(&v, "projects/bp/issues/0003.held"), ("needs-review", lenses));
     assert_eq!(
         intent(&v, "projects/bp/issues/0002.waits"),
         ("ready", ""),
@@ -147,7 +154,7 @@ fn the_forge_snapshot_moves_the_review_path_and_unblocks_dependents() {
     std::fs::copy(d.path().join("forge/open-prs.json"), own.join("open-prs.json")).unwrap();
     let v = list(d.path(), &["issue"], false);
     assert!(v["forge"] == "snapshot" && v["forge_age"].is_i64(), "{v}");
-    assert_eq!(intent(&v, "projects/bp/issues/0003.held"), ("needs-review", ""));
+    assert_eq!(intent(&v, "projects/bp/issues/0003.held"), ("needs-review", lenses));
     let v = list(d.path(), &["issue", "--project", "other"], false);
     assert!(v["forge"] == "not read" && v.get("forge_age").is_none(), "{v}");
     // A bad file of a project out of view breaks no list: only the projects in view are read.

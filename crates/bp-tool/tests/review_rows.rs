@@ -17,6 +17,7 @@ struct World {
     vault: tempfile::TempDir,
     t: tempfile::TempDir,
     head: String,
+    worktree: PathBuf,
 }
 
 /// A vault, a bare origin and its clone, [`ISSUE`] cut, and one commit in its worktree: `src/b.rs` line 30 changed
@@ -57,7 +58,7 @@ fn world() -> World {
     git(&w, &["add", "-A"]);
     git(&w, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "two"]);
     let head = git(&w, &["rev-parse", "HEAD"]).trim().to_string();
-    World { vault, t, head }
+    World { vault, t, head, worktree: w }
 }
 
 impl World {
@@ -65,12 +66,30 @@ impl World {
         self.vault.path()
     }
 
-    /// `bp record review <issue>` at the head, with `body`.
+    /// `bp record review <issue>` at the head, with `body`, as round one's conformance review.
     fn review(&self, issue: &str, body: &str) -> (Option<i32>, Value) {
+        self.at(issue, &self.head, &["round=1", "lens=conformance", "mode=full"], body)
+    }
+
+    /// `bp record review <issue>` at `head` with `fields` and `body`.
+    fn at(&self, issue: &str, head: &str, fields: &[&str], body: &str) -> (Option<i32>, Value) {
         let file = self.t.path().join("review.md");
         std::fs::write(&file, body).unwrap();
-        let head = format!("head={}", self.head);
-        common::bp(self.v(), &["record", "review", issue, "--field", &head, "--body-file", file.to_str().unwrap()])
+        let head = format!("head={head}");
+        let mut args = vec!["record", "review", issue, "--field", &head];
+        for f in fields {
+            args.extend(["--field", f]);
+        }
+        args.extend(["--body-file", file.to_str().unwrap()]);
+        common::bp(self.v(), &args)
+    }
+
+    /// A commit in the claim's worktree that changes `src/a.rs` line 1: the fix a later round reads.
+    fn fix(&self) -> String {
+        std::fs::write(self.worktree.join("src/a.rs"), "fn a() { fixed() }\n".to_string() + &"fn a() {}\n".repeat(11))
+            .unwrap();
+        git(&self.worktree, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "fix"]);
+        git(&self.worktree, &["rev-parse", "HEAD"]).trim().to_string()
     }
 
     /// A body with the head line and the table, one row per `(location, finding)`.
@@ -233,4 +252,81 @@ fn record_review_returns_rows() {
     assert_eq!((v["rows"].as_u64(), v["findings"].as_array().map(Vec::len)), (Some(2), Some(0)), "{v}");
     let (exit, v) = w.review(ISSUE, &w.body(&[]));
     assert_eq!((exit, v["rows"].as_u64()), (Some(0), Some(0)), "an empty table is no finding: {v}");
+}
+
+#[test]
+fn a_review_names_the_round_lens_and_mode_of_its_head() {
+    let w = world();
+    let body = w.body(&["| error | src/a.rs:1 | Wrong. |"]);
+    let refused = |head: &str, fields: &[&str], code: &str| {
+        let before = commits(w.v());
+        let (exit, v) = w.at(ISSUE, head, fields, &body.replace(&w.head, head));
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some(code)), "{fields:?}: {v}");
+        assert_eq!(commits(w.v()), before, "a refusal writes nothing");
+        v["fix"].as_str().unwrap().to_string()
+    };
+    let round_one = format!("{} is round 1 of {ISSUE}: --field round=1 --field mode=full", w.head);
+    for fields in [&["round=2", "lens=conformance", "mode=full"][..], &["round=1", "lens=conformance", "mode=verify"]] {
+        assert_eq!(refused(&w.head, fields, "schema_invalid"), round_one);
+    }
+    let fix = refused(&w.head, &["round=1", "lens=verify", "mode=full"], "schema_invalid");
+    assert_eq!(
+        fix,
+        "round one reads one lens per review: --field lens=<conformance|failure-paths|tests-and-checks|security>"
+    );
+    refused(&w.head, &["round=1", "lens=style", "mode=full"], "unknown_value");
+    refused(&w.head, &["round=1", "mode=full"], "schema_invalid");
+    refused(&w.head, &["round=1", "lens=conformance", "mode=full", "late=1"], "schema_invalid");
+    for lens in ["conformance", "failure-paths", "conformance"] {
+        let (exit, v) = w.at(ISSUE, &w.head, &["round=1", &format!("lens={lens}"), "mode=full"], &body);
+        assert_eq!(
+            (exit, &v["late"]),
+            (Some(0), &serde_json::json!([])),
+            "one record per lens, and a second reading: {v}"
+        );
+    }
+    // The next head with a review is round 2: one `verify` review of the fix.
+    let two = w.fix();
+    let fix = refused(&two, &["round=1", "lens=conformance", "mode=full"], "schema_invalid");
+    assert_eq!(fix, format!("{two} is round 2 of {ISSUE}: --field round=2 --field mode=verify"));
+    let fix = refused(&two, &["round=2", "lens=conformance", "mode=verify"], "schema_invalid");
+    assert_eq!(fix, "round 2 verifies the fix in one review: --field lens=verify");
+}
+
+#[test]
+fn a_verify_review_marks_its_error_rows_outside_the_fix_late() {
+    let w = world();
+    let (exit, v) = w.review(ISSUE, &w.body(&["| error | src/a.rs:1 | Wrong. |"]));
+    assert_eq!(exit, Some(0), "{v}");
+    let two = w.fix();
+    let rows = [
+        "| error | src/a.rs:1 | The fix is wrong. |",
+        "| error | src/b.rs:30 | Wrong before the fix. |",
+        "| warn | src/b.rs:30 | Slow. |",
+        "| error | projects/bp/issues/x | A design the head contradicts. |",
+        "| risk | src/b.rs:30 | It reads a secret. |",
+    ];
+    let body = w.body(&rows).replace(&w.head, &two);
+    let (exit, v) = w.at(ISSUE, &two, &["round=2", "lens=verify", "mode=verify"], &body);
+    assert_eq!((exit, &v["late"]), (Some(0), &serde_json::json!([2, 4])), "{v}");
+    let review = v["id"].as_str().unwrap().to_string();
+    let (_, shown) = common::bp(w.v(), &["show", &review, "--no-body"]);
+    assert_eq!((&shown["round"], &shown["lens"], &shown["mode"]), (&2.into(), &"verify".into(), &"verify".into()));
+    // A late row is declined only with a follow-up issue; the reviewed issue is none.
+    let decline = |n: &str, reason: &str| {
+        let (n, reason) = (format!("finding={n}"), format!("reason={reason}"));
+        common::bp(
+            w.v(),
+            &["record", "disposition", &review, "--field", &n, "--field", "as=declined", "--field", &reason],
+        )
+    };
+    for reason in ["out of scope", &format!("see {ISSUE}"), "follow-up projects/bp/issues/none"] {
+        let (exit, v) = decline("2", reason);
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{reason}: {v}");
+        assert!(v["fix"].as_str().unwrap().starts_with("finding 2 is a late error outside the fix"), "{v}");
+    }
+    let (exit, v) = decline("2", &format!("follow-up {UNCLAIMED}."));
+    assert_eq!(exit, Some(0), "{v}");
+    let (exit, v) = decline("1", "the reviewer misread the fix");
+    assert_eq!(exit, Some(0), "a row the fix shows declines with any reason, and still blocks: {v}");
 }

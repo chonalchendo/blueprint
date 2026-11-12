@@ -231,6 +231,35 @@ impl Vault {
             .collect()
     }
 
+    /// The commit that first added each file directly under `dir`, by id: the record as it was written, which a later
+    /// edit by hand cannot change (37, design change 2). One `git log` serves the directory. A rename is no add, so a
+    /// file whose directory moved reads from its first commit at the new path. Empty outside git.
+    pub fn added(&self, dir: &str) -> BTreeMap<String, String> {
+        let Ok(out) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .env("LC_ALL", "C")
+            .args(["-c", "core.quotepath=off", "log", "--relative", "--reverse", "--no-renames", "--diff-filter=A"])
+            .args(["--name-only", "--format=@%H", "--"])
+            .arg(format!("./{dir}"))
+            .output()
+        else {
+            return BTreeMap::new();
+        };
+        let (mut first, mut sha) = (BTreeMap::new(), String::new());
+        let prefix = format!("{dir}/");
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some(commit) = line.strip_prefix('@') {
+                sha = commit.to_string();
+            } else if let Some(id) =
+                line.strip_suffix(".md").filter(|p| p.strip_prefix(&prefix).is_some_and(|f| !f.contains('/')))
+            {
+                first.entry(id.to_string()).or_insert_with(|| sha.clone());
+            }
+        }
+        first
+    }
+
     /// Every markdown file under `projects/` and `shared/`: the ids, sorted, and the paths that are not ids, without
     /// `.md` (a stray `notes.md`), which the index holds as broken files. Dot directories (`.bp`, `.git`) are skipped.
     pub fn ids(&self) -> Result<(Vec<Id>, Vec<String>), Refusal> {

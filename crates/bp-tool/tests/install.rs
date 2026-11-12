@@ -335,7 +335,21 @@ fn a_handoff_seed_follows_a_record_to_its_node() {
     let (code, v) = w.bp(
         w.vault.path(),
         &[("BP_SESSION", "s-r")],
-        &["record", "review", ISSUE, "--field", &format!("head={head}"), "--body-file", file.to_str().unwrap()],
+        &[
+            "record",
+            "review",
+            ISSUE,
+            "--field",
+            &format!("head={head}"),
+            "--field",
+            "round=1",
+            "--field",
+            "lens=conformance",
+            "--field",
+            "mode=full",
+            "--body-file",
+            file.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, Some(0), "{v}");
     let (code, v) = w.bp(w.vault.path(), &[], &["record", "handoff", "projects/bp/project", "--field", "session=s-r"]);

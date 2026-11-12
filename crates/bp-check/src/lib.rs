@@ -98,8 +98,9 @@ pub struct Ran {
     /// The code commit the blocks ran at.
     commit: String,
     done: Vec<Done>,
-    /// The risk level `pr` computed for `commit`, which each code run records (37, design change 1).
-    risk: Option<&'static str>,
+    /// The risk level `pr` computed for `commit`, which each code run records (37, design change 1), and whether its
+    /// diff touches a high path outside the low patterns (37, design change 8).
+    risk: Option<(&'static str, bool)>,
 }
 
 /// Why the block records `skipped` wherever it runs, if it does: a runner not built yet, or `when=post-land`. It never
@@ -229,11 +230,12 @@ impl Ran {
         &self.commit
     }
 
-    /// Each code run records `risk` as the level of [`Self::commit`]'s diff. An intent reads it there and fetches
-    /// nothing (22, constraint 8); an integrity run names the vault's head, so it records none.
+    /// Each code run records `risk` as the level of [`Self::commit`]'s diff, and `security: true` when the diff
+    /// touches a high path outside the low patterns, which adds round one's security lens. An intent reads both
+    /// there and fetches nothing (22, constraint 8); an integrity run names the vault's head, so it records neither.
     #[must_use]
-    pub fn with_risk(self, level: &'static str) -> Self {
-        Self { risk: Some(level), ..self }
+    pub fn with_risk(self, level: &'static str, security: bool) -> Self {
+        Self { risk: Some((level, security)), ..self }
     }
 
     /// The writer, waited for up to [`LOCK_WAIT`]: the verdicts cost the whole run, so it waits longer than a plain
@@ -325,7 +327,7 @@ fn code_tree(vault: &Vault, repo: &Path) -> Result<(String, std::path::PathBuf),
 
 /// The run record's text (13, Run; 25, design change 5): the converted fields, then `ended`, the block's hash and
 /// the output's; the body is the verdict's reason and the output's last lines.
-fn record(owner: &Id, commit: &str, attempt: u32, d: &Done, risk: Option<&str>) -> String {
+fn record(owner: &Id, commit: &str, attempt: u32, d: &Done, risk: Option<(&str, bool)>) -> String {
     let mut fields: BTreeMap<String, Value> = BTreeMap::from([
         ("check".into(), d.check.attrs["name"].as_str().into()),
         // The block's kind, so a reader finds the integrity runs without parsing bodies (21, blocked).
@@ -341,8 +343,11 @@ fn record(owner: &Id, commit: &str, attempt: u32, d: &Done, risk: Option<&str>) 
     if let Some(evidence) = &d.evidence {
         fields.insert("evidence".into(), evidence.as_str().into());
     }
-    if let Some(risk) = risk {
+    if let Some((risk, security)) = risk {
         fields.insert("risk".into(), risk.into());
+        if security {
+            fields.insert("security".into(), true.into());
+        }
     }
     let mut links = BTreeMap::new();
     if !d.names.is_empty() {

@@ -1,15 +1,19 @@
 //! The row checks of `record` (15, record; 29 design change 6). A review holds the head it read and one findings
 //! table, and each row names a severity, a place in the diff of that head and what is wrong; a declined disposition
 //! says why. A review the responder cannot count or place is refused when it is written, not when it is answered. A
-//! `risk` row raises the issue's level (37, design change 2), so a misspelt one is refused too.
+//! `risk` row raises the issue's level (37, design change 2), so a misspelt one is refused too. A review names its round,
+//! lens and mode, which must be the head's (37, design change 6); a `verify` review gains `late`, its error rows
+//! outside the fix, and a late row is declined only with a follow-up issue (37, design change 7).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use bp_change::DispositionAs;
 use bp_change::risk::RISK_ROW;
+use bp_change::rounds::{self, Lens, Mode};
 use bp_read::inputs::{field, held};
-use bp_vault::{Code, Id, Index, Kind, Refusal};
+use bp_vault::{Code, Id, Index, Kind, Refusal, Vault};
+use serde_json::Value;
 
 use crate::claim::git;
 
@@ -19,29 +23,81 @@ const RULE: &str = "a review holds a `head:` line and one findings table; each r
 /// The lines of each file that the diff shows, by path.
 type Hunks = BTreeMap<String, Vec<(u64, u64)>>;
 
-/// Refuses a record whose rows fail their kind's check: a review's body, or a declined disposition with no reason.
+/// Refuses a record whose rows fail their kind's check: a review's body or round, or a declined disposition with no
+/// reason, or a late row's with no follow-up issue. Returns the fields the tool adds: a `verify` review's `late`.
 pub(crate) fn check(
+    vault: &Vault,
     index: &Index,
     kind: Kind,
     parent: Option<&Id>,
     given: &BTreeMap<&str, &str>,
     body: &str,
-) -> Result<(), Refusal> {
+) -> Result<BTreeMap<String, Value>, Refusal> {
     match kind {
-        Kind::Review => review(index, parent.expect("a review sits under an issue"), given["head"], body),
-        Kind::Disposition
-            if given["as"] == DispositionAs::Declined.as_str()
-                && given.get("reason").is_none_or(|r| r.trim().is_empty()) =>
-        {
-            let fix = "`reason` is required when as=declined: --field reason=\"<the issue, design or convention that \
-                       rules the finding out>\"";
-            Err(crate::record::schema("disposition reason".into(), fix.into()))
+        Kind::Review => review(vault, index, parent.expect("a review sits under an issue"), given, body),
+        Kind::Disposition if given["as"] == DispositionAs::Declined.as_str() => {
+            let reason = given.get("reason").map_or("", |r| r.trim());
+            if reason.is_empty() {
+                let fix = "`reason` is required when as=declined: --field reason=\"<the issue, design or convention \
+                           that rules the finding out>\"";
+                return Err(crate::record::schema("disposition reason".into(), fix.into()));
+            }
+            late(index, parent.expect("a disposition sits under a review"), given["finding"], reason)?;
+            Ok(BTreeMap::new())
         }
-        _ => Ok(()),
+        _ => Ok(BTreeMap::new()),
     }
 }
 
-fn review(index: &Index, issue: &Id, head: &str, body: &str) -> Result<(), Refusal> {
+/// A decline of a late row names its follow-up issue (37, design change 7): the session creates it under the same
+/// milestone, so the stamp waits on it with no new rule.
+fn late(index: &Index, review: &Id, finding: &str, reason: &str) -> Result<(), Refusal> {
+    let Some(header) = index.header(review.as_str())? else { return Ok(()) };
+    let n = finding.parse::<u64>().unwrap_or_default();
+    let late = header.get("late").and_then(Value::as_array).is_some_and(|l| l.iter().any(|v| v.as_u64() == Some(n)));
+    let issue = header.get("under").and_then(Value::as_str).unwrap_or_default();
+    if !late || bp_read::inputs::follow_up(index, issue, reason)?.is_some() {
+        return Ok(());
+    }
+    let fix = format!(
+        "finding {n} is a late error outside the fix: name its follow-up issue in the reason, as --field \
+         reason=\"follow-up <issue id>\"; the session creates it under {issue}'s milestone"
+    );
+    Err(crate::record::schema(format!("{review} disposition {n} reason"), fix))
+}
+
+/// The round, lens and mode a review of `head` must name: the head's round, `full` and a round-one lens at round
+/// one, `verify` after it (37, design change 6).
+fn round(reviews: &[rounds::Review], issue: &Id, head: &str, given: &BTreeMap<&str, &str>) -> Result<Mode, Refusal> {
+    let round = rounds::round_of(reviews, head);
+    let mode = rounds::mode(round);
+    if given["round"].parse() != Ok(round) || given["mode"] != mode.as_str() {
+        let fix = format!("{head} is round {round} of {issue}: --field round={round} --field mode={mode}");
+        return Err(crate::record::schema(format!("{issue} review round"), fix));
+    }
+    let verify = Lens::Verify.as_str();
+    match mode {
+        Mode::Full if given["lens"] == verify => {
+            let lenses: Vec<&str> = Lens::ALL.iter().map(|l| l.as_str()).filter(|l| *l != verify).collect();
+            let fix = format!("round one reads one lens per review: --field lens=<{}>", lenses.join("|"));
+            Err(crate::record::schema(format!("{issue} review lens"), fix))
+        }
+        Mode::Verify if given["lens"] != verify => {
+            let fix = format!("round {round} verifies the fix in one review: --field lens={verify}");
+            Err(crate::record::schema(format!("{issue} review lens"), fix))
+        }
+        _ => Ok(mode),
+    }
+}
+
+fn review(
+    vault: &Vault,
+    index: &Index,
+    issue: &Id,
+    given: &BTreeMap<&str, &str>,
+    body: &str,
+) -> Result<BTreeMap<String, Value>, Refusal> {
+    let head = given["head"];
     let refuse =
         |what: &str, fix: String| Refusal::new(Code::FindingInvalid, format!("{issue} review {what}"), RULE, fix);
     // The reviewer's text may shorten the sha or quote it; it still names this head.
@@ -65,6 +121,8 @@ fn review(index: &Index, issue: &Id, head: &str, body: &str) -> Result<(), Refus
         return Err(refuse(&format!("finding {}", n + 1), fix.into()));
     }
     let mut diff = None;
+    // Each error row's location, and whether it names a node, which no diff shows.
+    let mut errors = Vec::new();
     for (n, row) in table[2..].iter().enumerate().map(|(i, r)| (i + 1, r)) {
         let inner = row[1..].strip_suffix('|').unwrap_or(&row[1..]);
         let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
@@ -84,11 +142,15 @@ fn review(index: &Index, issue: &Id, head: &str, body: &str) -> Result<(), Refus
             return Err(refuse(&format!("finding {n}"), fix));
         }
         let at = cells[1].trim_matches('`');
-        if Id::parse(at).is_ok() && index.header(at)?.is_some() {
+        let node = Id::parse(at).is_ok() && index.header(at)?.is_some();
+        if rounds::is_error(severity) {
+            errors.push((n as u64, at, node));
+        }
+        if node {
             continue;
         }
         if diff.is_none() {
-            diff = Some(hunks(index, issue, head)?);
+            diff = Some(hunks(index, issue, None, head)?);
         }
         if !diff.as_ref().is_some_and(|h| inside(h, at)) {
             let fix = format!(
@@ -98,12 +160,28 @@ fn review(index: &Index, issue: &Id, head: &str, body: &str) -> Result<(), Refus
             return Err(refuse(&format!("finding {n}"), fix));
         }
     }
-    Ok(())
+    let reviews = bp_read::inputs::reviews(vault, index, issue.as_str())?;
+    let mut added = BTreeMap::new();
+    if round(&reviews, issue, head, given)? == Mode::Full {
+        return Ok(added);
+    }
+    // The fix diff is the diff from the head the round before read; an error row it does not show is late.
+    let Some(prior) = rounds::prior_head(&reviews, rounds::round_of(&reviews, head)).filter(|_| !errors.is_empty())
+    else {
+        return Ok(added);
+    };
+    let fix = hunks(index, issue, Some(prior), head)?;
+    let late: Vec<Value> =
+        errors.iter().filter(|(_, at, node)| *node || !inside(&fix, at)).map(|(n, ..)| (*n).into()).collect();
+    if !late.is_empty() {
+        added.insert("late".into(), Value::Array(late));
+    }
+    Ok(added)
 }
 
-/// The lines that `git diff <base> <head>` shows in the claim's worktree, with git's three lines of context: the new
-/// side of each file, the old side of a deleted one. Flags fix the format whatever the user's git config says.
-fn hunks(index: &Index, issue: &Id, head: &str) -> Result<Hunks, Refusal> {
+/// The lines that `git diff <base> <head>` shows in the claim's worktree, `base` else the claim's, with git's three
+/// lines of context: the new side of each file, the old side of a deleted one. Flags fix the format whatever the user's git config says.
+fn hunks(index: &Index, issue: &Id, base: Option<&str>, head: &str) -> Result<Hunks, Refusal> {
     let Some(claim) = held(index, issue)? else {
         let fix = format!(
             "{issue} holds no claim, so no diff places a row: cite a node id, or record the review on the issue after \
@@ -111,10 +189,8 @@ fn hunks(index: &Index, issue: &Id, head: &str) -> Result<Hunks, Refusal> {
         );
         return Err(Refusal::new(Code::FindingInvalid, format!("{issue} review"), RULE, fix));
     };
-    let (worktree, base) = (
-        field(&claim, "worktree").expect("a claim holds its worktree and base"),
-        field(&claim, "base").expect("a claim holds its worktree and base"),
-    );
+    let worktree = field(&claim, "worktree").expect("a claim holds its worktree and base");
+    let base = base.map_or_else(|| field(&claim, "base").expect("a claim holds its worktree and base"), str::to_string);
     let args = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--no-color", "--no-prefix", "-U3", &base, head];
     let text = git(Path::new(&worktree), &args)?;
     let mut out = Hunks::new();

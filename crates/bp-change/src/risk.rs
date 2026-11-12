@@ -293,6 +293,9 @@ pub struct Computed {
     pub level: Level,
     /// Each rule that set the level, in words: a path and its pattern, a line count, a package count.
     pub reasons: Vec<String>,
+    /// A changed path is high by its path and matches no low pattern, so round one adds the security lens (37, design
+    /// change 8). A test or a doc on a high path does not set it.
+    pub security: bool,
 }
 
 /// The level of a diff (36, section 1). High when a path holds a non-ASCII character, is under, at or above a
@@ -305,9 +308,10 @@ pub fn computed(diff: &[Changed], config: &Config) -> Computed {
     let limits = config.limits;
     let low_path = |path: &str| config.low.iter().any(|p| p.matches(path));
     let low = |c: &&Changed| c.paths().all(low_path);
-    let mut high = Vec::new();
+    let (mut high, mut security) = (Vec::new(), false);
     for path in diff.iter().flat_map(Changed::paths) {
         let folded = path.to_ascii_lowercase();
+        let before = high.len();
         if !path.is_ascii() {
             // A volume that folds case folds more than ASCII (U+017F opens as `s`), and bp holds no folding table.
             high.push(format!("non-ASCII path: {path}"));
@@ -319,6 +323,7 @@ pub fn computed(diff: &[Changed], config: &Config) -> Computed {
         } else if let Some(p) = config.high.iter().find(|p| p.matches_any_case(path)) {
             high.push(format!("{path} matches the high pattern {p}"));
         }
+        security |= high.len() > before && !low_path(path);
     }
     let outside: Vec<&Changed> = diff.iter().filter(|c| !low(c)).collect();
     high.extend(outside.iter().filter(|c| c.lines.is_none()).map(|c| format!("size unknown: {}", c.path)));
@@ -337,7 +342,7 @@ pub fn computed(diff: &[Changed], config: &Config) -> Computed {
         high.push(format!("{n} top-level directories change ({names}), more than packages {}", limits.packages));
     }
     if !high.is_empty() {
-        return Computed { level: Level::High, reasons: high };
+        return Computed { level: Level::High, reasons: high, security };
     }
     let total: u64 = diff.iter().filter_map(|c| c.lines).sum();
     let mut reasons = Vec::new();
@@ -356,9 +361,9 @@ pub fn computed(diff: &[Changed], config: &Config) -> Computed {
             "each changed path matches a low pattern, and {total} changed lines are under low_lines {}",
             limits.low_lines
         );
-        return Computed { level: Level::Low, reasons: vec![why] };
+        return Computed { level: Level::Low, reasons: vec![why], security };
     }
-    Computed { level: Level::Medium, reasons }
+    Computed { level: Level::Medium, reasons, security }
 }
 
 #[cfg(test)]
@@ -629,5 +634,20 @@ mod tests {
             ]
         );
         assert_eq!(numstat(""), []);
+    }
+
+    #[test]
+    fn security_reads_a_high_path_outside_the_low_patterns() {
+        let rules = config("high: [infra/]\nlow: [docs/, infra/tests/]\nlimits: {low_lines: 10, high_lines: 20}\n");
+        let at = |diff: &[Changed]| {
+            let c = computed(diff, &rules);
+            (c.level, c.security)
+        };
+        assert_eq!(at(&[change("infra/main.tf", 1, 0)]), (Level::High, true));
+        assert_eq!(at(&[change(".github/workflows/ci.yml", 1, 0)]), (Level::High, true), "a built-in high path");
+        assert_eq!(at(&[change("infra/tests/a.rs", 1, 0)]), (Level::High, false), "a test on a high path");
+        assert_eq!(at(&[change("src/a.rs", 30, 0)]), (Level::High, false), "high by size, not by a path");
+        assert_eq!(at(&[change("src/a.rs", 1, 0)]), (Level::Medium, false));
+        assert_eq!(at(&[change("docs/a.md", 30, 0), change("infra/x", 1, 0)]), (Level::High, true));
     }
 }

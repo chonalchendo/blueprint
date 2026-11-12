@@ -110,6 +110,22 @@ impl World {
     }
 }
 
+impl World {
+    /// `bp record review` at `head` with `round`, `lens` and the mode of the round, and one row per item of `rows`.
+    fn review(&self, head: &str, round: u64, lens: &str, rows: &[&str]) -> Value {
+        let table = format!("head: {head}\n\n| severity | location | finding |\n|---|---|---|\n{}\n", rows.join("\n"));
+        let file = self.t.path().join("review.md");
+        std::fs::write(&file, table).unwrap();
+        let (head, round) = (format!("head={head}"), format!("round={round}"));
+        let (lens, mode) = (format!("lens={lens}"), if round == "round=1" { "mode=full" } else { "mode=verify" });
+        let fields = ["--field", &head, "--field", &round, "--field", &lens, "--field", mode];
+        let (exit, v) =
+            self.bp(&[&["record", "review", ISSUE][..], &fields, &["--body-file", file.to_str().unwrap()]].concat());
+        assert_eq!(exit, Some(0), "{v}");
+        v
+    }
+}
+
 fn commit_in(dir: &Path, files: &[(&str, &str)]) -> String {
     for (rel, text) in files {
         write(dir, rel, text);
@@ -473,13 +489,70 @@ fn a_risk_row_raises_the_level_and_needs_no_disposition() {
     let file = w.t.path().join("review.md");
     std::fs::write(&file, body).unwrap();
     let field = format!("head={head}");
-    let (exit, review) = w.bp(&["record", "review", ISSUE, "--field", &field, "--body-file", file.to_str().unwrap()]);
+    let mut args = vec![
+        "record",
+        "review",
+        ISSUE,
+        "--field",
+        &field,
+        "--field",
+        "round=1",
+        "--field",
+        "lens=conformance",
+        "--field",
+        "mode=full",
+        "--body-file",
+    ];
+    args.push(file.to_str().unwrap());
+    let (exit, review) = w.bp(&args);
     assert_eq!(exit, Some(0), "{review}");
     let id = review["id"].as_str().unwrap();
     let v = w.risk();
     assert_eq!(pick(&v), json!(["high", "low", "low"]), "{v}");
     assert_eq!(v["raised_by"], json!([id]));
     assert_eq!(v["reasons"], json!([format!("review {id} holds a risk row")]));
+    // An edit by hand of the committed record cannot drop the raise: the level reads the review as first committed
+    // (37, design change 2; review of #95, finding 7).
+    let path = w.vault.path().join(format!("{id}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("| risk |", "| warn |")).unwrap();
+    git(w.vault.path(), &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "lower it by hand"]);
+    let v = w.risk();
+    assert_eq!((v["level"].as_str(), &v["raised_by"]), (Some("high"), &json!([id])), "{v}");
+}
+
+#[test]
+fn a_medium_issue_with_an_error_at_its_cap_reads_high() {
+    for (row, late, want) in [
+        ("| error | src/a.rs:1 | Still wrong. |", json!([]), "high"),
+        ("| error | src/c.rs:1 | Wrong before the fix. |", json!([1]), "medium"),
+    ] {
+        let mut w = world(None, Some("low: [docs/]\n"));
+        w.cut();
+        let one = w.commit(&[("src/a.rs", "fn a() {}\n"), ("src/c.rs", "fn c() {}\n")]);
+        w.review(&one, 1, "conformance", &["| error | src/a.rs:1 | Wrong. |"]);
+        w.review(&one, 1, "failure-paths", &[]);
+        assert_eq!(w.risk()["level"], "medium", "round one raises nothing");
+        let two = w.commit(&[("src/a.rs", "fn a() { 1; }\n")]);
+        // The fix diff shows src/a.rs, so an error there is the fix's; src/c.rs is outside it, so its error is late.
+        assert_eq!(w.review(&two, 2, "verify", &[row])["late"], late);
+        let v = w.risk();
+        assert_eq!(v["level"], want, "{v}");
+        let cap = "round cap: the review of round 2 holds an error row at or past the cap of medium";
+        assert_eq!(v["reasons"].as_array().unwrap().iter().any(|r| r == cap), want == "high", "{v}");
+        // A hand edit that turns the error into a warn and drops `late` changes nothing: the first commit counts.
+        let id = w.bp(&["list", "review", "--under", ISSUE]).1["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|r| r["id"].as_str().filter(|i| i.contains(&two)).map(str::to_string))
+            .unwrap();
+        let path = w.vault.path().join(format!("{id}.md"));
+        let text = std::fs::read_to_string(&path).unwrap().replace("| error |", "| warn |").replace("late: [1]\n", "");
+        std::fs::write(&path, text).unwrap();
+        git(w.vault.path(), &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "soften it by hand"]);
+        assert_eq!(w.risk()["level"], want, "the edit is ignored");
+    }
 }
 
 #[test]

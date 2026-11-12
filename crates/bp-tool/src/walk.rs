@@ -157,11 +157,16 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     Ok(with(slice, pull_request, forge_error))
 }
 
-/// The latest record of each kind the action answers, latest by its time field, as `index.records` orders them.
+/// The latest record of each kind the action answers, latest by its time field, as `index.records` orders them. A
+/// review brings each other review of its head: respond answers one per lens (37, design change 8).
 fn answered(index: &Index, id: &Id, action: Action) -> Result<Vec<Value>, Refusal> {
     let mut records = Vec::new();
     for kind in action.records() {
-        if let Some(r) = index.records(id.as_str(), *kind)?.pop() {
+        let mut all = index.records(id.as_str(), *kind)?;
+        let Some(last) = all.pop() else { continue };
+        let head = last.header.get("head").filter(|_| *kind == Kind::Review).cloned();
+        let lenses = all.into_iter().filter(|r| head.is_some() && r.header.get("head") == head.as_ref());
+        for r in lenses.chain([last]) {
             records.push(json!({ "id": r.id, "kind": kind, "header": r.header, "body": r.body }));
         }
     }

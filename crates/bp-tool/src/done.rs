@@ -104,15 +104,21 @@ fn escalated(index: &Index, id: &Id) -> Result<bool, Refusal> {
     Ok(intents::latest_claim(&claims).is_some_and(|c| c.escalated))
 }
 
-/// Every finding of the latest review has a disposition, matched by its index, and the head moved if one is `fixed`.
+/// Every finding of each review at the latest reviewed head, one per lens (37, design change 8), has a disposition,
+/// matched by its index, and the head moved if one is `fixed`.
 fn responded(root: &Path, index: &Index, id: &Id, forge_age: &mut Option<i64>) -> Result<bool, Refusal> {
-    let (Some((pr, _)), Some(review)) =
-        (open_head(root, index, id, forge_age)?, index.records(id.as_str(), Kind::Review)?.pop())
+    let reviews = index.records(id.as_str(), Kind::Review)?;
+    let (Some((pr, _)), Some(head)) =
+        (open_head(root, index, id, forge_age)?, reviews.last().map(|r| field(r, "head")))
     else {
         return Ok(false);
     };
-    let (open, fixed) = bp_read::inputs::findings(index, &review)?;
-    Ok(open.is_empty() && !(fixed && field(&review, "head") == Some(pr)))
+    let (mut answered, mut fixed) = (true, false);
+    for review in reviews.iter().filter(|r| field(r, "head") == head) {
+        let (open, any) = bp_read::inputs::findings(index, review)?;
+        (answered, fixed) = (answered && open.is_empty(), fixed || any);
+    }
+    Ok(answered && !(fixed && head == Some(pr)))
 }
 
 /// The head of the issue's open pull request while a claim is held, and the claim's worktree when this machine has

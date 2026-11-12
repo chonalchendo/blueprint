@@ -349,7 +349,9 @@ impl Sandbox {
         let mut c = self.command("bp", &self.code());
         c.env("BP_ROLE", "session").env("BP_SESSION", "eval");
         let status = c
-            .args(["record", "review", &self.issue, "--field", &field, "--field", "role=reviewer", "--body-file"])
+            .args(["record", "review", &self.issue, "--field", &field, "--field", "role=reviewer"])
+            // An eval reads one head once: round one, the conformance lens (37, design change 8).
+            .args(["--field", "round=1", "--field", "lens=conformance", "--field", "mode=full", "--body-file"])
             .arg(&file)
             .arg("--json")
             .stdout(Stdio::null())

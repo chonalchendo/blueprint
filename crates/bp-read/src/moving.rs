@@ -485,7 +485,8 @@ mod tests {
         );
         assert_eq!(row("0004.wait").wait.as_deref(), Some("waits for projects/bp/issues/0002.held"));
         let review = row("0005.review");
-        assert_eq!((review.head.as_deref(), review.wait.as_deref()), (Some("checks pending"), Some("review dispatch")));
+        let lenses = "review dispatch: round 1: missing lenses: conformance, failure-paths";
+        assert_eq!((review.head.as_deref(), review.wait.as_deref()), (Some("checks pending"), Some(lenses)));
         assert_eq!(review.holder.as_deref(), Some("worker"));
         let milestone = row("milestones/m");
         assert_eq!((milestone.kind.as_str(), milestone.head.as_deref()), ("milestone", None));

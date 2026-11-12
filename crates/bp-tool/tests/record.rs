@@ -10,6 +10,8 @@ const DESIGN: &str = "projects/bp/designs/system";
 const MILESTONE: &str = "projects/bp/milestones/m";
 const ISSUE: &str = "projects/bp/issues/i";
 const LEARNING: &str = "shared/learnings/l";
+/// The fields of round one's conformance review (37, design change 6).
+const ONE: [&str; 6] = ["--field", "round=1", "--field", "lens=conformance", "--field", "mode=full"];
 
 fn git(root: &Path, args: &[&str]) -> String {
     let out = Std::new("git").arg("-C").arg(root).args(args).output().unwrap();
@@ -78,8 +80,11 @@ fn each_kind_writes_one_file_at_its_path() {
             vec!["delta", DESIGN, "--field", &ms, "--body-file", body.to_str().unwrap()],
             "projects/bp/designs/system/deltas/2026-10-19T10-00-00Z",
         ),
-        (vec!["review", ISSUE, "--field", &h, "--field", "role=reviewer", "--body-file", &r], review.as_str()),
-        (vec!["review", ISSUE, "--field", &h, "--body-file", &r], &format!("{review}-2")),
+        (
+            [&["review", ISSUE, "--field", &h][..], &ONE, &["--field", "role=reviewer", "--body-file", &r]].concat(),
+            review.as_str(),
+        ),
+        ([&["review", ISSUE, "--field", &h][..], &ONE, &["--body-file", &r]].concat(), &format!("{review}-2")),
         (
             vec![
                 "disposition",
@@ -151,7 +156,8 @@ fn an_identity_refuses_a_second_and_a_retry_changes_nothing() {
     let review = format!("{ISSUE}/reviews/{head}");
     let found = tempfile::tempdir().unwrap();
     let r = review_body(found.path(), head);
-    let (exit, _) = bp(root, &["record", "review", ISSUE, "--field", &format!("head={head}"), "--body-file", &r]);
+    let h = format!("head={head}");
+    let (exit, _) = bp(root, &[&["record", "review", ISSUE, "--field", &h][..], &ONE, &["--body-file", &r]].concat());
     assert_eq!(exit, Some(0));
     let fixed = ["record", "disposition", &review, "--field", "finding=1", "--field", "as=fixed"];
     let handoff = ["record", "handoff", "projects/bp/project", "--field", "session=8b8b7784-352c"];
@@ -180,7 +186,7 @@ fn a_record_cites_only_what_head_holds() {
     std::fs::write(&ghost, "---\nkind: issue\ntitle: G\nstatus: open\n---\n").unwrap();
     let head = "head=0123456789abcdef0123456789abcdef01234567";
     for args in [
-        vec!["review", "projects/bp/issues/ghost", "--field", head],
+        [&["review", "projects/bp/issues/ghost", "--field", head][..], &ONE].concat(),
         vec!["evidence", LEARNING, "--field", "outcome=helped", "--field", "issue=projects/bp/issues/ghost"],
     ] {
         let mut a = vec!["record"];
@@ -260,9 +266,13 @@ fn record_refuses_what_its_kind_does_not_hold() {
         ),
         (vec!["delta", DESIGN, "--field", &ms], 2, "schema_invalid"),
         (vec!["delta", DESIGN, "--field", &ms, "--field", "state=accepted", "--body-file", b], 2, "schema_invalid"),
-        (vec!["review", ISSUE, "--field", "head=../x"], 2, "schema_invalid"),
-        (vec!["review", ISSUE, "--field", "head=abcdef0"], 2, "schema_invalid"),
-        (vec!["review", ISSUE, "--field", "head=0123456789ABCDEF0123456789ABCDEF01234567"], 2, "schema_invalid"),
+        ([&["review", ISSUE, "--field", "head=../x"][..], &ONE].concat(), 2, "schema_invalid"),
+        ([&["review", ISSUE, "--field", "head=abcdef0"][..], &ONE].concat(), 2, "schema_invalid"),
+        (
+            [&["review", ISSUE, "--field", "head=0123456789ABCDEF0123456789ABCDEF01234567"][..], &ONE].concat(),
+            2,
+            "schema_invalid",
+        ),
         (vec!["evidence", LEARNING, "--field", "outcome=helped", "--external", ""], 4, "usage"),
         (vec!["evidence", LEARNING, "--field", "=x"], 4, "usage"),
         (
