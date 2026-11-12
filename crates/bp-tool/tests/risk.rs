@@ -234,6 +234,11 @@ fn the_level_is_of_the_higher_of_the_local_and_the_pushed_head() {
     let v = w.risk();
     assert_eq!(pick(&v), json!(["high", "low", "high"]), "{v}");
     assert_eq!(v["head"].as_array().unwrap().first(), Some(&json!(local)), "{v}");
+    // A tie keeps the local branch's reasons.
+    git(&wt, &["push", "-q", "-f", "origin", "HEAD:bp/a"]);
+    git(&wt, &["reset", "-q", "--hard", "HEAD~1"]);
+    w.commit(&[("infra/c.tf", "z\n")]);
+    assert_eq!(w.risk()["reasons"], json!(["infra/c.tf matches the high pattern infra/"]));
 }
 
 #[test]
