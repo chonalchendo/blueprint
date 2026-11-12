@@ -16,6 +16,7 @@ pub(crate) fn check(verb: &Verb) -> Result<(), Refusal> {
         Verb::List(_) => "list",
         Verb::Search(_) => "search",
         Verb::Walk(_) => "walk",
+        Verb::Risk(_) => "risk",
         Verb::Set(_) => "set",
         Verb::Create(_) => "create",
         Verb::Link(_) => "link",
