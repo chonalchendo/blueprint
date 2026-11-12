@@ -89,17 +89,24 @@ impl Pattern {
         }
     }
 
-    /// [`Self::matches`] with ASCII case folded on both sides. A high pattern matches so: a case-folding volume, as
-    /// macOS's default, checks `.Claude/x` out as `.claude/x`, so a case trick can only raise the level.
+    /// [`Self::matches`] with ASCII case folded on both sides, and a `Dir` that also holds its own name and each
+    /// parent's. A high pattern matches so: a case-folding volume, as macOS's default, checks `.Claude/x` out as
+    /// `.claude/x`, and a link named `infra` moves all of `infra/`, so a trick can only raise the level.
     pub fn matches_any_case(&self, path: &str) -> bool {
-        let fold = |p: &String| p.to_ascii_lowercase();
-        let folded = match self {
-            Self::Dir(p) => Self::Dir(fold(p)),
-            Self::Ext(p) => Self::Ext(fold(p)),
-            Self::Exact(p) => Self::Exact(fold(p)),
-        };
-        folded.matches(&path.to_ascii_lowercase())
+        let path = path.to_ascii_lowercase();
+        match self {
+            Self::Dir(p) => touches(&p.to_ascii_lowercase(), &path),
+            Self::Ext(p) => Self::Ext(p.to_ascii_lowercase()).matches(&path),
+            Self::Exact(p) => p.to_ascii_lowercase() == path,
+        }
     }
+}
+
+/// Whether `path` is under the directory `dir`, which ends in `/`, is its name, or is the name of a parent. A link or
+/// a file at such a name points the whole directory elsewhere, so it is a change to the directory.
+fn touches(dir: &str, path: &str) -> bool {
+    let at = format!("{path}/");
+    at.starts_with(dir) || dir.starts_with(&at)
 }
 
 impl fmt::Display for Pattern {
@@ -287,11 +294,12 @@ pub struct Computed {
     pub reasons: Vec<String>,
 }
 
-/// The level of a diff (36, section 1). High when a path is under a built-in high path or matches a high pattern
-/// (each in any ASCII case), when a path outside the low patterns has a size git does not count, when the lines
-/// outside the low patterns exceed `high_lines`, or when more packages than `packages` change. Low only when each
-/// path matches a low pattern and the diff changes fewer than `low_lines` lines. Medium otherwise. A package is a
-/// top-level directory that holds a changed path outside the low patterns; a file at the top is in no package.
+/// The level of a diff (36, section 1). High when a path holds a non-ASCII character, is under, at or above a
+/// built-in high path or matches a high pattern (each in any ASCII case), when a path outside the low patterns has a
+/// size git does not count, when the lines outside the low patterns exceed `high_lines`, or when more packages than
+/// `packages` change. Low only when each path matches a low pattern and the diff changes fewer than `low_lines`
+/// lines. Medium otherwise. A package is a top-level directory that holds a changed path outside the low patterns; a
+/// file at the top is in no package.
 pub fn computed(diff: &[Changed], config: &Config) -> Computed {
     let limits = config.limits;
     let low_path = |path: &str| config.low.iter().any(|p| p.matches(path));
@@ -299,10 +307,14 @@ pub fn computed(diff: &[Changed], config: &Config) -> Computed {
     let mut high = Vec::new();
     for path in diff.iter().flat_map(Changed::paths) {
         let folded = path.to_ascii_lowercase();
-        if folded == RISK_FILE {
+        if !path.is_ascii() {
+            // A volume that folds case folds more than ASCII (U+017F opens as `s`), and bp holds no folding table.
+            high.push(format!("non-ASCII path: {path}"));
+        } else if folded == RISK_FILE {
             high.push(format!("{path} is the risk file, and an edit to the gate is high"));
-        } else if let Some(p) = BUILT_IN_HIGH.iter().find(|p| folded.starts_with(*p)) {
-            high.push(format!("{path} is under the built-in high path {p}"));
+        } else if let Some(p) = BUILT_IN_HIGH.iter().find(|p| touches(p, &folded)) {
+            let how = if folded.starts_with(*p) { "is under" } else { "is at or above" };
+            high.push(format!("{path} {how} the built-in high path {p}"));
         } else if let Some(p) = config.high.iter().find(|p| p.matches_any_case(path)) {
             high.push(format!("{path} matches the high pattern {p}"));
         }
@@ -433,8 +445,27 @@ mod tests {
                 let c = computed(&[change(path, 1, 0)], rules);
                 assert_eq!(c.reasons, [format!("{path} is under the built-in high path {under}")], "{rules:?}");
             }
+            // A link or a file at a gate directory's name, or at a parent's, moves the directory: a symlink `.codex`.
+            for (path, at) in [
+                (".codex", ".codex/"),
+                (".Agents", ".agents/"),
+                (".claude", ".claude/"),
+                (".bp", ".bp/"),
+                (".github/workflows", ".github/workflows/"),
+                (".GitHub", ".github/workflows/"),
+            ] {
+                let c = computed(&[change(path, 1, 0)], rules);
+                assert_eq!(c.reasons, [format!("{path} is at or above the built-in high path {at}")], "{rules:?}");
+            }
         }
-        for near in ["bp/risk.yml", "x/.bp/risk.yml", ".github/dependabot.yml", "x/.claude/a.json", ".claude.json"] {
+        for near in [
+            "bp/risk.yml",
+            "x/.bp/risk.yml",
+            ".github/dependabot.yml",
+            "x/.claude/a.json",
+            ".claude.json",
+            ".codex.json",
+        ] {
             assert_eq!(computed(&[change(near, 1, 0)], &lenient).level, Level::Low, "{near} is not the gate's");
         }
         assert_eq!(computed(&[], &none).level, Level::Low, "an empty diff edits no file");
@@ -442,16 +473,39 @@ mod tests {
 
     #[test]
     fn a_case_variant_matches_a_high_pattern_and_never_a_low_one() {
-        let rules = config("high: [Infra/, '*.TF', Cargo.toml]\nlow: [docs/, '*.md']\n");
+        let rules = config("high: [Infra/, deploy/prod/, '*.TF', Cargo.toml]\nlow: [docs/, '*.md', infra.md]\n");
         let at = |path: &str| computed(&[change(path, 1, 0)], &rules);
-        for (path, pattern) in
-            [("infra/a", "Infra/"), ("INFRA/a", "Infra/"), ("x/a.tf", "*.TF"), ("CARGO.TOML", "Cargo.toml")]
-        {
+        for (path, pattern) in [
+            ("infra/a", "Infra/"),
+            ("INFRA/a", "Infra/"),
+            ("x/a.tf", "*.TF"),
+            ("CARGO.TOML", "Cargo.toml"),
+            // A link at the directory's name, or at a parent's, points the directory elsewhere.
+            ("infra", "Infra/"),
+            ("INFRA", "Infra/"),
+            ("deploy/prod", "deploy/prod/"),
+            ("deploy", "deploy/prod/"),
+        ] {
             assert_eq!(at(path).reasons, [format!("{path} matches the high pattern {pattern}")]);
         }
+        assert_eq!(at("infra.md").level, Level::Low, "a name that only starts as the directory's is not it");
         assert_eq!(at("Docs/a.txt").level, Level::Medium, "a low pattern is exact");
         assert_eq!(at("Docs/a.MD").level, Level::Medium, "a low suffix is exact");
         assert_eq!(at("docs/a.txt").level, Level::Low);
+    }
+
+    #[test]
+    fn a_non_ascii_path_is_high() {
+        // APFS opens U+017F (long s) as `s` and U+212A (Kelvin sign) as `k`: `\u{17f}ecrets/` is `secrets/` on macOS.
+        let rules = config("high: [secrets/]\nlow: [docs/, '*.md']\n");
+        for path in
+            ["\u{17f}ecrets/prod.env", ".agent\u{17f}/a.md", ".github/wor\u{212a}flows/ci.yml", "docs/\u{e9}.md"]
+        {
+            let c = computed(&[change(path, 1, 0)], &rules);
+            assert_eq!((c.level, c.reasons), (Level::High, vec![format!("non-ASCII path: {path}")]));
+        }
+        let c = computed(&[renamed("\u{17f}ecrets/a", "docs/a.md")], &rules);
+        assert_eq!(c.reasons, ["non-ASCII path: \u{17f}ecrets/a"], "the old path of a rename counts");
     }
 
     #[test]

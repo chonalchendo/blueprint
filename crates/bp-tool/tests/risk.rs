@@ -215,6 +215,45 @@ fn the_gates_own_paths_are_high_with_no_risk_file() {
 }
 
 #[test]
+fn a_link_named_as_a_high_directory_is_high() {
+    let mut w = world(Some("low"), Some("high: [infra/]\nlow: [docs/]\n"));
+    w.cut();
+    let wt = w.worktree.clone().unwrap();
+    write(&wt, "docs/x/settings.json", "{\"hooks\":{}}\n");
+    for link in [".codex", ".agents", "infra"] {
+        std::os::unix::fs::symlink("docs/x", wt.join(link)).unwrap();
+    }
+    w.commit(&[]);
+    let v = w.risk();
+    assert_eq!(pick(&v), json!(["high", "low", "high"]), "{v}");
+    assert_eq!(
+        v["reasons"],
+        json!([
+            ".agents is at or above the built-in high path .agents/",
+            ".codex is at or above the built-in high path .codex/",
+            "infra matches the high pattern infra/"
+        ])
+    );
+}
+
+#[test]
+fn a_non_ascii_path_is_high() {
+    let mut w = world(Some("low"), Some("high: [secrets/]\nlow: [docs/]\n"));
+    w.push_master(&[("secrets/prod.env", "k\n")]);
+    w.cut();
+    // APFS opens `\u{17f}ecrets/` as `secrets/`, so the tree gets the path by hand, as an agent's index would.
+    let wt = w.worktree.clone().unwrap();
+    let blob = w.t.path().join("evil");
+    std::fs::write(&blob, "evil\n").unwrap();
+    let blob = git(&wt, &["hash-object", "-w", blob.to_str().unwrap()]).trim().to_string();
+    git(&wt, &["update-index", "--add", "--cacheinfo", &format!("100644,{blob},\u{17f}ecrets/prod.env")]);
+    git(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fold"]);
+    let v = w.risk();
+    assert_eq!(pick(&v), json!(["high", "low", "high"]), "{v}");
+    assert_eq!(v["reasons"], json!(["non-ASCII path: \u{17f}ecrets/prod.env"]));
+}
+
+#[test]
 fn the_level_is_of_the_higher_of_the_local_and_the_pushed_head() {
     let mut w = world(Some("low"), Some("high: [infra/]\nlow: [docs/]\n"));
     w.cut();
