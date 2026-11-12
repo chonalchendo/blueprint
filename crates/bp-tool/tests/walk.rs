@@ -269,6 +269,23 @@ fn review_and_respond_read_the_open_pull_request_head() {
 }
 
 #[test]
+fn respond_needs_no_disposition_for_a_risk_row() {
+    let d = vault();
+    let forge = tempfile::tempdir().unwrap();
+    let pr = r#"[{"number":1,"headRefName":"bp/0001.seed","headRefOid":"aaaa"}]"#;
+    write(forge.path(), "open-prs.json", pr);
+    let claim = format!("---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n");
+    write(d.path(), &format!("{SEED}/claims/c.md"), &claim);
+    let table = "| severity | location | finding |\n|---|---|---|\n| risk | a | raise |\n| `risk` | b | raise |\n| error | c | x |\n";
+    let review = format!("{SEED}/reviews/aaaa");
+    write(d.path(), &format!("{review}.md"), &format!("---\nkind: review\nunder: {SEED}\nhead: aaaa\n---\n\n{table}"));
+    assert_eq!(done(d.path(), Some(forge.path()), SEED, "respond"), false, "the error row has no disposition");
+    let text = format!("---\nkind: disposition\nunder: {review}\nfinding: 3\nas: declined\n---\n");
+    write(d.path(), &format!("{review}/dispositions/3.md"), &text);
+    assert_eq!(done(d.path(), Some(forge.path()), SEED, "respond"), true, "a risk row only raises the level");
+}
+
+#[test]
 fn a_stop_reads_the_vault_snapshot_and_never_calls_gh() {
     let d = vault();
     let claim = format!("---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n");

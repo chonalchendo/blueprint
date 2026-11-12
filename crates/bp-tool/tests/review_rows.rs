@@ -118,6 +118,19 @@ fn refuses_an_empty_finding_row() {
 }
 
 #[test]
+fn refuses_a_misspelt_risk_row() {
+    let w = world();
+    for severity in ["Risk", "RISK", "**risk**", "risk:"] {
+        let fix =
+            w.refused(ISSUE, &w.body(&["| risk | src/a.rs:2 | Auth. |", &format!("| {severity} | src/a.rs:1 | X. |")]));
+        assert_eq!(fix, format!("row 2's severity is `{severity}`: write `risk`, in lower case, to raise the level"));
+    }
+    let rows = ["| `risk` | src/a.rs:1 | It reads a secret. |", "| major | src/a.rs:2 | A past review's word. |"];
+    let (exit, v) = w.review(ISSUE, &w.body(&rows));
+    assert_eq!(exit, Some(0), "{v}");
+}
+
+#[test]
 fn refuses_a_second_table() {
     let w = world();
     let rows = ["| warn | src/a.rs:2 | Fine. |", "|---|---|---|", "| warn | src/a.rs:3 | Fine. |"];
