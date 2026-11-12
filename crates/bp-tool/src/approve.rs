@@ -1,0 +1,414 @@
+//! `bp approve <issue>` and `bp lower <issue> <level>`: the human's signed acts on a pull request head (37, design
+//! change 4). Each reads the head from the forge, as `land` does, signs the act with the human's key and writes one
+//! record under the issue: `approvals/<head>` or `lowerings/<head>`. A gate reads a record only through [`approved`]
+//! or [`lowered`], which rebuild the message from the head they test and verify the signature against the signer that
+//! origin's `.bp/risk.yml` names. A hand-written record, a copied signature or a changed field does not verify.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use bp_forge::{Gh, PullRequest};
+use bp_read::snapshot::clone_of;
+use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
+use clap::Args;
+use serde_json::{Value, json};
+
+use crate::signed::{Act, armour, in_agent, is_sha, sign, signer, verify};
+use crate::{Wrote, node_id, subject};
+
+/// `bp approve <issue> [--key <path>]`.
+#[derive(Args)]
+pub struct Approve {
+    /// The issue whose open pull request the human approves at its current head.
+    pub issue: String,
+    /// The private key that signs; you type its passphrase at the prompt. Default `~/.ssh/bp_human`.
+    #[arg(long)]
+    pub key: Option<PathBuf>,
+}
+
+/// `bp lower <issue> <level> --reason <why> [--key <path>]`.
+#[derive(Args)]
+pub struct Lower {
+    /// The issue whose risk level the human lowers at its pull request's current head.
+    pub issue: String,
+    /// The level in force at that head.
+    #[arg(value_parser = ["low", "medium"])]
+    pub level: String,
+    /// Why the level is lower, in one line.
+    #[arg(long)]
+    pub reason: String,
+    /// The private key that signs; you type its passphrase at the prompt. Default `~/.ssh/bp_human`.
+    #[arg(long)]
+    pub key: Option<PathBuf>,
+}
+
+pub(crate) fn approve(cwd: &Path, a: &Approve) -> Result<Wrote, Refusal> {
+    act(cwd, &a.issue, a.key.as_deref(), Kind::Approval, &[])
+}
+
+pub(crate) fn lower(cwd: &Path, l: &Lower) -> Result<Wrote, Refusal> {
+    if l.reason.trim().is_empty() || l.reason.contains(['\n', '\r']) {
+        return Err(Refusal::usage("--reason", "give the reason as one line of text"));
+    }
+    act(cwd, &l.issue, l.key.as_deref(), Kind::Lowering, &[("level", &l.level), ("reason", l.reason.trim())])
+}
+
+/// The verb of a signed record's kind.
+fn verb(kind: Kind) -> &'static str {
+    if kind == Kind::Approval { "approve" } else { "lower" }
+}
+
+/// One signed act of `kind` on the issue's open pull request at its head; a valid record of the same act at that head
+/// is a repeat.
+fn act(cwd: &Path, issue: &str, key: Option<&Path>, kind: Kind, more: &[(&str, &str)]) -> Result<Wrote, Refusal> {
+    let verb = verb(kind);
+    let role = crate::set::human(format!("{verb} {issue}"))?;
+    node_id(issue)?;
+    let vault = Vault::discover(cwd)?;
+    let index = Index::open(&vault)?;
+    let id = subject(&index, issue)?;
+    if !Kind::Issue.fits(&id) {
+        return Err(Refusal::usage(id.as_str(), format!("bp {verb} takes an issue id: bp list issue")));
+    }
+    let top = clone_of(cwd, &index, id.project().unwrap_or_default())?;
+    crate::claim::git(&top, &["fetch", "-q", "origin"])?;
+    let branch = crate::claim::branch(&id);
+    let gh = Gh::new(&top);
+    let Some(pr) = gh.prs_for_head(&branch)?.into_iter().filter(PullRequest::is_open).max_by_key(|p| p.number) else {
+        return Err(Refusal::new(
+            Code::ApprovalMissing,
+            id.as_str(),
+            "a signed act names a pull request and its head (37, design change 4)",
+            format!("{branch} has no open pull request; the worker runs bp pr {id}, then rerun"),
+        ));
+    };
+    let head = pr.head_ref_oid.as_str();
+    // The head names the record's file and a line of the signed message, so a slash or a newline from the forge
+    // would move the one and add a field to the other.
+    if !is_sha(head) {
+        return Err(Refusal::failed(
+            format!("gh pr list --head {branch}"),
+            format!("the forge gave head {head:?}, not a full commit sha; fix gh or the pull request, then rerun"),
+        ));
+    }
+    let signer = signer(&top)?;
+    if in_agent(&signer) {
+        return Err(Refusal::new(
+            Code::KeyInAgent,
+            signer,
+            "a key loaded in an ssh-agent signs with no passphrase, so an agent session could use it (37, design \
+             change 4)",
+            format!("ssh-add -d <the key's .pub file>, then rerun bp {verb} {id}"),
+        ));
+    }
+    let act = Act { verb, node: &id, pull_request: pr.number, head, more };
+    let message = act.message();
+    if let Some(r) = index.records(id.as_str(), kind)?.iter().find(|r| holds(r, &message, &signer)) {
+        return Ok(Wrote::Already(json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number })));
+    }
+    drop(index);
+    let key = match key {
+        Some(k) => k.to_path_buf(),
+        None => Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(".ssh/bp_human"),
+    };
+    // The passphrase prompt names no act, so the human reads what the key signs first.
+    eprint!("bp {verb} signs:\n{message}");
+    let signature = sign(&message, &key)?;
+    if !verify(&message, &signature, &signer)? {
+        return Err(Refusal::new(
+            Code::SignatureInvalid,
+            key.display().to_string(),
+            "bp trusts a human act only with a signature by the key that .bp/risk.yml names (37, design change 4)",
+            format!("the key at {} is not the signer; name the signer's private key with --key <path>", key.display()),
+        ));
+    }
+    let writer = vault.writer()?;
+    writer.clean([&id])?;
+    // A record already at this head that does not verify stays; the valid one takes the next key.
+    let record = crate::record::free(&vault.root, &format!("{id}/{}/{head}", kind.dir()));
+    let at = crate::clock::instant(crate::clock::now()?);
+    let mut fields: Vec<(&str, Value)> = vec![("head", head.into()), ("pull_request", pr.number.into())];
+    fields.extend(more.iter().map(|(k, v)| (*k, Value::from(*v))));
+    fields.push(("at", at.into()));
+    let text = record_text(kind, &id, fields, &signature);
+    let changes = BTreeMap::from([(record.clone(), text)]);
+    let written = writer.commit(verb, role.as_str(), &format!("{verb} {id}"), &changes)?;
+    Ok(Wrote::Changed(json!({
+        "id": record,
+        "issue": id,
+        "head": head,
+        "pull_request": pr.number,
+        "commit": written.commit,
+        "findings": written.findings,
+    })))
+}
+
+/// A signed record's file: its header fields, then the armoured signature as its one section.
+pub(crate) fn record_text(kind: Kind, issue: &Id, fields: Vec<(&str, Value)>, signature: &str) -> String {
+    let header = crate::stamp::record(kind, issue, &[], fields);
+    format!("{header}\n## Signature\n\n```\n{}\n```\n", signature.trim_end())
+}
+
+/// The record's signature verifies `message` by `signer`.
+fn holds(r: &Record, message: &str, signer: &str) -> bool {
+    armour(&r.body).is_some_and(|sig| verify(message, &sig, signer).unwrap_or(false))
+}
+
+/// The record's pull request number, as its header holds it.
+fn number(r: &Record) -> Option<u64> {
+    r.header.get("pull_request")?.as_u64()
+}
+
+/// `Ok` when an approval under `issue` carries a valid signature of the approval of `head` by `signer` (37, design
+/// changes 3 and 4). The message comes from `issue` and `head`, not from the record, so only a signature the human
+/// made for this head passes. Else `signature_invalid` for a record at this head that does not verify, or
+/// `approval_missing`, which names the heads a stale approval signed.
+#[cfg_attr(not(test), expect(dead_code, reason = "land calls it from milestone 12 issue 3"))]
+pub(crate) fn approved(index: &Index, issue: &Id, head: &str, signer: &str) -> Result<(), Refusal> {
+    let records = index.records(issue.as_str(), Kind::Approval)?;
+    let message = |n: u64| Act { verb: "approve", node: issue, pull_request: n, head, more: &[] }.message();
+    if records.iter().any(|r| number(r).is_some_and(|n| holds(r, &message(n), signer))) {
+        return Ok(());
+    }
+    let fix = format!("the human runs bp approve {issue} from a shell, at head {head}");
+    let at = |r: &&Record| r.header.get("head").and_then(Value::as_str) == Some(head);
+    if let Some(r) = records.iter().find(at) {
+        return Err(Refusal::new(
+            Code::SignatureInvalid,
+            r.id.as_str(),
+            "an approval counts only with a signature, by the signer that .bp/risk.yml names, of this act at this \
+             head (37, design change 4)",
+            fix,
+        ));
+    }
+    let heads: Vec<&str> = records.iter().filter_map(|r| r.header.get("head")?.as_str()).collect();
+    let stale = if heads.is_empty() { String::new() } else { format!("; the approvals sign {}", heads.join(", ")) };
+    Err(Refusal::new(
+        Code::ApprovalMissing,
+        issue.as_str(),
+        "a high pull request lands only with the human's signed approval of its head (37, design change 3)",
+        format!("{fix}{stale}"),
+    ))
+}
+
+/// The level of the latest lowering under `issue` whose signature by `signer` verifies at `head`, or `None`. A
+/// lowering whose signature does not verify, or that signed another head, is ignored: only a signed human record
+/// lowers a level (37, design change 2).
+#[cfg_attr(not(test), expect(dead_code, reason = "the level in force reads it from milestone 12 issue 0"))]
+pub(crate) fn lowered(index: &Index, issue: &Id, head: &str, signer: &str) -> Result<Option<String>, Refusal> {
+    let records = index.records(issue.as_str(), Kind::Lowering)?;
+    let text = |r: &Record, f: &str| r.header.get(f).and_then(Value::as_str).map(str::to_string);
+    Ok(records.iter().rev().find_map(|r| {
+        let (n, level, reason) = (number(r)?, text(r, "level")?, text(r, "reason")?);
+        let more = [("level", level.as_str()), ("reason", reason.as_str())];
+        let message = Act { verb: "lower", node: issue, pull_request: n, head, more: &more }.message();
+        holds(r, &message, signer).then_some(level)
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use bp_vault::{Code, Id, Index, Kind, Vault};
+    use serde_json::Value;
+
+    use super::{approved, lowered, record_text};
+    use crate::signed::{Act, sign, signer};
+
+    const ISSUE: &str = "projects/bp/issues/a";
+    const H1: &str = "1111111111111111111111111111111111111111";
+    const H2: &str = "2222222222222222222222222222222222222222";
+
+    fn run(dir: &Path, program: &str, args: &[&str]) -> String {
+        let out = Command::new(program).current_dir(dir).env_remove("SSH_AUTH_SOCK").args(args).output().unwrap();
+        assert!(out.status.success(), "{program} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// A key pair made in `dir` with no passphrase: the private key's path and the public key's `<type> <base64>`.
+    fn key(dir: &Path, name: &str) -> (PathBuf, String) {
+        run(dir, "ssh-keygen", &["-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", name]);
+        let public = std::fs::read_to_string(dir.join(format!("{name}.pub"))).unwrap();
+        (dir.join(name), public.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
+    }
+
+    /// A vault under git with one project and the issue [`ISSUE`].
+    fn vault() -> (tempfile::TempDir, Vault) {
+        let dir = tempfile::tempdir().unwrap();
+        for (rel, text) in [
+            ("projects/bp/project.md", "---\nkind: project\ntitle: B\nstatus: active\n---\n"),
+            ("projects/bp/issues/a.md", "---\nkind: issue\ntitle: A\nstatus: open\n---\n"),
+            ("shared/.keep", ""),
+            (".gitignore", ".bp/\n"),
+        ] {
+            put(dir.path(), rel, text);
+        }
+        run(dir.path(), "git", &["init", "-q"]);
+        let vault = Vault { root: dir.path().to_path_buf() };
+        (dir, vault)
+    }
+
+    fn put(root: &Path, rel: &str, text: &str) {
+        std::fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(root.join(rel), text).unwrap();
+    }
+
+    /// A signed record written by hand at `key` under the issue, as an agent could write it, with `fields` and the
+    /// armoured `signature`, then committed.
+    fn forge(v: &Vault, kind: Kind, key: &str, fields: Vec<(&str, Value)>, signature: &str) {
+        let issue = Id::parse(ISSUE).unwrap();
+        put(&v.root, &format!("{ISSUE}/{}/{key}.md", kind.dir()), &record_text(kind, &issue, fields, signature));
+        run(&v.root, "git", &["add", "-A"]);
+        run(&v.root, "git", &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", key]);
+    }
+
+    fn fields(head: &str, n: u64, at: &str, more: &[(&'static str, &str)]) -> Vec<(&'static str, Value)> {
+        let mut f: Vec<(&str, Value)> = vec![("head", head.into()), ("pull_request", n.into())];
+        f.extend(more.iter().map(|(k, v)| (*k, Value::from(*v))));
+        f.push(("at", format!("2026-11-12T10:00:{at}Z").into()));
+        f
+    }
+
+    #[test]
+    fn approve_refuses_bad_or_stale_signature() {
+        let keys = tempfile::tempdir().unwrap();
+        let (human, signer) = key(keys.path(), "human");
+        let (agent, agent_public) = key(keys.path(), "agent");
+        let (_dir, v) = vault();
+        let issue = Id::parse(ISSUE).unwrap();
+        let act =
+            |verb: &str, head: &str, n: u64| Act { verb, node: &issue, pull_request: n, head, more: &[] }.message();
+        let message = |head: &str, n: u64| act("approve", head, n);
+        let gate = |head: &str, signer: &str| {
+            approved(&Index::open(&v).unwrap(), &issue, head, signer).map_err(|r| (r.code, r.fix))
+        };
+        assert_eq!(gate(H1, &signer).unwrap_err().0, Code::ApprovalMissing, "no approval");
+
+        // A valid signature of another head is stale: it approves that head only.
+        let of_h2 = sign(&message(H2, 1), &human).unwrap();
+        forge(&v, Kind::Approval, H2, fields(H2, 1, "01", &[]), &of_h2);
+        let (code, fix) = gate(H1, &signer).unwrap_err();
+        assert!(code == Code::ApprovalMissing && fix.contains(&format!("the approvals sign {H2}")), "{fix}");
+        assert_eq!(gate(H2, &signer), Ok(()), "it does approve the head it signed");
+        assert_eq!(gate(H2, &agent_public).unwrap_err().0, Code::SignatureInvalid, "only the signer's key counts");
+
+        // Each record at this head that an agent can make without the human's key refuses.
+        let garbage = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQ==\n-----END SSH SIGNATURE-----";
+        let by_agent = sign(&message(H1, 1), &agent).unwrap();
+        let other_act = sign(&act("lower", H1, 1), &human).unwrap();
+        let other_pr = sign(&message(H1, 2), &human).unwrap();
+        let namespace = {
+            put(keys.path(), "m", &message(H1, 1));
+            run(keys.path(), "ssh-keygen", &["-Y", "sign", "-n", "git", "-f", "human", "m"]);
+            std::fs::read_to_string(keys.path().join("m.sig")).unwrap()
+        };
+        for (n, (why, signature, pr)) in [
+            ("a hand-written record", garbage, 1),
+            ("a record with no signature", "", 1),
+            ("a signature by the agent's own key", by_agent.as_str(), 1),
+            ("a signature of another head, copied", of_h2.as_str(), 1),
+            ("a signature of another act", other_act.as_str(), 1),
+            ("a changed field: the pull request", other_pr.as_str(), 1),
+            ("a signature in git's namespace", namespace.as_str(), 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let key = if n == 0 { H1.to_string() } else { format!("{H1}-{}", n + 1) };
+            forge(&v, Kind::Approval, &key, fields(H1, pr, &format!("{:02}", n + 2), &[]), signature);
+            assert_eq!(gate(H1, &signer).unwrap_err().0, Code::SignatureInvalid, "{why}");
+        }
+        assert!(gate(H1, &signer).unwrap_err().1.contains("bp approve projects/bp/issues/a"));
+
+        // The human's signature of this act at this head passes, whatever forged records sit beside it.
+        let good = sign(&message(H1, 1), &human).unwrap();
+        forge(&v, Kind::Approval, &format!("{H1}-9"), fields(H1, 1, "20", &[]), &good);
+        assert_eq!(gate(H1, &signer), Ok(()));
+        // The gate trusts the signer it is given, so `signer` reads it from origin's protected branch only.
+        assert_eq!(gate(H1, &agent_public), Ok(()), "the agent's record verifies against the agent's own key");
+    }
+
+    #[test]
+    fn lowering_needs_signature() {
+        let keys = tempfile::tempdir().unwrap();
+        let (human, signer) = key(keys.path(), "human");
+        let (agent, _) = key(keys.path(), "agent");
+        let (_dir, v) = vault();
+        let issue = Id::parse(ISSUE).unwrap();
+        let level = || lowered(&Index::open(&v).unwrap(), &issue, H1, &signer).unwrap();
+        let lowering = |key: &Path, head: &str, level: &str| {
+            let more = [("level", level), ("reason", "docs only")];
+            sign(&Act { verb: "lower", node: &issue, pull_request: 1, head, more: &more }.message(), key).unwrap()
+        };
+        let low = [("level", "low"), ("reason", "docs only")];
+        assert_eq!(level(), None, "no lowering");
+        let forged = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQ==\n-----END SSH SIGNATURE-----";
+        forge(&v, Kind::Lowering, H1, fields(H1, 1, "01", &low), forged);
+        assert_eq!(level(), None, "a hand-written lowering is ignored");
+        forge(&v, Kind::Lowering, &format!("{H1}-2"), fields(H1, 1, "02", &low), "");
+        assert_eq!(level(), None, "an unsigned lowering is ignored");
+        forge(&v, Kind::Lowering, &format!("{H1}-3"), fields(H1, 1, "03", &low), &lowering(&agent, H1, "low"));
+        assert_eq!(level(), None, "a lowering by another key is ignored");
+        forge(&v, Kind::Lowering, &format!("{H1}-4"), fields(H1, 1, "04", &low), &lowering(&human, H1, "medium"));
+        assert_eq!(level(), None, "a changed level does not verify");
+        forge(&v, Kind::Lowering, H2, fields(H2, 1, "05", &low), &lowering(&human, H2, "low"));
+        assert_eq!(level(), None, "a lowering of another head does not count at this one");
+        forge(&v, Kind::Lowering, &format!("{H1}-5"), fields(H1, 1, "06", &low), &lowering(&human, H1, "low"));
+        assert_eq!(level().as_deref(), Some("low"), "the human's signed lowering counts");
+        forge(
+            &v,
+            Kind::Lowering,
+            &format!("{H1}-6"),
+            fields(H1, 1, "07", &[("level", "medium"), ("reason", "x")]),
+            forged,
+        );
+        assert_eq!(level().as_deref(), Some("low"), "a later forged lowering changes nothing");
+    }
+
+    #[test]
+    fn approved_reads_the_signer_from_the_forge_not_a_local_ref() {
+        let keys = tempfile::tempdir().unwrap();
+        let (_, human) = key(keys.path(), "human");
+        let (agent, agent_public) = key(keys.path(), "agent");
+        let t = tempfile::tempdir().unwrap();
+        let code = t.path().join("code");
+        let commit = |text: &str| {
+            put(&code, ".bp/risk.yml", text);
+            run(&code, "git", &["add", "-A"]);
+            run(&code, "git", &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "risk"]);
+        };
+        run(t.path(), "git", &["init", "-q", "--bare", "-b", "master", "origin.git"]);
+        run(t.path(), "git", &["init", "-q", "-b", "master", "code"]);
+        run(&code, "git", &["remote", "add", "origin", &t.path().join("origin.git").display().to_string()]);
+        commit(&format!("signer: {human}\n"));
+        run(&code, "git", &["push", "-q", "-u", "origin", "master"]);
+        // The agent pushes its own branch, which names its key, as normal work.
+        run(&code, "git", &["checkout", "-q", "-b", "bp/x"]);
+        commit(&format!("signer: {agent_public}\n"));
+        run(&code, "git", &["push", "-q", "origin", "bp/x"]);
+        run(&code, "git", &["checkout", "-q", "master"]);
+
+        let (_dir, v) = vault();
+        let issue = Id::parse(ISSUE).unwrap();
+        let message = Act { verb: "approve", node: &issue, pull_request: 1, head: H1, more: &[] }.message();
+        forge(&v, Kind::Approval, H1, fields(H1, 1, "01", &[]), &sign(&message, &agent).unwrap());
+        let gate = || approved(&Index::open(&v).unwrap(), &issue, H1, &signer(&code).unwrap()).unwrap_err().code;
+        let local = |r: &str| run(&code, "git", &["show", &format!("{r}:.bp/risk.yml")]);
+
+        // Poison one: origin/HEAD names the agent's pushed branch, with no push.
+        run(&code, "git", &["remote", "set-head", "origin", "bp/x"]);
+        assert!(local("origin/HEAD").contains(&agent_public), "the local ref names the agent's key");
+        assert_eq!(signer(&code).unwrap(), human, "the signer is the server's default branch's");
+        assert_eq!(gate(), Code::SignatureInvalid, "the agent's approval does not verify");
+
+        // Poison two: origin/master is a local commit that names the agent's key.
+        run(&code, "git", &["remote", "set-head", "origin", "master"]);
+        commit(&format!("signer: {agent_public}\n"));
+        run(&code, "git", &["update-ref", "refs/remotes/origin/master", "HEAD"]);
+        assert!(local("origin/master").contains(&agent_public), "the local ref names the agent's key");
+        assert_eq!(signer(&code).unwrap(), human, "the signer is the server's default branch's");
+        assert_eq!(gate(), Code::SignatureInvalid, "the agent's approval does not verify");
+    }
+}

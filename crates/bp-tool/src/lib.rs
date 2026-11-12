@@ -1,6 +1,7 @@
-//! The tool: the 18 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
+//! The tool: the 20 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
 //! `--json`; diagnostics go to stderr.
 
+mod approve;
 mod carry;
 mod chain;
 mod check;
@@ -20,6 +21,7 @@ mod review_rows;
 mod row;
 mod schema;
 mod set;
+mod signed;
 mod snapshot;
 mod stack;
 mod stamp;
@@ -103,6 +105,11 @@ pub enum Verb {
     Stamp(stamp::Stamp),
     /// The bundle into a harness, at the clone's top, with its manifest; local, so it calls no forge.
     Install(install::Install),
+    /// The human's signed approval of the issue's pull request at its head; the key's passphrase is typed in a
+    /// terminal, never in an agent.
+    Approve(approve::Approve),
+    /// The human's signed lowering of the issue's risk level at its pull request's head.
+    Lower(approve::Lower),
     /// Check, render and write a diagram spec and its page into a draft design; or preview a spec, or the diff of
     /// two, in a file outside the vault.
     Diagram(diagram::Diagram),
@@ -210,6 +217,8 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Stamp(s) => stamp::run(cwd, s, cli.json, out),
         Verb::Install(i) => wrote(install::install(cwd, i), cli.json, out),
         Verb::Diagram(d) => diagram::run(cwd, d, cli.json, out),
+        Verb::Approve(a) => wrote(approve::approve(cwd, a), cli.json, out),
+        Verb::Lower(l) => wrote(approve::lower(cwd, l), cli.json, out),
     }
 }
 

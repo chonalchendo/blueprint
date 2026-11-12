@@ -181,7 +181,8 @@ mod tests {
             let verbs = r.verbs();
             assert_eq!(verbs.is_none(), r == Role::Human, "{r}");
             let verbs = verbs.unwrap_or_default();
-            assert!(verbs.iter().all(|v| !["stamp", "land"].contains(v) && !READ_VERBS.contains(v)), "{r}");
+            let human = ["stamp", "land", "approve", "lower"];
+            assert!(verbs.iter().all(|v| !human.contains(v) && !READ_VERBS.contains(v)), "{r}");
         }
         assert!(Role::Reviewer.verbs().unwrap().is_empty(), "the session records the review (21)");
         assert!(Role::Session.verbs().unwrap().contains(&"check"), "the design action runs check (21)");

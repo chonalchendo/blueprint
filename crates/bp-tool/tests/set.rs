@@ -299,9 +299,11 @@ fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
     let dir = vault();
     let root = dir.path();
     // Ids that name nothing: the role refuses first, so no other refusal shows.
-    let acts: [&[&str]; 4] = [
+    let acts: [&[&str]; 6] = [
         &["stamp", "projects/bp/milestones/none"],
         &["land", "projects/bp/issues/none"],
+        &["approve", "projects/bp/issues/none"],
+        &["lower", "projects/bp/issues/none", "low", "--reason", "docs only"],
         &["transition", "projects/bp/milestones/none", "approved"],
         &["transition", "projects/bp/designs/none", "active", "--dry-run"],
     ];
@@ -316,4 +318,25 @@ fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
     let (_, v) = bp_env(root, &[("BP_ROLE", "")], &["transition", "projects/bp/designs/product", "active"]);
     assert!(v["commit"].is_string(), "the human activates: {v}");
     assert!(git(root, &["log", "-1", "--format=%B"]).lines().any(|l| l == "Bp-Role: human"));
+}
+
+#[test]
+fn set_refuses_risk_lowering() {
+    let dir = vault();
+    let root = dir.path();
+    // A first level and a raise are labels; a lowering is the human's signed act, whatever BP_ROLE says.
+    assert_eq!(bp(root, &["set", ISSUE, "risk", "medium"]).0, Some(0));
+    assert_eq!(bp(root, &["set", ISSUE, "risk", "high"]).0, Some(0));
+    let before = commits(root);
+    for (env, level) in [(&[][..], "medium"), (&[("BP_ROLE", "human")][..], "low"), (&[][..], "low")] {
+        for dry in [false, true] {
+            let args: Vec<&str> = ["set", ISSUE, "risk", level].into_iter().chain(dry.then_some("--dry-run")).collect();
+            let (code, v) = bp_env(root, env, &args);
+            assert_eq!((code, v["code"].as_str()), (Some(2), Some("not_a_label")), "{level} {v}");
+            assert!(v["fix"].as_str().unwrap().contains(&format!("bp lower {ISSUE} <level> --reason")), "{v}");
+        }
+    }
+    assert_eq!(commits(root), before, "no lowering committed");
+    assert_eq!(bp(root, &["show", ISSUE]).1["risk"], "high");
+    assert_eq!(bp(root, &["set", ISSUE, "risk", "high"]).0, Some(3), "the same level is a repeat");
 }

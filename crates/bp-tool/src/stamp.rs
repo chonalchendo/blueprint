@@ -374,11 +374,11 @@ fn gate(vault: &Vault, index: &Index, id: &Id, waive: &[String], now: i64) -> Re
 }
 
 /// A record's text: its header under `under`, with one id per `→` field, and no body.
-pub(crate) fn record<const N: usize>(
+pub(crate) fn record<'a>(
     kind: Kind,
     under: &Id,
     links: &[(&str, &Id)],
-    fields: [(&str, Value); N],
+    fields: impl IntoIterator<Item = (&'a str, Value)>,
 ) -> String {
     let header = Header {
         kind,

@@ -53,6 +53,10 @@ crate::closed_enum! {
         FindingInvalid = "finding_invalid",
         NoTag = "no_tag",
         ChainReverts = "chain_reverts",
+        SignerMissing = "signer_missing",
+        SignatureInvalid = "signature_invalid",
+        ApprovalMissing = "approval_missing",
+        KeyInAgent = "key_in_agent",
     }
 }
 

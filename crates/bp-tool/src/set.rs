@@ -76,6 +76,7 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
         if was.as_ref() == Some(&value) {
             return Ok(Wrote::Already(serde_json::json!({ "id": id })));
         }
+        lowers(header.kind, &id, field, was.as_ref(), &value)?;
         let new = bp_vault::set_field(&text, field, &value);
         (new, serde_json::json!({ "id": id, "field": field, "value": value, "was": was }), field.as_str())
     };
@@ -94,6 +95,22 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     result["commit"] = written.commit.into();
     result["findings"] = serde_json::to_value(written.findings).expect("a plain struct serialises");
     Ok(Wrote::Changed(result))
+}
+
+/// `not_a_label` when the write lowers an issue's `risk`: only the human's signed record lowers a level (37, design
+/// change 2), so `set` writes a first level or a higher one only.
+fn lowers(kind: Kind, id: &Id, field: &str, was: Option<&Value>, value: &Value) -> Result<(), Refusal> {
+    let rank = |v: Option<&Value>| v.and_then(Value::as_str).and_then(|l| schema::RISK.iter().position(|r| *r == l));
+    match (rank(was), rank(Some(value))) {
+        (Some(was), Some(now)) if kind == Kind::Issue && field == "risk" && now < was => Err(Refusal::new(
+            Code::NotALabel,
+            format!("{id} risk"),
+            "only a signed human record lowers a risk level; set writes a first level or a higher one (37, design \
+             change 2)",
+            format!("the human runs bp lower {id} <level> --reason <why> from a shell"),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The file with its body replaced: the header's bytes as they were, then the body as `create` stores it. `None`
@@ -135,7 +152,7 @@ pub(crate) fn rebody(text: &str, body: &str) -> Option<String> {
     Some(if body.is_empty() { format!("{head}{eol}") } else { format!("{head}{eol}\n{body}\n") })
 }
 
-/// The role of a human act (`stamp`, `land`, a `transition` to `approved` or `active`), tested before any other: an agent
+/// The role of a human act (`stamp`, `land`, `approve`, `lower`, a `transition` to `approved` or `active`), tested before any other: an agent
 /// role refuses `role_forbidden` (27, design change 3). An agent can forge the label, so this stops a slip, not an
 /// attack; the forge stays the gate. So a milestone's approval is its latest such commit with `Bp-Role: human` (13).
 pub(crate) fn human(act: String) -> Result<Role, Refusal> {
@@ -147,7 +164,8 @@ pub(crate) fn human(act: String) -> Result<Role, Refusal> {
     Err(Refusal::new(
         Code::RoleForbidden,
         act,
-        "BP_ROLE names an agent role, and the verb is the human's: stamp, land, or transition to approved or active",
+        "BP_ROLE names an agent role, and the verb is the human's: stamp, land, approve, lower, or transition to approved \
+         or active",
         fix,
     ))
 }

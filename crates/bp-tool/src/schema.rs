@@ -62,8 +62,12 @@ pub fn parents(kind: Kind) -> &'static [Kind] {
 }
 
 /// Every label field of any kind, for the fix that lists one kind's.
-const LABELS: [&str; 10] =
-    ["title", "tags", "applies", "class", "repository", "forge", "reviewer", "cue", "severity", "walkthrough"];
+const LABELS: [&str; 11] =
+    ["title", "tags", "applies", "class", "repository", "forge", "reviewer", "cue", "severity", "walkthrough", "risk"];
+
+/// An issue's risk levels, lowest first (37, design change 1). Issue 0 of milestone 12 (`risk-level`) adds the
+/// `bp_change` level type; at rebase this order reads from it.
+pub const RISK: [&str; 3] = ["low", "medium", "high"];
 
 /// What a label holds.
 enum Vocab {
@@ -88,6 +92,7 @@ fn vocab(kind: Kind, field: &str) -> Option<Vocab> {
         (_, "tags") | (Kind::Convention, "applies") => Vocab::Tags,
         (Kind::Project, "class") => closed(ProjectClass::ALL, ProjectClass::as_str),
         (Kind::Issue, "severity") => closed(Severity::ALL, Severity::as_str),
+        (Kind::Issue, "risk") => Vocab::Closed(RISK.to_vec()),
         (Kind::Issue, "walkthrough") => Vocab::Bool,
         _ => return None,
     })
@@ -103,6 +108,8 @@ pub fn owner(kind: Kind, id: &Id, field: &str) -> Option<String> {
             Kind::Claim => format!("bp release {parent} --reason <reason>"),
             Kind::Waiver => format!("bp stamp {parent} --waive <predicate> --reason <why>"),
             Kind::BlueprintVersion => "bp stamp <milestone>".into(),
+            Kind::Approval => format!("bp approve {parent}"),
+            Kind::Lowering => format!("bp lower {parent} <level> --reason <why>"),
             _ => format!("bp record {kind} {parent}"),
         };
         return Some(format!("a record is never edited (13, rule 6); a correction is a new one: {verb}"));
