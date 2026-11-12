@@ -175,6 +175,7 @@ dependencies = [
  "bp-vault",
  "serde",
  "ts-rs",
+ "yaml-rust2",
 ]
 
 [[package]]
