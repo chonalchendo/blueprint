@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use bp_change::intents::Base;
-use bp_change::risk::{self, Computed, Config, Level, RISK_FILE};
+use bp_change::risk::{self, Computed, Config, Level, Pattern, RISK_FILE};
 use bp_read::inputs::{field, held};
 use bp_read::snapshot::clone_of;
 use bp_vault::{Code, Id, Index, Refusal, Vault};
@@ -104,18 +104,39 @@ fn computed(cwd: &Path, index: &Index, id: &Id) -> Result<Option<Computed>, Refu
     let range = format!("{base}...{head}");
     let args = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--numstat", "-z", "--find-renames", &range];
     let diff = risk::numstat(&git(&top, &args)?);
-    let rules = format!("{base}:{RISK_FILE}");
-    let config = if exists(&rules) {
-        Config::parse(&git(&top, &["show", &rules])?).map_err(|why| {
-            Refusal::new(
-                Code::SchemaInvalid,
-                rules.clone(),
-                "the risk file holds `high` and `low` lists of path patterns, `limits` and `signer` (37, design change 1)",
-                format!("{why}; edit {RISK_FILE} on {target} by hand, then git commit it"),
-            )
-        })?
-    } else {
-        Config::default()
-    };
+    let config = rules(&top, &base, &target)?;
     Ok(Some(risk::computed(&diff, &config)))
+}
+
+/// `.bp/risk.yml` on the base commit; the default when it holds none. An exact pattern that names a directory of the
+/// base tree matches no path under it, so it refuses as a parse failure does.
+fn rules(top: &Path, base: &str, target: &str) -> Result<Config, Refusal> {
+    let at = format!("{base}:{RISK_FILE}");
+    let invalid = |why: String| {
+        Refusal::new(
+            Code::RiskFileInvalid,
+            format!("origin/{target}:{RISK_FILE}"),
+            "the risk file holds `high` and `low` lists of path patterns, `limits` and `signer` (37, design change 1)",
+            format!("{why}; edit {RISK_FILE} on {target} by hand, then git commit it"),
+        )
+    };
+    if git(top, &["cat-file", "-e", &at]).is_err() {
+        return Ok(Config::default());
+    }
+    let config = Config::parse(&git(top, &["show", &at])?).map_err(invalid)?;
+    let exact = config.high.iter().chain(&config.low).filter_map(|p| match p {
+        Pattern::Exact(e) => Some(e.as_str()),
+        _ => None,
+    });
+    // One path at a time: `ls-tree` given `src` and `src/a.rs` together walks into `src` and never prints it.
+    for path in exact {
+        let entry = git(top, &["--literal-pathspecs", "ls-tree", "-z", base, "--", path])?;
+        if entry.split_once('\t').is_some_and(|(meta, at)| meta.contains(" tree ") && at.trim_end_matches('\0') == path)
+        {
+            return Err(invalid(format!(
+                "the pattern {path:?} names a directory, so it matches no path: write {path}/"
+            )));
+        }
+    }
+    Ok(config)
 }

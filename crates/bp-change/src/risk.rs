@@ -48,11 +48,15 @@ pub enum Pattern {
 }
 
 impl Pattern {
-    /// Reads one pattern. A wildcard outside the leading `*.` and a path that git never prints (empty, absolute, or
-    /// with a `./` or `..` segment) refuse, since such a pattern would never match and a high path would pass as low.
+    /// Reads one pattern. A wildcard outside the leading `*.`, white space at an end, and a path that git never
+    /// prints (empty, absolute, or with a `./` or `..` segment) refuse, since such a pattern would never match and a
+    /// high path would pass as low.
     pub fn parse(text: &str) -> Result<Self, String> {
         let bad =
             |why: &str| Err(format!("the pattern {text:?} {why}; write a prefix ending in `/`, `*.<ext>` or a path"));
+        if text.trim() != text {
+            return bad("has white space at an end");
+        }
         let (rest, ext) = match text.strip_prefix("*.") {
             Some(ext) => (ext, true),
             None => (text, false),
@@ -131,7 +135,7 @@ pub struct Config {
     pub high: Vec<Pattern>,
     /// The test and documentation paths: a diff of only these, and small, is low.
     pub low: Vec<Pattern>,
-    /// The size limits.
+    /// The size limits; `low_lines` is at most `high_lines`.
     pub limits: Limits,
     /// The human's OpenSSH public key line, which verifies a signed act (37, design change 4). Kept, not verified here.
     pub signer: Option<String>,
@@ -198,6 +202,12 @@ fn limits(value: &Yaml) -> Result<Limits, String> {
             .and_then(|n| u64::try_from(n).ok())
             .ok_or_else(|| format!("the limit {} is {}, not a whole number of 0 or more", name(key), name(value)))?;
     }
+    if limits.low_lines > limits.high_lines {
+        let (low, high) = (limits.low_lines, limits.high_lines);
+        return Err(format!(
+            "low_lines {low} is over high_lines {high}, so no diff could be low and under the high limit"
+        ));
+    }
     Ok(limits)
 }
 
@@ -212,12 +222,22 @@ fn name(value: &Yaml) -> String {
     }
 }
 
+/// One OpenSSH public key line: `<type> <base64 key> [comment]`, the type `ssh-…`, `ecdsa-…` or `sk-…`.
 fn signer(value: &Yaml) -> Result<Option<String>, String> {
-    match value {
-        Yaml::Null => Ok(None),
-        Yaml::String(line) if !line.trim().is_empty() && !line.trim().contains('\n') => Ok(Some(line.trim().into())),
-        _ => Err("signer is not one OpenSSH public key line".into()),
+    let line = match value {
+        Yaml::Null => return Ok(None),
+        Yaml::String(line) => line.trim(),
+        _ => "",
+    };
+    let mut words = line.split(' ');
+    let kind = words.next().unwrap_or_default();
+    let key = words.next().unwrap_or_default();
+    let typed = ["ssh-", "ecdsa-", "sk-"].iter().any(|p| kind.starts_with(p));
+    let base64 = !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b));
+    if typed && base64 && !line.contains(['\n', '\r']) {
+        return Ok(Some(line.into()));
     }
+    Err("signer is not one OpenSSH public key line: `<type> <base64 key> [comment]`, as a `.pub` file holds it".into())
 }
 
 /// One changed file of a diff, as `git diff --numstat -z` prints it.
@@ -485,6 +505,16 @@ mod tests {
         assert_eq!(full.low, [Pattern::Dir("tests/".into())]);
         assert_eq!(full.limits, Limits { low_lines: 50, ..Limits::default() });
         assert_eq!(full.signer.as_deref(), Some("ssh-ed25519 AAAAC3 me"));
+        let key = "ecdsa-sha2-nistp256 AAAAE2VjZHNh+/= a b";
+        assert_eq!(config(&format!("signer: {key}\n")).signer.as_deref(), Some(key));
+        assert_eq!(
+            config("signer: sk-ssh-ed25519@openssh.com AAAA\n").signer.as_deref(),
+            Some("sk-ssh-ed25519@openssh.com AAAA")
+        );
+        let nulls = config("high:\nlow:\nlimits:\nsigner:\n");
+        assert_eq!(nulls, Config::default(), "an empty key is the default, and an absent signer is null");
+        assert_eq!(config("low: [docs/]\n").signer, None);
+        assert_eq!(config("limits: {low_lines: 20, high_lines: 20}\n").limits.high_lines, 20, "equal limits parse");
         for (text, says) in [
             ("high: [a/\n", "not YAML"),
             ("- a/\n", "not a mapping"),
@@ -498,11 +528,23 @@ mod tests {
             ("high: [./infra/]\n", "relative"),
             ("high: [/infra/]\n", "relative"),
             ("low: ['']\n", "is empty"),
+            ("high: ['infra/ ']\n", "white space at an end"),
+            ("high: [' infra/']\n", "white space at an end"),
+            ("high: [\"infra\\t\"]\n", "white space at an end"),
+            ("limits: {low_lines: 900, high_lines: 20}\n", "low_lines 900 is over high_lines 20"),
+            ("limits: {low_lines: 900}\n", "low_lines 900 is over high_lines 800"),
             ("limits: 3\n", "not a mapping"),
             ("limits: {lines: 3}\n", "no limit"),
             ("limits: {packages: -1}\n", "whole number"),
             ("limits: {low_lines: 1.5}\n", "whole number"),
             ("signer: [a]\n", "public key"),
+            ("signer: ''\n", "public key"),
+            ("signer: 12\n", "public key"),
+            ("signer: \"ssh-ed25519 AAAA me\\nssh-ed25519 BBBB you\"\n", "public key"),
+            ("signer: |\n  ssh-ed25519 AAAA me\n  ssh-rsa BBBB you\n", "public key"),
+            ("signer: ed25519 AAAA me\n", "public key"),
+            ("signer: ssh-ed25519\n", "public key"),
+            ("signer: ssh-ed25519 AA*A me\n", "public key"),
             ("high: [a/]\nhigh: [b/]\n", "not YAML"),
             ("a: 1\n---\nb: 2\n", "more than one"),
         ] {

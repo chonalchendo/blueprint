@@ -175,9 +175,28 @@ fn a_risk_file_that_does_not_parse_refuses() {
     w.cut();
     w.commit(&[("src/a.rs", "fn a() {}\n")]);
     let (exit, v) = w.bp(&["risk", ISSUE]);
-    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{v}");
-    assert_eq!(v["subject"], "refs/remotes/origin/master:.bp/risk.yml");
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("risk_file_invalid")), "{v}");
+    assert_eq!(v["subject"], "origin/master:.bp/risk.yml");
     assert!(v["fix"].as_str().unwrap().contains("\"hihg\" is no key"), "{v}");
+}
+
+#[test]
+fn an_exact_pattern_that_names_a_directory_refuses() {
+    for (rules, dir) in [("high: [src, src/b.rs]\n", "src"), ("low: [docs/, src/b.rs, src]\n", "src")] {
+        let mut w = world(None, Some(rules));
+        w.cut();
+        w.commit(&[("src/a.rs", "fn a() {}\n")]);
+        let (exit, v) = w.bp(&["risk", ISSUE]);
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("risk_file_invalid")), "{v}");
+        let fix = v["fix"].as_str().unwrap();
+        assert!(
+            fix.starts_with(&format!("the pattern {dir:?} names a directory, so it matches no path: write {dir}/"))
+        );
+    }
+    let mut w = world(None, Some("high: [src/b.rs, nothing/here]\n"));
+    w.cut();
+    w.commit(&[("src/b.rs", "fn b2() {}\n")]);
+    assert_eq!(w.risk()["reasons"], json!(["src/b.rs matches the high pattern src/b.rs"]), "a file is a path");
 }
 
 #[test]
