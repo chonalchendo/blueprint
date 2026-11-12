@@ -1,8 +1,9 @@
 //! `bp risk <issue>`: the risk level in force and the rules that set it (37, design changes 1 and 2). The level is the
 //! highest of the issue's `risk` label (absent reads `medium`), the level the claim's diff computes, each review that
-//! holds a `risk` row, and a pending delta the issue caused. The diff is the held claim's branch against the base branch its pull request targets, as
-//! the clone's remote-tracking ref holds it; the rules are `.bp/risk.yml` on that base branch, so a branch that edits
-//! them is judged by the base's rules, and its edit is high. A read: it writes nothing and calls no forge.
+//! holds a `risk` row, and a pending delta the issue caused. The diff is the pull request's head after a fetch: the
+//! higher of the local branch and `origin/<branch>`, against the base branch its pull request targets. The rules are
+//! `.bp/risk.yml` on that base commit, so a branch that edits them is judged by the base's rules, and its edit is
+//! high. The answer names each head it judged and the base. It writes nothing to the vault and calls no forge.
 
 use std::path::Path;
 
@@ -24,41 +25,56 @@ pub struct Risk {
     pub issue: String,
 }
 
+/// The computed level, the base commit whose rules judged it, and each head it judged.
+struct Judged {
+    computed: Computed,
+    base: String,
+    heads: Vec<String>,
+}
+
 pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
     let vault = Vault::discover(cwd)?;
     let index = Index::open(&vault)?;
     let id = subject(&index, &r.issue)?;
-    let header = index.header(id.as_str())?.filter(|h| h.get("kind").and_then(Value::as_str) == Some("issue"));
-    let Some(header) = header else {
+    let Some(header) = index.header(id.as_str())? else {
         return Err(vault.unparsed(&id).unwrap_or_else(|| {
             Refusal::new(Code::NoNode, id.as_str(), "bp risk reads one issue (37, design change 1)", "bp list issue")
         }));
     };
+    if header.get("kind").and_then(Value::as_str) != Some("issue") {
+        // `cut` refuses a node of another kind so too: only an issue moves, and only an issue has a level.
+        return Err(Refusal::new(
+            Code::IllegalTransition,
+            id.as_str(),
+            "bp risk reads one issue (37, design change 1)",
+            "bp list issue",
+        ));
+    }
     let declared = match header.get("risk") {
-        None | Some(Value::Null) => Level::Medium,
-        Some(v) => v.as_str().and_then(|s| s.parse().ok()).ok_or_else(|| {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_str().and_then(|s| s.parse().ok()).ok_or_else(|| {
             Refusal::new(
                 Code::UnknownValue,
                 format!("{id} risk {v}"),
                 "a label with a closed set takes one of its values (13)",
                 format!("bp set {id} risk <low|medium|high>"),
             )
-        })?,
+        })?),
     };
     // A pending delta is vault data: it raises the level with or without a clone in view (37, design change 1).
     let delta = !bp_read::carried_deltas(&index, &id)?.is_empty();
     let raised_by = bp_read::inputs::raises(&index, id.as_str())?;
-    let computed = computed(cwd, &index, &id)?;
-    let level = risk::level(declared, computed.as_ref().map(|c| c.level), raised_by.len() + usize::from(delta));
+    let judged = judged(cwd, &index, &id)?;
+    let computed = judged.as_ref().map(|j| j.computed.level);
+    let level = risk::level(declared.unwrap_or(Level::Medium), computed, raised_by.len() + usize::from(delta));
     let mut reasons = Vec::new();
-    if declared == level {
-        reasons.push(match header.get("risk") {
-            Some(_) => format!("the issue declares {declared}"),
-            None => "the issue declares no risk, which reads medium".into(),
-        });
+    match declared {
+        Some(d) if d == level => reasons.push(format!("the issue declares {d}")),
+        None if level == Level::Medium => reasons.push("the issue declares no risk, which reads medium".into()),
+        _ => {}
     }
-    if let Some(c) = computed.as_ref().filter(|c| c.level == level) {
-        reasons.extend(c.reasons.iter().cloned());
+    if let Some(j) = judged.as_ref().filter(|j| j.computed.level == level) {
+        reasons.extend(j.computed.reasons.iter().cloned());
     }
     if level == Level::High {
         if delta {
@@ -68,16 +84,18 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
     }
     Ok(json!({
         "level": level,
-        "declared": declared,
-        "computed": computed.map(|c| c.level),
+        "declared": declared.unwrap_or(Level::Medium),
+        "computed": computed,
+        "head": judged.as_ref().map_or(Vec::new(), |j| j.heads.clone()),
+        "base": judged.as_ref().map(|j| j.base.clone()),
         "raised_by": raised_by,
         "reasons": reasons,
     }))
 }
 
-/// The level of the held claim's diff; `None` with no held claim, or when the working directory is in no clone of the
-/// project's repository.
-fn computed(cwd: &Path, index: &Index, id: &Id) -> Result<Option<Computed>, Refusal> {
+/// The level of the held claim's diff after a fetch; `None` with no held claim, or when the working directory is in
+/// no clone of the project's repository. A gate reads `None` as not computed, never as low.
+fn judged(cwd: &Path, index: &Index, id: &Id) -> Result<Option<Judged>, Refusal> {
     let Some(claim) = held(index, id)? else { return Ok(None) };
     let top = match clone_of(cwd, index, id.project().unwrap_or_default()) {
         Ok(top) => top,
@@ -90,22 +108,31 @@ fn computed(cwd: &Path, index: &Index, id: &Id) -> Result<Option<Computed>, Refu
         Base::Unknown => default_branch(&top)?,
         Base::Unmerged(_) => field(&claim, "base_branch").unwrap_or_default(),
     };
-    let base = format!("refs/remotes/origin/{target}");
-    let name = branch(id);
-    let exists = |r: &str| git(&top, &["rev-parse", "--verify", "-q", r]).is_ok();
-    let Some(head) =
-        [format!("refs/heads/{name}"), format!("refs/remotes/origin/{name}")].into_iter().find(|r| exists(r))
-    else {
-        return Err(Refusal::failed(name, format!("the clone holds no branch of the claim; bp cut {id} puts it back")));
+    // Old refs would judge another head by stale rules, so a failed fetch refuses.
+    git(&top, &["fetch", "-q", "origin"])?;
+    let sha = |r: &str| git(&top, &["rev-parse", "--verify", "-q", &format!("{r}^{{commit}}")]).ok();
+    let Some(base) = sha(&format!("refs/remotes/origin/{target}")) else {
+        return Err(Refusal::failed(format!("origin/{target}"), "origin holds no base branch of the claim"));
     };
-    if !exists(&base) {
-        return Err(Refusal::failed(base, "the clone has no copy of the base branch: git fetch origin, then rerun"));
+    let name = branch(id);
+    let mut heads: Vec<String> =
+        [format!("refs/heads/{name}"), format!("refs/remotes/origin/{name}")].iter().filter_map(|r| sha(r)).collect();
+    heads.dedup();
+    if heads.is_empty() {
+        return Err(Refusal::failed(name, format!("the clone holds no branch of the claim; bp cut {id} puts it back")));
     }
-    let range = format!("{base}...{head}");
-    let args = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--numstat", "-z", "--find-renames", &range];
-    let diff = risk::numstat(&git(&top, &args)?);
     let config = rules(&top, &base, &target)?;
-    Ok(Some(risk::computed(&diff, &config)))
+    let mut best: Option<Computed> = None;
+    for head in &heads {
+        let range = format!("{base}...{head}");
+        let args = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--numstat", "-z", "--find-renames", &range];
+        let c = risk::computed(&risk::numstat(&git(&top, &args)?), &config);
+        if best.as_ref().is_none_or(|b| c.level > b.level) {
+            best = Some(c);
+        }
+    }
+    let computed = best.expect("one head at least");
+    Ok(Some(Judged { computed, base, heads }))
 }
 
 /// `.bp/risk.yml` on the base commit; the default when it holds none. An exact pattern that names a directory of the
