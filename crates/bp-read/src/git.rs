@@ -12,6 +12,11 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
         .arg("-C")
         .arg(dir)
         .env("LC_ALL", "C")
+        // A git hook that runs bp sets these; each would turn `-C <dir>` to another repository, index or worktree.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         // A credential prompt would wait on a terminal no agent reads; the fetch fails instead.
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(args)
