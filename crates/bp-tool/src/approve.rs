@@ -13,7 +13,7 @@ use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::signed::{Act, armour, in_agent, sign, signer, verify};
+use crate::signed::{Act, armour, in_agent, is_sha, sign, signer, verify};
 use crate::{Wrote, node_id, subject};
 
 /// `bp approve <issue> [--key <path>]`.
@@ -82,6 +82,15 @@ fn act(cwd: &Path, issue: &str, key: Option<&Path>, kind: Kind, more: &[(&str, &
             format!("{branch} has no open pull request; the worker runs bp pr {id}, then rerun"),
         ));
     };
+    let head = pr.head_ref_oid.as_str();
+    // The head names the record's file and a line of the signed message, so a slash or a newline from the forge
+    // would move the one and add a field to the other.
+    if !is_sha(head) {
+        return Err(Refusal::failed(
+            format!("gh pr list --head {branch}"),
+            format!("the forge gave head {head:?}, not a full commit sha; fix gh or the pull request, then rerun"),
+        ));
+    }
     let signer = signer(&top)?;
     if in_agent(&signer) {
         return Err(Refusal::new(
@@ -92,7 +101,6 @@ fn act(cwd: &Path, issue: &str, key: Option<&Path>, kind: Kind, more: &[(&str, &
             format!("ssh-add -d <the key's .pub file>, then rerun bp {verb} {id}"),
         ));
     }
-    let head = pr.head_ref_oid.as_str();
     let act = Act { verb, node: &id, pull_request: pr.number, head, more };
     let message = act.message();
     if let Some(r) = index.records(id.as_str(), kind)?.iter().find(|r| holds(r, &message, &signer)) {

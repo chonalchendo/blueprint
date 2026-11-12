@@ -145,6 +145,11 @@ pub(crate) fn signer(top: &Path) -> Result<String, Refusal> {
     })
 }
 
+/// A full commit sha: 40 or 64 lower-case hex digits. A head that is not one never enters a message or a path.
+pub(crate) fn is_sha(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// `<type> <base64>` of a public key line, or `None` when the line is not one.
 fn public_key(line: &str) -> Option<String> {
     let mut words = line.split_whitespace();
@@ -170,4 +175,18 @@ pub(crate) fn armour(body: &str) -> Option<String> {
     let end = "-----END SSH SIGNATURE-----";
     let stop = start + body[start..].find(end)? + end.len();
     Some(format!("{}\n", &body[start..stop]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_sha;
+
+    #[test]
+    fn a_head_is_a_full_lower_case_sha() {
+        assert!(is_sha(&"a".repeat(40)) && is_sha(&"0".repeat(64)));
+        for bad in ["a".repeat(39), "A".repeat(40), "a".repeat(41), format!("{}/..", "a".repeat(38)), "a".repeat(7)] {
+            assert!(!is_sha(&bad), "{bad}");
+        }
+        assert!(!is_sha(&format!("{}\nact", "a".repeat(36))));
+    }
 }

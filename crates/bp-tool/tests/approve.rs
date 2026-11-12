@@ -141,3 +141,18 @@ fn approve_and_lower_sign_the_head_with_the_signers_key() {
     assert_eq!(code, Some(4), "record writes no approval: {out}");
     assert!(out["fix"].as_str().unwrap().contains("bp approve"), "{out}");
 }
+
+#[test]
+fn approve_refuses_a_head_that_is_not_a_full_sha() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    risk(t, "human", true);
+    let human = t.join("human").display().to_string();
+    for head in ["../../../x", "abcdef\nact: lower", "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD", "abcdef1"] {
+        let pr = json!([{ "number": 4, "state": "OPEN", "headRefName": "bp/a", "headRefOid": head }]);
+        std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
+        let (code, out) = bp(v, t, &[], &["approve", ISSUE, "--key", &human]);
+        assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{head:?}: {out}");
+        assert!(!v.join(ISSUE).join("approvals").exists(), "{head:?}: no record is written");
+    }
+}
