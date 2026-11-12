@@ -276,7 +276,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "yaml-rust2",
 ]
 
 [[package]]

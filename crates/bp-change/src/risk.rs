@@ -229,11 +229,12 @@ fn name(value: &Yaml) -> String {
     }
 }
 
-/// One OpenSSH public key line: `<type> <base64 key> [comment]`, the type `ssh-…`, `ecdsa-…` or `sk-…`.
+/// One OpenSSH public key line: `<type> <base64 key> [comment]`, the type `ssh-…`, `ecdsa-…` or `sk-…`. A block
+/// scalar ends in a newline, so it is no line: the signer is a plain or a quoted string.
 fn signer(value: &Yaml) -> Result<Option<String>, String> {
     let line = match value {
         Yaml::Null => return Ok(None),
-        Yaml::String(line) => line.trim(),
+        Yaml::String(line) if !line.contains(['\n', '\r']) => line.trim(),
         _ => "",
     };
     let mut words = line.split(' ');
@@ -241,7 +242,7 @@ fn signer(value: &Yaml) -> Result<Option<String>, String> {
     let key = words.next().unwrap_or_default();
     let typed = ["ssh-", "ecdsa-", "sk-"].iter().any(|p| kind.starts_with(p));
     let base64 = !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b));
-    if typed && base64 && !line.contains(['\n', '\r']) {
+    if typed && base64 {
         return Ok(Some(line.into()));
     }
     Err("signer is not one OpenSSH public key line: `<type> <base64 key> [comment]`, as a `.pub` file holds it".into())
@@ -600,6 +601,8 @@ mod tests {
             ("signer: 12\n", "public key"),
             ("signer: \"ssh-ed25519 AAAA me\\nssh-ed25519 BBBB you\"\n", "public key"),
             ("signer: |\n  ssh-ed25519 AAAA me\n  ssh-rsa BBBB you\n", "public key"),
+            ("signer: |\n  ssh-ed25519 AAAA me\n", "public key"),
+            ("signer: >\n  ssh-ed25519 AAAA me\n", "public key"),
             ("signer: ed25519 AAAA me\n", "public key"),
             ("signer: ssh-ed25519\n", "public key"),
             ("signer: ssh-ed25519 AA*A me\n", "public key"),
