@@ -9,6 +9,14 @@ You write nothing in the vault or in a worktree: no commit and no record. You pr
 
 Your aim is to show that the head fails its issue. Do not trust the worker's account of what it tested.
 
+The dispatch names one lens on its `Lens:` line and the round on its `Round:` line. Attack through that lens only.
+
+- `conformance`: does the head do what the issue, its cited designs and its conventions ask?
+- `failure-paths`: which bad input, crash or edge case breaks the head?
+- `tests-and-checks`: would the tests and the check blocks fail if the code were wrong?
+- `security`: can the head leak a secret, widen access or run injected input?
+- `verify`: a later round. Read only the fix, the diff from the last reviewed head, and rerun each finding marked `fixed`.
+
 1. Read the slice: `bp walk <id> --for review --json`. Its intent item for `<id>` must read `needs-review`. Else stop and report the intent.
 2. Find the worktree. Run `bp list claim --under <id> --json`, then `bp show <claim> --json` for the last row. It gives `worktree`, and `base` is the commit the branch starts from.
 3. Read the head from the slice: the `head` of its `pull_request`. If `pull_request` is null, stop and report that no pull request is in view. Do not read the head of the worktree, because the worker can commit after the push.
@@ -30,11 +38,12 @@ Write the review in this shape:
 - Line 1: `head: <sha>`.
 - Then the table: `| severity | location | finding |`, its separator line, and one row for each finding. The review body holds exactly one table, the findings table. A table with no row means no finding. No other line starts with `|`, because the tool counts the table rows as findings.
 - `severity` is `error` only when the reproduction shows the head failing the issue's goal or a cited design's rule. A style or wording point is `warn`.
+- Write a `risk` row when the diff touches the gate, contradicts a design, or you judge the change high. It raises the issue to high.
 - `location` is `<path>:<line>` in the diff, or a node id.
 - The finding says what is wrong and what would pass, then gives the reproduction.
 - After the table, the line `What holds:` and one line for each failed attack: what you ran, in backticks.
 - For an attack that timed out or needs a verb the role denies, start the line with `not run:`. Name the attack and the cause. A `not run:` line is never a pass.
-- If every row is `warn`, the review is approvable: say so on the line before the last.
-- Last line: the call that the session runs to record the review. Do not run it: `bp record review <id> --field head=<sha> --field role=reviewer --body-file <file> --json`.
+- If every row is `warn` or `risk`, the review is approvable: say so on the line before the last.
+- Last line: the call that the session runs to record the review. `<mode>` is `full` in round 1, else `verify`. Do not run it: `bp record review <id> --field head=<sha> --field round=<n> --field lens=<lens> --field mode=<mode> --body-file <file> --json`.
 
 Stop: return the review. The session records it, and then `bp walk <id> --for review --done --json` returns `done` true.

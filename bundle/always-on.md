@@ -13,9 +13,10 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - `needs-shaping`: an active design has an unproven concern, and no milestone is `planned` or `approved`. A concern is unproven when its latest answer is `open`, or `designed` with no milestone stamped after it. Run the skill `bp-shape`.
 - `needs-derivation`: an approved milestone has fewer than three live issues, and a finish-line block that no issue covers. Run the skill `bp-derive`.
 - `ready`: an issue is open and unclaimed. Dispatch `bp-worker` with its `complete` template.
-- `needs-review`: dispatch `bp-reviewer` with its `review` template. Then record the review.
-- After the worker pushes fixes for a review, the pull request has a new head: run the walk again. `needs-review` then means dispatch `bp-reviewer` again with the same four lines, then record the review.
-- A review whose rows are all `warn` is approvable: tell the human so in one line. A third review of one issue with an `error` row goes to the human, not a fourth dispatch.
+- `needs-review`: its note names the round and each lens still missing. Dispatch `bp-reviewer` once per lens with its `review` template. Then record each review.
+- After the worker pushes fixes, the new head is the next round. It needs one review with the lens `verify`.
+- A review whose rows are all `warn` or `risk` is approvable: tell the human so in one line. In round 3 or later of a high issue, an `error` row goes to the human, not another dispatch.
+- A review's record call returns `late`: error rows outside the fix. For a low or medium issue, create one follow-up issue for each under the same milestone. Then decline the row: `bp record disposition <review> --field finding=<n> --field as=declined --field reason="follow-up <issue>" --json`.
 - `needs-response`: a review has a finding with no disposition. Dispatch `bp-worker` with its `respond` template.
 - `drifted`: a drift run failed, and nothing cites it. Run the skill `bp-triage-drift`.
 - The context cannot answer a question: run the skill `bp-deliberate`.
@@ -32,7 +33,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 
 - A dispatch template is a file `<role>-<action>.md` in the `bp/dispatch/` directory beside the skill directory.
 - Copy the template. Fill its four lines: `Node:`, `Skill:`, `Forbidden:` and `Stop:`. Add no text above the four lines.
-- A research dispatch holds its question below the four lines.
+- A research dispatch holds its question below the four lines. A review dispatch carries its lens and round there: `Lens: <lens>` and `Round: <n>`.
 - The reviewer writes nothing in the vault or in a worktree; it probes in a copy. Write its review, from `head:` to the end of its `What holds:` list, to a file outside the vault.
 - Then run the record call on the last line of the reply. Its `--body-file` names that file. The record call returns `rows`, the count of the review's findings; its `findings` are the body lint, not the review's.
 
