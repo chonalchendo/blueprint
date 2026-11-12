@@ -1,6 +1,6 @@
 //! `bp risk <issue>`: the risk level in force and the rules that set it (37, design changes 1 and 2). The level is the
-//! highest of the issue's `risk` label (absent reads `medium`), the level the claim's diff computes, and each review
-//! that holds a `risk` row. The diff is the held claim's branch against the base branch its pull request targets, as
+//! highest of the issue's `risk` label (absent reads `medium`), the level the claim's diff computes, each review that
+//! holds a `risk` row, and a pending delta the issue caused. The diff is the held claim's branch against the base branch its pull request targets, as
 //! the clone's remote-tracking ref holds it; the rules are `.bp/risk.yml` on that base branch, so a branch that edits
 //! them is judged by the base's rules, and its edit is high. A read: it writes nothing and calls no forge.
 
@@ -45,9 +45,11 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
             )
         })?,
     };
+    // A pending delta is vault data: it raises the level with or without a clone in view (37, design change 1).
+    let delta = !bp_read::carried_deltas(&index, &id)?.is_empty();
     let raised_by = bp_read::inputs::raises(&index, id.as_str())?;
     let computed = computed(cwd, &index, &id)?;
-    let level = risk::level(declared, computed.as_ref().map(|c| c.level), raised_by.len());
+    let level = risk::level(declared, computed.as_ref().map(|c| c.level), raised_by.len() + usize::from(delta));
     let mut reasons = Vec::new();
     if declared == level {
         reasons.push(match header.get("risk") {
@@ -59,6 +61,9 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
         reasons.extend(c.reasons.iter().cloned());
     }
     if level == Level::High {
+        if delta {
+            reasons.push("the issue caused a pending delta, and a design change is high".into());
+        }
         reasons.extend(raised_by.iter().map(|r| format!("review {r} holds a risk row")));
     }
     Ok(json!({
@@ -112,6 +117,5 @@ fn computed(cwd: &Path, index: &Index, id: &Id) -> Result<Option<Computed>, Refu
     } else {
         Config::default()
     };
-    let delta = !bp_read::carried_deltas(index, id)?.is_empty();
-    Ok(Some(risk::computed(&diff, &config, delta)))
+    Ok(Some(risk::computed(&diff, &config)))
 }

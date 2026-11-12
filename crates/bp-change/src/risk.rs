@@ -23,8 +23,13 @@ pub const RISK_ROW: &str = "risk";
 /// The risk file, at the top of the code repository. A diff that touches it is high: it holds the rules of the gate.
 pub const RISK_FILE: &str = ".bp/risk.yml";
 
-/// The level in force: the highest of the declared level, the computed level and the raises. Each raise is high. A
-/// computed level that nothing could read counts for nothing.
+/// The gate's own paths (36, section 1: CI workflows, bp hooks, risk rules, agent settings). They are high with or
+/// without a risk file; the file's `high` list adds to them and cannot remove one.
+pub const BUILT_IN_HIGH: [&str; 5] = [".bp/", ".github/workflows/", ".claude/", ".codex/", ".agents/"];
+
+/// The level in force: the highest of the declared level, the computed level and the raises. Each raise is high: a
+/// review's `risk` row, or a pending delta the issue caused. A computed level that nothing could read counts for
+/// nothing.
 pub fn level(declared: Level, computed: Option<Level>, raises: usize) -> Level {
     let floor = if raises > 0 { Level::High } else { Level::Low };
     declared.max(computed.unwrap_or(Level::Low)).max(floor)
@@ -78,6 +83,18 @@ impl Pattern {
             Self::Ext(ext) => path.rsplit('/').next().is_some_and(|name| name.ends_with(ext.as_str())),
             Self::Exact(exact) => path == exact,
         }
+    }
+
+    /// [`Self::matches`] with ASCII case folded on both sides. A high pattern matches so: a case-folding volume, as
+    /// macOS's default, checks `.Claude/x` out as `.claude/x`, so a case trick can only raise the level.
+    pub fn matches_any_case(&self, path: &str) -> bool {
+        let fold = |p: &String| p.to_ascii_lowercase();
+        let folded = match self {
+            Self::Dir(p) => Self::Dir(fold(p)),
+            Self::Ext(p) => Self::Ext(fold(p)),
+            Self::Exact(p) => Self::Exact(fold(p)),
+        };
+        folded.matches(&path.to_ascii_lowercase())
     }
 }
 
@@ -210,10 +227,9 @@ pub struct Changed {
     pub path: String,
     /// The path before a rename or a copy.
     pub from: Option<String>,
-    /// The lines added; 0 for a binary file.
-    pub added: u64,
-    /// The lines removed; 0 for a binary file.
-    pub removed: u64,
+    /// The lines added and removed; `None` when git prints `-`, for a binary file or a path an attribute marks
+    /// `-diff`. The attributes come from files the diff does not show, so an unknown size is never read as 0.
+    pub lines: Option<u64>,
 }
 
 impl Changed {
@@ -221,27 +237,23 @@ impl Changed {
     fn paths(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.path.as_str()).chain(self.from.as_deref())
     }
-
-    fn lines(&self) -> u64 {
-        self.added + self.removed
-    }
 }
 
 /// Reads the output of `git diff --numstat -z`: each entry is `<added>\t<removed>\t<path>\0`, or for a rename
-/// `<added>\t<removed>\t\0<from>\0<to>\0`. Git prints `-` for the counts of a binary file.
+/// `<added>\t<removed>\t\0<from>\0<to>\0`. Git prints `-` for the counts of a file whose lines it does not count.
 pub fn numstat(text: &str) -> Vec<Changed> {
     let mut fields = text.split('\0');
     let mut out = Vec::new();
     while let Some(entry) = fields.next() {
         let mut cells = entry.splitn(3, '\t');
         let (Some(added), Some(removed), Some(path)) = (cells.next(), cells.next(), cells.next()) else { continue };
-        let count = |n: &str| n.trim().parse().unwrap_or(0);
+        let lines = added.parse::<u64>().ok().zip(removed.parse::<u64>().ok()).map(|(a, r)| a + r);
         let (from, path) = if path.is_empty() {
             (fields.next().map(String::from), fields.next().unwrap_or_default().to_string())
         } else {
             (None, path.to_string())
         };
-        out.push(Changed { path, from, added: count(added), removed: count(removed) });
+        out.push(Changed { path, from, lines });
     }
     out
 }
@@ -255,30 +267,38 @@ pub struct Computed {
     pub reasons: Vec<String>,
 }
 
-/// The level of a diff (36, section 1). High when the issue caused a pending delta, when a path is the risk file or
-/// matches a high pattern, when the lines outside the low patterns exceed `high_lines`, or when more top-level
-/// directories than `packages` change. Low only when each path matches a low pattern and the diff changes fewer than
-/// `low_lines` lines. Medium otherwise. A file at the top is in no directory, so it counts as no package.
-pub fn computed(diff: &[Changed], config: &Config, delta: bool) -> Computed {
+/// The level of a diff (36, section 1). High when a path is under a built-in high path or matches a high pattern
+/// (each in any ASCII case), when a path outside the low patterns has a size git does not count, when the lines
+/// outside the low patterns exceed `high_lines`, or when more packages than `packages` change. Low only when each
+/// path matches a low pattern and the diff changes fewer than `low_lines` lines. Medium otherwise. A package is a
+/// top-level directory that holds a changed path outside the low patterns; a file at the top is in no package.
+pub fn computed(diff: &[Changed], config: &Config) -> Computed {
     let limits = config.limits;
+    let low_path = |path: &str| config.low.iter().any(|p| p.matches(path));
+    let low = |c: &&Changed| c.paths().all(low_path);
     let mut high = Vec::new();
-    if delta {
-        high.push("the issue caused a pending delta, and a design change is high".to_string());
-    }
     for path in diff.iter().flat_map(Changed::paths) {
-        if path == RISK_FILE {
+        let folded = path.to_ascii_lowercase();
+        if folded == RISK_FILE {
             high.push(format!("{path} is the risk file, and an edit to the gate is high"));
-        } else if let Some(p) = config.high.iter().find(|p| p.matches(path)) {
+        } else if let Some(p) = BUILT_IN_HIGH.iter().find(|p| folded.starts_with(*p)) {
+            high.push(format!("{path} is under the built-in high path {p}"));
+        } else if let Some(p) = config.high.iter().find(|p| p.matches_any_case(path)) {
             high.push(format!("{path} matches the high pattern {p}"));
         }
     }
-    let low = |c: &&Changed| c.paths().all(|path| config.low.iter().any(|p| p.matches(path)));
-    let outside: u64 = diff.iter().filter(|c| !low(c)).map(Changed::lines).sum();
-    if outside > limits.high_lines {
-        high.push(format!("{outside} changed lines outside the low patterns exceed high_lines {}", limits.high_lines));
+    let outside: Vec<&Changed> = diff.iter().filter(|c| !low(c)).collect();
+    high.extend(outside.iter().filter(|c| c.lines.is_none()).map(|c| format!("size unknown: {}", c.path)));
+    let lines: u64 = outside.iter().filter_map(|c| c.lines).sum();
+    if lines > limits.high_lines {
+        high.push(format!("{lines} changed lines outside the low patterns exceed high_lines {}", limits.high_lines));
     }
-    let packages: BTreeSet<&str> =
-        diff.iter().flat_map(Changed::paths).filter_map(|p| p.split_once('/').map(|(dir, _)| dir)).collect();
+    let packages: BTreeSet<&str> = diff
+        .iter()
+        .flat_map(Changed::paths)
+        .filter(|p| !low_path(p))
+        .filter_map(|p| p.split_once('/').map(|(dir, _)| dir))
+        .collect();
     if packages.len() as u64 > limits.packages {
         let (n, names) = (packages.len(), packages.into_iter().collect::<Vec<_>>().join(", "));
         high.push(format!("{n} top-level directories change ({names}), more than packages {}", limits.packages));
@@ -286,14 +306,13 @@ pub fn computed(diff: &[Changed], config: &Config, delta: bool) -> Computed {
     if !high.is_empty() {
         return Computed { level: Level::High, reasons: high };
     }
-    let total: u64 = diff.iter().map(Changed::lines).sum();
-    let not_low: Vec<&str> = diff.iter().filter(|c| !low(c)).map(|c| c.path.as_str()).collect();
+    let total: u64 = diff.iter().filter_map(|c| c.lines).sum();
     let mut reasons = Vec::new();
-    match not_low.as_slice() {
+    match outside.as_slice() {
         [] => {}
-        [one] => reasons.push(format!("{one} matches no low pattern")),
+        [one] => reasons.push(format!("{} matches no low pattern", one.path)),
         [first, rest @ ..] => {
-            reasons.push(format!("{first} and {} more changed paths match no low pattern", rest.len()));
+            reasons.push(format!("{} and {} more changed paths match no low pattern", first.path, rest.len()));
         }
     }
     if total >= limits.low_lines {
@@ -314,11 +333,16 @@ mod tests {
     use super::*;
 
     fn change(path: &str, added: u64, removed: u64) -> Changed {
-        Changed { path: path.into(), from: None, added, removed }
+        Changed { path: path.into(), from: None, lines: Some(added + removed) }
     }
 
     fn renamed(from: &str, to: &str) -> Changed {
-        Changed { path: to.into(), from: Some(from.into()), added: 0, removed: 0 }
+        Changed { path: to.into(), from: Some(from.into()), lines: Some(0) }
+    }
+
+    /// A change whose size git prints as `-`.
+    fn no_size(path: &str) -> Changed {
+        Changed { path: path.into(), from: None, lines: None }
     }
 
     fn config(text: &str) -> Config {
@@ -339,7 +363,7 @@ mod tests {
         }
         // The computed level from real diffs, through the same function.
         let rules = config("high: [infra/, '*.yml', Cargo.toml]\nlow: [docs/, '*.md']\n");
-        let at = |diff: &[Changed]| computed(diff, &rules, false).level;
+        let at = |diff: &[Changed]| computed(diff, &rules).level;
         assert_eq!(at(&[change("infrastructure.md", 3, 0)]), Low, "infra/ stops at its slash");
         assert_eq!(at(&[change("infra/main.tf", 1, 0)]), High);
         assert_eq!(at(&[change("a.yml.bak", 1, 0)]), Medium, "*.yml is a suffix of the name");
@@ -352,36 +376,68 @@ mod tests {
         assert_eq!(level(Medium, Some(at(&[change("docs/a.md", 2, 1)])), 0), Medium, "a low diff lowers nothing");
         assert_eq!(level(Low, Some(at(&[change("src/a.rs", 2, 1)])), 0), Medium);
         assert_eq!(level(Low, Some(at(&[change("docs/a.md", 2, 1)])), 1), High, "a raise holds over a low diff");
-        assert_eq!(computed(&[change("docs/a.md", 1, 0)], &rules, true).level, High, "a pending delta is high");
+        assert_eq!(level(Low, None, 1), High, "a raise holds with no diff in view");
     }
 
     #[test]
     fn risk_file_edit_is_high() {
         let none = Config::default();
-        let lenient = config("low: [.bp/, '*.yml']\nlimits: {low_lines: 1000, high_lines: 100000, packages: 100}\n");
+        let lenient = config(
+            "low: [.bp/, .github/, .claude/, .codex/, .agents/, '*.yml', '*.json']\n\
+             limits: {low_lines: 1000, high_lines: 100000, packages: 100}\n",
+        );
         for rules in [&none, &lenient] {
             for diff in [
                 vec![change(RISK_FILE, 1, 0)],
                 vec![change(RISK_FILE, 0, 0)],
+                vec![change(".BP/Risk.yml", 1, 0)],
                 vec![renamed(RISK_FILE, ".bp/old.yml")],
                 vec![renamed(".bp/new.yml", RISK_FILE)],
                 vec![change("docs/a.md", 1, 0), change(RISK_FILE, 0, 1)],
             ] {
-                let c = computed(&diff, rules, false);
+                let c = computed(&diff, rules);
                 assert_eq!(c.level, Level::High, "{diff:?}");
-                assert!(c.reasons.iter().any(|r| r.starts_with(".bp/risk.yml is the risk file")), "{c:?}");
+                assert!(c.reasons.iter().any(|r| r.contains(" is the risk file")), "{c:?}");
+            }
+            // The gate's own paths are high with no risk file, and a low pattern cannot remove one.
+            for (path, under) in [
+                (".bp/hooks/x.sh", ".bp/"),
+                (".github/workflows/bp-gate.yml", ".github/workflows/"),
+                (".GitHub/Workflows/ci.yml", ".github/workflows/"),
+                (".claude/settings.json", ".claude/"),
+                (".Claude/settings.json", ".claude/"),
+                (".codex/config.toml", ".codex/"),
+                (".agents/a.md", ".agents/"),
+                (".bp/risk.yml.bak", ".bp/"),
+            ] {
+                let c = computed(&[change(path, 1, 0)], rules);
+                assert_eq!(c.reasons, [format!("{path} is under the built-in high path {under}")], "{rules:?}");
             }
         }
-        for near in [".bp/risk.yml.bak", "bp/risk.yml", "x/.bp/risk.yml", ".bp/risk.yaml"] {
-            assert_eq!(computed(&[change(near, 1, 0)], &lenient, false).level, Level::Low, "{near} is not the file");
+        for near in ["bp/risk.yml", "x/.bp/risk.yml", ".github/dependabot.yml", "x/.claude/a.json", ".claude.json"] {
+            assert_eq!(computed(&[change(near, 1, 0)], &lenient).level, Level::Low, "{near} is not the gate's");
         }
-        assert_eq!(computed(&[], &none, false).level, Level::Low, "an empty diff edits no file");
+        assert_eq!(computed(&[], &none).level, Level::Low, "an empty diff edits no file");
+    }
+
+    #[test]
+    fn a_case_variant_matches_a_high_pattern_and_never_a_low_one() {
+        let rules = config("high: [Infra/, '*.TF', Cargo.toml]\nlow: [docs/, '*.md']\n");
+        let at = |path: &str| computed(&[change(path, 1, 0)], &rules);
+        for (path, pattern) in
+            [("infra/a", "Infra/"), ("INFRA/a", "Infra/"), ("x/a.tf", "*.TF"), ("CARGO.TOML", "Cargo.toml")]
+        {
+            assert_eq!(at(path).reasons, [format!("{path} matches the high pattern {pattern}")]);
+        }
+        assert_eq!(at("Docs/a.txt").level, Level::Medium, "a low pattern is exact");
+        assert_eq!(at("Docs/a.MD").level, Level::Medium, "a low suffix is exact");
+        assert_eq!(at("docs/a.txt").level, Level::Low);
     }
 
     #[test]
     fn the_size_and_package_limits_set_high_and_low() {
         let rules = config("low: [tests/, docs/]\nlimits: {low_lines: 10, high_lines: 20, packages: 2}\n");
-        let at = |diff: &[Changed]| computed(diff, &rules, false);
+        let at = |diff: &[Changed]| computed(diff, &rules);
         assert_eq!(at(&[change("tests/a.rs", 5, 4)]).level, Level::Low);
         assert_eq!(at(&[change("tests/a.rs", 5, 5)]).level, Level::Medium, "low needs fewer lines than low_lines");
         assert_eq!(at(&[change("tests/a.rs", 500, 0)]).level, Level::Medium, "test lines never make a diff high");
@@ -392,6 +448,21 @@ mod tests {
         assert_eq!(at(&[change("a/x", 1, 0), change("b/x", 1, 0), change("README", 1, 0)]).level, Level::Medium);
         let wide = at(&[change("a/x", 1, 0), change("b/x", 1, 0), change("c/x", 1, 0)]);
         assert_eq!(wide.reasons, ["3 top-level directories change (a, b, c), more than packages 2"]);
+        let in_low = at(&[change("a/x", 1, 0), change("tests/x", 1, 0), change("docs/x", 1, 0)]);
+        assert_eq!(in_low.level, Level::Medium, "a path under a low pattern is in no package: {in_low:?}");
+        let moved = at(&[renamed("a/x", "tests/x"), change("b/x", 1, 0), change("docs/x", 1, 0)]);
+        assert_eq!(moved.level, Level::Medium, "{moved:?}");
+        let moved = at(&[renamed("a/x", "c/x"), change("b/x", 1, 0)]);
+        assert_eq!(
+            moved.reasons,
+            ["3 top-level directories change (a, b, c), more than packages 2"],
+            "both paths count"
+        );
+        // Git prints `-` for a binary file or a `-diff` attribute that the diff does not show: never read as 0.
+        assert_eq!(at(&[no_size("src/logo.png")]).reasons, ["size unknown: src/logo.png"]);
+        assert_eq!(at(&[renamed("src/a.bin", "docs/a.bin"), no_size("docs/b.bin")]).level, Level::Medium);
+        let low = at(&[no_size("docs/logo.png"), change("tests/a.rs", 2, 0)]);
+        assert_eq!(low.level, Level::Low, "an unknown size under a low pattern counts 0: {low:?}");
         let medium = at(&[change("src/a.rs", 1, 0), change("src/b.rs", 1, 0)]);
         assert_eq!(medium.reasons, ["src/a.rs and 1 more changed paths match no low pattern"]);
         assert_eq!(
@@ -449,7 +520,7 @@ mod tests {
             numstat(&text),
             [
                 change("src/a b.rs", 3, 1),
-                change("logo.png", 0, 0),
+                no_size("logo.png"),
                 renamed("docs/old.md", "docs/new.md"),
                 change("README", 2, 0),
             ]
