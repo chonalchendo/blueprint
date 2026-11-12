@@ -137,6 +137,7 @@ pub fn runs(index: &Index, id: &str) -> Result<Vec<intents::Run>, Refusal> {
                 error: text(&r.header, "severity").is_none_or(|s| s != "warn"),
                 failed: matches!(verdict.as_deref(), Some("fail" | "timed-out")),
                 passed: matches!(verdict.as_deref(), Some("pass" | "skipped")),
+                risk: text(&r.header, "risk").and_then(|l| l.parse().ok()),
             }
         })
         .collect())

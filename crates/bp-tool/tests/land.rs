@@ -244,6 +244,26 @@ fn git_s_index_and_tree_variables_never_reach_the_claim_s_worktree() {
     assert_eq!((code, &out["head"]), (Some(0), &json!(h)), "the worktree is clean: {out}");
 }
 
+/// `pr` records the computed level of the head it pushes on each run it writes there, so an intent reads the level
+/// with no fetch (22, constraint 8). A head whose runs record no level is no repeat.
+#[test]
+fn pr_records_the_risk_level_of_its_head_on_each_run() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, h) = opened(v, t, &[]);
+    let run = v.join(format!("{ISSUE}/runs/hello-{h}-1.md"));
+    let text = std::fs::read_to_string(&run).unwrap();
+    assert!(text.contains("\nrisk: medium\n"), "hello.txt matches no low pattern: {text}");
+    forge(t, &h, &[], &[]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "the level is recorded at the head");
+    std::fs::write(&run, text.replace("risk: medium\n", "")).unwrap();
+    git(v, &["commit", "-qam", "no level"]);
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, &out["head"]), (Some(0), &json!(h)), "{out}");
+    let again = std::fs::read_to_string(v.join(format!("{ISSUE}/runs/hello-{h}-2.md"))).unwrap();
+    assert!(again.contains("\nrisk: medium\n"), "{again}");
+}
+
 /// `check` on an issue with a held claim runs at the claim's worktree head, as `pr` does, wherever the caller stands.
 #[test]
 fn check_runs_the_blocks_in_the_held_claims_worktree() {
