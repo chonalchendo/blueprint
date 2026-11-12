@@ -189,12 +189,21 @@ fn public_key(line: &str) -> Option<String> {
 
 /// Whether a running ssh-agent holds `signer`, as `ssh-add -L` lists it. With no agent, or no `ssh-add`, it holds
 /// nothing.
+///
+/// This guards a human slip only: a loaded key signs with no passphrase. It defends nothing against an agent on the
+/// same machine, which controls `PATH` and `SSH_AUTH_SOCK`; the forge check (37, issue 4) is the gate an agent cannot
+/// pass. `/usr/bin/ssh-add` runs when it exists, so a `PATH` without `ssh-add` does not drop the check. The `ssh-add`
+/// on `PATH` runs too, and either listing refuses, so a program on `PATH` can only add a refusal.
 pub(crate) fn in_agent(signer: &str) -> bool {
-    let Ok(out) = Command::new("ssh-add").arg("-L").stdin(Stdio::null()).stderr(Stdio::null()).output() else {
-        return false;
-    };
-    out.status.success()
-        && String::from_utf8_lossy(&out.stdout).lines().any(|l| public_key(l).as_deref() == Some(signer))
+    let system = Path::new("/usr/bin/ssh-add");
+    let programs = if system.exists() { vec![system, Path::new("ssh-add")] } else { vec![Path::new("ssh-add")] };
+    programs.into_iter().any(|program| {
+        let Ok(out) = Command::new(program).arg("-L").stdin(Stdio::null()).stderr(Stdio::null()).output() else {
+            return false;
+        };
+        out.status.success()
+            && String::from_utf8_lossy(&out.stdout).lines().any(|l| public_key(l).as_deref() == Some(signer))
+    })
 }
 
 /// The armoured signature a record's body holds, from its first line to its last.
