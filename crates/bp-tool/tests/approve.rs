@@ -145,6 +145,14 @@ fn approve_and_lower_sign_the_head_with_the_signers_key() {
     assert_eq!((code, &again["comment"]), (Some(3), &out["comment"]), "a repeat posts the same comment: {again}");
     let posted = std::fs::read_to_string(t.join("posted")).unwrap();
     assert_eq!(posted, format!("4\n{comment}"), "gh pr comment 4 --body <the comment>");
+    // A retarget changes the signed base: the old approval is no repeat, and the new comment names the new base.
+    let onto =
+        json!([{ "number": 4, "state": "OPEN", "headRefName": "bp/a", "headRefOid": HEAD, "baseRefName": "bp/b" }]);
+    std::fs::write(t.join("prs.json"), onto.to_string()).unwrap();
+    let (code, out) = approve(&[], &human);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out["comment"].as_str().unwrap().contains("pull_request: 4\nbase: bp/b\nhead: "), "{out}");
+    std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
 
     let lower = |level: &str, k: &str| bp(v, t, &[], &["lower", ISSUE, level, "--reason", "docs only", "--key", k]);
     assert_eq!(lower("high", &human).0, Some(4), "a lowering names low or medium");
