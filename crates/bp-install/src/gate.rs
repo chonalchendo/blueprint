@@ -97,20 +97,16 @@ pub(crate) fn plan(top: &Path, project: &str, pin: Option<Pin<'_>>) -> Result<Tr
     if let Some(new) = new_risk.filter(|new| risk.as_deref() != Some(new.as_str())) {
         writes.push((RISK_FILE, new));
     }
+    // The nearest directory that exists takes the new file. A file on the path is not one: its read above failed.
     for (rel, _) in &writes {
         let path = top.join(rel);
         let near = path.ancestors().skip(1).find(|a| a.exists()).expect("the top exists");
-        let why = if !near.is_dir() {
-            "is not a directory"
-        } else if near.metadata().is_ok_and(|m| m.permissions().readonly()) {
-            "is read-only"
-        } else {
-            continue;
-        };
-        return Err(Refusal::failed(
-            near.display().to_string(),
-            format!("{} {why}, so install cannot write {rel}; fix it, then rerun", near.display()),
-        ));
+        if near.metadata().is_ok_and(|m| m.permissions().readonly()) {
+            return Err(Refusal::failed(
+                near.display().to_string(),
+                format!("{} is read-only, so install cannot write {rel}; fix it, then rerun", near.display()),
+            ));
+        }
     }
     Ok(Tracked { writes, gate })
 }
