@@ -18,14 +18,24 @@ The toolchain is pinned in `rust-toolchain.toml`. `cargo deny` and `cargo machet
 
 ## Pull requests
 
-The check `bp-gate` (`.github/workflows/bp-gate.yml`) requires the human's signed approval of a high pull request. `bp install` writes the workflow and the line `gate: <sha>` in `.bp/risk.yml`: the Blueprint commit that the check builds `bp` from. Commit both to the default branch from a shell. Here `.gitignore` holds `.bp/`, so use `git add -f .bp/risk.yml`. Until the default branch holds a pin, the check fails on every pull request.
+The check `bp-gate` (`.github/workflows/bp-gate.yml`) requires the human's signed approval of a high pull request. It judges what the head lands: the test merge of the head into the default branch. A high head passes only on a pull request into the default branch. `bp install` writes the workflow, and the line `gate: <sha>` in `.bp/risk.yml` when the file holds no pin. The pin is the Blueprint commit that the check builds `bp` from, and it must be on Blueprint's default branch. Only `bp install --gate <sha>` replaces a pin.
 
 The check stops an agent only with these forge settings. Without them it stops mistakes only.
 
-- The agent's GitHub token is a fine-grained personal access token on this repository only. It has Contents and Pull requests write. It has no Administration, Workflows or Commit statuses permission. The owner's own `gh` login is not the agent's token.
-- Branch protection on `master`, or a ruleset with no bypass actor, requires the checks `bp-gate` and CI, with "Do not allow bypassing the above settings".
+- The agent's GitHub token is a fine-grained personal access token on this repository only, with Contents and Pull requests write and no other write. It has no Administration, Workflows, Commit statuses or Actions write.
+- The owner's own token is out of the agent's reach. The machine account that runs agents has no `gh` login of the owner, and no keychain, keyring or git credential helper that holds a github.com credential of the owner. The owner acts in the browser, or with `gh` on a separate account.
+- The repository's default workflow token is read-only. Every workflow that runs the pull request's code also sets `permissions: contents: read`, as `ci.yml` does.
+- Branch protection on `master`, or a ruleset with no bypass actor, requires the checks `bp-gate` and CI from GitHub Actions, with "Do not allow bypassing the above settings". It also requires branches to be up to date before merging, and linear history.
 - On a public repository, the Actions policy allows `pull_request_target` for `.github/workflows/bp-gate.yml`. From 2026-12-02 GitHub blocks that event by default, and then the check never runs.
 
-A pass is not judged again when the rules on the default branch change. The next push to the pull request runs the check again. On a private repository on GitHub's free plan, GitHub refuses branch protection, so `bp-gate` is advisory there.
+Bootstrap, in this order. Until protection is on, `master` takes any merge, so the trust anchor is what it holds on that day.
+
+1. From a shell, commit `.bp/risk.yml` with `signer:` and `gate:` to `master`. Here `.gitignore` holds `.bp/`, so use `git add -f .bp/risk.yml`. Check the pin with `git merge-base --is-ancestor <pin> origin/master` in a clone of Blueprint.
+2. Merge the workflow `.github/workflows/bp-gate.yml`.
+3. Read `.bp/risk.yml`, `.gitmodules`, `.gitattributes` and `.github/workflows/` on `master`. Then turn on protection.
+
+Until the default branch holds a pin, the check fails on every pull request.
+
+With "up to date" on, a pass is for the rules on the default branch's current head. On a private repository on GitHub's free plan, GitHub refuses branch protection, so `bp-gate` is advisory there.
 
 Every pull request body follows `.github/pull_request_template.md`. `gh pr create --body` does not load the template, so copy its sections into the body.
