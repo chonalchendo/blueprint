@@ -207,6 +207,11 @@ impl Sandbox {
             install.env(key, cfg.join(dir));
         }
         capture(install.args(["install", "--target", "claude", "--json"]))?;
+        // The forge check's workflow is a tracked file the human commits; an arm runs no forge check, and its clone
+        // stays as the fixture committed it.
+        std::fs::remove_file(self.code().join(".github/workflows/bp-gate.yml"))?;
+        std::fs::remove_dir(self.code().join(".github/workflows")).ok();
+        std::fs::remove_dir(self.code().join(".github")).ok();
         if let Some((arm, at)) = check_arm {
             self.assert_arm(skill, arm, at)?;
         }
