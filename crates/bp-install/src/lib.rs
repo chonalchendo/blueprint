@@ -48,17 +48,15 @@ bp_vault::closed_enum! {
 }
 
 /// Installs the bundle for `target` at `top`, the forge check's workflow for `project`, and the pin `gate: <sha>` in
-/// the risk file, `sha` a full commit of Blueprint: `(true, result)` for a write, `(false, result)` when the clone
-/// already holds all three, so the verb exits 3.
-pub fn install(top: &Path, target: Target, project: &str, sha: &str) -> Result<(bool, Value), Refusal> {
+/// the risk file when `sha`, a full commit of Blueprint, is known: `(true, result)` for a write, `(false, result)`
+/// when the clone already holds them, so the verb exits 3.
+pub fn install(top: &Path, target: Target, project: &str, sha: Option<&str>) -> Result<(bool, Value), Refusal> {
     let (mut wrote, mut result) = bundle(top, target)?;
     let risk = read(&top.join(RISK_FILE))?;
     // `bundle` refused a path outside the top, these two included, before it wrote anything. Neither is excluded:
     // each acts only once the human commits it to the default branch.
-    for (rel, old, new) in [
-        (WORKFLOW, read(&top.join(WORKFLOW))?, workflow(project)),
-        (RISK_FILE, risk.clone(), gate::pinned(risk.as_deref(), sha)),
-    ] {
+    let pin = sha.map(|s| (RISK_FILE, risk.clone(), gate::pinned(risk.as_deref(), s)));
+    for (rel, old, new) in std::iter::once((WORKFLOW, read(&top.join(WORKFLOW))?, workflow(project))).chain(pin) {
         if old.as_deref() != Some(new.as_str()) {
             put(&top.join(rel), new.as_bytes())?;
             wrote = true;

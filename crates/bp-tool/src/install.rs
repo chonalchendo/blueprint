@@ -16,19 +16,19 @@ pub struct Install {
     #[arg(long, value_parser = ["claude", "codex"])]
     pub target: String,
     /// The Blueprint commit the forge check `bp-gate` builds `bp` from, written as `gate:` in `.bp/risk.yml`. Default:
-    /// the commit this `bp` is built from.
+    /// the commit this `bp` is built from. A `bp` built outside a clone of Blueprint writes no pin, and the check fails
+    /// until the human adds one.
     #[arg(long)]
     pub gate: Option<String>,
 }
 
 pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
     let target: Target = i.target.parse().expect("clap holds the target to the set");
-    let gate = i.gate.as_deref().unwrap_or(bp_install::BUILT_FROM);
-    if !bp_change::risk::is_commit(gate) {
+    let gate = i.gate.as_deref().or(Some(bp_install::BUILT_FROM).filter(|s| !s.is_empty()));
+    if let Some(g) = gate.filter(|g| !bp_change::risk::is_commit(g)) {
         return Err(Refusal::usage(
-            format!("--gate {gate}"),
-            "--gate takes the full 40-digit sha of a Blueprint commit that holds bp gate; a bp built outside a clone \
-             of Blueprint knows no commit, so name one",
+            format!("--gate {g}"),
+            "--gate takes the full 40-digit sha of a Blueprint commit that holds bp gate",
         ));
     }
     let vault = Vault::discover(cwd)?;

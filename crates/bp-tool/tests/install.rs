@@ -116,20 +116,14 @@ fn install_refuses_outside_a_clone_and_a_repeat_exits_3() {
     }
     let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude"]);
     assert_eq!((code, v["target"].as_str()), (Some(0), Some("claude")), "{v}");
-    // The pin defaults to the commit this binary is built from: the test runs in a clone of Blueprint.
-    let built = String::from_utf8(
-        Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap();
-    assert_eq!(v["gate"].as_str(), Some(built.trim()), "{v}");
-    let risk = std::fs::read_to_string(w.code().join(".bp/risk.yml")).unwrap();
-    assert_eq!(risk, format!("gate: {}\n", built.trim()));
+    // The pin defaults to the commit this binary is built from; a build outside a clone (a copy) writes none.
+    let risk = || std::fs::read_to_string(w.code().join(".bp/risk.yml")).ok();
+    let built = Some(bp_install::BUILT_FROM).filter(|s| !s.is_empty());
+    assert_eq!((v["gate"].as_str(), risk()), (built, built.map(|b| format!("gate: {b}\n"))), "{v}");
     assert_eq!(w.bp(&w.code(), &[], &["install", "--target", "claude"]).0, Some(3));
+    let pin = "0123456789abcdef0123456789abcdef01234567";
+    let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude", "--gate", pin]);
+    assert_eq!((code, v["gate"].as_str(), risk()), (Some(0), Some(pin), Some(format!("gate: {pin}\n"))), "{v}");
     assert_eq!(std::fs::read_dir(w.home.path()).unwrap().count(), 0, "the install writes nothing in the home");
 }
 

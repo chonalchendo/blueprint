@@ -217,7 +217,8 @@ impl Sandbox {
         match fixture {
             Some(text) => std::fs::write(&risk, text)?,
             // An empty `.bp/` stays: git holds no directory, so the clone's status is clean.
-            None => std::fs::remove_file(&risk)?,
+            None if risk.exists() => std::fs::remove_file(&risk)?,
+            None => {}
         }
         if let Some((arm, at)) = check_arm {
             self.assert_arm(skill, arm, at)?;
