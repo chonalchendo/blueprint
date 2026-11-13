@@ -312,7 +312,7 @@ fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
             assert_eq!((code, v["code"].as_str()), (Some(2), Some("role_forbidden")), "{role} {act:?}: {v}");
         }
     }
-    // The session lands a low or medium issue itself (37, design change 4); the other agents do not.
+    // The session lands a low or medium issue itself (37, design change 3); the other agents do not.
     for role in ["worker", "reviewer", "researcher"] {
         let (code, v) = bp_env(root, &[("BP_ROLE", role)], &["land", "projects/bp/issues/none"]);
         assert_eq!((code, v["code"].as_str()), (Some(2), Some("role_forbidden")), "{role} land: {v}");

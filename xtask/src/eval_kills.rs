@@ -37,8 +37,8 @@ pub fn designs(dir: Option<&Path>) -> BTreeMap<String, String> {
 /// command, or it with trailing arguments trimmed. So a command the reviewer only advises is no reproduction, and nor
 /// is the tail of one. The span matches as written, or with the assignments and keywords the trace reader skips
 /// ([`crate::eval_trace::program_at`]) dropped from both sides, so `CARGO_TARGET_DIR=$T cargo test -p a` and
-/// `cargo test -p a` open each other; the assignments themselves are not compared. An escaped pipe `\|` reads as `|`. A read ([`READS`]) reproduces
-/// nothing. An id is a vault path under `projects/…/designs/` or
+/// `cargo test -p a` open each other; the assignments themselves are not compared. An escaped pipe `\|` reads as `|`.
+/// A read ([`READS`]) reproduces nothing. An id is a vault path under `projects/…/designs/` or
 /// `shared/conventions/`, or a numbered cite ([`numbered`]).
 pub fn evidence(text: &str, proof: &Proof) -> bool {
     let ran = |span: &str| {
