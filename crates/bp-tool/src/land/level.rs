@@ -29,9 +29,11 @@ pub(super) fn lander(issue: &str) -> Result<Role, Refusal> {
 }
 
 /// The commit whose rules judge the head's level, from the forge's own shas (37, design change 1): for an open pull
-/// request its `baseRefOid`, once `git ls-remote` names the same sha for its base branch; for a merged one the first
-/// parent of its merge commit, the base it merged into (review of #100, F8). A `url.<x>.insteadOf` rule that points
-/// origin at another repository so refuses at every level, before a level is judged (C2). Each sha the forge gives is
+/// request its `baseRefOid`, once `git ls-remote` names the same sha for its base branch; for a merged one its
+/// `baseRefOid` alone, since the branch has moved on. The pull request's own diff is then judged, whatever the merge
+/// made: a rebase merge's commit holds the head's earlier commits in its first parent (review of #100, F8 and V4). A
+/// `url.<x>.insteadOf` rule that points origin at another repository so refuses at every level, before a level is
+/// judged (C2). Each sha the forge gives is
 /// a full sha before a git call reads it, and an open pull request names its base branch (F4, F5).
 pub(super) fn base(c: &Claimed, id: &Id, pr: &PullRequest) -> Result<String, Refusal> {
     let subject = format!("gh pr list --head {}", c.branch);
@@ -47,9 +49,9 @@ pub(super) fn base(c: &Claimed, id: &Id, pr: &PullRequest) -> Result<String, Ref
     };
     let head = sha("head", Some(&pr.head_ref_oid))?;
     if merged(pr) {
-        let merge = sha("merge commit", pr.merge_commit.as_ref().map(|m| m.oid.as_str()))?;
-        git(&c.top, &["fetch", "-q", "origin", &merge])?;
-        return git(&c.top, &["rev-parse", "--verify", "-q", &format!("{merge}^1^{{commit}}")]);
+        let base = sha("base", pr.base_ref_oid.as_deref())?;
+        git(&c.top, &["fetch", "-q", "origin", &base])?;
+        return git(&c.top, &["rev-parse", "--verify", "-q", &format!("{base}^{{commit}}")]);
     }
     let Some(name) = pr.base_ref_name.as_deref().filter(|b| is_branch(b)) else {
         return Err(Refusal::failed(

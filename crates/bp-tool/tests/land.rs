@@ -75,13 +75,14 @@ case "$1 $2" in
     printf '{{"body":"'; awk 'BEGIN {{ ORS = "\\r\\n" }} {{ print }}' '{t}/body'; printf '"}}' ;;
   "pr merge")
     echo "$*" > '{t}/merged'; [ ! -f '{t}/merge-noop' ] || exit 0
+    before=$(git -C '{t}/origin.git' rev-parse master)
     if [ -f '{t}/squash' ]; then git -C '{t}/code' push -q origin "$(cat '{t}/squash')":refs/heads/master
     else
       squash=$(git -C '{t}/origin.git' -c user.name=f -c user.email=f@f commit-tree "$6^{{tree}}" -p master -m squash)
       git -C '{t}/origin.git' update-ref refs/heads/master "$squash"
     fi
     f=$(row "$3"); m=$(git -C '{t}/origin.git' rev-parse master)
-    merged="s/\"state\":\"OPEN\"/\"state\":\"MERGED\"/; s/^\[{{/[{{\"mergeCommit\":{{\"oid\":\"$m\"}},/"
+    merged="s/\"state\":\"OPEN\"/\"state\":\"MERGED\"/; s/^\[{{/[{{\"baseRefOid\":\"$before\",\"mergeCommit\":{{\"oid\":\"$m\"}},/"
     sed "$merged" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     [ ! -f '{t}/on-merge' ] || sh '{t}/on-merge' ;;
   *) exit 9 ;;
@@ -154,6 +155,8 @@ fn forge_as(t: &Path, head: &str, checks: &[&str], over: &Value) {
     });
     if over["state"] == "MERGED" {
         pr["mergeCommit"] = json!({ "oid": merged_at(t, head) });
+        // The forge keeps the base the pull request merged onto, though the branch has moved on.
+        pr["baseRefOid"] = json!(std::fs::read_to_string(t.join("merge-base-oid")).unwrap());
     }
     pr.as_object_mut().unwrap().extend(over.as_object().unwrap().clone());
     std::fs::write(t.join("prs.json"), json!([pr]).to_string()).unwrap();
@@ -168,6 +171,7 @@ fn merged_at(t: &Path, head: &str) -> String {
     git(&code, &["fetch", "-q", "origin"]);
     let tree = format!("{head}^{{tree}}");
     let oid = git(&code, &["commit-tree", &tree, "-p", "origin/master", "-m", "squash"]).trim().to_string();
+    std::fs::write(t.join("merge-base-oid"), git(&code, &["rev-parse", "origin/master"]).trim()).unwrap();
     git(&code, &["push", "-q", "origin", &format!("{oid}:refs/heads/master")]);
     std::fs::write(t.join("merge-oid"), &oid).unwrap();
     oid
@@ -1989,4 +1993,32 @@ fn a_merged_head_is_judged_by_the_rules_it_merged_onto() {
             assert_eq!(got, (Some(0), Some("resolved"), Some("medium")), "{out}");
         }
     }
+}
+
+/// A head merged outside `land` is judged by the pull request's own diff, from the forge's base to the head, whatever
+/// the merge made. A rebase merge's commit holds the head's earlier commits in its first parent, so a diff against that
+/// parent shows the last commit only (review of #100, V4).
+#[test]
+fn a_rebase_merged_head_is_judged_by_its_whole_diff() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, _) = opened(v, t, &[]);
+    std::fs::write(w.join("other.txt"), "o\n").unwrap();
+    let h = commit(&w, &["add", "other.txt"], "other");
+    pushed(v, t, &h);
+    lenses(v, t, &h, &MEDIUM);
+    // The rules name `hello.txt` high on the base; the forge then rebases the two commits onto it, one by one.
+    rules(t, "high:\n  - hello.txt\n");
+    let code = t.join("code");
+    let base = git(&code, &["rev-parse", "HEAD"]).trim().to_string();
+    std::fs::write(code.join("hello.txt"), "hi\n").unwrap();
+    commit(&code, &["add", "hello.txt"], "hello");
+    std::fs::write(code.join("other.txt"), "o\n").unwrap();
+    let last = commit(&code, &["add", "other.txt"], "other");
+    git(&code, &["push", "-q", "origin", "master"]);
+    let merge = json!({ "oid": last });
+    forge_as(t, &h, &["SUCCESS"], &json!({ "state": "MERGED", "mergeCommit": merge, "baseRefOid": base }));
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("evidence_stale")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains("pull request 1 is merged"), "{out}");
 }
