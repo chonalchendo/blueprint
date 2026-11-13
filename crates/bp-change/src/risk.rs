@@ -146,17 +146,20 @@ pub struct Config {
     pub limits: Limits,
     /// The human's OpenSSH public key line, which verifies a signed act (37, design change 4). Kept, not verified here.
     pub signer: Option<String>,
+    /// The Blueprint commit that the forge check `bp-gate` builds `bp` from (37, design change 5). The pin sits in this
+    /// file, so a change of it is high and needs the human's signature; `bp gate` refuses a base with none.
+    pub gate: Option<String>,
 }
 
 impl Config {
-    /// Reads the risk file's text. A key outside `high`, `low`, `limits` and `signer`, or a value outside its shape,
-    /// refuses: a misspelt `high` would drop each high path without a word.
+    /// Reads the risk file's text. A key outside `high`, `low`, `limits`, `signer` and `gate`, or a value outside its
+    /// shape, refuses: a misspelt `high` would drop each high path without a word.
     pub fn parse(text: &str) -> Result<Self, String> {
         let docs = YamlLoader::load_from_str(text).map_err(|e| format!("it is not YAML: {e}"))?;
         let map = match docs.as_slice() {
             [] | [Yaml::Null] => return Ok(Self::default()),
             [Yaml::Hash(map)] => map,
-            [_] => return Err("its top is not a mapping of high, low, limits and signer".into()),
+            [_] => return Err("its top is not a mapping of high, low, limits, signer and gate".into()),
             _ => return Err("it holds more than one YAML document".into()),
         };
         let mut config = Self::default();
@@ -166,9 +169,10 @@ impl Config {
                 Some("low") => config.low = patterns("low", value)?,
                 Some("limits") => config.limits = limits(value)?,
                 Some("signer") => config.signer = signer(value)?,
+                Some("gate") => config.gate = gate(value)?,
                 _ => {
                     return Err(format!(
-                        "{} is no key of the risk file: the keys are high, low, limits and signer",
+                        "{} is no key of the risk file: the keys are high, low, limits, signer and gate",
                         name(key)
                     ));
                 }
@@ -246,6 +250,21 @@ fn signer(value: &Yaml) -> Result<Option<String>, String> {
         return Ok(Some(line.into()));
     }
     Err("signer is not one OpenSSH public key line: `<type> <base64 key> [comment]`, as a `.pub` file holds it".into())
+}
+
+/// The gate pin: a full commit sha, as `bp install` writes it. The workflow reads the line `gate: <sha>` with no YAML
+/// parser, so a quoted value refuses there; here it reads as the same string.
+fn gate(value: &Yaml) -> Result<Option<String>, String> {
+    match value {
+        Yaml::Null => Ok(None),
+        Yaml::String(sha) if is_commit(sha) => Ok(Some(sha.clone())),
+        _ => Err(format!("gate is {}, not the 40 lower-case hex digits of a Blueprint commit", name(value))),
+    }
+}
+
+/// A full SHA-1 commit name: 40 lower-case hex digits, as a gate pin is.
+pub fn is_commit(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// One changed file of a diff, as `git diff --numstat -z` prints it.
@@ -547,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn the_risk_file_reads_its_four_keys_and_refuses_the_rest() {
+    fn the_risk_file_reads_its_five_keys_and_refuses_the_rest() {
         assert_eq!(config(""), Config::default());
         assert_eq!(config("# nothing yet\n"), Config::default());
         let full = config(
@@ -560,6 +579,10 @@ mod tests {
         assert_eq!(full.low, [Pattern::Dir("tests/".into())]);
         assert_eq!(full.limits, Limits { low_lines: 50, ..Limits::default() });
         assert_eq!(full.signer.as_deref(), Some("ssh-ed25519 AAAAC3 me"));
+        let pin = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(config(&format!("gate: {pin}\n")).gate.as_deref(), Some(pin));
+        assert_eq!(config(&format!("gate: '{pin}'\n")).gate.as_deref(), Some(pin), "a quoted pin reads the same");
+        assert_eq!(config("gate:\n").gate, None);
         let key = "ecdsa-sha2-nistp256 AAAAE2VjZHNh+/= a b";
         assert_eq!(config(&format!("signer: {key}\n")).signer.as_deref(), Some(key));
         assert_eq!(
@@ -606,6 +629,11 @@ mod tests {
             ("signer: ed25519 AAAA me\n", "public key"),
             ("signer: ssh-ed25519\n", "public key"),
             ("signer: ssh-ed25519 AA*A me\n", "public key"),
+            ("gate: abc\n", "gate is \"abc\", not the 40"),
+            ("gate: 0123456789ABCDEF0123456789ABCDEF01234567\n", "not the 40 lower-case hex"),
+            ("gate: 0123456789abcdef0123456789abcdef012345678\n", "not the 40 lower-case hex"),
+            ("gate: [0123456789abcdef0123456789abcdef01234567]\n", "gate is a list or a mapping"),
+            ("gate: 12\n", "gate is 12"),
             ("high: [a/]\nhigh: [b/]\n", "not YAML"),
             ("a: 1\n---\nb: 2\n", "more than one"),
         ] {

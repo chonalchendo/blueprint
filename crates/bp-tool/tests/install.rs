@@ -110,8 +110,25 @@ fn install_refuses_outside_a_clone_and_a_repeat_exits_3() {
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("no_clone")), "{v}");
     assert!(v["fix"].as_str().unwrap().contains("projects/bp/project https://h.invalid/o/r"), "{v}");
     assert_eq!(common::commits(w.vault.path()), "1", "install writes nothing in the vault");
+    for bad in ["abc", "0123456789ABCDEF0123456789ABCDEF01234567", ""] {
+        let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude", "--gate", bad]);
+        assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "{bad:?}: {v}");
+    }
     let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude"]);
     assert_eq!((code, v["target"].as_str()), (Some(0), Some("claude")), "{v}");
+    // The pin defaults to the commit this binary is built from: the test runs in a clone of Blueprint.
+    let built = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(v["gate"].as_str(), Some(built.trim()), "{v}");
+    let risk = std::fs::read_to_string(w.code().join(".bp/risk.yml")).unwrap();
+    assert_eq!(risk, format!("gate: {}\n", built.trim()));
     assert_eq!(w.bp(&w.code(), &[], &["install", "--target", "claude"]).0, Some(3));
     assert_eq!(std::fs::read_dir(w.home.path()).unwrap().count(), 0, "the install writes nothing in the home");
 }

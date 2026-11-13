@@ -1,7 +1,10 @@
 # The forge check bp-gate (37, design change 5), written by `bp install`. Branch protection requires the job
 # `bp-gate` and CI. The run never holds code from the pull request: `pull_request_target` runs this file as the
 # default branch holds it, the one checkout of this repository is the default branch's commit, and the head is
-# fetched as data for `git diff` only. A change to this file is high, as every path under `.github/workflows/` is.
+# fetched as data for `git diff` only. `bp` is built from the Blueprint commit that the line `gate:` of `.bp/risk.yml`
+# names on that commit, never from this repository's tree, and with no cache: a cache is not signed, and the runs that
+# write one run unsigned code. A change to this file or to the pin is high, as every path under `.github/workflows/`
+# and `.bp/` is.
 name: bp-gate
 
 on:
@@ -21,47 +24,49 @@ jobs:
     env:
       BP_PROJECT: "bp"
       BP_SOURCE: https://github.com/chonalchendo/blueprint
-      BP_REF: master
       BP_BASE: ${{ github.sha }}
       BP_BASE_REF: ${{ github.event.pull_request.base.ref }}
       BP_HEAD: ${{ github.event.pull_request.head.sha }}
       BP_PR: ${{ github.event.pull_request.number }}
-      GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
           path: base
           fetch-depth: 0
-      # The cache scope of this run is the default branch, which a pull request's own runs cannot write.
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            bp-target
-          key: bp-gate-${{ runner.os }}-${{ hashFiles('base/Cargo.lock') }}
-          restore-keys: bp-gate-${{ runner.os }}-
-      - name: build bp from the base
+          persist-credentials: false
+      - name: read the pin at the base
+        # Exactly one line `gate: <40 hex digits>`, or the check fails: a base with no pin has no gate.
         run: |
-          # Blueprint's own repository builds bp from the base; another builds it from Blueprint's source.
-          if [ -f base/crates/bp-tool/Cargo.toml ]; then
-            src=base
-          else
-            git clone -q "$BP_SOURCE" bp-source
-            git -C bp-source checkout -q "$BP_REF"
-            src=bp-source
+          gate=$(sed -n -E 's/^gate: ([0-9a-f]{40})$/\1/p' base/.bp/risk.yml)
+          if [ "${#gate}" -ne 40 ]; then
+            echo "::error::.bp/risk.yml on the default branch holds no one line gate: <sha>; bp install writes it"
+            exit 1
           fi
-          cd "$src"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/bp-target" cargo build --locked --release -p bp-tool
+          echo "BP_GATE=$gate" >> "$GITHUB_ENV"
+      - name: build bp at the pin
+        # The project's tree is a sibling of bp-source, so cargo and rustup read none of its config or toolchain files.
+        run: |
+          git init -q bp-source
+          git -C bp-source fetch -q --depth 1 --no-tags "$BP_SOURCE" "$BP_GATE"
+          git -C bp-source checkout -q --detach "$BP_GATE"
+          cd bp-source
+          cargo build --locked --release -p bp-tool
       - name: fetch the head as data
-        run: git -C base fetch -q --no-tags origin "$BP_HEAD"
+        # The checkout keeps no token, so only this step and the next hold one.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -C base -c "http.extraheader=AUTHORIZATION: basic $auth" fetch -q --no-tags origin "$BP_HEAD"
       - name: read the comments
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: gh api --paginate "repos/$GH_REPO/issues/$BP_PR/comments" > "$RUNNER_TEMP/comments.json"
       - name: bp gate
         working-directory: base
         run: |
-          "$GITHUB_WORKSPACE/bp-target/release/bp" gate --base "$BP_BASE" --base-ref "$BP_BASE_REF" --head "$BP_HEAD" --pr "$BP_PR" \
-            --project "$BP_PROJECT" --comments "$RUNNER_TEMP/comments.json"
+          "$GITHUB_WORKSPACE/bp-source/target/release/bp" gate --base "$BP_BASE" --base-ref "$BP_BASE_REF" \
+            --head "$BP_HEAD" --pr "$BP_PR" --project "$BP_PROJECT" --comments "$RUNNER_TEMP/comments.json"

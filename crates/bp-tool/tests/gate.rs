@@ -108,7 +108,7 @@ impl World {
     }
 }
 
-const RULES: &str = "high: [infra/]\nlow: [docs/]\nsigner: {human}\n";
+const RULES: &str = "high: [infra/]\nlow: [docs/]\nsigner: {human}\ngate: 0123456789abcdef0123456789abcdef01234567\n";
 
 const ISSUE: &str = "projects/bp/issues/a";
 
@@ -224,7 +224,7 @@ fn gate_needs_a_signed_approval_of_this_pull_request_and_head_for_high() {
 fn gate_reads_the_rules_and_the_signer_at_the_base_never_the_head() {
     let w = World::new(RULES);
     // The head drops `infra/` from the high paths and names the agent's key.
-    let rules = format!("high: []\nlow: [docs/, infra/]\nsigner: {}\n", w.public("agent"));
+    let rules = format!("high: []\nlow: [docs/, infra/]\nsigner: {}\ngate: {}\n", w.public("agent"), "f".repeat(40));
     let head = w.commit(&[(".bp/risk.yml", &rules), ("infra/b.tf", "b\n")]);
     let pr = PR.to_string();
     let fields = ["approve", "bp", ISSUE, &pr, "master", &head];
@@ -236,7 +236,7 @@ fn gate_reads_the_rules_and_the_signer_at_the_base_never_the_head() {
     assert!(reasons.contains("infra/b.tf matches the high pattern infra/"), "the base's rules judge it: {v}");
 
     // A base with no signer passes no high head, whatever signer the head names.
-    let w = World::new("high: [infra/]\n");
+    let w = World::new("high: [infra/]\ngate: 0123456789abcdef0123456789abcdef01234567\n");
     let rules = format!("signer: {}\n", w.public("human"));
     let head = w.commit(&[(".bp/risk.yml", &rules), ("src/b.rs", "b\n")]);
     let fields = ["approve", "bp", ISSUE, &pr, "master", &head];
@@ -262,4 +262,20 @@ fn gate_binds_the_base_branch_so_a_retarget_needs_a_new_signature() {
     for bad in ["", "a b", "master\nhead: x"] {
         assert_eq!(code(&w.gate_onto(bad, &head, Some(&both))), (Some(4), "usage".into()), "{bad:?}");
     }
+}
+
+#[test]
+fn gate_refuses_a_base_with_no_pin_of_its_own_build() {
+    // The workflow builds `bp` from the pin it reads at the base, so a base with no pin, or a bad one, has no gate.
+    for rules in ["high: [infra/]\nsigner: {human}\n", "signer: {human}\ngate: abc\n", ""] {
+        let w = World::new(rules);
+        let head = w.commit(&[("docs/b.md", "b\n")]);
+        let (exit, v) = w.gate(&head, None);
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("risk_file_invalid")), "{rules:?}: {v}");
+        assert_eq!(v["subject"].as_str(), Some(format!("{}:.bp/risk.yml", w.base).as_str()), "{v}");
+    }
+    // The head's pin is not read: a head that adds one to a base with none still refuses.
+    let w = World::new("signer: {human}\n");
+    let head = w.commit(&[(".bp/risk.yml", &format!("signer: {}\ngate: {}\n", w.public("human"), "f".repeat(40)))]);
+    assert_eq!(code(&w.gate(&head, None)), (Some(2), "risk_file_invalid".into()));
 }

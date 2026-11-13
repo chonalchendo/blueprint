@@ -17,7 +17,7 @@ use bp_operation::{READ_VERBS, Role};
 use bp_vault::{Code, Kind, Refusal};
 use serde_json::{Map, Value, json};
 
-pub use crate::gate::{WORKFLOW, workflow};
+pub use crate::gate::{BUILT_FROM, RISK_FILE, WORKFLOW, workflow};
 use crate::hashes::Hashes;
 use crate::section::{importer, sectioned, with_section};
 use crate::spec::Spec;
@@ -47,19 +47,26 @@ bp_vault::closed_enum! {
     }
 }
 
-/// Installs the bundle for `target` at `top`, and the forge check's workflow for `project`: `(true, result)` for a
-/// write, `(false, result)` when the clone already holds both, so the verb exits 3.
-pub fn install(top: &Path, target: Target, project: &str) -> Result<(bool, Value), Refusal> {
-    let (wrote, mut result) = bundle(top, target)?;
-    let gate = workflow(project);
-    let held = read(&top.join(WORKFLOW))?.as_deref() == Some(gate.as_str());
-    if !held {
-        // `bundle` refused a path outside the top, this one included, before it wrote anything. The workflow is not
-        // excluded: it acts only once the human commits it to the default branch.
-        put(&top.join(WORKFLOW), gate.as_bytes())?;
+/// Installs the bundle for `target` at `top`, the forge check's workflow for `project`, and the pin `gate: <sha>` in
+/// the risk file, `sha` a full commit of Blueprint: `(true, result)` for a write, `(false, result)` when the clone
+/// already holds all three, so the verb exits 3.
+pub fn install(top: &Path, target: Target, project: &str, sha: &str) -> Result<(bool, Value), Refusal> {
+    let (mut wrote, mut result) = bundle(top, target)?;
+    let risk = read(&top.join(RISK_FILE))?;
+    // `bundle` refused a path outside the top, these two included, before it wrote anything. Neither is excluded:
+    // each acts only once the human commits it to the default branch.
+    for (rel, old, new) in [
+        (WORKFLOW, read(&top.join(WORKFLOW))?, workflow(project)),
+        (RISK_FILE, risk.clone(), gate::pinned(risk.as_deref(), sha)),
+    ] {
+        if old.as_deref() != Some(new.as_str()) {
+            put(&top.join(rel), new.as_bytes())?;
+            wrote = true;
+        }
     }
     result["workflow"] = WORKFLOW.into();
-    Ok((wrote || !held, result))
+    result["gate"] = sha.into();
+    Ok((wrote, result))
 }
 
 /// The bundle for `target` at `top`, as [`install`] returns it.
@@ -119,7 +126,7 @@ fn bundle(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     let mut writes = files
         .keys()
         .map(String::as_str)
-        .chain([spec.always_on, spec.settings, &manifest_rel, WORKFLOW])
+        .chain([spec.always_on, spec.settings, &manifest_rel, WORKFLOW, RISK_FILE])
         .chain(import)
         .chain(stale.iter().copied());
     let dirs = [spec.skills, spec.agents, spec.dispatch, spec.hooks];
