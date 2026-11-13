@@ -17,6 +17,43 @@ pub fn workflow(project: &str) -> String {
     include_str!("bp-gate.yml").replace("@project@", project).replace("@source@", env!("CARGO_PKG_REPOSITORY"))
 }
 
+/// The pin `install` writes as `gate:` in the risk file. A pin change is high and needs the human's signature, so
+/// only the human's own `--gate` replaces a committed pin.
+#[derive(Debug, Clone, Copy)]
+pub enum Pin<'a> {
+    /// `--gate <sha>`: written, and it replaces the pin the file holds.
+    Given(&'a str),
+    /// The commit this binary is built from: written only into a file that holds no `gate` key.
+    Built(&'a str),
+}
+
+/// The risk file's text after the install writes `pin`; `None` when the file stays as it is. A file that does not
+/// parse holds a pin for this rule: the install cannot tell, and the gate refuses that file anyway.
+pub(crate) fn written(text: Option<&str>, pin: Pin<'_>) -> Option<String> {
+    let holds = || {
+        let docs = text.map(yaml_rust2::YamlLoader::load_from_str);
+        match docs {
+            None => false,
+            Some(Ok(docs)) => docs.first().is_some_and(|d| !d["gate"].is_badvalue()),
+            Some(Err(_)) => true,
+        }
+    };
+    match pin {
+        Pin::Given(sha) => Some(pinned(text, sha)),
+        Pin::Built(sha) if !holds() => Some(pinned(text, sha)),
+        Pin::Built(_) => None,
+    }
+}
+
+/// The pin in force: the value of the one line `gate: <40 lower-case hex digits>`, as the workflow reads it.
+pub(crate) fn in_force(text: Option<&str>) -> Option<String> {
+    let hex = |s: &&str| s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    match text?.lines().filter_map(|l| l.strip_prefix("gate: ")).filter(hex).collect::<Vec<_>>()[..] {
+        [one] => Some(one.to_string()),
+        _ => None,
+    }
+}
+
 /// The risk file's text with the line `gate: <sha>`: the one line that starts `gate:` is replaced, or the line is
 /// appended. The other lines stay as the human wrote them.
 pub(crate) fn pinned(text: Option<&str>, sha: &str) -> String {
@@ -34,9 +71,10 @@ pub(crate) fn pinned(text: Option<&str>, sha: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use yaml_rust2::{Yaml, YamlLoader};
 
-    use super::{RISK_FILE, WORKFLOW, pinned, workflow};
+    use super::{Pin, RISK_FILE, WORKFLOW, in_force, pinned, workflow};
 
     const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -55,7 +93,7 @@ mod tests {
     fn gate_workflow_runs_from_base_and_requires_signature_for_high() {
         let top = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(top.path().join(".git/info")).unwrap();
-        crate::install(top.path(), crate::Target::Claude, "bp", Some(PIN)).unwrap();
+        crate::install(top.path(), crate::Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
         let text = std::fs::read_to_string(top.path().join(WORKFLOW)).unwrap();
         assert_eq!(text, workflow("bp"));
         let exclude = std::fs::read_to_string(top.path().join(".git/info/exclude")).unwrap();
@@ -170,25 +208,49 @@ mod tests {
         std::fs::create_dir_all(top.path().join(".git/info")).unwrap();
         let t = top.path();
         let risk = || std::fs::read_to_string(t.join(RISK_FILE)).unwrap();
-        crate::install(t, crate::Target::Claude, "bp", Some(PIN)).unwrap();
-        assert_eq!(risk(), format!("gate: {PIN}\n"), "a clone with no risk file gets one");
+        let run = |pin| crate::install(t, crate::Target::Claude, "bp", pin).unwrap();
+        let (_, v) = run(Some(Pin::Built(PIN)));
+        assert_eq!((risk(), &v["gate"]), (format!("gate: {PIN}\n"), &json!(PIN)), "a clone with no risk file gets one");
         let mine = "high: [infra/]\n# the human's key\nsigner: ssh-ed25519 AAAA me\n";
         std::fs::write(t.join(RISK_FILE), mine).unwrap();
-        let (wrote, v) = crate::install(t, crate::Target::Claude, "bp", Some(PIN)).unwrap();
+        let (wrote, v) = run(Some(Pin::Built(PIN)));
         assert!(wrote && v["gate"] == PIN, "{v}");
         assert_eq!(risk(), format!("{mine}gate: {PIN}\n"), "the human's lines stay");
-        assert!(!crate::install(t, crate::Target::Claude, "bp", Some(PIN)).unwrap().0, "a repeat writes nothing");
+        assert!(!run(Some(Pin::Built(PIN))).0, "a repeat writes nothing");
+        // A committed pin stays: only the human's `--gate` moves it, since a pin change is high.
         let next = "fedcba9876543210fedcba9876543210fedcba98";
-        assert!(crate::install(t, crate::Target::Claude, "bp", Some(next)).unwrap().0);
-        assert_eq!(risk(), format!("{mine}gate: {next}\n"), "a new pin replaces the old line");
+        let (wrote, v) = run(Some(Pin::Built(next)));
+        assert!(!wrote && v["gate"] == PIN, "the result names the pin in force: {v}");
+        assert_eq!(risk(), format!("{mine}gate: {PIN}\n"));
+        let (wrote, v) = run(Some(Pin::Given(next)));
+        assert!(wrote && v["gate"] == next, "{v}");
+        assert_eq!(risk(), format!("{mine}gate: {next}\n"), "--gate replaces the old line");
         let exclude = std::fs::read_to_string(t.join(".git/info/exclude")).unwrap();
         assert!(!exclude.contains(RISK_FILE), "the pin is tracked, so it can be committed: {exclude}");
+        // A `gate` key in another form, or a file that does not parse, holds a pin: no second `gate:` line.
+        for held in ["\"gate\": 'x'\n", "gate: [\n"] {
+            std::fs::write(t.join(RISK_FILE), held).unwrap();
+            let (_, v) = run(Some(Pin::Built(PIN)));
+            assert!(risk() == held && v["gate"].is_null(), "{held:?}: {v}");
+        }
         // With no known commit, the pin stays as it is: the check fails closed until the human writes one.
-        let (_, v) = crate::install(t, crate::Target::Claude, "bp", None).unwrap();
-        assert!(v["gate"].is_null() && risk().ends_with(&format!("gate: {next}\n")), "{v}");
+        std::fs::write(t.join(RISK_FILE), format!("gate: {next}\n")).unwrap();
+        let (_, v) = run(None);
+        assert!(v["gate"] == next && risk() == format!("gate: {next}\n"), "{v}");
         std::fs::remove_file(t.join(RISK_FILE)).unwrap();
-        crate::install(t, crate::Target::Claude, "bp", None).unwrap();
-        assert!(!t.join(RISK_FILE).exists(), "no risk file is made with no pin");
+        let (_, v) = run(None);
+        assert!(!t.join(RISK_FILE).exists() && v["gate"].is_null(), "no risk file is made with no pin");
+    }
+
+    #[test]
+    fn in_force_reads_the_one_pin_line_the_workflow_reads() {
+        assert_eq!(in_force(Some(&format!("low: []\ngate: {PIN}\n"))).as_deref(), Some(PIN));
+        for text in
+            [String::new(), format!("gate: '{PIN}'\n"), format!("gate: {PIN}\ngate: {PIN}\n"), "gate: abc\n".into()]
+        {
+            assert_eq!(in_force(Some(&text)), None, "{text:?}");
+        }
+        assert_eq!(in_force(None), None);
     }
 
     #[test]

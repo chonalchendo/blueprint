@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use bp_install::Target;
+use bp_install::{Pin, Target};
 use bp_vault::{Code, Filter, Index, Kind, Refusal, Vault};
 use clap::Args;
 
@@ -15,17 +15,20 @@ pub struct Install {
     /// The harness: `claude` (Claude Code) or `codex`.
     #[arg(long, value_parser = ["claude", "codex"])]
     pub target: String,
-    /// The Blueprint commit the forge check `bp-gate` builds `bp` from, written as `gate:` in `.bp/risk.yml`. Default:
-    /// the commit this `bp` is built from. A `bp` built outside a clone of Blueprint writes no pin, and the check fails
-    /// until the human adds one.
+    /// The Blueprint commit the forge check `bp-gate` builds `bp` from, written as `gate:` in `.bp/risk.yml`; it
+    /// replaces a pin the file holds. Default: the commit this `bp` is built from, written only into a file with no
+    /// pin. A `bp` built outside a clone of Blueprint writes no pin, and the check fails until the human adds one.
     #[arg(long)]
     pub gate: Option<String>,
 }
 
 pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
     let target: Target = i.target.parse().expect("clap holds the target to the set");
-    let gate = i.gate.as_deref().or(Some(bp_install::BUILT_FROM).filter(|s| !s.is_empty()));
-    if let Some(g) = gate.filter(|g| !bp_change::risk::is_commit(g)) {
+    let built = Some(bp_install::BUILT_FROM).filter(|s| !s.is_empty()).map(Pin::Built);
+    let gate = i.gate.as_deref().map(Pin::Given).or(built);
+    if let Some(Pin::Given(g) | Pin::Built(g)) = gate
+        && !bp_change::risk::is_commit(g)
+    {
         return Err(Refusal::usage(
             format!("--gate {g}"),
             "--gate takes the full 40-digit sha of a Blueprint commit that holds bp gate",

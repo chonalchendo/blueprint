@@ -17,7 +17,7 @@ use bp_operation::{READ_VERBS, Role};
 use bp_vault::{Code, Kind, Refusal};
 use serde_json::{Map, Value, json};
 
-pub use crate::gate::{BUILT_FROM, RISK_FILE, WORKFLOW, workflow};
+pub use crate::gate::{BUILT_FROM, Pin, RISK_FILE, WORKFLOW, workflow};
 use crate::hashes::Hashes;
 use crate::section::{importer, sectioned, with_section};
 use crate::spec::Spec;
@@ -47,23 +47,25 @@ bp_vault::closed_enum! {
     }
 }
 
-/// Installs the bundle for `target` at `top`, the forge check's workflow for `project`, and the pin `gate: <sha>` in
-/// the risk file when `sha`, a full commit of Blueprint, is known: `(true, result)` for a write, `(false, result)`
-/// when the clone already holds them, so the verb exits 3.
-pub fn install(top: &Path, target: Target, project: &str, sha: Option<&str>) -> Result<(bool, Value), Refusal> {
+/// Installs the bundle for `target` at `top`, the forge check's workflow for `project`, and `pin`, a full commit of
+/// Blueprint, as `gate: <sha>` in the risk file when [`Pin`]'s rule writes it: `(true, result)` for a write,
+/// `(false, result)` when the clone already holds them, so the verb exits 3. The result's `gate` is the pin in force
+/// after the install.
+pub fn install(top: &Path, target: Target, project: &str, pin: Option<Pin<'_>>) -> Result<(bool, Value), Refusal> {
     let (mut wrote, mut result) = bundle(top, target)?;
     let risk = read(&top.join(RISK_FILE))?;
     // `bundle` refused a path outside the top, these two included, before it wrote anything. Neither is excluded:
     // each acts only once the human commits it to the default branch.
-    let pin = sha.map(|s| (RISK_FILE, risk.clone(), gate::pinned(risk.as_deref(), s)));
-    for (rel, old, new) in std::iter::once((WORKFLOW, read(&top.join(WORKFLOW))?, workflow(project))).chain(pin) {
+    let new_risk = pin.and_then(|p| gate::written(risk.as_deref(), p));
+    let pinned = new_risk.clone().map(|new| (RISK_FILE, risk.clone(), new));
+    for (rel, old, new) in std::iter::once((WORKFLOW, read(&top.join(WORKFLOW))?, workflow(project))).chain(pinned) {
         if old.as_deref() != Some(new.as_str()) {
             put(&top.join(rel), new.as_bytes())?;
             wrote = true;
         }
     }
     result["workflow"] = WORKFLOW.into();
-    result["gate"] = sha.into();
+    result["gate"] = gate::in_force(new_risk.as_deref().or(risk.as_deref())).into();
     Ok((wrote, result))
 }
 
