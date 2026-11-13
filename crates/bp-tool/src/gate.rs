@@ -1,8 +1,9 @@
-//! `bp gate --base <sha> --head <sha> --pr <n> --project <name>`: the forge check `bp-gate` (37, design change 5).
+//! `bp gate --base <sha> --base-ref <branch> --head <sha> --pr <n> --project <name>`: the forge check `bp-gate` (37, design change 5).
 //! It runs in a plain clone with no vault, on the forge, from the base: the workflow checks out the base, fetches the
 //! head as data, and never runs code from it. The level comes from the diff by the one level function, with the
 //! rules and the signer of `.bp/risk.yml` at the base, never the head's copy. A high head passes only with a comment
-//! that carries the human's valid signature of the approval of this project, this pull request and this head.
+//! that carries the human's valid signature of the approval of this project, this pull request, its base branch and
+//! this head.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -13,14 +14,18 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use crate::risk::{judge_by, rules};
-use crate::signed::{Act, Block, blocks, is_sha, public_key, verify};
+use crate::signed::{Act, Block, blocks, is_branch, is_sha, public_key, verify};
 
-/// `bp gate --base <sha> --head <sha> --pr <n> --project <name> [--comments <path>]`.
+/// `bp gate --base <sha> --base-ref <branch> --head <sha> --pr <n> --project <name> [--comments <path>]`.
 #[derive(Args)]
 pub struct Gate {
     /// The commit whose rules judge the head: the default branch's head that the check runs from.
     #[arg(long)]
     pub base: String,
+    /// The branch the pull request merges into, as the forge names it. A signature names it, so a retarget needs a
+    /// new one.
+    #[arg(long)]
+    pub base_ref: String,
     /// The pull request's head commit, fetched as data.
     #[arg(long)]
     pub head: String,
@@ -44,6 +49,9 @@ pub(crate) fn gate(cwd: &Path, g: &Gate) -> Result<Value, Refusal> {
                 format!("{flag} takes a full commit sha: bp gate --help"),
             ));
         }
+    }
+    if !is_branch(&g.base_ref) {
+        return Err(Refusal::usage(format!("--base-ref {:?}", g.base_ref), "--base-ref takes a branch name"));
     }
     let top = bp_vault::git::Repo::find(cwd)
         .ok_or_else(|| Refusal::failed(cwd.display().to_string(), "bp gate runs in a clone of the repository"))?
@@ -81,7 +89,7 @@ pub(crate) fn gate(cwd: &Path, g: &Gate) -> Result<Value, Refusal> {
     Ok(result("signed"))
 }
 
-/// `Ok` when one block is the approval of this project, pull request and head, and its signature by `signer`
+/// `Ok` when one block is the approval of this project, pull request, base branch and head, and its signature by `signer`
 /// verifies against the message rebuilt from those values. Else `signature_invalid` when a block names this head and
 /// does not verify, or `approval_missing`, which names the heads the pull request's blocks sign.
 fn signed(blocks: &[Block], g: &Gate, signer: &str) -> Result<(), Refusal> {
@@ -98,7 +106,8 @@ fn signed(blocks: &[Block], g: &Gate, signer: &str) -> Result<(), Refusal> {
         if !Kind::Issue.fits(&node) || node.project() != Some(g.project.as_str()) {
             continue;
         }
-        let message = Act { verb: "approve", node: &node, pull_request: g.pr, head: &g.head, more: &[] }.message();
+        let act = Act { verb: "approve", node: &node, pull_request: g.pr, base: &g.base_ref, head: &g.head, more: &[] };
+        let message = act.message();
         if let Some(sig) = &b.signature
             && verify(&message, sig, signer)?
         {
@@ -114,7 +123,7 @@ fn signed(blocks: &[Block], g: &Gate, signer: &str) -> Result<(), Refusal> {
             Code::SignatureInvalid,
             format!("pull request {} at {}", g.pr, g.head),
             "an approval counts only with a signature, by the signer that .bp/risk.yml on the base names, of this \
-             project, pull request and head (37, design change 5)",
+             project, pull request, base branch and head (37, design change 5)",
             fix,
         ));
     }

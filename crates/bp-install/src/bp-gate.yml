@@ -23,6 +23,7 @@ jobs:
       BP_SOURCE: @source@
       BP_REF: master
       BP_BASE: ${{ github.sha }}
+      BP_BASE_REF: ${{ github.event.pull_request.base.ref }}
       BP_HEAD: ${{ github.event.pull_request.head.sha }}
       BP_PR: ${{ github.event.pull_request.number }}
       GH_TOKEN: ${{ github.token }}
@@ -62,5 +63,5 @@ jobs:
       - name: bp gate
         working-directory: base
         run: |
-          "$GITHUB_WORKSPACE/bp-target/release/bp" gate --base "$BP_BASE" --head "$BP_HEAD" --pr "$BP_PR" \
+          "$GITHUB_WORKSPACE/bp-target/release/bp" gate --base "$BP_BASE" --base-ref "$BP_BASE_REF" --head "$BP_HEAD" --pr "$BP_PR" \
             --project "$BP_PROJECT" --comments "$RUNNER_TEMP/comments.json"

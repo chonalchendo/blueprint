@@ -67,9 +67,9 @@ impl World {
     }
 
     /// The comment `bp approve` posts: the message `bp approve` signs for these fields, signed by `key`.
-    fn comment(&self, key: &str, fields: [&str; 5], signed: [&str; 5]) -> String {
-        let text = |f: [&str; 5]| {
-            let names = ["act", "project", "node", "pull_request", "head"];
+    fn comment(&self, key: &str, fields: [&str; 6], signed: [&str; 6]) -> String {
+        let text = |f: [&str; 6]| {
+            let names = ["act", "project", "node", "pull_request", "base", "head"];
             names.iter().zip(f).flat_map(|(k, v)| [k, ": ", v, "\n"]).collect::<String>()
         };
         // A message on stdin signs to stdout, so no `.sig` file of an earlier call is kept.
@@ -88,10 +88,16 @@ impl World {
         format!("Signed.\n\n```bp-approval\n{}{}\n```\n", text(fields), sig.trim_end())
     }
 
-    /// `bp gate` for `head` from the clone, with `comments` written to a file when given.
+    /// `bp gate` for `head` onto `master` from the clone, with `comments` written to a file when given.
     fn gate(&self, head: &str, comments: Option<&Value>) -> (Option<i32>, Value) {
+        self.gate_onto("master", head, comments)
+    }
+
+    /// `bp gate` for `head` onto the branch `base_ref`.
+    fn gate_onto(&self, base_ref: &str, head: &str, comments: Option<&Value>) -> (Option<i32>, Value) {
         let pr = PR.to_string();
-        let mut args = vec!["gate", "--base", &self.base, "--head", head, "--pr", &pr, "--project", "bp"];
+        let mut args =
+            vec!["gate", "--base", &self.base, "--base-ref", base_ref, "--head", head, "--pr", &pr, "--project", "bp"];
         let path = self.dir.path().join("comments.json");
         let path_text = path.display().to_string();
         if let Some(c) = comments {
@@ -111,8 +117,8 @@ fn code(out: &(Option<i32>, Value)) -> (Option<i32>, String) {
     (out.0, out.1["code"].as_str().unwrap_or_default().to_string())
 }
 
-fn at(f: &[String; 5]) -> [&str; 5] {
-    [&f[0], &f[1], &f[2], &f[3], &f[4]]
+fn at(f: &[String; 6]) -> [&str; 6] {
+    [&f[0], &f[1], &f[2], &f[3], &f[4], &f[5]]
 }
 
 #[test]
@@ -137,7 +143,7 @@ fn gate_needs_a_signed_approval_of_this_pull_request_and_head_for_high() {
     let head = w.commit(&[("infra/b.tf", "b\n")]);
     let other = w.commit(&[("infra/c.tf", "c\n")]);
     let pr = PR.to_string();
-    let ours = |h: &str| ["approve", "bp", ISSUE, &pr, h].map(String::from);
+    let ours = |h: &str| ["approve", "bp", ISSUE, &pr, "master", h].map(String::from);
     let good = ours(&head);
     let refused = |comments: Option<&Value>| code(&w.gate(&head, comments));
 
@@ -152,29 +158,35 @@ fn gate_needs_a_signed_approval_of_this_pull_request_and_head_for_high() {
     assert_eq!((exit, v["code"].as_str()), (Some(2), "approval_missing".into()), "{v}");
     assert!(v["fix"].as_str().unwrap().contains(&format!("the comments sign {other}")), "{v}");
     assert_eq!(code(&w.gate(&other, Some(&json!([stale])))), (Some(0), String::new()), "it passes the head it signed");
-    let pr8 = ["approve", "bp", ISSUE, "8", &head];
+    let pr8 = ["approve", "bp", ISSUE, "8", "master", &head];
     assert_eq!(refused(Some(&json!([w.comment("human", pr8, pr8)]))), (Some(2), "approval_missing".into()));
-    let elsewhere = ["approve", "mentat", "projects/mentat/issues/a", &pr, &head];
+    let elsewhere = ["approve", "mentat", "projects/mentat/issues/a", &pr, "master", &head];
     assert_eq!(refused(Some(&json!([w.comment("human", elsewhere, elsewhere)]))), (Some(2), "approval_missing".into()));
 
     // Each block at this head that an agent can make without the human's key refuses.
-    let lower = ["lower", "bp", ISSUE, &pr, &head];
+    let lower = ["lower", "bp", ISSUE, &pr, "master", &head];
+    let stacked = ["approve", "bp", ISSUE, &pr, "bp/lower", &head];
     for (why, body) in [
         ("the agent's own key", w.comment("agent", at(&good), at(&good))),
         ("another head's signature, relabelled", w.comment("human", at(&good), at(&ours(&other)))),
         ("another pull request's signature, relabelled", w.comment("human", at(&good), pr8)),
         ("another act's signature, relabelled", w.comment("human", at(&good), lower)),
+        // A stacked pull request retargeted to the default branch: the human signed the diff on the lower layer.
+        ("another base branch's signature, relabelled", w.comment("human", at(&good), stacked)),
+        ("another base branch's signature", w.comment("human", stacked, stacked)),
         ("an issue of another project", {
-            let f = ["approve", "bp", "projects/mentat/issues/a", &pr, &head];
+            let f = ["approve", "bp", "projects/mentat/issues/a", &pr, "master", &head];
             w.comment("human", f, f)
         }),
         ("another project's valid approval, relabelled", {
-            let theirs = ["approve", "mentat", "projects/mentat/issues/a", &pr, &head];
-            w.comment("human", ["approve", "bp", "projects/mentat/issues/a", &pr, &head], theirs)
+            let theirs = ["approve", "mentat", "projects/mentat/issues/a", &pr, "master", &head];
+            w.comment("human", ["approve", "bp", "projects/mentat/issues/a", &pr, "master", &head], theirs)
         }),
         (
             "no signature",
-            format!("```bp-approval\nact: approve\nproject: bp\nnode: {ISSUE}\npull_request: {PR}\nhead: {head}\n```"),
+            format!(
+                "```bp-approval\nact: approve\nproject: bp\nnode: {ISSUE}\npull_request: {PR}\nbase: master\nhead: {head}\n```"
+            ),
         ),
     ] {
         assert_eq!(refused(Some(&json!([body]))), (Some(2), "signature_invalid".into()), "{why}");
@@ -189,7 +201,21 @@ fn gate_needs_a_signed_approval_of_this_pull_request_and_head_for_high() {
     let (exit, v) = common::bp_env(
         &w.code(),
         &[],
-        &["gate", "--base", &w.base, "--head", &head, "--pr", &pr, "--project", "bp", "--comments", &path],
+        &[
+            "gate",
+            "--base",
+            &w.base,
+            "--base-ref",
+            "master",
+            "--head",
+            &head,
+            "--pr",
+            &pr,
+            "--project",
+            "bp",
+            "--comments",
+            &path,
+        ],
     );
     assert_eq!((exit, v["level"].as_str(), v["approval"].as_str()), (Some(0), Some("high"), Some("signed")), "{v}");
 }
@@ -201,7 +227,7 @@ fn gate_reads_the_rules_and_the_signer_at_the_base_never_the_head() {
     let rules = format!("high: []\nlow: [docs/, infra/]\nsigner: {}\n", w.public("agent"));
     let head = w.commit(&[(".bp/risk.yml", &rules), ("infra/b.tf", "b\n")]);
     let pr = PR.to_string();
-    let fields = ["approve", "bp", ISSUE, &pr, &head];
+    let fields = ["approve", "bp", ISSUE, &pr, "master", &head];
     let (exit, v) = w.gate(&head, Some(&json!([w.comment("agent", fields, fields)])));
     assert_eq!((exit, v["code"].as_str()), (Some(2), "signature_invalid".into()), "the head's signer is not trusted");
     let (exit, v) = w.gate(&head, Some(&json!([w.comment("human", fields, fields)])));
@@ -213,8 +239,27 @@ fn gate_reads_the_rules_and_the_signer_at_the_base_never_the_head() {
     let w = World::new("high: [infra/]\n");
     let rules = format!("signer: {}\n", w.public("human"));
     let head = w.commit(&[(".bp/risk.yml", &rules), ("src/b.rs", "b\n")]);
-    let fields = ["approve", "bp", ISSUE, &pr, &head];
+    let fields = ["approve", "bp", ISSUE, &pr, "master", &head];
     let (exit, v) = w.gate(&head, Some(&json!([w.comment("human", fields, fields)])));
     assert_eq!((exit, v["code"].as_str()), (Some(2), "signer_missing".into()), "{v}");
     assert_eq!(v["subject"].as_str(), Some(format!("{}:.bp/risk.yml", w.base).as_str()));
+}
+
+#[test]
+fn gate_binds_the_base_branch_so_a_retarget_needs_a_new_signature() {
+    let w = World::new(RULES);
+    let head = w.commit(&[("infra/b.tf", "b\n")]);
+    let pr = PR.to_string();
+    // The human signs the pull request while it is stacked on `bp/lower`, so the diff seen is the top layer's only.
+    let stacked = ["approve", "bp", ISSUE, &pr, "bp/lower", &head];
+    let comments = json!([w.comment("human", stacked, stacked)]);
+    assert_eq!(code(&w.gate_onto("bp/lower", &head, Some(&comments))), (Some(0), String::new()));
+    // Retargeted to `master`, the same head and comment refuse: the signature names the old base.
+    assert_eq!(code(&w.gate_onto("master", &head, Some(&comments))), (Some(2), "signature_invalid".into()));
+    let onto = ["approve", "bp", ISSUE, &pr, "master", &head];
+    let both = json!([w.comment("human", stacked, stacked), w.comment("human", onto, onto)]);
+    assert_eq!(code(&w.gate_onto("master", &head, Some(&both))), (Some(0), String::new()), "a new signature passes");
+    for bad in ["", "a b", "master\nhead: x"] {
+        assert_eq!(code(&w.gate_onto(bad, &head, Some(&both))), (Some(4), "usage".into()), "{bad:?}");
+    }
 }
