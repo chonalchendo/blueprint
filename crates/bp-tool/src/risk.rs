@@ -171,7 +171,8 @@ pub(crate) fn judge_by(top: &Path, base: String, heads: Vec<String>, config: &Co
                 ];
                 risk::computed(&risk::changes(&git(top, &args)?), config)
             }
-            Err(why) => Computed { level: Level::High, reasons: vec![format!("{head} {why}")] },
+            // What lands is not known, so the security lens joins round one as for a high path.
+            Err(why) => Computed { level: Level::High, reasons: vec![format!("{head} {why}")], security: true },
         };
         if best.as_ref().is_none_or(|b| c.level > b.level) {
             best = Some(c);
