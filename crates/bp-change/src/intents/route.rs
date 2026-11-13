@@ -55,22 +55,18 @@ pub enum Task {
 pub fn route(task: Task, level: Level, complex: bool) -> Option<Route> {
     use Effort::{High, Medium};
     use Model::{Fable, Opus, Sonnet};
-    let (model, effort) = match (task, level) {
-        (Task::Design, _) => (Fable, High),
-        (Task::Build, _) if complex => (Fable, High),
-        (Task::Build, Level::Low) => (Sonnet, Medium),
-        (Task::Build, Level::Medium) => (Sonnet, High),
-        (Task::Build, Level::High) => (Opus, High),
-        (Task::ReviewFirst, Level::Low) => (Sonnet, Medium),
-        (Task::ReviewFirst, Level::Medium) => (Opus, High),
-        (Task::ReviewFirst, Level::High) => (Fable, High),
+    let at = |model, effort| Some(Route { model, effort });
+    // One row for each task: the cells for low, medium and high risk.
+    let row = match task {
+        Task::Design => [at(Fable, High); 3],
+        Task::Build if complex => [at(Fable, High); 3],
+        Task::Build => [at(Sonnet, Medium), at(Sonnet, High), at(Opus, High)],
+        Task::ReviewFirst => [at(Sonnet, Medium), at(Opus, High), at(Fable, High)],
         // A low issue has one round, so it has no verification review.
-        (Task::ReviewVerify, Level::Low) | (Task::Escalation, Level::Low) => return None,
-        (Task::ReviewVerify, Level::Medium) => (Sonnet, Medium),
-        (Task::ReviewVerify, Level::High) => (Opus, Medium),
-        (Task::Escalation, Level::Medium | Level::High) => (Fable, High),
+        Task::ReviewVerify => [None, at(Sonnet, Medium), at(Opus, Medium)],
+        Task::Escalation => [None, at(Fable, High), at(Fable, High)],
     };
-    Some(Route { model, effort })
+    row[level as usize]
 }
 
 #[cfg(test)]
@@ -83,10 +79,6 @@ mod tests {
 
     const NOW: i64 = 1_792_281_600;
     const LEVELS: [Level; 3] = [Level::Low, Level::Medium, Level::High];
-
-    fn r(model: Model, effort: Effort) -> Option<Route> {
-        Some(Route { model, effort })
-    }
 
     fn held(level: Level, complex: bool) -> Issue {
         Issue {
@@ -105,15 +97,15 @@ mod tests {
         vec![crate::intents::Run { commit: "h".into(), risk, ..Default::default() }]
     }
 
-    fn pr(head: &str) -> Option<PullRequest> {
-        Some(PullRequest { head: head.into(), base: Some("master".into()), green: true, ..PullRequest::default() })
+    fn pr(head: &str) -> PullRequest {
+        PullRequest { head: head.into(), base: Some("master".into()), green: true, ..PullRequest::default() }
     }
 
     /// Round one of `level` read `h`, each lens holding `rows`.
-    fn round_one(level: Level, rows: Vec<Row>) -> Vec<Review> {
+    fn round_one(level: Level, rows: &[Row]) -> Vec<Review> {
         let lens = rounds::lenses(level, false);
         lens.into_iter()
-            .map(|lens| Review { id: format!("r/{lens}"), head: "h".into(), round: 1, lens, rows: rows.clone() })
+            .map(|lens| Review { id: format!("r/{lens}"), head: "h".into(), round: 1, lens, rows: rows.to_vec() })
             .collect()
     }
 
@@ -125,22 +117,22 @@ mod tests {
     }
 
     fn first_review(level: Level) -> Option<Route> {
-        let v = issue(&Issue { pr: pr("h"), runs: computed(level), ..held(level, false) }, NOW);
+        let v = issue(&Issue { pr: Some(pr("h")), runs: computed(level), ..held(level, false) }, NOW);
         assert_eq!((v.intent, v.note.starts_with("round 1")), (Some(Intent::NeedsReview), true), "{v:?}");
         v.route
     }
 
     fn verify_review(level: Level) -> Option<Route> {
         let i =
-            Issue { pr: pr("h2"), runs: computed(level), reviews: round_one(level, Vec::new()), ..held(level, false) };
+            Issue { pr: Some(pr("h2")), runs: computed(level), reviews: round_one(level, &[]), ..held(level, false) };
         let v = issue(&i, NOW);
         assert_eq!((v.intent, v.note.starts_with("round 2")), (Some(Intent::NeedsReview), true), "{v:?}");
         v.route
     }
 
     fn response(level: Level, complex: bool) -> Option<Route> {
-        let reviews = round_one(level, vec![Row::default()]);
-        let i = Issue { pr: pr("h"), runs: computed(level), reviews, ..held(level, complex) };
+        let reviews = round_one(level, &[Row::default()]);
+        let i = Issue { pr: Some(pr("h")), runs: computed(level), reviews, ..held(level, complex) };
         let v = issue(&i, NOW);
         assert_eq!(v.intent, Some(Intent::NeedsResponse), "{v:?}");
         v.route
@@ -156,6 +148,7 @@ mod tests {
 
     #[test]
     fn intent_carries_model_and_effort() {
+        let r = |model, effort| Some(Route { model, effort });
         // The table of 36, section 3, written out cell by cell: low, medium, high.
         let build = [r(Sonnet, Medium), r(Sonnet, High), r(Opus, High)];
         let first = [r(Sonnet, Medium), r(Opus, High), r(Fable, High)];
@@ -187,7 +180,7 @@ mod tests {
             assert_eq!(ready(level, true), r(Fable, High), "complex build at {level}");
             assert_eq!(response(level, true), r(Fable, High), "complex fix at {level}");
         }
-        let held_complex = Issue { pr: pr("h"), runs: computed(Level::Medium), ..held(Level::Medium, true) };
+        let held_complex = Issue { pr: Some(pr("h")), runs: computed(Level::Medium), ..held(Level::Medium, true) };
         assert_eq!(issue(&held_complex, NOW).route, r(Opus, High), "complex leaves a review alone");
         // An intent that dispatches no one carries no route.
         let working = Issue { status: "in-progress".into(), claims: vec![Claim::default()], ..Issue::default() };

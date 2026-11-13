@@ -227,6 +227,12 @@ fn a_walk_reads_needs_derivation_inside_its_one_read() {
     assert_eq!(code, Some(0), "{v}");
     let a = v["intents"].as_array().unwrap().iter().find(|i| i["id"] == "projects/bp/milestones/a").unwrap();
     assert_eq!(a["intent"], "needs-derivation", "{v}");
+    assert_eq!((&a["model"], &a["effort"]), (&"fable".into(), &"high".into()), "derive routes to Fable: {v}");
+    let own = v["intents"].as_array().unwrap().iter().find(|i| i["id"] == "projects/bp/issues/0011.under").unwrap();
+    assert_eq!(
+        (own["intent"].as_str(), own["model"].as_str(), own["effort"].as_str()),
+        (Some("ready"), Some("sonnet"), Some("high"))
+    );
 }
 
 #[test]
@@ -320,4 +326,30 @@ fn the_label_and_a_pending_delta_reach_the_lenses() {
     assert_eq!(intent(&v, labelled), ("needs-review", note), "the label");
     assert_eq!(intent(&v, caused), ("needs-review", note), "the delta");
     assert_eq!(intent(&v, "projects/bp/issues/0003.held").1, "round 1: missing lenses: conformance, failure-paths");
+}
+
+/// A row that leads to a dispatch carries the model and effort of 36, section 3; one that leads to none carries
+/// neither (37, design change 9).
+#[test]
+fn list_and_walk_rows_carry_model_and_effort() {
+    let d = vault();
+    let r = d.path();
+    let labelled = |slug: &str, label: &str| {
+        let text = format!("---\nkind: issue\ntitle: L\nstatus: open\n{label}\n---\n\nBody.\n");
+        write(r, &format!("projects/bp/issues/{slug}.md"), &text);
+    };
+    labelled("0021.low", "risk: low");
+    labelled("0022.high", "risk: high");
+    labelled("0023.hard", "complex: true");
+    let v = list(r, &["issue"], false);
+    let route = |id: &str| {
+        let row = v["rows"].as_array().unwrap().iter().find(|row| row["id"] == id).unwrap();
+        (row["model"].as_str().unwrap_or("-"), row["effort"].as_str().unwrap_or("-"))
+    };
+    assert_eq!(route("projects/bp/issues/0001.ready"), ("sonnet", "high"), "no label reads medium");
+    assert_eq!(route("projects/bp/issues/0021.low"), ("sonnet", "medium"));
+    assert_eq!(route("projects/bp/issues/0022.high"), ("opus", "high"));
+    assert_eq!(route("projects/bp/issues/0023.hard"), ("fable", "high"), "complex");
+    assert_eq!(route("projects/bp/issues/0002.waits"), ("-", "-"), "a waiting issue dispatches no one");
+    assert_eq!(route("projects/bp/issues/0003.held"), ("-", "-"));
 }
