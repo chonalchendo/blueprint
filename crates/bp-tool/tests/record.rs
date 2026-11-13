@@ -10,6 +10,8 @@ const DESIGN: &str = "projects/bp/designs/system";
 const MILESTONE: &str = "projects/bp/milestones/m";
 const ISSUE: &str = "projects/bp/issues/i";
 const LEARNING: &str = "shared/learnings/l";
+/// The fields of round one's conformance review (37, design change 6).
+const ONE: [&str; 6] = ["--field", "round=1", "--field", "lens=conformance", "--field", "mode=full"];
 
 fn git(root: &Path, args: &[&str]) -> String {
     let out = Std::new("git").arg("-C").arg(root).args(args).output().unwrap();
@@ -33,9 +35,20 @@ fn vault() -> tempfile::TempDir {
     }
     std::fs::create_dir_all(root.join("shared")).unwrap();
     std::fs::write(root.join(".gitignore"), ".bp/\nchange.md\n").unwrap();
-    git(root, &["init", "-q"]);
+    // The vault's branch is the claim's, so each commit it gains is a head on the claim's branch.
+    git(root, &["init", "-q", "-b", "bp/i"]);
     git(root, &["config", "user.name", "t"]);
     git(root, &["config", "user.email", "t@t"]);
+    git(root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    // A held claim whose clone is the vault itself, so the vault's commit is a head `record review` accepts: it lies
+    // past the claim's base.
+    let claim = format!(
+        "---\nkind: claim\nunder: {ISSUE}\nfrom: 2026-10-19T09:00:00Z\nworktree: {}\nbase: {}\n---\n",
+        root.display(),
+        git(root, &["rev-parse", "HEAD"]).trim()
+    );
+    std::fs::create_dir_all(root.join(format!("{ISSUE}/claims"))).unwrap();
+    std::fs::write(root.join(format!("{ISSUE}/claims/c.md")), claim).unwrap();
     git(root, &["add", "-A"]);
     git(root, &["commit", "-qm", "one"]);
     dir
@@ -68,7 +81,7 @@ fn each_kind_writes_one_file_at_its_path() {
     let root = dir.path();
     let body = root.join("change.md");
     std::fs::write(&body, "One change.\n").unwrap();
-    let head = "0123456789abcdef0123456789abcdef01234567";
+    let head = &git(root, &["rev-parse", "HEAD"]).trim().to_string();
     let ms = format!("milestone={MILESTONE}");
     let (h, iss, review) = (format!("head={head}"), format!("issue={ISSUE}"), format!("{ISSUE}/reviews/{head}"));
     let found = tempfile::tempdir().unwrap();
@@ -78,8 +91,11 @@ fn each_kind_writes_one_file_at_its_path() {
             vec!["delta", DESIGN, "--field", &ms, "--body-file", body.to_str().unwrap()],
             "projects/bp/designs/system/deltas/2026-10-19T10-00-00Z",
         ),
-        (vec!["review", ISSUE, "--field", &h, "--field", "role=reviewer", "--body-file", &r], review.as_str()),
-        (vec!["review", ISSUE, "--field", &h, "--body-file", &r], &format!("{review}-2")),
+        (
+            [&["review", ISSUE, "--field", &h][..], &ONE, &["--field", "role=reviewer", "--body-file", &r]].concat(),
+            review.as_str(),
+        ),
+        ([&["review", ISSUE, "--field", &h][..], &ONE, &["--body-file", &r]].concat(), &format!("{review}-2")),
         (
             vec![
                 "disposition",
@@ -139,7 +155,7 @@ fn each_kind_writes_one_file_at_its_path() {
     assert_eq!((v["external"].as_str(), v.get("under")), (Some("https://x/pull/1"), None));
     let (_, v) = bp(root, &["show", "shared/learnings/l/evidence/2026-10-19T10-00-00Z"]);
     assert_eq!((v["outcome"].as_str(), v["at"].as_str()), (Some("helped"), Some("2026-10-19T10:00:00Z")));
-    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "11");
+    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "12");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
 }
 
@@ -147,11 +163,12 @@ fn each_kind_writes_one_file_at_its_path() {
 fn an_identity_refuses_a_second_and_a_retry_changes_nothing() {
     let dir = vault();
     let root = dir.path();
-    let head = "0123456789abcdef0123456789abcdef01234567";
+    let head = &git(root, &["rev-parse", "HEAD"]).trim().to_string();
     let review = format!("{ISSUE}/reviews/{head}");
     let found = tempfile::tempdir().unwrap();
     let r = review_body(found.path(), head);
-    let (exit, _) = bp(root, &["record", "review", ISSUE, "--field", &format!("head={head}"), "--body-file", &r]);
+    let h = format!("head={head}");
+    let (exit, _) = bp(root, &[&["record", "review", ISSUE, "--field", &h][..], &ONE, &["--body-file", &r]].concat());
     assert_eq!(exit, Some(0));
     let fixed = ["record", "disposition", &review, "--field", "finding=1", "--field", "as=fixed"];
     let handoff = ["record", "handoff", "projects/bp/project", "--field", "session=8b8b7784-352c"];
@@ -168,7 +185,7 @@ fn an_identity_refuses_a_second_and_a_retry_changes_nothing() {
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "findings count from 1: {v}");
     let (exit, v) = bp(root, &["record", "handoff", "projects/bp/project", "--field", "session=8b8b7784-other"]);
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("id_taken")), "{v}");
-    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "4");
+    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "5");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
 }
 
@@ -180,7 +197,7 @@ fn a_record_cites_only_what_head_holds() {
     std::fs::write(&ghost, "---\nkind: issue\ntitle: G\nstatus: open\n---\n").unwrap();
     let head = "head=0123456789abcdef0123456789abcdef01234567";
     for args in [
-        vec!["review", "projects/bp/issues/ghost", "--field", head],
+        [&["review", "projects/bp/issues/ghost", "--field", head][..], &ONE].concat(),
         vec!["evidence", LEARNING, "--field", "outcome=helped", "--field", "issue=projects/bp/issues/ghost"],
     ] {
         let mut a = vec!["record"];
@@ -197,7 +214,7 @@ fn a_record_cites_only_what_head_holds() {
         let (exit, v) = bp(root, &[&evidence[..], dry].concat());
         assert_eq!((exit, v["code"].as_str()), (Some(2), Some("path_dirty")), "{dry:?}: {v}");
     }
-    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "2");
 }
 
 #[test]
@@ -260,9 +277,13 @@ fn record_refuses_what_its_kind_does_not_hold() {
         ),
         (vec!["delta", DESIGN, "--field", &ms], 2, "schema_invalid"),
         (vec!["delta", DESIGN, "--field", &ms, "--field", "state=accepted", "--body-file", b], 2, "schema_invalid"),
-        (vec!["review", ISSUE, "--field", "head=../x"], 2, "schema_invalid"),
-        (vec!["review", ISSUE, "--field", "head=abcdef0"], 2, "schema_invalid"),
-        (vec!["review", ISSUE, "--field", "head=0123456789ABCDEF0123456789ABCDEF01234567"], 2, "schema_invalid"),
+        ([&["review", ISSUE, "--field", "head=../x"][..], &ONE].concat(), 2, "schema_invalid"),
+        ([&["review", ISSUE, "--field", "head=abcdef0"][..], &ONE].concat(), 2, "schema_invalid"),
+        (
+            [&["review", ISSUE, "--field", "head=0123456789ABCDEF0123456789ABCDEF01234567"][..], &ONE].concat(),
+            2,
+            "schema_invalid",
+        ),
         (vec!["evidence", LEARNING, "--field", "outcome=helped", "--external", ""], 4, "usage"),
         (vec!["evidence", LEARNING, "--field", "=x"], 4, "usage"),
         (
@@ -288,6 +309,6 @@ fn record_refuses_what_its_kind_does_not_hold() {
     }
     let (_, v) = bp(root, &["record", "run", ISSUE]);
     assert!(v["fix"].as_str().unwrap().contains("bp check"), "{v}");
-    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "2");
+    assert_eq!(git(root, &["rev-list", "--count", "HEAD"]).trim(), "3");
     assert_eq!(git(root, &["status", "--porcelain"]), "");
 }

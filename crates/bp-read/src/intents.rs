@@ -12,7 +12,7 @@ use bp_vault::{Body, Code, DeltaState, DesignLevel, Filter, Id, Index, Kind, Rec
 use serde_json::{Map, Value};
 
 use crate::World;
-use crate::inputs::{blocks, claims, derivation, drift, findings, pull_request, reviewer, runs, text};
+use crate::inputs::{blocks, claims, derivation, drift, pull_request, reviewer, runs, text};
 
 /// What one call reads to compute intents: the index, the world when an issue is in view, and what each project
 /// holds for every node in it, read once per project (24, call budget).
@@ -284,8 +284,6 @@ fn of(
     let records = index.records(id, Kind::Claim)?;
     let claims = claims(&records);
     let runs = runs(index, id)?;
-    let reviews = index.records(id, Kind::Review)?;
-    let review_heads = reviews.iter().filter_map(|r| text(&r.header, "head")).collect();
     // A merged pull request under a held claim is a land that stopped before its commit: `land` finishes it, through
     // the same gates.
     let held = claims.iter().any(|c| c.released.is_none());
@@ -307,18 +305,23 @@ fn of(
         let record = &records[claims.iter().position(|c| std::ptr::eq(c, latest)).expect("the latest is one of them")];
         Id::parse(id).ok().zip(Id::parse(&record.id).ok()).is_some_and(|(id, claim)| vault.touched_after(&id, &claim))
     });
-    // Dispositions are read only for a review at the head in view (21, needs response).
-    let at_head = pr
-        .as_ref()
-        .and_then(|p| reviews.iter().rev().find(|r| text(&r.header, "head").as_deref() == Some(p.head.as_str())));
-    let unanswered = at_head.map(|r| findings(index, r)).transpose()?.map(|(open, _)| open).unwrap_or_default();
+    // The reviews and the level's inputs matter only while a pull request is in view: needs review counts the lenses
+    // at its head, and needs response reads their dispositions (21; 37, design change 8).
+    let (reviews, declared, delta) = match &pr {
+        Some(_) => {
+            let r = crate::inputs::reviewed(vault, index, id)?;
+            (r.reviews, r.declared, r.delta)
+        }
+        None => (Vec::new(), None, false),
+    };
     let issue = Issue {
         status: status.into(),
         claims,
         runs,
         blocks,
-        review_heads,
-        unanswered,
+        reviews,
+        declared,
+        delta,
         depends,
         pr,
         base,

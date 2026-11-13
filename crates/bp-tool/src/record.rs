@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bp_change::DispositionAs;
+use bp_change::rounds::{Lens, Mode};
 use bp_design::ConcernState;
 use bp_operation::Role;
 use bp_reasoning::Outcome;
@@ -110,6 +111,9 @@ fn spec(kind: Kind) -> Option<Spec> {
             Some("at"),
             vec![
                 ("head", Type::Sha, true),
+                ("round", Type::Int, true),
+                ("lens", closed(Lens::ALL, Lens::as_str), true),
+                ("mode", closed(Mode::ALL, Mode::as_str), true),
                 ("patch_id", Type::Sha, false),
                 ("pull_request", Type::Int, false),
                 ("role", closed(Role::ALL, Role::as_str), false),
@@ -237,7 +241,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
     } else {
         free(&vault.root, &stem)
     };
-    let header = Header {
+    let mut header = Header {
         kind,
         title: None,
         status: None,
@@ -247,10 +251,6 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
         unresolved: Vec::new(),
         fields,
     };
-    let mut text = format!("---\n{}---\n", header.emit());
-    if !body.is_empty() {
-        text = format!("{text}\n{body}");
-    }
     // The parent and each link target are committed, so the record cites HEAD, not a human's work in progress
     // (25, design change 1); the record's own path is clean too. A dry run refuses what the write would.
     let links = spec.fields.iter().filter(|(_, ty, _)| matches!(ty, Type::Link(_)));
@@ -264,7 +264,11 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
         Some(w) => w.clean(&targets)?,
         None => vault.clean(&targets)?,
     }
-    crate::review_rows::check(index, kind, parent.as_ref(), &given, &body)?;
+    header.fields.extend(crate::review_rows::check(&vault, index, kind, parent.as_ref(), &given, &body)?);
+    let mut text = format!("---\n{}---\n", header.emit());
+    if !body.is_empty() {
+        text = format!("{text}\n{body}");
+    }
     if identity && let Some(already) = taken(&vault.root, &id, &text)? {
         return Ok(already);
     }
@@ -272,6 +276,7 @@ pub(crate) fn record(cwd: &Path, r: &Record) -> Result<Wrote, Refused> {
     let mut result = serde_json::json!({ "id": id, "kind": kind, "under": parent });
     if kind == Kind::Review {
         result["rows"] = bp_read::inputs::rows(&body).into();
+        result["late"] = header.fields.get("late").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
     }
     let moves = crate::delta::close(&vault, &id, onto.as_ref(), &diagrams, now, &mut changes, &mut result)?;
     let Some(writer) = writer else {

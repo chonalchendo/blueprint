@@ -6,9 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bp_change::IssueStatus;
 use bp_change::intents::{self, Base, Block, Claim, Milestone, PullRequest, STACK_DEPTH};
-use bp_change::risk::RISK_ROW;
 use bp_vault::{Body, Check, Filter, Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::{Map, Value};
+
+mod reviews;
+pub use reviews::*;
 
 /// The issues under the milestone `id`, and while fewer than a batch are live, its finish line and the blocks the
 /// issues' checks name: needs derivation's records, which derive's stop reads too (21).
@@ -47,32 +49,6 @@ fn named(body: &str, heading: &str) -> Vec<Block> {
 #[must_use]
 pub fn rows(body: &str) -> usize {
     body.lines().filter(|l| l.trim_start().starts_with('|')).count().saturating_sub(2)
-}
-
-/// Whether each finding of a review body is a `risk` row, in row order: the first cell of each of the [`rows`].
-fn risk_rows(body: &str) -> Vec<bool> {
-    let table = body.lines().map(str::trim_start).filter(|l| l.starts_with('|'));
-    let first = |l: &str| l[1..].split('|').next().unwrap_or_default().trim().trim_matches('`').to_string();
-    table.skip(2).map(|l| first(l) == RISK_ROW).collect()
-}
-
-/// The findings of a review that no disposition answers, counted from 1, and whether a disposition is `fixed` (21,
-/// respond). The findings are the [`rows`] of the body; a disposition of an index past the last row answers nothing.
-/// A `risk` row only raises the level, so it needs no answer (37, design change 2).
-pub fn findings(index: &Index, review: &Record) -> Result<(Vec<u64>, bool), Refusal> {
-    let risk = risk_rows(&review.body);
-    let dispositions = index.records(&review.id, Kind::Disposition)?;
-    let answered: BTreeSet<u64> = dispositions.iter().filter_map(|d| d.header.get("finding")?.as_u64()).collect();
-    let fixed = dispositions.iter().any(|d| text(&d.header, "as").as_deref() == Some("fixed"));
-    let open = (1..).zip(risk).filter(|&(n, risk)| !risk && !answered.contains(&n)).map(|(n, _)| n);
-    Ok((open.collect(), fixed))
-}
-
-/// The reviews of the issue that hold a `risk` row, at any head: each raises the level to high, and only a signed
-/// human record lowers it (37, design change 2).
-pub fn raises(index: &Index, issue: &str) -> Result<Vec<String>, Refusal> {
-    let reviews = index.records(issue, Kind::Review)?;
-    Ok(reviews.into_iter().filter(|r| risk_rows(&r.body).contains(&true)).map(|r| r.id).collect())
 }
 
 /// The drift runs under a design that no delta or thread cites: the runs of 21's drifted, which the intent, the
@@ -137,7 +113,10 @@ pub fn runs(index: &Index, id: &str) -> Result<Vec<intents::Run>, Refusal> {
                 error: text(&r.header, "severity").is_none_or(|s| s != "warn"),
                 failed: matches!(verdict.as_deref(), Some("fail" | "timed-out")),
                 passed: matches!(verdict.as_deref(), Some("pass" | "skipped")),
-                risk: text(&r.header, "risk").and_then(|l| l.parse().ok()),
+                risk: text(&r.header, "risk").and_then(|l| l.parse().ok()).map(|level| intents::Recorded {
+                    level,
+                    security: r.header.get("security").and_then(Value::as_bool).unwrap_or_default(),
+                }),
             }
         })
         .collect())

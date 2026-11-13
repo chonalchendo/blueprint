@@ -108,7 +108,7 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     let (runs, waiting) =
         if action == Action::TriageDrift { drift(&index, &id, kind, budget, &mut reached)? } else { (Vec::new(), 0) };
     let (read, intents) = intents(&vault, &index, &reached)?;
-    let mut records = answered(&index, &id, action)?;
+    let mut records = answered(&vault, &index, &id, action)?;
     records.extend(runs);
     let pull_request = pull_request(&vault, &index, &id, action)?;
     let line = |r: &bp_vault::Reached| -> Result<Value, Refusal> {
@@ -157,12 +157,26 @@ pub(crate) fn walk(cwd: &Path, walk: &Walk) -> Result<Value, Refusal> {
     Ok(with(slice, pull_request, forge_error))
 }
 
-/// The latest record of each kind the action answers, latest by its time field, as `index.records` orders them.
-fn answered(index: &Index, id: &Id, action: Action) -> Result<Vec<Value>, Refusal> {
+/// The latest record of each kind the action answers, latest by its time field, as `index.records` orders them. A
+/// review is read as its first commit wrote it, as the intents read it, and brings each other review of its head, one
+/// per lens (37, design change 8), and each review of an earlier head whose error row still needs a disposition.
+fn answered(vault: &Vault, index: &Index, id: &Id, action: Action) -> Result<Vec<Value>, Refusal> {
     let mut records = Vec::new();
     for kind in action.records() {
-        if let Some(r) = index.records(id.as_str(), *kind)?.pop() {
-            records.push(json!({ "id": r.id, "kind": kind, "header": r.header, "body": r.body }));
+        if *kind == Kind::Review {
+            let written = bp_read::inputs::written(vault, index, id.as_str())?;
+            let reviews = bp_read::inputs::reduced(index, id.as_str(), &written)?;
+            let Some(head) = reviews.last().map(|r| r.head.as_str()) else { continue };
+            let open = bp_change::rounds::unanswered(&reviews, head);
+            for (w, r) in written.iter().zip(&reviews) {
+                if r.head == head || open.iter().any(|(o, _)| o.id == r.id) {
+                    records.push(json!({ "id": w.id, "kind": kind, "header": w.header, "body": w.body }));
+                }
+            }
+            continue;
+        }
+        if let Some(last) = index.records(id.as_str(), *kind)?.pop() {
+            records.push(json!({ "id": last.id, "kind": kind, "header": last.header, "body": last.body }));
         }
     }
     Ok(records)

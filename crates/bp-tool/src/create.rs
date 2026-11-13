@@ -36,8 +36,11 @@ pub struct Create {
     /// Validate and print what would be written; write nothing.
     #[arg(long)]
     pub dry_run: bool,
+    /// An issue's risk level at derive, as `risk=<low|medium|high>` (37, design change 1).
+    #[arg(long, value_name = "NAME=VALUE")]
+    pub field: Vec<String>,
     /// Print the kind's body template, a file of the bundle, as `{kind, template}`; write nothing.
-    #[arg(long, conflicts_with_all = ["title", "slug", "under", "body_file", "project", "dry_run"])]
+    #[arg(long, conflicts_with_all = ["title", "slug", "under", "body_file", "project", "dry_run", "field"])]
     pub template: bool,
 }
 
@@ -64,6 +67,20 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     };
     let vault = Vault::discover(cwd)?;
     let id = home(kind, title, create)?;
+    let mut fields = BTreeMap::new();
+    for given in &create.field {
+        match given.split_once('=') {
+            Some(("risk", level)) if kind == Kind::Issue => {
+                fields.insert("risk".to_string(), schema::label(kind, &id, "risk", level)?);
+            }
+            _ => {
+                return Err(Refusal::usage(
+                    format!("create {kind} --field {given}"),
+                    "create takes --field risk=<low|medium|high> on an issue; bp set writes any other label",
+                ));
+            }
+        }
+    }
     let role = set::role()?;
     // The lock comes before the read, so no other write lands between what this one reads and what it commits.
     // A dry run takes no writer, so it runs the writer's commit precondition itself (34, design change 7).
@@ -87,6 +104,11 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
         ));
     }
     let under = parent(&vault, index, kind, &id, under.as_ref())?;
+    // Absent reads medium, so a first `low` is a lowering: a label only before the milestone's approval (37, design
+    // change 1).
+    if let Some(level) = fields.get("risk") {
+        set::lowers(kind, &id, "risk", None, level, || set::lowerable(&vault, index, under.as_ref(), &id))?;
+    }
     let header = Header {
         kind,
         title: Some(title.into()),
@@ -95,7 +117,7 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
         aliases: Vec::new(),
         links: BTreeMap::new(),
         unresolved: Vec::new(),
-        fields: BTreeMap::new(),
+        fields,
     };
     let body = stored(&body);
     let text = if body.is_empty() {

@@ -10,11 +10,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::IssueStatus;
+use crate::risk::Level;
+use crate::rounds::{self, Review};
 
 mod gates;
 mod planning;
+mod review;
 pub use gates::*;
 pub use planning::*;
+pub use review::*;
 
 /// Twelve hours: a claim older than this with no run since reads `working (stale)`.
 pub const STALE_AFTER: i64 = 12 * 3600;
@@ -93,8 +97,17 @@ pub struct Run {
     /// The verdict was `pass`, or `skipped`: a `when=post-land` block holds only after the merge. Only these count as
     /// evidence for a land; a run that could not run proves nothing.
     pub passed: bool,
-    /// The level `pr` computed for `commit`'s diff after its fetch; `None` on a run `pr` did not write.
-    pub risk: Option<crate::risk::Level>,
+    /// What `pr` computed for `commit`'s diff after its fetch; `None` on a run `pr` did not write.
+    pub risk: Option<Recorded>,
+}
+
+/// What `pr` records on a run about the diff of its commit (37, design changes 1 and 8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recorded {
+    /// The computed level.
+    pub level: Level,
+    /// A changed path is high by its path and matches no low pattern, so round one adds the security lens.
+    pub security: bool,
 }
 
 /// An integrity run of a project, reduced (25, issue 11).
@@ -236,11 +249,14 @@ pub struct Issue {
     pub runs: Vec<Run>,
     /// The issue's named `error` blocks; read only while a pull request is in view.
     pub blocks: Vec<Block>,
-    /// `head` of each review record.
-    pub review_heads: Vec<String>,
-    /// The findings of the review at the head that no disposition answers, counted from 1; read only while a
-    /// pull request is in view.
-    pub unanswered: Vec<u64>,
+    /// The review records, each as its first commit wrote it, with its dispositions; read only while a pull request
+    /// is in view.
+    pub reviews: Vec<Review>,
+    /// The issue's `risk` label; `None` reads medium. Read only while a pull request is in view.
+    pub declared: Option<Level>,
+    /// The issue caused a pending delta, which raises it to high (37, design change 1). Read only while a pull request
+    /// is in view.
+    pub delta: bool,
     /// The `depends` targets.
     pub depends: Vec<Dependency>,
     /// The open pull request, or the merged one of a held claim; `None` when there is none or the forge was not read.
@@ -337,18 +353,32 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
             Err(Unmet::ChecksChanged) => unreachable!("landing reads no check set"),
         };
     }
-    if !i.review_heads.contains(&pr.head) {
-        return Verdict::of(Intent::NeedsReview, "");
+    let (level, _) = level(i, &pr.head);
+    let blocking = rounds::blocking(level, &i.reviews);
+    // At high's cap an error row goes to the human, not to another dispatch (37, design change 6).
+    if level == Level::High && blocking.iter().any(|(r, _)| r.round >= rounds::cap(Level::High)) {
+        return Verdict::of(Intent::Blocked, "round cap: the human decides");
+    }
+    // Round one waits for a review of each lens of the level; a later round waits for one `verify` review (37, design
+    // change 8).
+    let missing = missing(i, &pr.head);
+    if !missing.is_empty() {
+        let lenses: Vec<&str> = missing.iter().map(|l| l.as_str()).collect();
+        let round = round(i, &pr.head);
+        return Verdict::of(Intent::NeedsReview, format!("round {round}: missing lenses: {}", lenses.join(", ")));
     }
     // A finding without a disposition needs a response whatever the checks say: the fix may be what turns them green.
-    if !i.unanswered.is_empty() {
-        let rows: Vec<String> = i.unanswered.iter().map(u64::to_string).collect();
-        return Verdict::of(Intent::NeedsResponse, format!("no disposition: findings {}", rows.join(", ")));
+    let open = rounds::unanswered(&i.reviews, &pr.head);
+    if !open.is_empty() {
+        return Verdict::of(Intent::NeedsResponse, format!("no disposition: {}", rounds::named(&open, &pr.head)));
     }
     if !pr.green {
         return Verdict::of(Intent::Working, "checks not green");
     }
-    Verdict::of(Intent::NeedsApproval, "")
+    if blocking.is_empty() {
+        return Verdict::of(Intent::NeedsApproval, "");
+    }
+    Verdict::of(Intent::NeedsApproval, format!("error rows hold the land: {}", rounds::cited(&blocking)))
 }
 
 /// The first part of needs landing that does not hold, in `land`'s refusal order (26, design change 4).
@@ -396,8 +426,8 @@ pub fn evidence<'a>(runs: &'a [Run], head: &str, blocks: &'a [Block]) -> Result<
 
 /// The highest level that a run at `head` records: the computed level an intent reads, as it fetches nothing (22,
 /// constraint 8). `None` when no run there records one, which a gate reads as not computed, never as low.
-pub fn recorded_risk(runs: &[Run], head: &str) -> Option<crate::risk::Level> {
-    runs.iter().filter(|r| r.commit == head).filter_map(|r| r.risk).max()
+pub fn recorded_risk(runs: &[Run], head: &str) -> Option<Level> {
+    runs.iter().filter(|r| r.commit == head).filter_map(|r| Some(r.risk?.level)).max()
 }
 
 /// The latest run of an `error` check at `head` failed: blocked's first test, and the view's "red at head".
@@ -461,6 +491,7 @@ pub fn timestamp(text: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rounds::{Answer, Lens, Row};
 
     const NOW: i64 = 1_792_281_600; // 2026-10-18T00:00:00Z
 
@@ -493,6 +524,20 @@ mod tests {
             passed: !failed,
             risk: None,
         }
+    }
+
+    fn review(head: &str, round: u64, lens: Lens, rows: Vec<Row>) -> Review {
+        Review { id: format!("r/{head}-{lens}"), head: head.into(), round, lens, rows }
+    }
+
+    /// Round one at `head` for medium, the level of an issue with no recorded risk: conformance, holding `rows`, and
+    /// failure paths, holding none.
+    fn reviewed(head: &str, rows: Vec<Row>) -> Vec<Review> {
+        vec![review(head, 1, Lens::Conformance, rows), review(head, 1, Lens::FailurePaths, Vec::new())]
+    }
+
+    fn answered(answer: Answer) -> Row {
+        Row { answer: Some(answer), ..Row::default() }
     }
 
     fn block(name: &str) -> Block {
@@ -629,7 +674,10 @@ mod tests {
         let held = Issue { status: "in-progress".into(), claims: vec![Claim::default()], ..Issue::default() };
         let i = Issue { pr: Some(pr("h", true, false)), ..held.clone() };
         assert_eq!(issue(&i, NOW).intent, Some(Intent::NeedsReview));
-        let i = Issue { review_heads: vec!["h".into(), "old".into()], ..i };
+        let mut reviews = vec![review("old", 1, Lens::Conformance, Vec::new())];
+        reviews.extend(reviewed("h", Vec::new()));
+        reviews.reverse();
+        let i = Issue { reviews, ..i };
         assert_eq!(issue(&i, NOW).intent, Some(Intent::NeedsApproval), "a review for h counts in any order");
         let red = Issue { pr: Some(pr("h", false, true)), ..i.clone() };
         assert_eq!(issue(&red, NOW), Verdict::of(Intent::Working, "checks not green"));
@@ -684,9 +732,9 @@ mod tests {
         );
 
         let held = Issue { status: "in-progress".into(), claims: vec![Claim::default()], ..Issue::default() };
-        let i = Issue { pr: Some(pr("h", true, true)), review_heads: vec!["h".into()], blocks, runs, ..held };
+        let i = Issue { pr: Some(pr("h", true, true)), reviews: reviewed("h", Vec::new()), blocks, runs, ..held };
         assert_eq!(issue(&i, NOW).intent, Some(Intent::NeedsLanding));
-        let unread = Issue { review_heads: Vec::new(), ..i.clone() };
+        let unread = Issue { reviews: Vec::new(), ..i.clone() };
         assert_eq!(
             issue(&unread, NOW).intent,
             Some(Intent::NeedsLanding),
@@ -739,7 +787,7 @@ mod tests {
         let held = Issue {
             status: "in-progress".into(),
             claims: vec![Claim::default()],
-            review_heads: vec!["h".into()],
+            reviews: reviewed("h", Vec::new()),
             ..Issue::default()
         };
         let i = Issue { pr: Some(ok.clone()), base: below, ..held.clone() };
@@ -849,17 +897,20 @@ mod tests {
 
     #[test]
     fn needs_response_follows_a_review_with_an_unanswered_finding() {
-        let reviewed = Issue {
+        let open_rows = Issue {
             status: "in-progress".into(),
             claims: vec![Claim::default()],
-            review_heads: vec!["h".into()],
+            reviews: reviewed("h", vec![answered(Answer::Declined), Row::default(), Row::default()]),
             pr: Some(pr("h", true, false)),
-            unanswered: vec![2, 3],
             ..Issue::default()
         };
-        let v = issue(&reviewed, NOW);
+        let v = issue(&open_rows, NOW);
         assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 2, 3"));
-        let answered = Issue { unanswered: Vec::new(), ..reviewed };
+        let mut two = open_rows.clone();
+        two.reviews[1].rows.push(Row::default());
+        let v = issue(&two, NOW);
+        assert_eq!(v.note, "no disposition: conformance findings 2, 3; failure-paths findings 1", "each lens's rows");
+        let answered = Issue { reviews: reviewed("h", vec![answered(Answer::Fixed)]), ..open_rows };
         assert_eq!(issue(&answered, NOW).intent, Some(Intent::NeedsApproval));
     }
 
@@ -868,9 +919,8 @@ mod tests {
         let red = Issue {
             status: "in-progress".into(),
             claims: vec![Claim::default()],
-            review_heads: vec!["h".into()],
+            reviews: reviewed("h", vec![Row::default()]),
             pr: Some(pr("h", false, false)),
-            unanswered: vec![1],
             ..Issue::default()
         };
         let v = issue(&red, NOW);
@@ -878,7 +928,137 @@ mod tests {
         let approved = Issue { pr: Some(pr("h", false, true)), ..red.clone() };
         let v = issue(&approved, NOW);
         assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"), "approved, checks not green");
-        let answered = Issue { unanswered: Vec::new(), ..red };
+        let answered = Issue { reviews: reviewed("h", vec![answered(Answer::Declined)]), ..red };
         assert_eq!(issue(&answered, NOW), Verdict::of(Intent::Working, "checks not green"), "every finding answered");
+    }
+
+    #[test]
+    fn a_head_with_no_pr_run_keeps_the_earlier_level_and_lenses() {
+        // A plain push cannot close round one of a high issue with the medium lenses (review of #98, row 22).
+        let high = Run { risk: Some(Recorded { level: Level::High, security: true }), ..run("a", NOW, "h", false) };
+        let mut i = Issue {
+            status: "in-progress".into(),
+            claims: vec![Claim::default()],
+            runs: vec![high],
+            pr: Some(pr("h2", true, false)),
+            ..Issue::default()
+        };
+        i.reviews.extend([Lens::Conformance, Lens::FailurePaths].map(|l| review("h", 1, l, Vec::new())));
+        let want = "round 1: missing lenses: conformance, failure-paths, tests-and-checks, security";
+        assert_eq!(issue(&i, NOW), Verdict::of(Intent::NeedsReview, want));
+    }
+
+    #[test]
+    fn needs_review_until_each_lens_recorded() {
+        let held = Issue { status: "in-progress".into(), claims: vec![Claim::default()], ..Issue::default() };
+        let at = |level: Option<Level>, security: bool| {
+            let risk = level.map(|level| Recorded { level, security });
+            let r = Run { risk, ..run("a", NOW, "h", false) };
+            Issue { pr: Some(pr("h", true, false)), runs: vec![r], ..held.clone() }
+        };
+        let note = |i: &Issue| {
+            let v = issue(i, NOW);
+            assert!(matches!(v.intent, Some(Intent::NeedsReview | Intent::NeedsApproval)), "{v:?}");
+            v.note
+        };
+        // None recorded reads medium, never low, whatever the label says.
+        assert_eq!(note(&at(None, false)), "round 1: missing lenses: conformance, failure-paths");
+        let unrecorded = Issue { declared: Some(Level::Low), ..at(None, false) };
+        assert_eq!(note(&unrecorded), "round 1: missing lenses: conformance, failure-paths", "declared low, no run");
+        assert_eq!(
+            note(&at(Some(Level::Low), false)),
+            "round 1: missing lenses: conformance, failure-paths",
+            "no label reads medium"
+        );
+        let low = Issue { declared: Some(Level::Low), ..at(Some(Level::Low), false) };
+        assert_eq!(note(&low), "round 1: missing lenses: conformance");
+        let high = at(Some(Level::High), true);
+        assert_eq!(note(&high), "round 1: missing lenses: conformance, failure-paths, tests-and-checks, security");
+        assert_eq!(
+            note(&at(Some(Level::High), false)),
+            "round 1: missing lenses: conformance, failure-paths, tests-and-checks"
+        );
+        // Only a run at the head says security.
+        let mut elsewhere = at(Some(Level::High), false);
+        elsewhere
+            .runs
+            .push(Run { risk: Some(Recorded { level: Level::High, security: true }), ..run("a", NOW, "old", false) });
+        assert_eq!(note(&elsewhere), "round 1: missing lenses: conformance, failure-paths, tests-and-checks");
+        // Each lens recorded at the head clears its part; a lens at another head clears nothing.
+        let mut i = high.clone();
+        i.reviews.push(review("old", 1, Lens::TestsAndChecks, Vec::new()));
+        for (lens, left) in [
+            (Lens::Conformance, "round 1: missing lenses: failure-paths, tests-and-checks, security"),
+            (Lens::Security, "round 1: missing lenses: failure-paths, tests-and-checks"),
+            (Lens::FailurePaths, "round 1: missing lenses: tests-and-checks"),
+        ] {
+            i.reviews.push(review("h", 1, lens, Vec::new()));
+            assert_eq!(note(&i), left);
+        }
+        i.reviews.push(review("h", 1, Lens::TestsAndChecks, Vec::new()));
+        assert_eq!(issue(&i, NOW), Verdict::of(Intent::NeedsApproval, ""));
+        // The declared label and a raise count: a low diff of a declared-high issue reads high.
+        let declared = Issue { declared: Some(Level::High), ..at(Some(Level::Low), false) };
+        assert_eq!(note(&declared), "round 1: missing lenses: conformance, failure-paths, tests-and-checks");
+        let raise = Row { risk: true, ..Row::default() };
+        let raised =
+            Issue { reviews: vec![review("h", 1, Lens::Conformance, vec![raise])], ..at(Some(Level::Low), false) };
+        assert_eq!(
+            note(&raised),
+            "round 1: missing lenses: failure-paths, tests-and-checks",
+            "a risk row asks for the high lenses"
+        );
+        let delta = Issue { delta: true, ..at(Some(Level::Low), false) };
+        assert_eq!(note(&delta), "round 1: missing lenses: conformance, failure-paths, tests-and-checks");
+        // A new head before each lens has a record at one head is still round one, and needs every lens again.
+        let mut partial = at(None, false);
+        partial.reviews.push(review("h", 1, Lens::Conformance, vec![Row { error: true, ..Row::default() }]));
+        partial.pr = Some(pr("h2", true, false));
+        assert_eq!(note(&partial), "round 1: missing lenses: conformance, failure-paths");
+        partial.reviews.extend(reviewed("h2", Vec::new()));
+        let v = issue(&partial, NOW);
+        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: r/h-conformance findings 1"), "it holds");
+        partial.reviews[0].rows[0].answer = Some(Answer::Declined);
+        let v = issue(&partial, NOW);
+        assert_eq!(v.note, "error rows hold the land: r/h-conformance findings 1", "a decline holds at a new head");
+        // A later head waits for one verify review, whatever the level. Its `pr` run records medium: the fix left
+        // the high path.
+        let fixed = |head: &str| {
+            let mut runs = i.runs.clone();
+            runs.push(Run {
+                risk: Some(Recorded { level: Level::Medium, security: false }),
+                ..run("a", NOW, head, false)
+            });
+            Issue { pr: Some(pr(head, true, false)), runs, ..i.clone() }
+        };
+        assert_eq!(note(&fixed("h2")), "round 2: missing lenses: verify");
+        let mut verified = fixed("h2");
+        verified.reviews.push(review("h2", 2, Lens::Verify, Vec::new()));
+        assert_eq!(issue(&verified, NOW), Verdict::of(Intent::NeedsApproval, ""));
+        // A medium issue whose verify round holds an error reads high: the error then blocks the land.
+        let mut capped = fixed("h2");
+        capped.reviews.push(review(
+            "h2",
+            2,
+            Lens::Verify,
+            vec![Row { error: true, late: true, ..answered(Answer::FollowUp) }],
+        ));
+        assert_eq!(level(&capped, "h2"), (Level::Medium, None), "a late error at medium raises nothing");
+        assert_eq!(issue(&capped, NOW), Verdict::of(Intent::NeedsApproval, ""), "nor holds the land");
+        capped.reviews.last_mut().unwrap().rows[0].late = false;
+        assert_eq!(level(&capped, "h2"), (Level::High, Some((2, Level::Medium))));
+        let note = "error rows hold the land: r/h2-verify findings 1";
+        assert_eq!(issue(&capped, NOW), Verdict::of(Intent::NeedsApproval, note));
+        // A moved head clears nothing: the row holds until a verify review of the next round does not re-report it.
+        let mut moved = Issue { pr: Some(pr("h3", true, false)), ..capped.clone() };
+        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::NeedsReview, "round 3: missing lenses: verify"));
+        let again = Row { error: true, of: Some(("r/h2-verify".into(), 1)), ..Row::default() };
+        moved.reviews.push(review("h3", 3, Lens::Verify, vec![again]));
+        // At high's cap, an error row goes to the human: no new dispatch.
+        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::Blocked, "round cap: the human decides"));
+        moved.pr = Some(pr("h4", true, false));
+        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::Blocked, "round cap: the human decides"), "at a new head");
+        moved.reviews.last_mut().unwrap().rows.clear();
+        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::NeedsReview, "round 4: missing lenses: verify"));
     }
 }

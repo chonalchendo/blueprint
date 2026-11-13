@@ -328,14 +328,38 @@ fn the_role_hook_prefix_names_the_harness_for_a_later_walk() {
 #[test]
 fn a_handoff_seed_follows_a_record_to_its_node() {
     let w = World::new();
-    let head = "a".repeat(40);
+    // A held claim whose clone is the vault itself, so the vault's commit is a head `record review` accepts.
+    let v = w.vault.path();
+    let base = git(v, &["rev-parse", "HEAD"]).trim().to_string();
+    let claim = format!("---\nkind: claim\nunder: {ISSUE}\nworktree: {}\nbase: {base}\n---\n", v.display());
+    std::fs::create_dir_all(v.join(format!("{ISSUE}/claims"))).unwrap();
+    std::fs::write(v.join(format!("{ISSUE}/claims/c.md")), claim).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "claim"]);
+    let head = git(v, &["rev-parse", "HEAD"]).trim().to_string();
+    // The claim's branch holds the head: a review's head is the branch's tip or behind it.
+    git(v, &["branch", "bp/a"]);
     let body = tempfile::tempdir().unwrap();
     let file = body.path().join("review.md");
     std::fs::write(&file, format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n")).unwrap();
     let (code, v) = w.bp(
         w.vault.path(),
         &[("BP_SESSION", "s-r")],
-        &["record", "review", ISSUE, "--field", &format!("head={head}"), "--body-file", file.to_str().unwrap()],
+        &[
+            "record",
+            "review",
+            ISSUE,
+            "--field",
+            &format!("head={head}"),
+            "--field",
+            "round=1",
+            "--field",
+            "lens=conformance",
+            "--field",
+            "mode=full",
+            "--body-file",
+            file.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, Some(0), "{v}");
     let (code, v) = w.bp(w.vault.path(), &[], &["record", "handoff", "projects/bp/project", "--field", "session=s-r"]);

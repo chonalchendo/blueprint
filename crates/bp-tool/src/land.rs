@@ -144,8 +144,8 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     let head = ran.commit().to_string();
     // Each run records the level of the head it names, judged after a fetch: an intent reads it there and fetches
     // nothing (22, constraint 8). `land` judges again after its own fetch.
-    let level = crate::risk::judge(&c.top, &c.target, vec![head.clone()])?.computed.level;
-    let ran = ran.with_risk(level.as_str());
+    let computed = crate::risk::judge(&c.top, &c.target, vec![head.clone()])?.computed;
+    let ran = ran.with_risk(computed.level.as_str(), computed.security);
     let refspec = format!("{head}:refs/heads/{}", c.branch);
     // A rebased branch replaces the forge's head, but only the head the forge showed: a push since then refuses.
     let lease = open.as_ref().map(|o| format!("--force-with-lease=refs/heads/{}:{}", c.branch, o.head_ref_oid));

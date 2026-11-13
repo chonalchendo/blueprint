@@ -119,8 +119,24 @@ fn a_delta_carries_its_diagrams_through_record_and_stamp() {
     ] {
         assert_eq!(record(root, body, &flags).1["code"], "usage", "{why}");
     }
-    let (exit, v) =
-        bp(root, &["record", "review", ISSUE, "--field", &format!("head={}", "a".repeat(40)), "--diagram", &new_flag]);
+    let (exit, v) = bp(
+        root,
+        &[
+            "record",
+            "review",
+            ISSUE,
+            "--field",
+            &format!("head={}", "a".repeat(40)),
+            "--field",
+            "round=1",
+            "--field",
+            "lens=conformance",
+            "--field",
+            "mode=full",
+            "--diagram",
+            &new_flag,
+        ],
+    );
     assert_eq!((exit, v["code"].as_str()), (Some(4), Some("usage")), "only a delta carries diagrams: {v}");
     assert_eq!(common::commits(root), before, "no refusal writes");
 

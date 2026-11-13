@@ -1,16 +1,17 @@
 //! `bp risk <issue>`: the risk level in force and the rules that set it (37, design changes 1 and 2). The level is the
 //! highest of the issue's `risk` label (absent reads `medium`), the level the claim's diff computes, each review that
-//! holds a `risk` row, and a pending delta the issue caused. The diff is the higher of the local branch and the sha
-//! that origin's server names for the branch, against the sha it names for the base branch the pull request targets;
-//! each sha is fetched. The rules are `.bp/risk.yml` on that base commit, so a branch that edits them is judged by the
-//! base's rules, and its edit is high. The answer names each head it judged and the base. It writes nothing to the
-//! vault and calls no `gh`.
+//! holds a `risk` row as first committed, and a pending delta the issue caused; then the round caps (design change 6).
+//! The diff is the higher of the local branch and the sha that origin's server names for the branch, against the sha
+//! it names for the base branch the pull request targets; each sha is fetched. The rules are `.bp/risk.yml` on that
+//! base commit, so a branch that edits them is judged by the base's rules, and its edit is high. The answer names each
+//! head it judged and the base. It writes nothing to the vault and calls no `gh`.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use bp_change::intents::Base;
 use bp_change::risk::{self, Computed, Config, Level, Pattern, RISK_FILE};
+use bp_change::rounds;
 use bp_read::inputs::{field, held};
 use bp_read::snapshot::clone_of;
 use bp_vault::{Code, Id, Index, Refusal, Vault};
@@ -65,10 +66,14 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
     };
     // A pending delta is vault data: it raises the level with or without a clone in view (37, design change 1).
     let delta = !bp_read::carried_deltas(&index, &id)?.is_empty();
-    let raised_by = bp_read::inputs::raises(&index, id.as_str())?;
+    // Each review counts as its first commit wrote it, so an edit cannot drop a raise or an error row (37, design
+    // change 2).
+    let reviews = bp_read::inputs::reviews(&vault, &index, id.as_str())?;
+    let raised_by: Vec<&str> = reviews.iter().filter(|r| r.raises()).map(|r| r.id.as_str()).collect();
     let judged = judged(cwd, &index, &id)?;
     let computed = judged.as_ref().map(|j| j.computed.level);
-    let level = risk::level(declared.unwrap_or(Level::Medium), computed, raised_by.len() + usize::from(delta));
+    let base = risk::level(declared.unwrap_or(Level::Medium), computed, raised_by.len() + usize::from(delta));
+    let (level, capped) = rounds::capped(base, &reviews);
     let mut reasons = Vec::new();
     match declared {
         Some(d) if d == level => reasons.push(format!("the issue declares {d}")),
@@ -83,6 +88,9 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
             reasons.push("the issue caused a pending delta, and a design change is high".into());
         }
         reasons.extend(raised_by.iter().map(|r| format!("review {r} holds a risk row")));
+    }
+    if let Some((round, from)) = capped {
+        reasons.push(format!("round cap: the review of round {round} holds an error row at or past the cap of {from}"));
     }
     Ok(json!({
         "level": level,

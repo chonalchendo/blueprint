@@ -110,6 +110,22 @@ impl World {
     }
 }
 
+impl World {
+    /// `bp record review` at `head` with `round`, `lens` and the mode of the round, and one row per item of `rows`.
+    fn review(&self, head: &str, round: u64, lens: &str, rows: &[&str]) -> Value {
+        let table = format!("head: {head}\n\n| severity | location | finding |\n|---|---|---|\n{}\n", rows.join("\n"));
+        let file = self.t.path().join("review.md");
+        std::fs::write(&file, table).unwrap();
+        let (head, round) = (format!("head={head}"), format!("round={round}"));
+        let (lens, mode) = (format!("lens={lens}"), if round == "round=1" { "mode=full" } else { "mode=verify" });
+        let fields = ["--field", &head, "--field", &round, "--field", &lens, "--field", mode];
+        let (exit, v) =
+            self.bp(&[&["record", "review", ISSUE][..], &fields, &["--body-file", file.to_str().unwrap()]].concat());
+        assert_eq!(exit, Some(0), "{v}");
+        v
+    }
+}
+
 fn commit_in(dir: &Path, files: &[(&str, &str)]) -> String {
     for (rel, text) in files {
         write(dir, rel, text);
@@ -426,6 +442,23 @@ fn git_s_location_variables_do_not_send_the_level_to_another_repository() {
     assert_eq!((exit, pick(&v), &v["head"]), (Some(0), pick(&want), &want["head"]), "{v}");
 }
 
+/// A transport variable reaches bp's own fetch: the sandbox's `GIT_ALLOW_PROTOCOL` guard holds (review of #98, row
+/// 31). Origin is a local path, so a guard without `file` refuses the fetch.
+#[test]
+fn git_s_transport_variables_reach_the_fetch() {
+    let mut w = world(Some("low"), Some("low: [docs/]\n"));
+    w.cut();
+    w.commit(&[("docs/a.md", "One.\n")]);
+    let vault = w.vault.path().display().to_string();
+    let run =
+        |allow: &str| common::bp_env(&w.code, &[("BP_VAULT", &vault), ("GIT_ALLOW_PROTOCOL", allow)], &["risk", ISSUE]);
+    let (exit, v) = run("file");
+    assert_eq!(exit, Some(0), "{v}");
+    let (exit, v) = run("ssh");
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("transport 'file' not allowed"), "{v}");
+}
+
 /// A `gh` first on `PATH` whose `pr list --head <project>/<slug>` prints `prs-<slug>.json`, else no pull request.
 fn fake_gh(t: &Path) -> String {
     let bin = t.join("bin");
@@ -473,13 +506,124 @@ fn a_risk_row_raises_the_level_and_needs_no_disposition() {
     let file = w.t.path().join("review.md");
     std::fs::write(&file, body).unwrap();
     let field = format!("head={head}");
-    let (exit, review) = w.bp(&["record", "review", ISSUE, "--field", &field, "--body-file", file.to_str().unwrap()]);
+    let mut args = vec![
+        "record",
+        "review",
+        ISSUE,
+        "--field",
+        &field,
+        "--field",
+        "round=1",
+        "--field",
+        "lens=conformance",
+        "--field",
+        "mode=full",
+        "--body-file",
+    ];
+    args.push(file.to_str().unwrap());
+    let (exit, review) = w.bp(&args);
     assert_eq!(exit, Some(0), "{review}");
     let id = review["id"].as_str().unwrap();
     let v = w.risk();
     assert_eq!(pick(&v), json!(["high", "low", "low"]), "{v}");
     assert_eq!(v["raised_by"], json!([id]));
     assert_eq!(v["reasons"], json!([format!("review {id} holds a risk row")]));
+    // An edit by hand of the committed record cannot drop the raise: the level reads the review as first committed
+    // (37, design change 2; review of #95, finding 7).
+    let path = w.vault.path().join(format!("{id}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace("| risk |", "| warn |")).unwrap();
+    git(w.vault.path(), &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "lower it by hand"]);
+    let v = w.risk();
+    assert_eq!((v["level"].as_str(), &v["raised_by"]), (Some("high"), &json!([id])), "{v}");
+    // Git's location variables cannot turn the read off: the call clears them (review of #98, finding 6).
+    let vault = w.vault.path().display().to_string();
+    let (_, v) = common::bp_env(&w.code, &[("BP_VAULT", &vault), ("GIT_DIR", "/nonexistent")], &["risk", ISSUE]);
+    assert_eq!(v["level"], "high", "{v}");
+    // Nor can a variable that hides history or moves the objects: the call clears each one (rows 25 and 31).
+    let tip = w.t.path().join("tip");
+    std::fs::write(&tip, git(w.vault.path(), &["rev-parse", "HEAD"])).unwrap();
+    let tip = tip.display().to_string();
+    for hide in ["GIT_SHALLOW_FILE", "GIT_GRAFT_FILE"]
+        .map(|n| (n, tip.as_str()))
+        .into_iter()
+        .chain([("GIT_OBJECT_DIRECTORY", "/nonexistent"), ("GIT_NAMESPACE", "x")])
+    {
+        let (_, v) = common::bp_env(&w.code, &[("BP_VAULT", &vault), hide], &["risk", ISSUE]);
+        assert_eq!(v["level"], "high", "{hide:?}: {v}");
+    }
+    // A first-commit `git log` that fails refuses; it never reads the present text (row 26).
+    let shim = w.t.path().join("shim");
+    std::fs::create_dir(&shim).unwrap();
+    let path = std::env::var("PATH").unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in *' --reverse --no-renames '*) echo 'no log here' >&2; exit 128;; esac\nPATH='{path}' \
+         exec git \"$@\"\n"
+    );
+    std::fs::write(shim.join("git"), script).unwrap();
+    std::fs::set_permissions(shim.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let shimmed = format!("{}:{path}", shim.display());
+    let (exit, v) = common::bp_env(&w.code, &[("BP_VAULT", &vault), ("PATH", &shimmed)], &["risk", ISSUE]);
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
+    assert!(v["subject"].as_str().unwrap().starts_with("git log"), "{v}");
+    // A rename moves the record in a commit that adds it at the new path; the first add at the old path counts, so
+    // the rename does not launder the edit (finding 7). The rename takes the claim's branch, so read with no clone.
+    let root = w.vault.path();
+    let (exit, v) = common::bp(root, &["rename", ISSUE, "a2"]);
+    assert_eq!(exit, Some(0), "{v}");
+    let (renamed, moved) = ("projects/bp/issues/a2", id.replace("/issues/a/", "/issues/a2/"));
+    let (_, v) = common::bp(root, &["risk", renamed]);
+    assert_eq!((v["level"].as_str(), &v["raised_by"]), (Some("high"), &json!([moved])), "{v}");
+    // A delete and a re-add of the edited text: the first add still counts (finding 11 j).
+    let path = root.join(format!("{moved}.md"));
+    let edited = std::fs::read_to_string(&path).unwrap();
+    git(root, &["rm", "-q", &format!("{moved}.md")]);
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "drop it"]);
+    write(root, &format!("{moved}.md"), &edited);
+    git(root, &["add", "-A"]);
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add it back"]);
+    let (_, v) = common::bp(root, &["risk", renamed]);
+    assert_eq!(v["level"], "high", "{v}");
+    // A first commit git cannot read refuses; it never falls back to the present text (finding 6).
+    let first = git(root, &["log", "--diff-filter=A", "--format=%H", "--", &format!("{id}.md")]);
+    let blob = git(root, &["rev-parse", &format!("{}:{id}.md", first.trim())]).trim().to_string();
+    std::fs::remove_file(root.join(format!(".git/objects/{}/{}", &blob[..2], &blob[2..]))).unwrap();
+    let (exit, v) = common::bp(root, &["risk", renamed]);
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
+}
+
+#[test]
+fn a_medium_issue_with_an_error_at_its_cap_reads_high() {
+    for (row, late, want) in [
+        ("| error | src/a.rs:1 | Still wrong. |", json!([]), "high"),
+        ("| error | src/c.rs:1 | Wrong before the fix. |", json!([1]), "medium"),
+    ] {
+        let mut w = world(None, Some("low: [docs/]\n"));
+        w.cut();
+        let one = w.commit(&[("src/a.rs", "fn a() {}\n"), ("src/c.rs", "fn c() {}\n")]);
+        w.review(&one, 1, "conformance", &["| error | src/a.rs:1 | Wrong. |"]);
+        w.review(&one, 1, "failure-paths", &[]);
+        assert_eq!(w.risk()["level"], "medium", "round one raises nothing");
+        let two = w.commit(&[("src/a.rs", "fn a() { 1; }\n")]);
+        // The fix diff shows src/a.rs, so an error there is the fix's; src/c.rs is outside it, so its error is late.
+        assert_eq!(w.review(&two, 2, "verify", &[row])["late"], late);
+        let v = w.risk();
+        assert_eq!(v["level"], want, "{v}");
+        let cap = "round cap: the review of round 2 holds an error row at or past the cap of medium";
+        assert_eq!(v["reasons"].as_array().unwrap().iter().any(|r| r == cap), want == "high", "{v}");
+        // A hand edit that turns the error into a warn and drops `late` changes nothing: the first commit counts.
+        let id = w.bp(&["list", "review", "--under", ISSUE]).1["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|r| r["id"].as_str().filter(|i| i.contains(&two)).map(str::to_string))
+            .unwrap();
+        let path = w.vault.path().join(format!("{id}.md"));
+        let text = std::fs::read_to_string(&path).unwrap().replace("| error |", "| warn |").replace("late: [1]\n", "");
+        std::fs::write(&path, text).unwrap();
+        git(w.vault.path(), &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "soften it by hand"]);
+        assert_eq!(w.risk()["level"], want, "the edit is ignored");
+    }
 }
 
 #[test]
