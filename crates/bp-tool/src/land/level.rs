@@ -99,7 +99,8 @@ pub(super) fn base(c: &Claimed, id: &Id, pr: &PullRequest) -> Result<String, Ref
 /// Puts into `issue` only the signed acts that verify (37, design changes 2 to 4), and returns the level in force with,
 /// for high, the refusal of an approval that does not verify. A lowering counts only when its signature verifies for
 /// the forge's pull request, its base and its head; an approval the same. The signer is read only when a lowering
-/// record names the head or the level is high, so a low or medium land reads no key.
+/// record names the head or the level is high, so a low or medium land reads no key. At high's round cap a fault of
+/// `ssh-keygen` or of the signer read refuses at once, with its own code.
 pub(super) fn trusted(
     c: &Claimed,
     gh: &Gh,
@@ -148,6 +149,12 @@ pub(super) fn trusted(
             )),
         ),
         Ok(accepts) => (vec![intents::Approval { head: head.to_string(), accepts }], None),
+        // At the cap the rows the human accepted read open without the approval, so a tool or signer fault there
+        // refuses as itself, before the gates: never `findings_open` and a worker whose fix voids the approval
+        // (review of #100, W3).
+        Err(e) if intents::at_cap(issue, head) && !matches!(e.code, Code::SignatureInvalid | Code::ApprovalMissing) => {
+            return Err(e);
+        }
         Err(e) => (Vec::new(), Some(e)),
     };
     issue.approvals = approvals;

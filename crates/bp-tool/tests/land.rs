@@ -1781,6 +1781,17 @@ fn land_at_high_s_round_cap_takes_the_human_s_approval_as_the_disposition() {
     assert_eq!(intent(v), (json!("needs-landing"), json!("")), "no dispatch answers the accepted row");
     let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["approve", ISSUE, "--key", &human]);
     assert_eq!(code, Some(3), "a repeat finds its record and names no row again: {out}");
+    // A verify that cannot run refuses as the tool's fault, never as the accepted rows open (review of #100, W3).
+    let keygen = t.join("bin/ssh-keygen");
+    std::fs::write(&keygen, "#!/bin/sh\nexit 255\n").unwrap();
+    std::fs::set_permissions(&keygen, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let (code, out) = land(&["--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    std::fs::remove_file(&keygen).unwrap();
+    std::fs::write(t.join("default-oid"), "0".repeat(40)).unwrap();
+    let (code, out) = land(&["--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("signer_missing")), "{out}");
+    std::fs::remove_file(t.join("default-oid")).unwrap();
     let (code, out) = land(&["--dry-run"]);
     assert_eq!((code, &out["level"]), (Some(0), &json!("high")), "{out}");
     let (code, out) = land(&[]);
