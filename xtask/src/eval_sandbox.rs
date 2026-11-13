@@ -206,12 +206,19 @@ impl Sandbox {
         {
             install.env(key, cfg.join(dir));
         }
+        let risk = self.code().join(".bp/risk.yml");
+        let fixture = std::fs::read(&risk).ok();
         capture(install.args(["install", "--target", "claude", "--json"]))?;
-        // The forge check's workflow is a tracked file the human commits; an arm runs no forge check, and its clone
-        // stays as the fixture committed it.
+        // The forge check's workflow and its pin are tracked files the human commits; an arm runs no forge check, and
+        // its clone stays as the fixture committed it.
         std::fs::remove_file(self.code().join(".github/workflows/bp-gate.yml"))?;
         std::fs::remove_dir(self.code().join(".github/workflows")).ok();
         std::fs::remove_dir(self.code().join(".github")).ok();
+        match fixture {
+            Some(text) => std::fs::write(&risk, text)?,
+            // An empty `.bp/` stays: git holds no directory, so the clone's status is clean.
+            None => std::fs::remove_file(&risk)?,
+        }
         if let Some((arm, at)) = check_arm {
             self.assert_arm(skill, arm, at)?;
         }

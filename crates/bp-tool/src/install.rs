@@ -9,16 +9,28 @@ use clap::Args;
 
 use crate::Wrote;
 
-/// `bp install --target <claude|codex>`.
+/// `bp install --target <claude|codex> [--gate <sha>]`.
 #[derive(Args)]
 pub struct Install {
     /// The harness: `claude` (Claude Code) or `codex`.
     #[arg(long, value_parser = ["claude", "codex"])]
     pub target: String,
+    /// The Blueprint commit the forge check `bp-gate` builds `bp` from, written as `gate:` in `.bp/risk.yml`. Default:
+    /// the commit this `bp` is built from.
+    #[arg(long)]
+    pub gate: Option<String>,
 }
 
 pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
     let target: Target = i.target.parse().expect("clap holds the target to the set");
+    let gate = i.gate.as_deref().unwrap_or(bp_install::BUILT_FROM);
+    if !bp_change::risk::is_commit(gate) {
+        return Err(Refusal::usage(
+            format!("--gate {gate}"),
+            "--gate takes the full 40-digit sha of a Blueprint commit that holds bp gate; a bp built outside a clone \
+             of Blueprint knows no commit, so name one",
+        ));
+    }
     let vault = Vault::discover(cwd)?;
     let index = Index::open(&vault)?;
     let Some(project) = vault.project_for(cwd)? else {
@@ -38,7 +50,7 @@ pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
         ));
     };
     let top = bp_read::snapshot::clone_of(cwd, &index, &project)?;
-    Ok(match bp_install::install(&top, target, &project)? {
+    Ok(match bp_install::install(&top, target, &project, gate)? {
         (true, v) => Wrote::Changed(v),
         (false, v) => Wrote::Already(v),
     })

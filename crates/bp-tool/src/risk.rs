@@ -178,7 +178,8 @@ pub(crate) fn rules(top: &Path, base: &str, place: &str, heads: &[String]) -> Re
         Refusal::new(
             Code::RiskFileInvalid,
             format!("{place}:{RISK_FILE}"),
-            "the risk file holds `high` and `low` lists of path patterns, `limits` and `signer` (37, design change 1)",
+            "the risk file holds `high` and `low` lists of path patterns, `limits`, `signer` and `gate` (37, design \
+             changes 1 and 5)",
             format!("{why}; edit {RISK_FILE} on {branch} by hand, then git commit it"),
         )
     };

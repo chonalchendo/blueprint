@@ -57,6 +57,16 @@ pub(crate) fn gate(cwd: &Path, g: &Gate) -> Result<Value, Refusal> {
         .ok_or_else(|| Refusal::failed(cwd.display().to_string(), "bp gate runs in a clone of the repository"))?
         .top;
     let config = rules(&top, &g.base, &g.base, std::slice::from_ref(&g.head))?;
+    // The workflow built this binary from the pin; a base with no pin has no gate, so it fails closed.
+    if config.gate.is_none() {
+        return Err(Refusal::new(
+            Code::RiskFileInvalid,
+            format!("{}:{RISK_FILE}", g.base),
+            "the forge check builds bp from the Blueprint commit that `gate` in .bp/risk.yml on the default branch \
+             names (37, design change 5)",
+            "bp install writes the line `gate: <sha>` into .bp/risk.yml; commit it to the default branch from a shell",
+        ));
+    }
     let judged = judge_by(&top, g.base.clone(), vec![g.head.clone()], &config)?;
     let level = judged.computed.level;
     let result = |approval: &str| {
