@@ -2,6 +2,7 @@
 //! Blueprint commit it builds `bp` from, in `.bp/risk.yml`. Unlike the bundle, both are tracked files: they act only
 //! once they are committed to the default branch, and that commit is high.
 
+use std::io::Write;
 use std::path::Path;
 
 use bp_vault::{Code, Refusal};
@@ -41,22 +42,45 @@ pub(crate) struct Tracked {
 
 impl Tracked {
     /// Writes each changed file whole, by a rename: an install cut short leaves the old file, never a short one that
-    /// still parses (review of #99, row 37). `true` when it wrote one.
+    /// still parses (review of #99, row 37). `true` when it wrote one. A temp file that a killed install left beside
+    /// either file goes first, and the new one is created fresh, so a link planted at its name is not followed.
     pub(crate) fn write(&self, top: &Path) -> Result<bool, Refusal> {
+        for rel in [WORKFLOW, RISK_FILE] {
+            let path = top.join(rel);
+            let failed =
+                |e: std::io::Error| Refusal::failed(path.display().to_string(), format!("{e}; fix it, then rerun"));
+            let (dir, name) = (path.parent().expect("a tracked file has a parent"), temp_prefix(&path));
+            let Ok(entries) = std::fs::read_dir(dir) else { continue };
+            for entry in entries.map_while(Result::ok) {
+                let file = entry.file_name();
+                let pid = file.to_str().and_then(|f| f.strip_prefix(&name));
+                if pid.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
+                    std::fs::remove_file(entry.path()).map_err(failed)?;
+                }
+            }
+        }
         for (rel, text) in &self.writes {
             let path = top.join(rel);
             let dir = path.parent().expect("a tracked file has a parent");
-            let tmp = dir.join(format!(".{}.{}", path.file_name().expect("a file").display(), std::process::id()));
+            let tmp = dir.join(format!("{}{}", temp_prefix(&path), std::process::id()));
             let failed =
                 |e: std::io::Error| Refusal::failed(path.display().to_string(), format!("{e}; fix it, then rerun"));
             std::fs::create_dir_all(dir).map_err(failed)?;
-            std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &path)).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                failed(e)
-            })?;
+            let fresh = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp);
+            fresh.and_then(|mut f| f.write_all(text.as_bytes())).and_then(|()| std::fs::rename(&tmp, &path)).map_err(
+                |e| {
+                    let _ = std::fs::remove_file(&tmp);
+                    failed(e)
+                },
+            )?;
         }
         Ok(!self.writes.is_empty())
     }
+}
+
+/// The name of a tracked file's temp file before the pid: `.<name>.`.
+fn temp_prefix(path: &Path) -> String {
+    format!(".{}.", path.file_name().expect("a file").display())
 }
 
 /// The workflow for `project` and the risk file with `pin`, as [`Pin`]'s rule writes it, each checked: inside the top,
@@ -149,18 +173,16 @@ pub(crate) fn in_force(text: &str) -> Result<Option<String>, String> {
 }
 
 /// The risk file's text with the line `gate: <sha>`: the one line that starts `gate:` is replaced, or the line is
-/// appended. The other lines stay as the human wrote them.
+/// appended. The other lines stay as the human wrote them, line ends too; the pin's line ends in LF, as the workflow
+/// reads it.
 pub(crate) fn pinned(text: Option<&str>, sha: &str) -> String {
-    let line = format!("gate: {sha}");
-    let Some(text) = text.filter(|t| !t.is_empty()) else { return format!("{line}\n") };
+    let line = format!("gate: {sha}\n");
+    let Some(text) = text.filter(|t| !t.is_empty()) else { return line };
     if text.lines().any(|l| l.starts_with("gate:")) {
-        return text
-            .lines()
-            .map(|l| if l.starts_with("gate:") { format!("{line}\n") } else { format!("{l}\n") })
-            .collect();
+        return text.split_inclusive('\n').map(|l| if l.starts_with("gate:") { line.as_str() } else { l }).collect();
     }
     let sep = if text.ends_with('\n') { "" } else { "\n" };
-    format!("{text}{sep}{line}\n")
+    format!("{text}{sep}{line}")
 }
 
 #[cfg(test)]
@@ -330,6 +352,13 @@ mod tests {
         assert!(wrote && v["gate"] == PIN, "{v}");
         assert_eq!(risk(), format!("{mine}gate: {PIN}\n"), "the human's lines stay");
         assert!(!run(Some(Pin::Built(PIN))).0, "a repeat writes nothing");
+        // A killed install's temp files go on the next install; a name that is not a pid stays (review of #99, late).
+        let stale = [".bp/.risk.yml.4242", ".github/workflows/.bp-gate.yml.7"];
+        for rel in stale.iter().chain(&[".bp/.risk.yml.keep"]) {
+            std::fs::write(t.join(rel), "x").unwrap();
+        }
+        assert!(!run(Some(Pin::Built(PIN))).0);
+        assert!(stale.iter().all(|rel| !t.join(rel).exists()) && t.join(".bp/.risk.yml.keep").exists());
         // A committed pin stays: only the human's `--gate` moves it, since a pin change is high.
         let next = "fedcba9876543210fedcba9876543210fedcba98";
         let (wrote, v) = run(Some(Pin::Built(next)));
@@ -434,5 +463,12 @@ mod tests {
             "a last line with no end"
         );
         assert_eq!(pinned(Some("gate: 'x'\nlow: []\n"), PIN), format!("gate: {PIN}\nlow: []\n"), "the line in place");
+        // Review of #99, late list: the human's CRLF lines keep their ends, and a last line with no end keeps none.
+        assert_eq!(
+            pinned(Some("high: [a/]\r\ngate: x\r\nlow: []"), PIN),
+            format!("high: [a/]\r\ngate: {PIN}\nlow: []"),
+            "CRLF kept"
+        );
+        assert_eq!(in_force(&pinned(Some("high: [a/]\r\ngate: x\r\n"), PIN)).unwrap().as_deref(), Some(PIN));
     }
 }
