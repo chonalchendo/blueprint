@@ -183,7 +183,7 @@ mod tests {
         let (shipped, arm) = (root.join("bundle"), dest.path().join("b"));
         let read = |dir: &Path, f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
         let (want, have) = (read(&shipped, "roles/bp-reviewer/review.md"), read(&arm, "roles/bp-reviewer/review.md"));
-        assert_eq!(have.lines().count(), 4);
+        assert_eq!(have.lines().take_while(|l| !l.is_empty()).count(), 4, "the four slots lead");
         assert_eq!(have, want.replace("Skill: bp-review", "Skill: none"), "only the Skill line differs");
         let role = read(&shipped, "roles/bp-reviewer.md");
         assert_eq!(read(&arm, "roles/bp-reviewer.md"), role.replace("skills: bp-review\n", ""), "only the preload");

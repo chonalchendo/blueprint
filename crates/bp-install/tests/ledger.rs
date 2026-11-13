@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 type Files = BTreeMap<String, String>;
 
-/// Choices from 29. The role cap sits above today's worst dispatched action, the reviewer at 1,734 after 37's lenses,
+/// Choices from 29. The role cap sits above today's worst dispatched action, the reviewer at 1,736 after 37's lenses,
 /// rounds and `risk` rows (34's round rules put it at 1,533). The route cap guards growth with about 7 % headroom over the worst route, `revise-container`; a cap with
 /// none would trip on every edit.
 const ROLE_CAP: usize = 1_750;

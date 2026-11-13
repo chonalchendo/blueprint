@@ -13,9 +13,10 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - `needs-shaping`: an active design has an unproven concern, and no milestone is `planned` or `approved`. A concern is unproven when its latest answer is `open`, or `designed` with no milestone stamped after it. Run the skill `bp-shape`.
 - `needs-derivation`: an approved milestone has fewer than three live issues, and a finish-line block that no issue covers. Run the skill `bp-derive`.
 - `ready`: an issue is open and unclaimed. Dispatch `bp-worker` with its `complete` template.
-- `needs-review`: its note names the round and each lens still missing. Dispatch `bp-reviewer` once per lens with its `review` template. Then record each review.
-- After the worker pushes fixes, the new head is the next round. It needs one review with the lens `verify`.
-- A review whose rows are all `warn` or `risk` is approvable: tell the human so in one line. In round 3 or later of a high issue, an `error` row goes to the human, not another dispatch.
+- `needs-review`: its note names the round and each lens still missing. Dispatch `bp-reviewer` once per lens with its `review` template, its `Lens:` and `Round:` filled. Then record each review.
+- Round one ends when each lens has a review at one head. Each later head is the next round: one review with the lens `verify`.
+- A review whose rows are all `warn` or `risk` is approvable: tell the human so in one line.
+- `blocked` with the note "round cap: the human decides": give the human the error rows. Dispatch no one.
 - A review's record call returns `late`: error rows outside the fix. For a low or medium issue, create one follow-up issue for each under the same milestone. Then decline the row: `bp record disposition <review> --field finding=<n> --field as=declined --field reason="follow-up <issue>" --json`.
 - `needs-response`: a review has a finding with no disposition. Dispatch `bp-worker` with its `respond` template.
 - `drifted`: a drift run failed, and nothing cites it. Run the skill `bp-triage-drift`.
