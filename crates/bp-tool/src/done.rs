@@ -104,9 +104,8 @@ fn escalated(index: &Index, id: &Id) -> Result<bool, Refusal> {
     Ok(intents::latest_claim(&claims).is_some_and(|c| c.escalated))
 }
 
-/// Every row that needs a disposition at the latest reviewed head has one: each row of each review there, one per lens
-/// (37, design change 8), and each error row of an earlier head that still holds, as the intents read them from each
-/// review's first commit. The head moved if one is `fixed`.
+/// Every row of every review has a disposition, at any head (37, design change 3), as the intents read them from each
+/// review's first commit. The head moved if one at the latest reviewed head is `fixed`.
 fn responded(vault: &Vault, index: &Index, id: &Id, forge_age: &mut Option<i64>) -> Result<bool, Refusal> {
     let reviews = bp_read::inputs::reviews(vault, index, id.as_str())?;
     let (Some((pr, _)), Some(head)) = (open_head(&vault.root, index, id, forge_age)?, reviews.last().map(|r| &r.head))
@@ -115,7 +114,7 @@ fn responded(vault: &Vault, index: &Index, id: &Id, forge_age: &mut Option<i64>)
     };
     let fixed =
         reviews.iter().filter(|r| r.head == *head).flat_map(|r| &r.rows).any(|r| r.answer == Some(Answer::Fixed));
-    Ok(rounds::unanswered(&reviews, head).is_empty() && !(fixed && *head == pr))
+    Ok(rounds::unanswered(&reviews).is_empty() && !(fixed && *head == pr))
 }
 
 /// The head of the issue's open pull request while a claim is held, and the claim's worktree when this machine has

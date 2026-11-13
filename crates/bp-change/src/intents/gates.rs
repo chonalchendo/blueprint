@@ -187,14 +187,14 @@ fn reviewed<'a>(i: &'a Issue, pr: &PullRequest, head: &str) -> [(Gate, Option<Un
         let detail = format!("round {round} at {head}: missing lenses: {}", names.join(", "));
         (gate("review", GateState::Pending, detail), Some(Unmet::Lenses { round, missing }))
     };
-    let open = rounds::unanswered(&i.reviews, &pr.head);
+    let open = rounds::unanswered(&i.reviews);
     let answered = if open.is_empty() {
         (gate("dispositions", GateState::Pass, "each row answered".into()), None)
     } else {
         let detail = format!("no disposition: {}", rounds::named(&open, &pr.head));
         (gate("dispositions", GateState::Pending, detail), Some(Unmet::Unanswered(open)))
     };
-    let blocking = rounds::blocking(level, &i.reviews);
+    let (blocking, _) = super::holding(i, &pr.head);
     let rows = if blocking.is_empty() {
         (gate("error rows", GateState::Pass, "no error row holds".into()), None)
     } else {

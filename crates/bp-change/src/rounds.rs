@@ -210,13 +210,12 @@ fn holds(reviews: &[Review], review: &Review, n: u64) -> bool {
     !reported && !verified
 }
 
-/// The rows that need a disposition at `head`, counted from 1, less each `risk` row (21, needs response): each row of
-/// a review at `head` with no answer, and each error row of an earlier head that still holds with no answer. Reviews
-/// with every row answered are left out.
-pub fn unanswered<'a>(reviews: &'a [Review], head: &str) -> Vec<(&'a Review, Vec<u64>)> {
-    rows(reviews, |r, n, row| {
-        !row.risk && row.answer.is_none() && (r.head == head || (row.error && holds(reviews, r, n)))
-    })
+/// The rows that need a disposition, counted from 1, less each `risk` row (37, design change 3; 36, section 1): each
+/// row of each review, at any head, with no answer. A later `verify` review that does not re-report an error row
+/// clears it as an error, not its need of an answer, and a moved head clears neither. Reviews with every row answered
+/// are left out.
+pub fn unanswered(reviews: &[Review]) -> Vec<(&Review, Vec<u64>)> {
+    rows(reviews, |_, _, row| !row.risk && row.answer.is_none())
 }
 
 /// The error rows that hold the land at `level` (37, design changes 6 and 7; 36, section 1: no error row): each error
@@ -410,9 +409,9 @@ mod tests {
         let late = |answer| review("b", 2, Lens::Verify, vec![error(true, answer)]);
         // Unanswered, it needs a response; declined with a follow-up issue, it holds nothing.
         let open = [r1.clone(), late(None)];
-        assert_eq!(unanswered(&open, "b").len(), 1);
+        assert_eq!(unanswered(&open).len(), 1);
         let followed = [r1.clone(), late(Some(Answer::FollowUp))];
-        assert!(unanswered(&followed, "b").is_empty());
+        assert!(unanswered(&followed).is_empty());
         assert!(blocking(Level::Medium, &followed).is_empty(), "medium");
         assert!(blocking(Level::Low, &followed).is_empty(), "low");
         // A decline that names no follow-up issue, or a fix not yet pushed, still holds the land.
@@ -441,8 +440,8 @@ mod tests {
         assert_eq!(blocking(Level::Medium, &round_one)[0].1, [1, 2]);
         // A moved head alone clears nothing: the declined row still blocks, and the unanswered one needs an answer.
         assert_eq!(blocking(Level::Low, &round_one)[0].1, [1, 2], "at a new head too");
-        assert_eq!(unanswered(&round_one, "b")[0].1, [2]);
-        assert_eq!(named(&unanswered(&round_one, "b"), "b"), "r/a-conformance findings 2");
+        assert_eq!(unanswered(&round_one)[0].1, [2]);
+        assert_eq!(named(&unanswered(&round_one), "b"), "r/a-conformance findings 2");
         // A row of a second lens at the same head re-reports nothing: rows 1 and 2 both hold (review of #98, row 20).
         let echo = review("a", 1, Lens::FailurePaths, vec![again(&r1, 2)]);
         let echoed = [r1.clone(), echo];
@@ -461,11 +460,12 @@ mod tests {
         let two = [r1.clone(), paths.clone(), v2.clone()];
         let held = blocking(Level::Medium, &two);
         assert_eq!((held.len(), held[0].0.id.as_str(), &held[0].1), (1, "r/b-verify", &vec![1]));
-        assert_eq!(unanswered(&two, "b")[0].1, [1]);
-        // The next verify review that does not re-report it clears it.
+        let open: Vec<_> = unanswered(&two).into_iter().map(|(r, n)| (&*r.id, n)).collect();
+        assert_eq!(open, [("r/a-conformance", vec![2]), ("r/b-verify", vec![1])], "a clear row still needs an answer");
+        // The next verify review that does not re-report it clears it as an error, not its need of an answer.
         let three = [r1, paths, v2, review("c", 3, Lens::Verify, vec![])];
         assert!(blocking(Level::High, &three).is_empty());
-        assert!(unanswered(&three, "c").is_empty());
+        assert_eq!(unanswered(&three), unanswered(&two));
     }
 
     #[test]
@@ -476,8 +476,7 @@ mod tests {
         let warn = Row::default();
         let risk = Row { risk: true, ..Row::default() };
         let r = [review("a", 1, Lens::Conformance, vec![warn.clone(), risk])];
-        assert_eq!(unanswered(&r, "a")[0].1, [1], "a warn row needs a disposition; a risk row does not");
-        assert!(unanswered(&r, "b").is_empty(), "nor does a warn row of another head");
+        assert_eq!(unanswered(&r)[0].1, [1], "a warn row needs a disposition at any head; a risk row does not");
         assert!(blocking(Level::High, &r).is_empty());
         assert!(r[0].raises());
     }

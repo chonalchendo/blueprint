@@ -5,6 +5,7 @@
 use super::{Issue, recorded_risk};
 use crate::risk::{self, Level};
 use crate::rounds;
+use crate::rounds::Review;
 
 /// The computed level that the intents read at `head`: the level `pr` recorded there. A head that no `pr` run names
 /// reads the highest level recorded at an earlier head, so a plain `git push` cannot lower the level or the lenses;
@@ -54,4 +55,17 @@ pub fn round(i: &Issue, head: &str) -> u64 {
 /// and `record review` read the same (21, rule 1).
 pub fn missing(i: &Issue, head: &str) -> Vec<rounds::Lens> {
     rounds::missing(level(i, head).0, security(i, head), &i.reviews, head)
+}
+
+/// The error rows that hold the land at `head` ([`rounds::blocking`] at the level in force), and whether one is past
+/// high's round cap. Past it the human decides (37, design change 6): an approval record of the head accepts the
+/// open rows, so none holds. `land` keeps only the approval that verifies.
+pub fn holding<'a>(i: &'a Issue, head: &str) -> (Vec<(&'a Review, Vec<u64>)>, bool) {
+    let level = level(i, head).0;
+    let rows = rounds::blocking(level, &i.reviews);
+    let capped = level == Level::High && rows.iter().any(|(r, _)| r.round >= rounds::cap(Level::High));
+    if capped && i.approvals.iter().any(|a| a == head) {
+        return (Vec::new(), false);
+    }
+    (rows, capped)
 }

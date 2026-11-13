@@ -15,7 +15,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - `ready`: an issue is open and unclaimed. Dispatch `bp-worker` with its `complete` template.
 - `needs-review`: its note names the round and each lens still missing. Dispatch `bp-reviewer` once per lens with its `review` template, its `Lens:` and `Round:` filled. Then record each review.
 - Round one ends when each lens has a review at one head. Each later head is the next round: one review with the lens `verify`. If the level rose, the note also names each new lens.
-- `blocked` with a note that ends "the human decides": give the human the error rows. Dispatch no one.
+- `blocked` with a note that starts "round cap" or ends "the human decides": give the human the note and its error rows. Dispatch no one.
 - A review's record call returns `late`: error rows outside the fix. For a low or medium issue, create one follow-up issue for each under the same milestone. Then decline the row: `bp record disposition <review> --field finding=<n> --field as=declined --field reason="follow-up <issue>" --json`.
 - `needs-response`: a review has a finding with no disposition. Dispatch `bp-worker` with its `respond` template.
 - `drifted`: a drift run failed, and nothing cites it. Run the skill `bp-triage-drift`.

@@ -344,11 +344,12 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
             c.at.is_some_and(|at| now - at > STALE_AFTER && !i.runs.iter().any(|r| r.at.is_none_or(|t| t > at)));
         return Verdict::of(Intent::Working, if stale { "stale" } else { "" });
     };
-    let level = level(i, &pr.head).0;
-    let blocking = rounds::blocking(level, &i.reviews);
-    // At high's cap an error row goes to the human, not to another dispatch (37, design change 6).
-    if level == Level::High && blocking.iter().any(|(r, _)| r.round >= rounds::cap(Level::High)) {
-        return Verdict::of(Intent::Blocked, "round cap: the human decides");
+    let (blocking, capped) = holding(i, &pr.head);
+    // At high's cap an error row goes to the human, not to another dispatch, until the human's approval of the head
+    // accepts the open rows (37, design change 6).
+    if capped {
+        let note = format!("round cap: the human abandons the issue, or accepts the open rows: bp approve {}", i.id);
+        return Verdict::of(Intent::Blocked, note);
     }
     // Round one waits for a review of each lens of the level; a later round waits for one `verify` review (37, design
     // change 8).
@@ -359,31 +360,43 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
         return Verdict::of(Intent::NeedsReview, format!("round {round}: missing lenses: {}", lenses.join(", ")));
     }
     // A finding without a disposition needs a response whatever the checks say: the fix may be what turns them green.
-    let open = rounds::unanswered(&i.reviews, &pr.head);
+    let open = rounds::unanswered(&i.reviews);
     if !open.is_empty() {
         return Verdict::of(Intent::NeedsResponse, format!("no disposition: {}", rounds::named(&open, &pr.head)));
     }
-    // Each row is answered, yet an error row holds: a decline does not clear it, and no dispatch does (37, design
-    // change 6). A fix at a new head and its `verify` review would; until then the human decides.
+    // Each row is answered, yet an error row holds (37, design change 6). A row answered `fixed` at the head is a fix
+    // the worker has not pushed: its push and the `verify` review clear it. A decline does not clear it, and no
+    // dispatch does; the human decides.
     if !blocking.is_empty() {
+        let fixed = |r: &Review, rows: &[u64]| {
+            (1..)
+                .zip(&r.rows)
+                .filter(|(n, _)| rows.contains(n))
+                .all(|(_, row)| row.answer == Some(rounds::Answer::Fixed))
+        };
+        if blocking.iter().all(|(r, rows)| r.head == pr.head && fixed(r, rows)) {
+            return Verdict::of(Intent::Working, format!("fix not pushed: a worker runs bp pr {}", i.id));
+        }
         let rows = rounds::cited(&blocking);
         return Verdict::of(Intent::Blocked, format!("error rows hold the land: {rows}; the human decides"));
     }
     if !pr.green {
         return Verdict::of(Intent::Working, "checks not green");
     }
-    // Only high waits for the human: the agent lands low and medium (37, design change 3).
-    if level == Level::High && !i.approvals.contains(&pr.head) {
-        return Verdict::of(Intent::NeedsApproval, format!("the human runs bp approve {} in a terminal", i.id));
-    }
+    // The gates' own order from here, so a stacked layer waits on its base before it asks the human: an approval of
+    // the layer signs a head that the land below replaces (21, rule 1).
     match landing(i, pr) {
         Ok(()) => Verdict::of(Intent::NeedsLanding, ""),
         // No agent action helps: the layer below lands first, and reads needs landing itself.
         Err(Unmet::Unmerged(a)) => Verdict::of(Intent::Waiting, format!("waits for {a} to land")),
+        // Only high waits for the human: the agent lands low and medium (37, design change 3).
+        Err(Unmet::Approval) => {
+            Verdict::of(Intent::NeedsApproval, format!("the human runs bp approve {} in a terminal", i.id))
+        }
         Err(Unmet::Mismatch(b)) => Verdict::of(Intent::Working, format!("not on {b}: bp pr")),
         Err(Unmet::Failed(r)) => Verdict::of(Intent::Working, format!("{} did not pass at head: bp pr", r.check)),
         Err(Unmet::Evidence(b)) => Verdict::of(Intent::Working, format!("no run of {b} at head: bp pr")),
-        Err(Unmet::Checks | Unmet::Lenses { .. } | Unmet::Unanswered(_) | Unmet::Holding(_) | Unmet::Approval) => {
+        Err(Unmet::Checks | Unmet::Lenses { .. } | Unmet::Unanswered(_) | Unmet::Holding(_)) => {
             unreachable!("each holds above")
         }
         Err(Unmet::ChecksChanged) => unreachable!("landing reads no check set"),
@@ -773,6 +786,12 @@ mod tests {
         };
         let i = Issue { base: Base::Unmerged(a.into()), ..held.clone() };
         assert_eq!(issue(&i, NOW), Verdict::of(Intent::Waiting, format!("waits for {a} to land")));
+        // A high layer waits for its base before it asks the human: the land below replaces the head an approval signs.
+        let mut high = Issue { declared: Some(Level::High), ..i };
+        high.reviews.push(review("h", 1, Lens::TestsAndChecks, Vec::new()));
+        assert_eq!(issue(&high, NOW), Verdict::of(Intent::Waiting, format!("waits for {a} to land")));
+        let high = Issue { base: Base::Branch("master".into()), ..high };
+        assert_eq!(issue(&high, NOW).intent, Some(Intent::NeedsApproval));
         let i = Issue { base: Base::Branch("bp/a".into()), ..held.clone() };
         assert_eq!(issue(&i, NOW), Verdict::of(Intent::Working, "not on bp/a: bp pr"));
         let i = Issue { base: master.clone(), ..held.clone() };
@@ -958,6 +977,26 @@ mod tests {
         assert_eq!(v, Verdict::of(Intent::Blocked, holding), "a decline holds at a new head");
     }
 
+    /// A row answered `fixed` at the head is a fix not pushed yet: the worker's act, not the human's.
+    fn unpushed_fix_is_the_worker_s(capped: &Issue) {
+        let mut unpushed = capped.clone();
+        unpushed.reviews.last_mut().unwrap().rows[0].answer = Some(Answer::Fixed);
+        let note = "fix not pushed: a worker runs bp pr projects/bp/issues/x";
+        assert_eq!(issue(&unpushed, NOW), Verdict::of(Intent::Working, note));
+    }
+
+    /// At high's cap, the human's approval of the head accepts the open rows; each still needs its disposition. An
+    /// approval of another head accepts nothing.
+    fn the_human_s_approval_accepts_the_rows_at_the_cap(moved: &Issue, cap: &str) {
+        let elsewhere = Issue { approvals: vec!["h2".into()], ..moved.clone() };
+        assert_eq!(issue(&elsewhere, NOW), Verdict::of(Intent::Blocked, cap));
+        let mut accepted = Issue { approvals: vec!["h3".into()], ..moved.clone() };
+        assert_eq!(issue(&accepted, NOW).intent, Some(Intent::NeedsResponse));
+        accepted.reviews.last_mut().unwrap().rows[0].answer = Some(Answer::Declined);
+        assert!(holding(&accepted, "h3").0.is_empty());
+        assert_eq!(issue(&accepted, NOW), Verdict::of(Intent::NeedsLanding, ""));
+    }
+
     #[test]
     fn needs_review_until_each_lens_recorded() {
         let held = Issue {
@@ -1054,15 +1093,18 @@ mod tests {
         assert_eq!(level(&capped, "h2"), (Level::High, Some((2, Level::Medium))));
         let note = "error rows hold the land: r/h2-verify findings 1; the human decides";
         assert_eq!(issue(&capped, NOW), Verdict::of(Intent::Blocked, note));
+        unpushed_fix_is_the_worker_s(&capped);
         // A moved head clears nothing: the row holds until a verify review of the next round does not re-report it.
         let mut moved = Issue { pr: Some(pr("h3", true)), ..capped.clone() };
         assert_eq!(issue(&moved, NOW), Verdict::of(Intent::NeedsReview, "round 3: missing lenses: verify"));
         let again = Row { error: true, of: Some(("r/h2-verify".into(), 1)), ..Row::default() };
         moved.reviews.push(review("h3", 3, Lens::Verify, vec![again]));
         // At high's cap, an error row goes to the human: no new dispatch.
-        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::Blocked, "round cap: the human decides"));
+        let cap = "round cap: the human abandons the issue, or accepts the open rows: bp approve projects/bp/issues/x";
+        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::Blocked, cap));
+        the_human_s_approval_accepts_the_rows_at_the_cap(&moved, cap);
         moved.pr = Some(pr("h4", true));
-        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::Blocked, "round cap: the human decides"), "at a new head");
+        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::Blocked, cap), "at a new head");
         moved.reviews.last_mut().unwrap().rows.clear();
         assert_eq!(issue(&moved, NOW), Verdict::of(Intent::NeedsReview, "round 4: missing lenses: verify"));
     }
