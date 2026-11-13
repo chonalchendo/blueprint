@@ -1842,6 +1842,31 @@ fn land_refuses_a_claim_released_while_it_reads() {
     assert!(!t.join("merged").exists() && w.is_dir(), "nothing merged, nothing removed");
 }
 
+/// A claim released while `gh pr merge` runs leaves the merge in place and removes nothing: the fix names the merged
+/// commit and `bp show` (review of #100, V3).
+#[test]
+fn a_claim_released_during_the_merge_removes_nothing() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &MEDIUM);
+    let release = format!(
+        "rm '{}'; '{}' release {ISSUE} --reason lost --json > /dev/null\n",
+        t.join("on-merge").display(),
+        env!("CARGO_BIN_EXE_bp")
+    );
+    std::fs::write(t.join("on-merge"), release).unwrap();
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    let merge = git(&t.join("origin.git"), &["rev-parse", "master"]).trim().to_string();
+    let want = format!("pull request 1 merged at {merge}, but the claim closed meanwhile, so land removed nothing");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.starts_with(&want) && fix.ends_with(&format!("bp show {ISSUE} names who closed it")), "{fix}");
+    assert!(w.is_dir(), "the worktree stays");
+    assert_eq!(git(&t.join("origin.git"), &["rev-parse", "bp/a"]).trim(), h, "origin's branch stays");
+}
+
 /// A rerun of a land that stopped after the merge: a tool that cannot run keeps its own code and fix, as the rerun
 /// finishes the land, and only a gate's refusal reads as a lost merge (review of #100, F2). A broken `ssh-keygen`
 /// refuses `could_not_run`, not as a signature that does not verify (F3).

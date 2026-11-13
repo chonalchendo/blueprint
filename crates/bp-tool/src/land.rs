@@ -263,10 +263,19 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     if l.dry_run {
         return Ok(Wrote::Changed(json!({ "land": id, "head": pr.head_ref_oid, "level": level, "dry_run": true })));
     }
-    if !merged(&pr) {
-        merge(&vault, &gh, &c, &id, &pr)?;
-    }
+    let pr = if merged(&pr) { pr } else { merge(&vault, &gh, &c, &id, &pr)? };
     drop(index);
+    // A release during the merge, or since a land that stopped, leaves the merge in place: nothing else is removed.
+    if held(&Index::open(&vault)?, &id)?.is_none_or(|h| h.id != c.claim.as_str()) {
+        let at = pr.merge_commit.as_ref().map_or(pr.head_ref_oid.as_str(), |m| m.oid.as_str());
+        return Err(Refusal::failed(
+            c.claim.as_str(),
+            format!(
+                "pull request {n} merged at {at}, but the claim closed meanwhile, so land removed nothing; bp show {id} \
+                 names who closed it"
+            ),
+        ));
+    }
     // Each layer above moves onto the base before the branch below goes (15, a dependency chain to landed).
     git(&c.top, &["fetch", "-q", "origin"])?;
     let moved = crate::stack::restack(&gh, &children, &c.target, &c.branch)?;
@@ -326,7 +335,7 @@ fn repeat(vault: &Vault, index: &mut Index, id: &Id, dry_run: bool) -> Result<Op
 /// reads the pull request again: `gh pr merge` exits 0 when a merge queue or auto-merge takes the pull request and
 /// merges nothing, so only the forge's `MERGED` at that head lets `land` remove the branch (F1). Else it refuses and
 /// changes nothing.
-fn merge(vault: &Vault, gh: &Gh, c: &Claimed, id: &Id, pr: &PullRequest) -> Result<(), Refusal> {
+fn merge(vault: &Vault, gh: &Gh, c: &Claimed, id: &Id, pr: &PullRequest) -> Result<PullRequest, Refusal> {
     let (n, head) = (pr.number, pr.head_ref_oid.as_str());
     if held(&Index::open(vault)?, id)?.is_none_or(|h| h.id != c.claim.as_str()) {
         return Err(Refusal::new(
@@ -351,7 +360,7 @@ fn merge(vault: &Vault, gh: &Gh, c: &Claimed, id: &Id, pr: &PullRequest) -> Resu
     })?;
     let now = gh.pr(n)?;
     if merged(&now) && now.head_ref_oid == head {
-        return Ok(());
+        return Ok(now);
     }
     Err(Refusal::failed(
         format!("gh pr merge {n}"),
