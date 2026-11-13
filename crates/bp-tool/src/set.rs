@@ -108,8 +108,15 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
 /// `not_a_label` when the write lowers an issue's `risk` after its milestone is approved: the level is set at derive
 /// and approved with the milestone, so while the milestone is `planned` a level is a label; after it, only the
 /// human's signed record lowers a level (37, design changes 1 and 2). An issue with no label reads medium, so a first
-/// `low` is a lowering too.
-fn lowers(kind: Kind, id: &Id, field: &str, was: Option<&Value>, value: &Value, planned: bool) -> Result<(), Refusal> {
+/// `low` is a lowering too, and so is a `low` at `create` (`create::create`).
+pub(crate) fn lowers(
+    kind: Kind,
+    id: &Id,
+    field: &str,
+    was: Option<&Value>,
+    value: &Value,
+    planned: bool,
+) -> Result<(), Refusal> {
     let rank = |v: Option<&Value>| v.and_then(Value::as_str).and_then(|l| l.parse::<Level>().ok());
     match (rank(was).or(Some(Level::Medium)), rank(Some(value))) {
         (Some(was), Some(now)) if kind == Kind::Issue && field == "risk" && now < was && !planned => Err(Refusal::new(

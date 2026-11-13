@@ -378,3 +378,30 @@ fn an_issue_takes_its_risk_level_at_create() {
     assert_eq!(bp(root, &milestone).1["code"], "usage", "only an issue carries a risk level");
     assert_eq!(commits(root), before, "a refusal writes nothing");
 }
+
+#[test]
+fn create_refuses_low_under_an_approved_milestone() {
+    let dir = vault();
+    let root = dir.path();
+    let create = |title: &str, level: &str| {
+        let field = format!("risk={level}");
+        bp(root, &["create", "issue", "--project", "bp", "--title", title, "--under", M, "--field", &field])
+    };
+    // While the milestone is `planned`, a low level is a label (37, design change 1).
+    let (code, v) = create("Planned low", "low");
+    assert_eq!(code, Some(0), "{v}");
+    let path = root.join(format!("{M}.md"));
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("status: planned", "status: approved"))
+        .unwrap();
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "approve"]);
+    // After the approval, absent reads medium, so a low is a lowering: only the human's signed `bp lower`.
+    let before = commits(root);
+    let (code, v) = create("Approved low", "low");
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("not_a_label")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("bp lower projects/bp/issues/approved-low <level> --reason"), "{v}");
+    assert_eq!(commits(root), before, "a refusal writes nothing");
+    for level in ["medium", "high"] {
+        let (code, v) = create(&format!("Approved {level}"), level);
+        assert_eq!(code, Some(0), "{level}: {v}");
+    }
+}

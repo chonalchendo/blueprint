@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use bp_change::MilestoneStatus;
 use bp_vault::{Code, File, Header, Id, Index, Kind, Refusal, SLUG_MAX, Vault, is_slug};
 use clap::Args;
 
@@ -104,6 +105,17 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
         ));
     }
     let under = parent(&vault, index, kind, &id, under.as_ref())?;
+    // Absent reads medium, so a first `low` is a lowering: a label only while the milestone is `planned` (37, design
+    // change 1).
+    if let Some(level) = fields.get("risk") {
+        let planned = match &under {
+            Some(m) => {
+                bp_read::inputs::status(index, m.as_str())?.as_deref() == Some(MilestoneStatus::Planned.as_str())
+            }
+            None => false,
+        };
+        set::lowers(kind, &id, "risk", None, level, planned)?;
+    }
     let header = Header {
         kind,
         title: Some(title.into()),
