@@ -76,11 +76,35 @@ pub(crate) fn sign(message: &str, key: &Path) -> Result<String, Refusal> {
     Ok(signature)
 }
 
-/// Whether `signature` is a valid signature of `message` by `signer`, a public key line. `Err` when `ssh-keygen` cannot
-/// run, or cannot verify at all: a usage error names no signature false, and a new signature would fail the same way
-/// (review of #99, row 32). OpenSSH exits 255 with "Could not verify signature." for a false one.
+/// Whether `signature` is a valid signature of `message` by `signer`, a public key line. Any failure of `ssh-keygen`
+/// reads false: its stderr can echo a field of the signature, so its words name no tool fault (review of #99, row 52).
+/// [`can_verify`] tells a tool that cannot verify at all. `Err` only when `ssh-keygen` or a scratch file cannot start.
 pub(crate) fn verify(message: &str, signature: &str, signer: &str) -> Result<bool, Refusal> {
     let Some(signer) = public_key(signer) else { return Ok(false) };
+    Ok(keygen_verify(message, signature, &signer)?.is_ok())
+}
+
+/// `Ok` when `ssh-keygen -Y verify` here verifies a fixed good signature, made once by a key of its own; else
+/// `could_not_run`. A gate runs it once before it reads the comments, so a usage error or an old OpenSSH is a tool
+/// fault, and no comment's text can raise one (review of #99, rows 32 and 52).
+pub(crate) fn can_verify() -> Result<(), Refusal> {
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINjbOecrh5eedysW/3Z2kX1jWgwtcIkLbT1lYY+0Q4Im";
+    const MESSAGE: &str = "bp checks that ssh-keygen verifies\n";
+    const SIGNATURE: &str = "-----BEGIN SSH SIGNATURE-----
+U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg2Ns55yuHl553Kxb/dnaRfWNaDC
+1wiQttPWVhj7RDgiYAAAACYnAAAAAAAAAABnNoYTUxMgAAAFMAAAALc3NoLWVkMjU1MTkA
+AABAr8NIAhaojSZ3/7EC9lleKMNj0m9NneVCJX09NdGXID8aR6oDkSgCsaNMmUtmmuLTti
+rmky+tna0L01P4XFXTDQ==
+-----END SSH SIGNATURE-----
+";
+    keygen_verify(MESSAGE, SIGNATURE, KEY)?.map_err(|stderr| {
+        Refusal::failed("ssh-keygen -Y verify", format!("{}; install OpenSSH 8.2 or later, then rerun", cap(&stderr)))
+    })
+}
+
+/// One `ssh-keygen -Y verify` of `message` against `signer`, `<type> <base64>`: `Ok(Err(stderr))` when it does not
+/// verify. OpenSSH exits 255 with "Could not verify signature." for a false one.
+fn keygen_verify(message: &str, signature: &str, signer: &str) -> Result<Result<(), String>, Refusal> {
     let dir = Scratch::new()?;
     // Only the key's type and base64 go in the allowed-signers line, so no option or second line can ride in.
     let allowed = dir.0.join("allowed");
@@ -101,15 +125,10 @@ pub(crate) fn verify(message: &str, signature: &str, signer: &str) -> Result<boo
         .map_err(|e| Refusal::failed("ssh-keygen", format!("{e}; install OpenSSH 8.2 or later")))?;
     let fed = child.stdin.take().expect("stdin is piped").write_all(message.as_bytes());
     let out = child.wait_with_output().map_err(|e| Refusal::failed("ssh-keygen", e.to_string()))?;
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let usage = ["usage:", "illegal option", "unknown option", "invalid option", "Unsupported operation"];
-    if !out.status.success() && usage.iter().any(|u| stderr.contains(u)) {
-        return Err(Refusal::failed(
-            "ssh-keygen -Y verify",
-            format!("{}; install OpenSSH 8.2 or later, then rerun", cap(stderr.trim())),
-        ));
+    if fed.is_ok() && out.status.success() {
+        return Ok(Ok(()));
     }
-    Ok(fed.is_ok() && out.status.success())
+    Ok(Err(String::from_utf8_lossy(&out.stderr).trim().to_string()))
 }
 
 /// `text` cut to its first 200 bytes, at a character boundary, with a mark when cut: a value echoed in an envelope

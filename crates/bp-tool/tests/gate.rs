@@ -250,6 +250,21 @@ fn gate_needs_a_signed_approval_of_this_pull_request_and_head_for_high() {
 }
 
 #[test]
+fn gate_skips_a_block_that_does_not_verify_for_any_cause() {
+    // Review of #99, row 52: `ssh-keygen` echoes a signature's hash algorithm in its stderr. A crafted block whose
+    // algorithm reads `usage:` is one more false block, never a tool fault that hides the human's valid one.
+    let w = World::new(RULES);
+    let head = w.commit(&[("infra/b.tf", "b\n")]);
+    let valid = w.approval(&head)[0].as_str().unwrap().to_string();
+    // An ed25519 signature for the namespace `bp` holds the algorithm `sha512` at one place of its armour.
+    let crafted = valid.replacen("AAAABnNoYTUxMg", "AAAABnVzYWdlOg", 1);
+    assert_ne!(crafted, valid);
+    let (exit, v) = w.gate(&head, Some(&json!([crafted, valid])));
+    assert_eq!((exit, v["approval"].as_str()), (Some(0), Some("signed")), "{v}");
+    assert_eq!(code(&w.gate(&head, Some(&json!([crafted])))), (Some(2), "signature_invalid".into()));
+}
+
+#[test]
 fn gate_reads_the_rules_and_the_signer_at_the_base_never_the_head() {
     let w = World::new(RULES);
     // The head drops `infra/` from the high paths and names the agent's key.

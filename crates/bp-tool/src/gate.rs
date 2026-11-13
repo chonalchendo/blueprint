@@ -15,7 +15,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use crate::risk::{judge_by, rules};
-use crate::signed::{Act, Block, blocks, cap, is_branch, is_sha, public_key, verify};
+use crate::signed::{Act, Block, blocks, can_verify, cap, is_branch, is_sha, public_key, verify};
 
 /// `bp gate --base <sha> --base-ref <branch> --default-ref <branch> --head <sha> --pr <n> --project <name> [--comments <path>]`.
 #[derive(Args)]
@@ -146,6 +146,12 @@ fn signed(blocks: &[Block], g: &Gate, signer: &str, fix: String) -> Result<(), R
         .filter(|b| b.get("pull_request") == Some(&pr))
         .collect();
     let at_head: Vec<&&Block> = ours.iter().filter(|b| b.get("head") == Some(&g.head)).collect();
+    // A block that does not verify, for any cause, is skipped: a crafted one never shadows the human's (review of
+    // #99, row 52). So the tool is tested once first, and a fault of the tool alone refuses `could_not_run`.
+    if at_head.iter().any(|b| b.signature.is_some()) {
+        can_verify()?;
+    }
+    let mut fault = None;
     for b in &at_head {
         // The node is the one field the gate cannot know: it must be an issue of this project, and it is signed.
         let Some(node) = b.get("node").and_then(|n| Id::parse(n).ok()) else { continue };
@@ -154,11 +160,15 @@ fn signed(blocks: &[Block], g: &Gate, signer: &str, fix: String) -> Result<(), R
         }
         let act = Act { verb: "approve", node: &node, pull_request: g.pr, base: &g.base_ref, head: &g.head, more: &[] };
         let message = act.message();
-        if let Some(sig) = &b.signature
-            && verify(&message, sig, signer)?
-        {
-            return Ok(());
+        let Some(sig) = &b.signature else { continue };
+        match verify(&message, sig, signer) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(e) => fault = fault.or(Some(e)),
         }
+    }
+    if let Some(e) = fault {
+        return Err(e);
     }
     if !at_head.is_empty() {
         return Err(Refusal::new(
