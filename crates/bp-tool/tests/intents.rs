@@ -227,7 +227,7 @@ fn a_walk_reads_needs_derivation_inside_its_one_read() {
     assert_eq!(code, Some(0), "{v}");
     let a = v["intents"].as_array().unwrap().iter().find(|i| i["id"] == "projects/bp/milestones/a").unwrap();
     assert_eq!(a["intent"], "needs-derivation", "{v}");
-    assert_eq!((&a["model"], &a["effort"]), (&"fable".into(), &"high".into()), "derive routes to Fable: {v}");
+    assert_eq!((a.get("model"), a.get("effort")), (None, None), "the session derives on its own model: {v}");
     let own = v["intents"].as_array().unwrap().iter().find(|i| i["id"] == "projects/bp/issues/0011.under").unwrap();
     assert_eq!(
         (own["intent"].as_str(), own["model"].as_str(), own["effort"].as_str()),
@@ -352,4 +352,42 @@ fn list_and_walk_rows_carry_model_and_effort() {
     assert_eq!(route("projects/bp/issues/0023.hard"), ("fable", "high"), "complex");
     assert_eq!(route("projects/bp/issues/0002.waits"), ("-", "-"), "a waiting issue dispatches no one");
     assert_eq!(route("projects/bp/issues/0003.held"), ("-", "-"));
+}
+
+/// A ready issue routes by the level the review path reads: a pending delta it caused raises it with no pull request
+/// open. A label that `set` would refuse reads as the costly value, and the note names it (21, rule 1; 36, section 3).
+#[test]
+fn a_ready_issue_routes_by_its_delta_and_reads_a_bad_label_as_the_costly_one() {
+    let d = vault();
+    let r = d.path();
+    let labelled = |slug: &str, label: &str| {
+        let text = format!("---\nkind: issue\ntitle: L\nstatus: open\n{label}\n---\n\nBody.\n");
+        write(r, &format!("projects/bp/issues/{slug}.md"), &text);
+    };
+    labelled("0031.caused", "risk: medium");
+    labelled("0032.shout", "risk: High");
+    labelled("0033.list", "risk: [high]");
+    labelled("0034.word", "complex: yes");
+    labelled("0035.null", "complex: ~");
+    labelled("0036.fine", "complex: false");
+    write(r, "projects/bp/designs/system.md", "---\nkind: design\ntitle: S\nstatus: active\n---\n\n## One\n\nOld.\n");
+    let delta = "---\nkind: delta\nunder: projects/bp/designs/system\ncause: projects/bp/issues/0031.caused\n---\n\n## One\n\nNew.\n";
+    write(r, "projects/bp/designs/system/deltas/d.md", delta);
+    let v = list(r, &["issue"], false);
+    let row = |id: &str| v["rows"].as_array().unwrap().iter().find(|row| row["id"] == id).unwrap().clone();
+    let route = |slug: &str| {
+        let row = row(&format!("projects/bp/issues/{slug}"));
+        (row["model"].as_str().unwrap().to_string(), row["effort"].as_str().unwrap().to_string())
+    };
+    let is = |m: &str, e: &str| (m.to_string(), e.to_string());
+    assert_eq!(route("0031.caused"), is("opus", "high"), "a pending delta the issue caused");
+    assert_eq!(route("0032.shout"), is("opus", "high"), "risk High reads high");
+    assert_eq!(route("0033.list"), is("opus", "high"));
+    assert_eq!(route("0034.word"), is("fable", "high"), "complex yes reads true");
+    assert_eq!(route("0035.null"), is("fable", "high"));
+    assert_eq!(route("0036.fine"), is("sonnet", "high"));
+    let note = |slug: &str| row(&format!("projects/bp/issues/{slug}"))["note"].as_str().unwrap_or("").to_string();
+    assert!(note("0032.shout").contains("risk \"High\" is not low, medium or high: read as high"), "{v}");
+    assert!(note("0034.word").contains("complex \"yes\" is not true or false: read as true"), "{v}");
+    assert_eq!(note("0036.fine"), "");
 }

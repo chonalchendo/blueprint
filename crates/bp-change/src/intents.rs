@@ -192,16 +192,18 @@ pub struct Issue {
     pub runs: Vec<Run>,
     /// The issue's named `error` blocks; read only while a pull request is in view.
     pub blocks: Vec<Block>,
-    /// The review records, each as its first commit wrote it, with its dispositions; read only while a pull request
-    /// is in view.
+    /// The review records, each as its first commit wrote it, with its dispositions; an earlier pull request's `risk`
+    /// rows still raise a ready issue.
     pub reviews: Vec<Review>,
     /// The issue's `risk` label; `None` reads medium.
     pub declared: Option<Level>,
     /// The issue's `complex` label: its build and fix go to Fable (36, section 3).
     pub complex: bool,
-    /// The issue caused a pending delta, which raises it to high (37, design change 1). Read only while a pull request
-    /// is in view.
+    /// The issue caused a pending delta, which raises it to high (37, design change 1), with or without a pull request.
     pub delta: bool,
+    /// What the reader could not parse in a label, named: it read `risk` as high and `complex` as true, and the
+    /// verdict's note says so, since silence would let a typo lower the gate and the worker's model.
+    pub unread: Vec<String>,
     /// The `depends` targets.
     pub depends: Vec<Dependency>,
     /// The open pull request, or the merged one of a held claim; `None` when there is none or the forge was not read.
@@ -223,8 +225,8 @@ pub struct Verdict {
     pub intent: Option<Intent>,
     /// What the intent names: the failed run, the targets waited on, `stale`.
     pub note: String,
-    /// The model and effort of the dispatch the intent leads to; `None` for an intent that dispatches no one, and where
-    /// the table of 36, section 3 reads n/a (37, design change 9).
+    /// The model and effort of the dispatch the intent leads to; `None` for an intent that dispatches no one (37,
+    /// design change 9).
     #[serde(flatten)]
     pub route: Option<Route>,
 }
@@ -235,7 +237,7 @@ impl Verdict {
     }
 
     fn routed(mut self, task: Task, level: Level, complex: bool) -> Self {
-        self.route = route(task, level, complex);
+        self.route = Some(route(task, level, complex));
         self
     }
 
@@ -253,8 +255,18 @@ pub fn latest_claim(claims: &[Claim]) -> Option<&Claim> {
     claims.iter().max_by_key(|c| c.at)
 }
 
-/// The intent of one live issue at `now` (Unix seconds).
+/// The intent of one live issue at `now` (Unix seconds). A label the reader could not parse adds its note to every
+/// intent, since it changed the level or the route.
 pub fn issue(i: &Issue, now: i64) -> Verdict {
+    let mut v = verdict(i, now);
+    if v.intent.is_some() && !i.unread.is_empty() {
+        let note = i.unread.join("; ");
+        v.note = if v.note.is_empty() { note } else { format!("{}; {note}", v.note) };
+    }
+    v
+}
+
+fn verdict(i: &Issue, now: i64) -> Verdict {
     let held = i.claims.iter().find(|c| c.released.is_none());
     if let Some(pr) = &i.pr
         && failed_at(&i.runs, &pr.head)
@@ -263,8 +275,7 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     }
     // Escalated holds until the issue changes after the release: the human's answer is a write to the issue.
     if latest_claim(&i.claims).is_some_and(|c| c.escalated) && !i.answered {
-        let at = i.pr.as_ref().map_or_else(|| level_before_pr(i), |p| level(i, &p.head).0);
-        return Verdict::of(Intent::Blocked, "escalated").routed(Task::Escalation, at, false);
+        return Verdict::of(Intent::Blocked, "escalated");
     }
     for d in &i.depends {
         match d.status.as_deref() {
@@ -278,7 +289,7 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     }
     if i.status == "open" && held.is_none() && i.pr.is_none() {
         return match stack(&i.depends) {
-            Ok(_) => Verdict::of(Intent::Ready, "").routed(Task::Build, level_before_pr(i), i.complex),
+            Ok(_) => Verdict::of(Intent::Ready, "").routed(Task::Build, level(i, "").0, i.complex),
             Err(Unstacked::Unpushed(waits)) => Verdict::of(Intent::Waiting, format!("waits for {}", waits.join(", "))),
             Err(Unstacked::Split(ids)) => {
                 Verdict::of(Intent::Waiting, format!("waits for one stack: land all but one of {}", ids.join(", ")))
@@ -320,7 +331,9 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     if !missing.is_empty() {
         let lenses: Vec<&str> = missing.iter().map(|l| l.as_str()).collect();
         let round = round(i, &pr.head);
-        let task = if round == 1 { Task::ReviewFirst } else { Task::ReviewVerify };
+        // A lens other than verify is a full review whatever the round: a level rise adds one to a later round.
+        let full = round == 1 || missing.iter().any(|l| *l != rounds::Lens::Verify);
+        let task = if full { Task::ReviewFirst } else { Task::ReviewVerify };
         let note = format!("round {round}: missing lenses: {}", lenses.join(", "));
         return Verdict::of(Intent::NeedsReview, note).routed(task, level, false);
     }

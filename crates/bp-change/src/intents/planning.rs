@@ -4,8 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Block, Intent, Run, Task, Verdict, is_live_issue};
-use crate::risk::Level;
+use super::{Block, Intent, Run, Verdict, is_live_issue};
 use crate::{IssueStatus, MilestoneStatus};
 
 /// The batch size for derive, until it is a project setting (21, open questions: three live issues).
@@ -59,8 +58,7 @@ pub fn milestone(id: &str, m: &Milestone) -> Verdict {
             open => Verdict::of(
                 Intent::NeedsDerivation,
                 format!("{} uncovered; bp walk {id} --for derive", open.join(", ")),
-            )
-            .routed(Task::Design, Level::Medium, false),
+            ),
         },
         // The node of a re-asked waiver is its milestone, `done`, so no other intent holds there (21).
         Ok(MilestoneStatus::Done) if !m.reasked.is_empty() => {
@@ -143,7 +141,7 @@ pub fn design(id: &str, uncited: &[String], unproven: &[String], due: bool) -> V
     }
     if !unproven.is_empty() && !due {
         let note = format!("{}; bp walk {id} --for shape", unproven.join(", "));
-        return Verdict::of(Intent::NeedsShaping, note).routed(Task::Design, Level::Medium, false);
+        return Verdict::of(Intent::NeedsShaping, note);
     }
     Verdict::NONE
 }
