@@ -1,8 +1,12 @@
 //! Installer: harness dialects, the embedded bundle, version comparison, precondition tests. `install` validates the
 //! whole bundle against one target's surface spec, then writes it at the top of the clone's main worktree with a
 //! manifest of content hashes. `check` holds the installed files to that manifest before a walk reads the vault (17;
-//! 27, design changes 1 and 2). The install is local: it calls no forge and writes nothing outside the clone.
+//! 27, design changes 1 and 2). It also writes the forge check's workflow, a tracked file (37, design change 5). The
+//! install is local: it calls no forge and writes nothing outside the clone.
 
+#[cfg(test)]
+mod built_from;
+mod gate;
 mod hashes;
 mod section;
 mod spec;
@@ -15,6 +19,7 @@ use bp_operation::{READ_VERBS, Role};
 use bp_vault::{Code, Kind, Refusal};
 use serde_json::{Map, Value, json};
 
+pub use crate::gate::{BUILT_FROM, Pin, RISK_FILE, WORKFLOW, workflow};
 use crate::hashes::Hashes;
 use crate::section::{importer, sectioned, with_section};
 use crate::spec::Spec;
@@ -44,9 +49,23 @@ bp_vault::closed_enum! {
     }
 }
 
-/// Installs the bundle for `target` at `top`: `(true, result)` for a write, `(false, result)` when the clone already
-/// holds this bundle, so the verb exits 3.
-pub fn install(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
+/// Installs the bundle for `target` at `top`, the forge check's workflow for `project`, and `pin`, a full commit of
+/// Blueprint, as `gate: <sha>` in the risk file when [`Pin`]'s rule writes it: `(true, result)` for a write,
+/// `(false, result)` when the clone already holds them, so the verb exits 3. The result's `gate` is the pin in force
+/// after the install.
+pub fn install(top: &Path, target: Target, project: &str, pin: Option<Pin<'_>>) -> Result<(bool, Value), Refusal> {
+    // Both tracked files are read and checked first, so a refusal of either leaves the bundle unwritten. Neither is
+    // excluded: each acts only once the human commits it to the default branch.
+    let tracked = gate::plan(top, project, pin)?;
+    let (wrote, mut result) = bundle(top, target)?;
+    let wrote = tracked.write(top)? || wrote;
+    result["workflow"] = WORKFLOW.into();
+    result["gate"] = tracked.gate.into();
+    Ok((wrote, result))
+}
+
+/// The bundle for `target` at `top`, as [`install`] returns it.
+fn bundle(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     let spec = Spec::of(target);
     validate::validate(BUNDLE, spec)?;
     let (files, skipped) = plan(spec);

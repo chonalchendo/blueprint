@@ -1,0 +1,87 @@
+# The forge check bp-gate (37, design change 5), written by `bp install`. Branch protection requires the job
+# `bp-gate` and CI. The run never holds code from the pull request: `pull_request_target` runs this file as the
+# default branch holds it, the one checkout of this repository is the default branch's commit, and the head is
+# fetched as data for the test merge only. `bp` is built from the Blueprint commit that the line `gate:` of
+# `.bp/risk.yml` names on that commit, never from this repository's tree, and with no cache: a cache is not signed, and
+# the runs that write one run unsigned code. The pin names a commit on Blueprint's default branch, which the human
+# reads before signing a move. A change to this file or to the pin is high, as every path under `.github/workflows/`
+# and `.bp/` is.
+name: bp-gate
+
+on:
+  pull_request_target:
+    # `edited` covers a retarget. A new signed comment needs a rerun of this check: a comment run is not a check of
+    # the head, and it would mark the default branch's commit instead.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  bp-gate:
+    name: bp-gate
+    runs-on: ubuntu-latest
+    # Three steps wait on the network. A stalled one would hold the required check pending for GitHub's six hours; a
+    # newer push ends the older run of the same pull request.
+    timeout-minutes: 30
+    concurrency:
+      group: bp-gate-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    env:
+      BP_PROJECT: "bp"
+      BP_SOURCE: https://github.com/chonalchendo/blueprint
+      BP_BASE: ${{ github.sha }}
+      BP_BASE_REF: ${{ github.event.pull_request.base.ref }}
+      BP_DEFAULT_REF: ${{ github.event.repository.default_branch }}
+      BP_HEAD: ${{ github.event.pull_request.head.sha }}
+      BP_PR: ${{ github.event.pull_request.number }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: base
+          fetch-depth: 0
+          persist-credentials: false
+      - name: read the pin at the base
+        # Exactly one line `gate: <40 hex digits>`, or the check fails: a base with no pin has no gate. The pin is read
+        # from the commit, not the work tree, which an attribute line on the default branch can rewrite.
+        run: |
+          gate=$(git -C base show "$BP_BASE:.bp/risk.yml" | sed -n -E 's/^gate: ([0-9a-f]{40})$/\1/p')
+          if [ "${#gate}" -ne 40 ]; then
+            echo "::error::.bp/risk.yml on the default branch holds no one line gate: <sha>; bp install --gate <sha> writes it"
+            exit 1
+          fi
+          echo "BP_GATE=$gate" >> "$GITHUB_ENV"
+      - name: build bp at the pin
+        # The project's tree is a sibling of bp-source, so cargo and rustup read none of its config or toolchain files.
+        # The server serves a commit that no branch holds, or a fork's, by its sha: only the default branch's history
+        # is fetched, and the pin must be in it.
+        run: |
+          git init -q bp-source
+          git -C bp-source fetch -q --no-tags "$BP_SOURCE" HEAD
+          if ! git -C bp-source merge-base --is-ancestor "$BP_GATE" FETCH_HEAD; then
+            echo "::error::the pin $BP_GATE is not on the default branch of $BP_SOURCE"
+            exit 1
+          fi
+          git -C bp-source checkout -q --detach "$BP_GATE"
+          cd bp-source
+          cargo build --locked --release -p bp-tool
+      - name: fetch the head as data
+        # The checkout keeps no token, so only this step and the next hold one.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -C base -c "http.extraheader=AUTHORIZATION: basic $auth" fetch -q --no-tags origin "$BP_HEAD"
+      - name: read the comments
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --paginate "repos/$GH_REPO/issues/$BP_PR/comments" > "$RUNNER_TEMP/comments.json"
+      - name: bp gate
+        working-directory: base
+        run: |
+          "$GITHUB_WORKSPACE/bp-source/target/release/bp" gate --base "$BP_BASE" --base-ref "$BP_BASE_REF" \
+            --default-ref "$BP_DEFAULT_REF" --head "$BP_HEAD" --pr "$BP_PR" --project "$BP_PROJECT" --comments "$RUNNER_TEMP/comments.json"

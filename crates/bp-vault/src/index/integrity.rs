@@ -232,7 +232,8 @@ impl Index {
 /// Every path git tracks in the vault. A run names the vault's head with a clean project tree, so these are the
 /// files the run's commit holds.
 fn tracked(root: &Path) -> Result<BTreeSet<String>, Refusal> {
-    let out = Command::new("git").arg("-C").arg(root).args(["ls-files", "-z"]).output();
+    let out =
+        Command::new("git").arg("-C").arg(root).env("GIT_NO_REPLACE_OBJECTS", "1").args(["ls-files", "-z"]).output();
     match out {
         Ok(o) if o.status.success() => {
             Ok(String::from_utf8_lossy(&o.stdout).split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect())

@@ -1,8 +1,13 @@
 //! Embeds `bundle/` (23): every file under it, by its path relative to `bundle/`, in path order. Cargo reruns this
-//! when any file under the directory changes, so the binary never ships a stale bundle.
+//! when any file under the directory changes, so the binary never ships a stale bundle. It also names the commit the
+//! build is from, as `BP_BUILT_FROM`, when that commit is on Blueprint's default branch: `install` pins the forge
+//! check's build of `bp` to it (37, design change 5).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+
+#[path = "src/built_from.rs"]
+mod built_from;
 
 fn main() {
     // `cargo xtask eval` builds the arms that lack the skill, or hold filler for it, from a copy of the bundle (29,
@@ -24,6 +29,11 @@ fn main() {
     out.push(']');
     let dest = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR")).join("bundle.rs");
     std::fs::write(dest, out).expect("OUT_DIR is writable");
+    let (sha, watched) = built_from::built_from(Path::new(env!("CARGO_MANIFEST_DIR")));
+    for path in watched {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!("cargo:rustc-env=BP_BUILT_FROM={}", sha.unwrap_or_default());
 }
 
 fn walk(dir: &Path, files: &mut Vec<PathBuf>) {

@@ -5,6 +5,11 @@ on:
     branches: [master]
   pull_request:
 
+# CI runs the pull request's code. Its token reads only, whatever the repository's default, so that code writes no
+# status, check or run.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings

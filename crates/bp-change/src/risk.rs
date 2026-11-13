@@ -27,6 +27,10 @@ pub const RISK_FILE: &str = ".bp/risk.yml";
 /// without a risk file; the file's `high` list adds to them and cannot remove one.
 pub const BUILT_IN_HIGH: [&str; 5] = [".bp/", ".github/workflows/", ".claude/", ".codex/", ".agents/"];
 
+/// The files that change how git reads every other path: what a submodule is, and how a file is diffed, merged or
+/// checked out. They are high in any directory, as the built-in high paths are.
+pub const BUILT_IN_HIGH_NAMES: [&str; 2] = [".gitmodules", ".gitattributes"];
+
 /// The level in force: the highest of the declared level, the computed level and the raises. Each raise is high: a
 /// review's `risk` row, or a pending delta the issue caused. A computed level that nothing could read counts for
 /// nothing.
@@ -146,17 +150,20 @@ pub struct Config {
     pub limits: Limits,
     /// The human's OpenSSH public key line, which verifies a signed act (37, design change 4). Kept, not verified here.
     pub signer: Option<String>,
+    /// The Blueprint commit that the forge check `bp-gate` builds `bp` from (37, design change 5). The pin sits in this
+    /// file, so a change of it is high and needs the human's signature; `bp gate` refuses a base with none.
+    pub gate: Option<String>,
 }
 
 impl Config {
-    /// Reads the risk file's text. A key outside `high`, `low`, `limits` and `signer`, or a value outside its shape,
-    /// refuses: a misspelt `high` would drop each high path without a word.
+    /// Reads the risk file's text. A key outside `high`, `low`, `limits`, `signer` and `gate`, or a value outside its
+    /// shape, refuses: a misspelt `high` would drop each high path without a word.
     pub fn parse(text: &str) -> Result<Self, String> {
         let docs = YamlLoader::load_from_str(text).map_err(|e| format!("it is not YAML: {e}"))?;
         let map = match docs.as_slice() {
             [] | [Yaml::Null] => return Ok(Self::default()),
             [Yaml::Hash(map)] => map,
-            [_] => return Err("its top is not a mapping of high, low, limits and signer".into()),
+            [_] => return Err("its top is not a mapping of high, low, limits, signer and gate".into()),
             _ => return Err("it holds more than one YAML document".into()),
         };
         let mut config = Self::default();
@@ -166,9 +173,10 @@ impl Config {
                 Some("low") => config.low = patterns("low", value)?,
                 Some("limits") => config.limits = limits(value)?,
                 Some("signer") => config.signer = signer(value)?,
+                Some("gate") => config.gate = gate(value)?,
                 _ => {
                     return Err(format!(
-                        "{} is no key of the risk file: the keys are high, low, limits and signer",
+                        "{} is no key of the risk file: the keys are high, low, limits, signer and gate",
                         name(key)
                     ));
                 }
@@ -248,7 +256,22 @@ fn signer(value: &Yaml) -> Result<Option<String>, String> {
     Err("signer is not one OpenSSH public key line: `<type> <base64 key> [comment]`, as a `.pub` file holds it".into())
 }
 
-/// One changed file of a diff, as `git diff --numstat -z` prints it.
+/// The gate pin: a full commit sha, as `bp install` writes it. The workflow reads the line `gate: <sha>` with no YAML
+/// parser, so a quoted value refuses there; here it reads as the same string.
+fn gate(value: &Yaml) -> Result<Option<String>, String> {
+    match value {
+        Yaml::Null => Ok(None),
+        Yaml::String(sha) if is_commit(sha) => Ok(Some(sha.clone())),
+        _ => Err(format!("gate is {}, not the 40 lower-case hex digits of a Blueprint commit", name(value))),
+    }
+}
+
+/// A full SHA-1 commit name: 40 lower-case hex digits, as a gate pin is.
+pub fn is_commit(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// One changed file of a diff, as `git diff --raw --numstat -z` prints it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Changed {
     /// The path after the change.
@@ -258,6 +281,8 @@ pub struct Changed {
     /// The lines added and removed; `None` when git prints `-`, for a binary file or a path an attribute marks
     /// `-diff`. The attributes come from files the diff does not show, so an unknown size is never read as 0.
     pub lines: Option<u64>,
+    /// A submodule's commit (mode 160000) on either side: code that the diff names by sha and does not show.
+    pub gitlink: bool,
 }
 
 impl Changed {
@@ -267,12 +292,24 @@ impl Changed {
     }
 }
 
-/// Reads the output of `git diff --numstat -z`: each entry is `<added>\t<removed>\t<path>\0`, or for a rename
-/// `<added>\t<removed>\t\0<from>\0<to>\0`. Git prints `-` for the counts of a file whose lines it does not count.
-pub fn numstat(text: &str) -> Vec<Changed> {
+/// Reads the output of `git diff --raw --numstat -z`. Git prints each raw entry first, as
+/// `:<mode> <mode> <sha> <sha> <status>\0<path>\0`, with a second path for a rename or a copy. Then each numstat
+/// entry, as `<added>\t<removed>\t<path>\0`, or for a rename `<added>\t<removed>\t\0<from>\0<to>\0`. Git prints `-`
+/// for the counts of a file whose lines it does not count. The raw entries give the modes: a gitlink on either side.
+pub fn changes(text: &str) -> Vec<Changed> {
     let mut fields = text.split('\0');
+    let mut gitlinks = BTreeSet::new();
     let mut out = Vec::new();
     while let Some(entry) = fields.next() {
+        if let Some(raw) = entry.strip_prefix(':') {
+            let cells: Vec<&str> = raw.split(' ').collect();
+            let paths = if cells.last().is_some_and(|s| s.starts_with(['R', 'C'])) { 2 } else { 1 };
+            let named: Vec<&str> = fields.by_ref().take(paths).collect();
+            if cells.iter().take(2).any(|m| *m == "160000") {
+                gitlinks.extend(named);
+            }
+            continue;
+        }
         let mut cells = entry.splitn(3, '\t');
         let (Some(added), Some(removed), Some(path)) = (cells.next(), cells.next(), cells.next()) else { continue };
         let lines = added.parse::<u64>().ok().zip(removed.parse::<u64>().ok()).map(|(a, r)| a + r);
@@ -281,7 +318,8 @@ pub fn numstat(text: &str) -> Vec<Changed> {
         } else {
             (None, path.to_string())
         };
-        out.push(Changed { path, from, lines });
+        let gitlink = gitlinks.contains(path.as_str()) || from.as_deref().is_some_and(|f| gitlinks.contains(f));
+        out.push(Changed { path, from, lines, gitlink });
     }
     out
 }
@@ -293,17 +331,18 @@ pub struct Computed {
     pub level: Level,
     /// Each rule that set the level, in words: a path and its pattern, a line count, a package count.
     pub reasons: Vec<String>,
-    /// A changed path is high by its path and matches no low pattern, so round one adds the security lens (37, design
-    /// change 8). A test or a doc on a high path does not set it.
+    /// A changed path is high by its path and matches no low pattern, or the diff hides what lands (a submodule commit,
+    /// a size git does not count), so round one adds the security lens (37, design change 8). A test or a doc on a
+    /// high path does not set it.
     pub security: bool,
 }
 
 /// The level of a diff (36, section 1). High when a path holds a non-ASCII character, is under, at or above a
-/// built-in high path or matches a high pattern (each in any ASCII case), when a path outside the low patterns has a
-/// size git does not count, when the lines outside the low patterns exceed `high_lines`, or when more packages than
-/// `packages` change. Low only when each path matches a low pattern and the diff changes fewer than `low_lines`
-/// lines. Medium otherwise. A package is a top-level directory that holds a changed path outside the low patterns; a
-/// file at the top is in no package.
+/// built-in high path, has a built-in high name or matches a high pattern (each in any ASCII case), when a path is a
+/// gitlink or has a size git does not count (under a low pattern too: an attribute line can hide any size), when the
+/// lines outside the low patterns exceed `high_lines`, or when more packages than `packages` change. Low only when
+/// each path matches a low pattern and the diff changes fewer than `low_lines` lines. Medium otherwise. A package is a
+/// top-level directory that holds a changed path outside the low patterns; a file at the top is in no package.
 pub fn computed(diff: &[Changed], config: &Config) -> Computed {
     let limits = config.limits;
     let low_path = |path: &str| config.low.iter().any(|p| p.matches(path));
@@ -320,13 +359,20 @@ pub fn computed(diff: &[Changed], config: &Config) -> Computed {
         } else if let Some(p) = BUILT_IN_HIGH.iter().find(|p| touches(p, &folded)) {
             let how = if folded.starts_with(*p) { "is under" } else { "is at or above" };
             high.push(format!("{path} {how} the built-in high path {p}"));
+        } else if let Some(n) = BUILT_IN_HIGH_NAMES.iter().find(|n| folded.rsplit('/').next() == Some(**n)) {
+            high.push(format!("{path} is a {n} file, which changes how git reads other paths"));
         } else if let Some(p) = config.high.iter().find(|p| p.matches_any_case(path)) {
             high.push(format!("{path} matches the high pattern {p}"));
         }
         security |= high.len() > before && !low_path(path);
     }
     let outside: Vec<&Changed> = diff.iter().filter(|c| !low(c)).collect();
-    high.extend(outside.iter().filter(|c| c.lines.is_none()).map(|c| format!("size unknown: {}", c.path)));
+    // A submodule commit and a size git does not count hide what lands, as a head with no test merge does, so each
+    // calls the security lens (review of #99, late list).
+    let unknown = high.len();
+    high.extend(diff.iter().filter(|c| c.gitlink).map(|c| format!("{} is a submodule commit", c.path)));
+    high.extend(diff.iter().filter(|c| c.lines.is_none()).map(|c| format!("size unknown: {}", c.path)));
+    security |= high.len() > unknown;
     let lines: u64 = outside.iter().filter_map(|c| c.lines).sum();
     if lines > limits.high_lines {
         high.push(format!("{lines} changed lines outside the low patterns exceed high_lines {}", limits.high_lines));
@@ -371,16 +417,16 @@ mod tests {
     use super::*;
 
     fn change(path: &str, added: u64, removed: u64) -> Changed {
-        Changed { path: path.into(), from: None, lines: Some(added + removed) }
+        Changed { path: path.into(), from: None, lines: Some(added + removed), gitlink: false }
     }
 
     fn renamed(from: &str, to: &str) -> Changed {
-        Changed { path: to.into(), from: Some(from.into()), lines: Some(0) }
+        Changed { path: to.into(), from: Some(from.into()), lines: Some(0), gitlink: false }
     }
 
     /// A change whose size git prints as `-`.
     fn no_size(path: &str) -> Changed {
-        Changed { path: path.into(), from: None, lines: None }
+        Changed { path: path.into(), from: None, lines: None, gitlink: false }
     }
 
     fn config(text: &str) -> Config {
@@ -464,7 +510,19 @@ mod tests {
                 assert_eq!(c.reasons, [format!("{path} is at or above the built-in high path {at}")], "{rules:?}");
             }
         }
+        // A file that changes how git reads other paths, and a submodule's commit, are high anywhere.
+        for (path, name) in [
+            (".gitmodules", ".gitmodules"),
+            ("src/.gitattributes", ".gitattributes"),
+            ("docs/.GitAttributes", ".gitattributes"),
+        ] {
+            let c = computed(&[change(path, 1, 0)], &lenient);
+            assert_eq!(c.reasons, [format!("{path} is a {name} file, which changes how git reads other paths")]);
+        }
+        let link = Changed { gitlink: true, ..change("docs/vendor", 1, 1) };
+        assert_eq!(computed(&[link], &lenient).reasons, ["docs/vendor is a submodule commit"]);
         for near in [
+            ".gitmodules.yml",
             "bp/risk.yml",
             "x/.bp/risk.yml",
             ".github/dependabot.yml",
@@ -540,9 +598,9 @@ mod tests {
         );
         // Git prints `-` for a binary file or a `-diff` attribute that the diff does not show: never read as 0.
         assert_eq!(at(&[no_size("src/logo.png")]).reasons, ["size unknown: src/logo.png"]);
-        assert_eq!(at(&[renamed("src/a.bin", "docs/a.bin"), no_size("docs/b.bin")]).level, Level::Medium);
+        // An attribute line on the base can mark any path `-diff`, under a low pattern too: an unknown size is high.
         let low = at(&[no_size("docs/logo.png"), change("tests/a.rs", 2, 0)]);
-        assert_eq!(low.level, Level::Low, "an unknown size under a low pattern counts 0: {low:?}");
+        assert_eq!(low.reasons, ["size unknown: docs/logo.png"], "{low:?}");
         let medium = at(&[change("src/a.rs", 1, 0), change("src/b.rs", 1, 0)]);
         assert_eq!(medium.reasons, ["src/a.rs and 1 more changed paths match no low pattern"]);
         assert_eq!(
@@ -552,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn the_risk_file_reads_its_four_keys_and_refuses_the_rest() {
+    fn the_risk_file_reads_its_five_keys_and_refuses_the_rest() {
         assert_eq!(config(""), Config::default());
         assert_eq!(config("# nothing yet\n"), Config::default());
         let full = config(
@@ -565,6 +623,10 @@ mod tests {
         assert_eq!(full.low, [Pattern::Dir("tests/".into())]);
         assert_eq!(full.limits, Limits { low_lines: 50, ..Limits::default() });
         assert_eq!(full.signer.as_deref(), Some("ssh-ed25519 AAAAC3 me"));
+        let pin = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(config(&format!("gate: {pin}\n")).gate.as_deref(), Some(pin));
+        assert_eq!(config(&format!("gate: '{pin}'\n")).gate.as_deref(), Some(pin), "a quoted pin reads the same");
+        assert_eq!(config("gate:\n").gate, None);
         let key = "ecdsa-sha2-nistp256 AAAAE2VjZHNh+/= a b";
         assert_eq!(config(&format!("signer: {key}\n")).signer.as_deref(), Some(key));
         assert_eq!(
@@ -611,6 +673,11 @@ mod tests {
             ("signer: ed25519 AAAA me\n", "public key"),
             ("signer: ssh-ed25519\n", "public key"),
             ("signer: ssh-ed25519 AA*A me\n", "public key"),
+            ("gate: abc\n", "gate is \"abc\", not the 40"),
+            ("gate: 0123456789ABCDEF0123456789ABCDEF01234567\n", "not the 40 lower-case hex"),
+            ("gate: 0123456789abcdef0123456789abcdef012345678\n", "not the 40 lower-case hex"),
+            ("gate: [0123456789abcdef0123456789abcdef01234567]\n", "gate is a list or a mapping"),
+            ("gate: 12\n", "gate is 12"),
             ("high: [a/]\nhigh: [b/]\n", "not YAML"),
             ("a: 1\n---\nb: 2\n", "more than one"),
         ] {
@@ -620,20 +687,58 @@ mod tests {
     }
 
     #[test]
-    fn numstat_reads_paths_renames_and_binary_files() {
-        let entries =
-            ["3\t1\tsrc/a b.rs", "-\t-\tlogo.png", "0\t0\t", "docs/old.md", "docs/new.md", "2\t0\tREADME", ""];
-        let text = entries.join("\0");
+    fn changes_reads_paths_renames_binary_files_and_gitlinks() {
+        let entries = [
+            ":100644 100644 aaaaaaa bbbbbbb M",
+            "src/a b.rs",
+            ":100644 100644 aaaaaaa aaaaaaa R100",
+            "docs/old.md",
+            "docs/new.md",
+            ":160000 160000 aaaaaaa bbbbbbb M",
+            "vendor/auth",
+            ":000000 160000 0000000 bbbbbbb A",
+            ".claude/skills",
+            "3\t1\tsrc/a b.rs",
+            "-\t-\tlogo.png",
+            "0\t0\t",
+            "docs/old.md",
+            "docs/new.md",
+            "2\t0\tREADME",
+            "1\t1\tvendor/auth",
+            "1\t0\t.claude/skills",
+            "",
+        ];
+        let link = |path: &str, added, removed| Changed { gitlink: true, ..change(path, added, removed) };
         assert_eq!(
-            numstat(&text),
+            changes(&entries.join("\0")),
             [
                 change("src/a b.rs", 3, 1),
                 no_size("logo.png"),
                 renamed("docs/old.md", "docs/new.md"),
                 change("README", 2, 0),
+                link("vendor/auth", 1, 1),
+                link(".claude/skills", 1, 0),
             ]
         );
-        assert_eq!(numstat(""), []);
+        assert_eq!(changes(""), []);
+        // Review of #99, row 41. A deleted gitlink has mode 160000 on the old side only. The second path of a rename is
+        // read as a path, so a file whose name reads as a raw entry cannot swallow the gitlink entry after it.
+        let entries = [
+            ":100644 100644 aaaaaaa aaaaaaa R100",
+            "docs/old.md",
+            ":160000 000000 aaaaaaa 0000000 D",
+            ":160000 000000 aaaaaaa 0000000 D",
+            "docs/skills",
+            "0\t0\t",
+            "docs/old.md",
+            ":160000 000000 aaaaaaa 0000000 D",
+            "0\t1\tdocs/skills",
+            "",
+        ];
+        assert_eq!(
+            changes(&entries.join("\0")),
+            [renamed("docs/old.md", ":160000 000000 aaaaaaa 0000000 D"), link("docs/skills", 0, 1)]
+        );
     }
 
     #[test]
@@ -649,5 +754,9 @@ mod tests {
         assert_eq!(at(&[change("src/a.rs", 30, 0)]), (Level::High, false), "high by size, not by a path");
         assert_eq!(at(&[change("src/a.rs", 1, 0)]), (Level::Medium, false));
         assert_eq!(at(&[change("docs/a.md", 30, 0), change("infra/x", 1, 0)]), (Level::High, true));
+        // What lands is not known, so the security lens reads it, under a low pattern too (review of #99, late list).
+        let gitlink = Changed { gitlink: true, ..no_size("docs/lib") };
+        assert_eq!(at(&[gitlink]), (Level::High, true), "a submodule commit");
+        assert_eq!(at(&[no_size("docs/a.md")]), (Level::High, true), "a size git does not count");
     }
 }
