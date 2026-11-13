@@ -124,6 +124,9 @@ fn install_refuses_outside_a_clone_and_a_repeat_exits_3() {
     let pin = "0123456789abcdef0123456789abcdef01234567";
     let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude", "--gate", pin]);
     assert_eq!((code, v["gate"].as_str(), risk()), (Some(0), Some(pin), Some(format!("gate: {pin}\n"))), "{v}");
+    // A committed pin stays: an install with no `--gate` keeps it and names it.
+    let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    assert_eq!((code, v["gate"].as_str(), risk()), (Some(3), Some(pin), Some(format!("gate: {pin}\n"))), "{v}");
     assert_eq!(std::fs::read_dir(w.home.path()).unwrap().count(), 0, "the install writes nothing in the home");
 }
 
