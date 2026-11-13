@@ -14,7 +14,7 @@ use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::signed::{Act, armour, comment, in_agent, is_branch, is_sha, sign, signer, verify};
+use crate::signed::{Act, armour, blocks, comment, in_agent, is_branch, is_sha, sign, signer, verify};
 use crate::{Wrote, node_id, subject};
 
 /// `bp approve <issue> [--key <path>] [--post]`.
@@ -125,8 +125,14 @@ fn act(
         let mut v = json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number });
         if kind == Kind::Approval {
             let signature = armour(&r.body).expect("a record that verifies holds a signature");
-            // A repeat writes nothing, so it posts nothing: each rerun would add one more copy to the pull request.
-            v["comment"] = share(&gh, pr.number, &message, &signature, false)?.into();
+            // A repeat posts only when no comment carries this signature: a failed post is then not stranded, and a
+            // rerun adds no second copy (review of #99, row 30).
+            let posted = || -> Result<bool, Refusal> {
+                let bodies = gh.comments(pr.number)?;
+                Ok(bodies.iter().flat_map(|b| blocks(b)).any(|b| b.signature.as_deref() == Some(signature.as_str())))
+            };
+            let post = post && !posted()?;
+            v["comment"] = share(&gh, &id, pr.number, &message, &signature, post)?.into();
         }
         return Ok(Wrote::Already(v));
     }
@@ -167,18 +173,21 @@ fn act(
         "findings": written.findings,
     });
     if kind == Kind::Approval {
-        v["comment"] = share(&gh, pr.number, &message, &signature, post)?.into();
+        v["comment"] = share(&gh, &id, pr.number, &message, &signature, post)?.into();
     }
     Ok(Wrote::Changed(v))
 }
 
 /// The forge comment of a signed approval, printed to stderr for the human to post, or posted with `gh pr comment`
-/// when `post`. Only the run that writes the record posts. The forge check reruns only on a new run: the fix names
-/// the rerun.
-fn share(gh: &Gh, number: u64, message: &str, signature: &str, post: bool) -> Result<String, Refusal> {
+/// when `post`. The forge check reruns only on a new run: the fix names the rerun. A failed post leaves the record,
+/// so its fix names the rerun with `--post`, which posts what the pull request lacks.
+fn share(gh: &Gh, issue: &Id, number: u64, message: &str, signature: &str, post: bool) -> Result<String, Refusal> {
     let text = comment(message, signature);
     if post {
-        gh.comment(number, &text)?;
+        gh.comment(number, &text).map_err(|e| {
+            let fix = format!("{}; the approval is recorded: rerun bp approve {issue} --post to post it", e.fix);
+            Refusal::failed(e.subject, fix)
+        })?;
         eprintln!("bp approve posted the signed comment on pull request {number}; rerun its bp-gate check");
     } else {
         eprint!("bp approve: post this comment on pull request {number}, then rerun its bp-gate check:\n\n{text}");
@@ -267,7 +276,10 @@ mod tests {
     const B: &str = "master";
 
     fn run(dir: &Path, program: &str, args: &[&str]) -> String {
-        let out = Command::new(program).current_dir(dir).env_remove("SSH_AUTH_SOCK").args(args).output().unwrap();
+        // The developer's git configuration stays out: a global `commit.gpgsign` would run their signing program.
+        let isolated = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+        let out = Command::new(program).current_dir(dir).envs(isolated).env_remove("SSH_AUTH_SOCK").args(args).output();
+        let out = out.unwrap();
         assert!(out.status.success(), "{program} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8(out.stdout).unwrap()
     }
@@ -370,6 +382,13 @@ mod tests {
             assert_eq!(gate(H1, &signer).unwrap_err().0, Code::SignatureInvalid, "{why}");
         }
         assert!(gate(H1, &signer).unwrap_err().1.contains("bp approve projects/bp/issues/a"));
+
+        // The human's valid signature in a record with no `base` refuses: the gate rebuilds the message from the record's
+        // base branch, so a record without one approves nothing.
+        let mut no_base = fields(H1, 1, "19", &[]);
+        no_base.retain(|(k, _)| *k != "base");
+        forge(&v, Kind::Approval, &format!("{H1}-10"), no_base, &sign(&message(H1, 1), &human).unwrap());
+        assert_eq!(gate(H1, &signer).unwrap_err().0, Code::SignatureInvalid, "a record with no base");
 
         // The human's signature of this act at this head passes, whatever forged records sit beside it.
         let good = sign(&message(H1, 1), &human).unwrap();
