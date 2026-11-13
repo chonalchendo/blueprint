@@ -324,6 +324,9 @@ fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
 fn set_refuses_risk_lowering() {
     let dir = vault();
     let root = dir.path();
+    // An issue with no label reads medium, so a first `low` is a lowering (review of #98, finding 10).
+    let (code, v) = bp(root, &["set", ISSUE, "risk", "low"]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("not_a_label")), "{v}");
     // A first level and a raise are labels; a lowering is the human's signed act, whatever BP_ROLE says.
     assert_eq!(bp(root, &["set", ISSUE, "risk", "medium"]).0, Some(0));
     assert_eq!(bp(root, &["set", ISSUE, "risk", "high"]).0, Some(0));
