@@ -8,7 +8,7 @@ use bp_vault::{Id, Index, Refusal, Vault};
 use super::text;
 use crate::git::git;
 
-/// The issue's declared level: its `risk` label, `None` with no label, which reads medium. Once the label is locked
+/// The issue's declared level: its committed `risk` label, `None` with no label, which reads medium. Once the label is locked
 /// (at [`locked`]), it reads the highest label any commit set from the lock on, or the one it held at the lock: a
 /// later commit that lowers it, which `bp set` refuses, does not count. `land`, the intents and `bp risk` read it. A
 /// vault outside git reads the label as it stands; a git failure refuses `could_not_run`.
@@ -25,6 +25,9 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
     let path = format!("./{issue}.md");
     let args = ["log", "--follow", "--text", "-p", "--format=commit: %H", "-G", "^risk:", "--", path.as_str()];
     let set = labels(&git(&vault.root, &args)?);
+    // The label as the last commit left it: a line in the work tree that no commit holds is no evidence (review of
+    // #100, V5), so `bp risk` and the intents agree with `land`, which refuses a vault that is not committed.
+    let now = set.first().and_then(|(_, l)| *l);
     let level = |l: Option<Level>| l.unwrap_or(Level::Medium);
     // Only a label below one that git once held, or a low one, needs the lock: else the label reads as it stands.
     let fell = set.iter().any(|(_, l)| level(*l) > level(now));

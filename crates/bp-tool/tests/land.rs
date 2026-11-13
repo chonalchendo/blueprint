@@ -1431,6 +1431,24 @@ fn a_label_lowered_by_hand_reads_as_the_one_it_replaced() {
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("approval_missing")), "{out}");
 }
 
+/// A label no commit holds reads as the committed one, whoever reads it: `bp risk` and the intents agree with `land`
+/// (review of #100, V5).
+#[test]
+fn a_label_no_commit_holds_is_no_label() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    rules(t, "low:\n  - hello.txt\n");
+    let (_, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &["conformance"]);
+    let path = v.join(format!("{ISSUE}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replacen("status: in-progress\n", "status: in-progress\nrisk: low\n", 1)).unwrap();
+    let (_, risk) = bp(v, t, &[], &["risk", ISSUE]);
+    assert_eq!((&risk["level"], &risk["declared"]), (&json!("medium"), &json!("medium")), "{risk}");
+    assert_eq!(intent(v), (json!("needs-review"), json!("round 1: missing lenses: failure-paths")));
+}
+
 /// A high head lands only on the human's signed approval of that head, of that pull request, into that base (37,
 /// design changes 3 and 4). The intents read an approval record as it stands; `land` verifies it, so a hand-written
 /// label, a record of another pull request or base, a changed field and an approval of an earlier head refuse.
