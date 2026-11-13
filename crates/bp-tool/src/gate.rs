@@ -74,7 +74,7 @@ pub(crate) fn gate(cwd: &Path, g: &Gate) -> Result<Value, Refusal> {
             "bp install writes the line `gate: <sha>` into .bp/risk.yml; commit it to the default branch from a shell",
         ));
     }
-    let judged = judge_by(&top, g.base.clone(), vec![g.head.clone()], &config)?;
+    let judged = judge_by(&top, g.base.clone(), vec![g.head.clone()], &config, false)?;
     let level = judged.computed.level;
     let result = |approval: &str| {
         json!({

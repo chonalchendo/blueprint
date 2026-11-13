@@ -183,18 +183,26 @@ pub(crate) fn judge(top: &Path, target: &str, heads: Vec<String>) -> Result<Judg
 /// [`judge`] against the fetched commit `base` of `target`: `land` passes the base that the forge names.
 pub(crate) fn judge_at(top: &Path, base: String, target: &str, heads: Vec<String>) -> Result<Judged, Refusal> {
     let config = rules(top, &base, &format!("origin/{target}"))?;
-    judge_by(top, base, heads, &config)
+    judge_by(top, base, heads, &config, true)
 }
 
 /// The level of what each head lands on `base`, by `config`; the highest wins, and a tie keeps the first head's
 /// reasons. `bp gate` calls it with the base the forge names and that base's rules. What lands is the test merge of
 /// the head into the base, diffed from the base: `base...head` reads from one merge base, which a commit date picks
 /// among several, and it shows a path as the head's start held it, before a rename on the base (review rows 10, 11).
-/// A conflict, or a test merge that fails, reads high: what lands is then not known.
-pub(crate) fn judge_by(top: &Path, base: String, heads: Vec<String>, config: &Config) -> Result<Judged, Refusal> {
+/// A conflict reads high: what lands is then not known. A test merge that fails for another cause reads high for the
+/// forge check, which has no other word; with `strict`, `land` and `pr` refuse `could_not_run` with git's words, so a
+/// git fault never reads as a level that rose or a merge that was lost (review of #100, V2).
+pub(crate) fn judge_by(
+    top: &Path,
+    base: String,
+    heads: Vec<String>,
+    config: &Config,
+    strict: bool,
+) -> Result<Judged, Refusal> {
     let mut best: Option<(Computed, bool)> = None;
     for head in &heads {
-        let landed = landed(top, &base, head)?;
+        let landed = landed(top, &base, head, strict)?;
         let unmerged = landed.is_err();
         let c = match landed {
             Ok(tree) => {
@@ -230,8 +238,9 @@ pub(crate) fn judge_by(top: &Path, base: String, heads: Vec<String>, config: &Co
     Ok(Judged { computed, base, heads, top: top.to_path_buf(), unmerged })
 }
 
-/// The tree of the test merge of `head` into `base`, or why there is none: a conflict, or git's own words.
-fn landed(top: &Path, base: &str, head: &str) -> Result<Result<String, String>, Refusal> {
+/// The tree of the test merge of `head` into `base`, or why there is none: a conflict, or git's own words. With
+/// `strict`, git's failure to merge refuses; only a conflict (exit 1) is a reason.
+fn landed(top: &Path, base: &str, head: &str, strict: bool) -> Result<Result<String, String>, Refusal> {
     let out = bp_read::git::command(top)
         .args(["merge-tree", "--write-tree", base, head])
         .output()
@@ -240,6 +249,16 @@ fn landed(top: &Path, base: &str, head: &str) -> Result<Result<String, String>, 
     Ok(match out.status.code() {
         Some(0) => Ok(stdout.lines().next().unwrap_or_default().to_string()),
         Some(1) => Err(format!("conflicts with {base}, so what lands is not known")),
+        _ if strict => {
+            let why = String::from_utf8_lossy(&out.stderr);
+            return Err(Refusal::failed(
+                format!("git merge-tree --write-tree {base} {head}"),
+                format!(
+                    "git cannot test-merge the head into the base: {}; fix git or the clone, then rerun",
+                    why.trim()
+                ),
+            ));
+        }
         _ => Err(format!("has no test merge with {base}: {}", String::from_utf8_lossy(&out.stderr).trim())),
     })
 }
@@ -336,15 +355,19 @@ mod tests {
         git(top, &["commit", "-qm", "orphan"]);
         let head = git(top, &["rev-parse", "HEAD"]);
         let config = Config::parse("low: [docs/]\n").unwrap();
-        let judged = super::judge_by(top, base.clone(), vec![head.clone()], &config).unwrap();
+        let judged = super::judge_by(top, base.clone(), vec![head.clone()], &config, false).unwrap();
         let c = &judged.computed;
         assert_eq!((c.level, c.security, judged.unmerged), (Level::High, true, true), "{:?}", c.reasons);
         assert!(c.reasons[0].starts_with(&format!("{head} has no test merge with {base}: ")), "{:?}", c.reasons);
+        // `land` and `pr` read a test merge that fails as a tool fault, never as a level (review of #100, V2).
+        let refused = super::judge_by(top, base.clone(), vec![head.clone()], &config, true).unwrap_err();
+        assert_eq!(refused.code, bp_vault::Code::CouldNotRun, "{refused:?}");
+        assert!(refused.fix.starts_with("git cannot test-merge the head into the base: "), "{}", refused.fix);
         // The same change from the base merges: low, and no rebase is the next step.
         git(top, &["checkout", "-q", "-b", "child", &base]);
         std::fs::write(top.join("docs/a.md"), "b\n").unwrap();
         git(top, &["commit", "-qam", "child"]);
-        let judged = super::judge_by(top, base, vec![git(top, &["rev-parse", "HEAD"])], &config).unwrap();
+        let judged = super::judge_by(top, base, vec![git(top, &["rev-parse", "HEAD"])], &config, false).unwrap();
         assert_eq!((judged.computed.level, judged.unmerged), (Level::Low, false));
     }
 }

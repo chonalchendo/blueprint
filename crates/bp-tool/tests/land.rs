@@ -1871,6 +1871,17 @@ fn a_rerun_after_the_merge_keeps_a_tool_failure_s_own_fix() {
         "{out}"
     );
     std::fs::remove_file(&keygen).unwrap();
+    // A test merge that cannot run reads as git's fault, not as a level that rose or a merge that was lost (V2).
+    let git = t.join("bin/git");
+    let wrapper = "#!/bin/sh\ncase \" $* \" in *\" merge-tree \"*) echo 'fatal: no merge today' >&2; exit 2 ;; esac\nexec /usr/bin/git \"$@\"\n";
+    std::fs::write(&git, wrapper).unwrap();
+    std::fs::set_permissions(&git, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let (code, out) = land();
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.contains("git cannot test-merge the head into the base: fatal: no merge today"), "{fix}");
+    assert!(!fix.contains("--reason lost"), "a failed test merge is no lost merge: {fix}");
+    std::fs::remove_file(&git).unwrap();
     let (code, out) = land();
     assert_eq!(
         (code, out["status"].as_str(), out["level"].as_str()),
