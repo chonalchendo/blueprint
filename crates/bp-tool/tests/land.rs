@@ -1473,6 +1473,23 @@ fn a_label_no_commit_holds_is_no_label() {
     assert_eq!(intent(v), (json!("needs-review"), json!("round 1: missing lenses: failure-paths")));
 }
 
+/// The label is the `risk` key of the committed header at each commit, never a body line (review of #100, W2): a body
+/// that quotes `risk: low` before the milestone's approval leaves a `risk: high` issue high.
+#[test]
+fn a_body_line_is_never_the_label() {
+    let (v, t) = setup_under("planned");
+    let (v, t) = (v.path(), t.path());
+    rules(t, "low:\n  - hello.txt\n");
+    assert_eq!(common::bp(v, &["set", ISSUE, "risk", "high"]).0, Some(0));
+    let path = v.join(format!("{ISSUE}.md"));
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{text}\n```yaml\nrisk: low\n```\n")).unwrap();
+    git(v, &["commit", "-qam", "a body example"]);
+    assert_eq!(common::bp(v, &["transition", M, "approved"]).0, Some(0));
+    let (_, risk) = bp(v, t, &[], &["risk", ISSUE]);
+    assert_eq!(risk["declared"], "high", "{risk}");
+}
+
 /// A high head lands only on the human's signed approval of that head, of that pull request, into that base (37,
 /// design changes 3 and 4). The intents read an approval record as it stands; `land` verifies it, so a hand-written
 /// label, a record of another pull request or base, a changed field and an approval of an earlier head refuse.

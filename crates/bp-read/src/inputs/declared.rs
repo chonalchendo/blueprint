@@ -8,9 +8,9 @@ use bp_vault::{Id, Index, Refusal, Vault};
 use super::text;
 use crate::git::git;
 
-/// The issue's declared level: its committed `risk` label, `None` with no label, which reads medium. Once the label is locked
-/// (at [`locked`]), it reads the highest label any commit set from the lock on, or the one it held at the lock: a
-/// later commit that lowers it, which `bp set` refuses, does not count. `land`, the intents and `bp risk` read it. A
+/// The issue's declared level: the `risk` key of its committed header, never a line of its body, `None` with no label,
+/// which reads medium. Once the label is locked (at [`locked`]), it reads the highest label any commit set from the
+/// lock on, or the one it held at the lock: a later commit that lowers it, which `bp set` refuses, does not count. `land`, the intents and `bp risk` read it. A
 /// vault outside git reads the label as it stands; a git failure refuses `could_not_run`.
 ///
 /// # Panics
@@ -23,7 +23,9 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
         return Ok(now);
     }
     let path = format!("./{issue}.md");
-    let args = ["log", "--follow", "--text", "-p", "--format=commit: %H", "-G", "^risk:", "--", path.as_str()];
+    // Each patch holds the whole file, so the header of each version reads apart from its body (review of #100, W2).
+    let args =
+        ["log", "--follow", "--text", "-p", "-U1000000", "--format=commit: %H", "-G", "^risk:", "--", path.as_str()];
     let set = labels(&git(&vault.root, &args)?);
     // The label as the last commit left it: a line in the work tree that no commit holds is no evidence (review of
     // #100, V5), so `bp risk` and the intents agree with `land`, which refuses a vault that is not committed.
@@ -52,33 +54,50 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
     Ok(if best > level(now) { Some(best) } else { now })
 }
 
-/// Each commit of the log `-p` that set the `risk` label, newest first, and the label it left: the level of its added
-/// `risk:` line, or `None` when it only removed one. Each commit heads its patch as `commit: <sha>`, which no diff line
-/// starts with. A `risk:` line that names no level, as a body line may, is not the label.
+/// Each commit of the log `-p` that changed the `risk` label, newest first, and the label it left: the level of the
+/// `risk:` line in the header of the version it wrote, or `None` when that header holds none. Each patch holds the
+/// whole file, so the version before and after each commit reads in full, and a `risk:` line of the body is never the
+/// label. Each commit heads its patch as `commit: <sha>`, which no diff line starts with.
 fn labels(log: &str) -> Vec<(String, Option<Level>)> {
-    let parse = |line: &str| {
-        let value = line.split('#').next().unwrap_or_default().trim().trim_matches(['"', '\'']);
-        value.parse::<Level>().ok()
-    };
     let mut out: Vec<(String, Option<Level>)> = Vec::new();
-    let (mut commit, mut added, mut removed) = (None::<&str>, None, false);
-    let mut close = |commit: Option<&str>, added: Option<Level>, removed: bool| {
-        if let Some(c) = commit.filter(|_| added.is_some() || removed) {
-            out.push((c.to_string(), added));
+    let (mut commit, mut hunk, mut old, mut new) = (None::<&str>, false, String::new(), String::new());
+    let mut close = |commit: Option<&str>, old: &str, new: &str| {
+        if let Some(c) = commit.filter(|_| label(new) != label(old)) {
+            out.push((c.to_string(), label(new)));
         }
     };
     for line in log.lines() {
         if let Some(c) = line.strip_prefix("commit: ") {
-            close(commit, added, removed);
-            (commit, added, removed) = (Some(c), None, false);
-        } else if let Some(l) = line.strip_prefix("+risk:").and_then(parse) {
-            added = Some(added.map_or(l, |a: Level| a.max(l)));
-        } else if line.strip_prefix("-risk:").and_then(parse).is_some() {
-            removed = true;
+            close(commit, &old, &new);
+            (commit, hunk) = (Some(c), false);
+            old.clear();
+            new.clear();
+        } else if line.starts_with("@@") {
+            hunk = true;
+        } else if hunk {
+            // The lines before the first `@@` name the files; in the hunk each line opens with its side.
+            let (side, text) = match line.as_bytes().first() {
+                Some(b) if b.is_ascii() => (*b, &line[1..]),
+                _ => (b' ', line),
+            };
+            for (to, holds) in [(&mut old, side != b'+'), (&mut new, side != b'-')] {
+                if holds && side != b'\\' {
+                    to.push_str(text);
+                    to.push('\n');
+                }
+            }
         }
     }
-    close(commit, added, removed);
+    close(commit, &old, &new);
     out
+}
+
+/// The level of the `risk` key of `text`'s header, between its opening and closing `---` lines; `None` with no header,
+/// no key or a value that names no level.
+fn label(text: &str) -> Option<Level> {
+    let header = &text[..bp_vault::header_end(text)?];
+    let value = header.lines().find_map(|l| l.strip_prefix("risk:"))?;
+    value.split('#').next().unwrap_or_default().trim().trim_matches(['"', '\'']).parse().ok()
 }
 
 /// The commit from which a label no longer lowers the issue's level, or `None` while it still may (`bp set`'s rule,
@@ -111,12 +130,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_commit_sets_the_level_of_its_added_line_or_none() {
-        let log = "commit: c3\n\n@@ -2,6 +2,7 @@\n-risk: high\n+risk: \"low\" # by hand\ncommit: c2\n-risk: medium\n\
-                   commit: c1\n+risk: medium\n+risk: the parser is slow\ncommit: c0\n+body text\n";
+    fn a_commit_sets_the_level_of_its_header_line_or_none() {
+        let log = "commit: c3\ndiff --git a/i.md b/i.md\n--- a/i.md\n+++ b/i.md\n@@ -1,3 +1,3 @@\n ---\n-risk: high\n\
+                   +risk: \"low\" # by hand\n ---\ncommit: c2\n@@ -1,3 +1,2 @@\n ---\n-risk: medium\n ---\n\
+                   commit: c1\n@@ -0,0 +1,4 @@\n+---\n+risk: medium\n+---\n+risk: the parser is slow\n\
+                   commit: c0\n@@ -1,2 +1,3 @@\n ---\n ---\n+body text\n";
         let want = [("c3", Some(Level::Low)), ("c2", None), ("c1", Some(Level::Medium))];
         let set = labels(log);
         let got: Vec<(&str, Option<Level>)> = set.iter().map(|(c, l)| (c.as_str(), *l)).collect();
         assert_eq!(got, want);
+    }
+
+    /// A `risk:` line of the body, as a YAML example holds, is not the label (review of #100, W2).
+    #[test]
+    fn a_body_line_is_never_the_label() {
+        let log = "commit: c2\n@@ -1,6 +1,9 @@\n ---\n kind: issue\n risk: high\n ---\n \n body\n+```yaml\n+risk: low\n\
+                   +```\ncommit: c1\n@@ -0,0 +1,6 @@\n+---\n+kind: issue\n+risk: high\n+---\n+\n+body\n\
+                   commit: c0\n@@ -0,0 +1,3 @@\n+body\n+\n+risk: low\n";
+        let set = labels(log);
+        let got: Vec<(&str, Option<Level>)> = set.iter().map(|(c, l)| (c.as_str(), *l)).collect();
+        assert_eq!(got, [("c1", Some(Level::High))]);
     }
 }
