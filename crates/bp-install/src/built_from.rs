@@ -15,7 +15,7 @@ use std::process::Command;
 /// watches a missing one on every build.
 pub fn built_from(dir: &Path) -> (Option<String>, Vec<PathBuf>) {
     let git = |args: &[&str]| {
-        let out = Command::new("git").current_dir(dir).args(args).output().ok()?;
+        let out = Command::new("git").current_dir(dir).env("GIT_NO_REPLACE_OBJECTS", "1").args(args).output().ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
     let mut watched = Vec::new();

@@ -249,6 +249,22 @@ fn a_risk_file_on_disk_only_is_no_risk_file() {
 }
 
 #[test]
+fn the_level_reads_the_base_commit_not_a_local_replace_of_it() {
+    // Review of #100, row S1: a local `git replace` of origin's master, whose risk file drops `infra/`, pushes nothing.
+    let mut w = world(Some("low"), Some("high: [infra/]\n"));
+    w.cut();
+    let forged = [(".bp/risk.yml", "high: []\n")];
+    let swap = w.commit(&forged);
+    let root = git(&w.code, &["commit-tree", &format!("{swap}^{{tree}}"), "-m", "forged"]).trim().to_string();
+    w.commit(&[("infra/main.tf", "x\n")]);
+    let base = w.rev("origin/master");
+    git(&w.code, &["replace", &base, &root]);
+    let v = w.risk();
+    assert_eq!(pick(&v), json!(["high", "low", "high"]), "{v}");
+    assert!(v["reasons"].to_string().contains("infra/main.tf matches the high pattern infra/"), "{v}");
+}
+
+#[test]
 fn a_link_named_as_a_high_directory_is_high() {
     let mut w = world(Some("low"), Some("high: [infra/]\nlow: [docs/]\n"));
     w.cut();

@@ -225,6 +225,17 @@ fn approve_reads_the_signer_from_the_forge_not_a_local_ref() {
     let (code_, out) = approve();
     assert_eq!((code_, out["code"].as_str()), (Some(2), Some("signature_invalid")), "{out}");
     assert!(git(&code, &["show", "origin/master:.bp/risk.yml"]).contains(&public(t, "agent").trim().to_string()));
+
+    // Poison three: a local `git replace` swaps origin's true default-branch commit for one whose tree names the
+    // agent's key. ls-remote still names the true sha (review of #100, row S1).
+    git(&code, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    let true_sha = git(&code, &["ls-remote", "origin", "refs/heads/master"]).split('\t').next().unwrap().to_string();
+    git(&code, &["update-ref", "refs/remotes/origin/master", &true_sha]);
+    let forged = git(&code, &["commit-tree", "HEAD^{tree}", "-m", "forged"]).trim().to_string();
+    git(&code, &["replace", &true_sha, &forged]);
+    assert!(git(&code, &["show", &format!("{true_sha}:.bp/risk.yml")]).contains(public(t, "agent").trim()));
+    let (code_, out) = approve();
+    assert_eq!((code_, out["code"].as_str()), (Some(2), Some("signature_invalid")), "{out}");
     assert!(!v.join(ISSUE).join("approvals").exists(), "no approval is written");
 }
 

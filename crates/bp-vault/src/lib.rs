@@ -121,6 +121,7 @@ impl Vault {
                 .arg("-C")
                 .arg(&self.root)
                 .env("LC_ALL", "C")
+                .env("GIT_NO_REPLACE_OBJECTS", "1")
                 .args(args)
                 .output()
                 .map_err(|e| Refusal::failed("git", format!("{e}; install git, or drop --at")))
@@ -170,6 +171,7 @@ impl Vault {
             .arg("-C")
             .arg(&self.root)
             .env("LC_ALL", "C")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(["log", "-1", "--relative", "--format=", "--name-only", "--"])
             .args([format!("./{id}"), format!("./{after}")])
             .output();
@@ -191,6 +193,7 @@ impl Vault {
             .arg(&self.root)
             .env("LC_ALL", "C")
             .env("TZ", "UTC")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args([
                 "-c",
                 "core.quotepath=off",

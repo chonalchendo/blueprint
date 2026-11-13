@@ -457,6 +457,27 @@ fn gate_reads_a_risk_file_on_disk_only_as_no_file() {
 }
 
 #[test]
+fn gate_reads_the_base_commit_not_a_local_replace_of_it() {
+    // Review of #100, row S1: `git replace` swaps the base for a commit whose risk file drops `infra/` from the high
+    // paths and names the agent's key. The head holds the same file, so against the swap only `infra/b.tf` changes.
+    let w = World::new(RULES);
+    let forged = RULES.replace("high: [infra/]", "high: []").replace("{human}", &w.public("agent"));
+    let top = w.code();
+    let swap = w.commit(&[(".bp/risk.yml", &forged)]);
+    let root = git(&top, &["commit-tree", &format!("{swap}^{{tree}}"), "-m", "forged"]).trim().to_string();
+    let head = w.commit(&[(".bp/risk.yml", &forged), ("infra/b.tf", "b\n")]);
+    git(&top, &["replace", &w.base, &root]);
+    assert!(git(&top, &["show", &format!("{}:.bp/risk.yml", w.base)]).contains("high: []"), "the swap is in force");
+    let (exit, v) = w.gate(&head, None);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("approval_missing")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("infra/b.tf matches the high pattern infra/"), "{v}");
+    let pr = PR.to_string();
+    let fields = ["approve", "bp", ISSUE, &pr, "master", &head];
+    let (exit, v) = w.gate(&head, Some(&json!([w.comment("agent", fields, fields)])));
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("signature_invalid")), "the base's signer: {v}");
+}
+
+#[test]
 fn gate_reads_no_attribute_of_the_developers_git_configuration() {
     // A global `core.attributesFile` that marks `docs/**` `-diff` would hide the size of a low change.
     let w = World::new(RULES);
