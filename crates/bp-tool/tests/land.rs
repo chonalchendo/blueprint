@@ -1828,7 +1828,10 @@ fn land_refuses_a_forge_row_it_cannot_read() {
     forge_as(t, &h, &["SUCCESS"], &json!({ "baseRefOid": format!("--output={}", pwn.display()) }));
     let (code, out) = bp(v, t, &[], &["land", ISSUE, "--dry-run"]);
     assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
-    assert!(out["fix"].as_str().unwrap().contains("the forge gave base"), "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    let want = format!("the forge gave base --output={} for pull request 1, not a full commit sha", pwn.display());
+    assert!(fix.contains(&want), "{out}");
+    assert!(!fix.contains("Some(") && !fix.contains('"'), "no Rust debug form: {fix}");
     for base in [json!(null), json!("")] {
         forge_as(t, &h, &["SUCCESS"], &json!({ "baseRefName": base }));
         let (code, out) = bp(v, t, &[], &["land", ISSUE]);
