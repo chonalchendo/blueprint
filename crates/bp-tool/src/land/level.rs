@@ -117,8 +117,12 @@ pub(super) fn trusted(
     // A signer that cannot be read refuses as an approval that does not verify, at the approval's place in the gate
     // order, so a high head with an open review still refuses on its review first.
     let approved = signer().and_then(|s| crate::approve::approved(index, id, head, &s, forge));
-    issue.approvals = if approved.is_ok() { vec![head.to_string()] } else { Vec::new() };
-    Ok((level, approved.err()))
+    let (approvals, refused) = match approved {
+        Ok(accepts) => (vec![intents::Approval { head: head.to_string(), accepts }], None),
+        Err(e) => (Vec::new(), Some(e)),
+    };
+    issue.approvals = approvals;
+    Ok((level, refused))
 }
 
 /// The signer of `.bp/risk.yml` at the sha `git ls-remote` names for origin's default branch, once that sha is the

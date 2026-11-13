@@ -1631,6 +1631,74 @@ fn land_refuses_an_open_round() {
     assert!(!t.join("merged").exists(), "no refusal merges");
 }
 
+/// At high's round cap the human's signed approval of the head is the disposition `accepted` of the open rows it names
+/// (37, design change 6; review of #100, V1): the record names them, `land` proceeds, and no worker is dispatched, since
+/// a fix would push a head that voids the approval.
+#[test]
+fn land_at_high_s_round_cap_takes_the_human_s_approval_as_the_disposition() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let human = signer(t);
+    let (w, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &HIGH);
+    // Round 2 holds an error row, answered `fixed`; round 3, at the fixed head, holds another: high's cap.
+    let verify = |head: &str, round: &str| {
+        let (code, got) =
+            review(v, t, head, &[round, "lens=verify", "mode=verify"], &["| error | hello.txt:1 | Wrong. |"]);
+        assert_eq!(code, Some(0), "{got}");
+        got["id"].as_str().unwrap().to_string()
+    };
+    let next = |message: &str| {
+        git(&w, &["commit", "--amend", "-qm", message]);
+        let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+        assert_eq!(code, Some(0), "{out}");
+        let head = out["head"].as_str().unwrap().to_string();
+        pushed(v, t, &head);
+        head
+    };
+    let h2 = next("again");
+    let second = verify(&h2, "round=2");
+    let fixed = ["record", "disposition", &second, "--field", "finding=1", "--field", "as=fixed"];
+    assert_eq!(bp(v, t, &[], &fixed).0, Some(0));
+    let h3 = next("and again");
+    let third = verify(&h3, "round=3");
+    let cap = format!("round cap: the human abandons the issue, or accepts the open rows: bp approve {ISSUE}");
+    assert_eq!(intent(v), (json!("blocked"), json!(cap)));
+    let session = [("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")];
+    let land = |args: &[&str]| bp(v, t, &session, &[&["land", ISSUE][..], args].concat());
+    // A record the agent writes by hand, naming the row, signs nothing: the intents read it, `land` does not.
+    let forged = format!(
+        "---\nkind: approval\nunder: {ISSUE}\nhead: {h3}\npull_request: 1\nbase: master\naccepts:\n  - {third}#1\n---\n"
+    );
+    std::fs::create_dir_all(v.join(format!("{ISSUE}/approvals"))).unwrap();
+    std::fs::write(v.join(format!("{ISSUE}/approvals/{h3}.md")), forged).unwrap();
+    git(v, &["add", "."]);
+    git(v, &["commit", "-qm", "a hand-written approval"]);
+    let (code, out) = land(&["--dry-run"]);
+    assert_eq!(
+        (code, out["code"].as_str()),
+        (Some(2), Some("findings_open")),
+        "an unsigned record accepts nothing: {out}"
+    );
+    git(v, &["rm", "-q", "-r", "--", &format!("{ISSUE}/approvals")]);
+    git(v, &["commit", "-qm", "the hand-written approval goes"]);
+    assert_eq!(intent(v), (json!("blocked"), json!(cap)));
+    let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["approve", ISSUE, "--key", &human]);
+    assert_eq!(code, Some(0), "{out}");
+    let names = json!([format!("{third}#1")]);
+    assert_eq!(out["accepts"], names, "the record names the rows it accepts: {out}");
+    let text = std::fs::read_to_string(v.join(format!("{ISSUE}/approvals/{h3}.md"))).unwrap();
+    assert!(text.contains(&format!("{third}#1")), "{text}");
+    assert_eq!(intent(v), (json!("needs-landing"), json!("")), "no dispatch answers the accepted row");
+    let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["approve", ISSUE, "--key", &human]);
+    assert_eq!(code, Some(3), "a repeat finds its record and names no row again: {out}");
+    let (code, out) = land(&["--dry-run"]);
+    assert_eq!((code, &out["level"]), (Some(0), &json!("high")), "{out}");
+    let (code, out) = land(&[]);
+    assert_eq!((code, out["status"].as_str()), (Some(0), Some("resolved")), "{out}");
+}
+
 /// Each refusal `land` can give, and each fix it names, is one the session can follow (review of #100, C3).
 #[test]
 fn every_land_fix_names_what_the_session_runs() {

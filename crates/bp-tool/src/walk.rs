@@ -167,7 +167,8 @@ fn answered(vault: &Vault, index: &Index, id: &Id, action: Action) -> Result<Vec
             let written = bp_read::inputs::written(vault, index, id.as_str())?;
             let reviews = bp_read::inputs::reduced(index, id.as_str(), &written)?;
             let Some(head) = reviews.last().map(|r| r.head.as_str()) else { continue };
-            let open = bp_change::rounds::unanswered(&reviews);
+            let approvals = bp_read::inputs::approvals(index, id.as_str())?;
+            let open = bp_change::intents::open(&reviews, &approvals, head);
             for (w, r) in written.iter().zip(&reviews) {
                 if r.head == head || open.iter().any(|(o, _)| o.id == r.id) {
                     records.push(json!({ "id": w.id, "kind": kind, "header": w.header, "body": w.body }));

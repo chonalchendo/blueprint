@@ -243,6 +243,21 @@ pub fn follow_up(index: &Index, issue: &str, reason: &str) -> Result<Option<Stri
     Ok(None)
 }
 
+/// The rows an approval record accepts: its `accepts` list, each name as `<review id>#<row>`. A name that does not
+/// read as one accepts nothing.
+pub fn accepted(r: &Record) -> Vec<(String, u64)> {
+    let names = r.header.get("accepts").and_then(Value::as_array);
+    let named = names.into_iter().flatten().filter_map(Value::as_str);
+    named.filter_map(|n| n.rsplit_once('#')).filter_map(|(id, n)| Some((id.to_string(), n.parse().ok()?))).collect()
+}
+
+/// The approval records of `issue`: each one's head and the rows it accepts.
+pub fn approvals(index: &Index, issue: &str) -> Result<Vec<intents::Approval>, Refusal> {
+    let records = index.records(issue, Kind::Approval)?;
+    let approval = |r: &Record| Some(intents::Approval { head: text(&r.header, "head")?, accepts: accepted(r) });
+    Ok(records.iter().filter_map(approval).collect())
+}
+
 /// What an issue's review reads (37, design changes 1, 6 and 8): its runs, its reviews as first committed, its `risk`
 /// label and whether it caused a pending delta. The intents, `record review` and the review stop read the round and
 /// the lenses from it, so they cannot disagree (21, rule 1).
@@ -259,7 +274,7 @@ pub fn reviewed(vault: &Vault, index: &Index, issue: &str) -> Result<intents::Is
         reviews: reviews(vault, index, issue)?,
         declared: super::declared(vault, index, issue)?,
         delta: !crate::carried_deltas(index, &Id::parse(issue).expect("the index holds ids"))?.is_empty(),
-        approvals: index.records(issue, Kind::Approval)?.iter().filter_map(head).collect(),
+        approvals: approvals(index, issue)?,
         lowerings: lowerings.iter().filter_map(|r| Some((head(r)?, text(&r.header, "level")?.parse().ok()?))).collect(),
         ..intents::Issue::default()
     })

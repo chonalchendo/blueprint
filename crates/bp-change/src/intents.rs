@@ -255,9 +255,9 @@ pub struct Issue {
     /// The issue caused a pending delta, which raises it to high (37, design change 1). Read only while a pull request
     /// is in view.
     pub delta: bool,
-    /// The head of each approval record. The intents verify no signature; `land` keeps only the approval that
-    /// verifies against the forge's pull request (37, design changes 3 and 4).
-    pub approvals: Vec<String>,
+    /// Each approval record. The intents verify no signature; `land` keeps only the approval that verifies against
+    /// the forge's pull request (37, design changes 3 and 4).
+    pub approvals: Vec<Approval>,
     /// Each lowering record's head and level, in record order. The intents verify no signature; `land` keeps only the
     /// lowering that verifies (37, design change 2).
     pub lowerings: Vec<(String, Level)>,
@@ -360,7 +360,7 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
         return Verdict::of(Intent::NeedsReview, format!("round {round}: missing lenses: {}", lenses.join(", ")));
     }
     // A finding without a disposition needs a response whatever the checks say: the fix may be what turns them green.
-    let open = rounds::unanswered(&i.reviews);
+    let open = open(&i.reviews, &i.approvals, &pr.head);
     if !open.is_empty() {
         return Verdict::of(Intent::NeedsResponse, format!("no disposition: {}", rounds::named(&open, &pr.head)));
     }
@@ -682,9 +682,9 @@ mod tests {
         high.reviews.push(review("h", 1, Lens::TestsAndChecks, Vec::new()));
         let note = "the human runs bp approve projects/bp/issues/x in a terminal";
         assert_eq!(issue(&high, NOW), Verdict::of(Intent::NeedsApproval, note));
-        let other = Issue { approvals: vec!["old".into()], ..high.clone() };
+        let other = Issue { approvals: vec![Approval { head: "old".into(), ..Approval::default() }], ..high.clone() };
         assert_eq!(issue(&other, NOW).intent, Some(Intent::NeedsApproval), "an approval of another head");
-        let signed = Issue { approvals: vec!["h".into()], ..high.clone() };
+        let signed = Issue { approvals: vec![Approval { head: "h".into(), ..Approval::default() }], ..high.clone() };
         assert_eq!(issue(&signed, NOW).intent, Some(Intent::NeedsLanding));
         let lowered = Issue { lowerings: vec![("h".into(), Level::Medium)], ..high.clone() };
         assert_eq!(issue(&lowered, NOW).intent, Some(Intent::NeedsLanding), "a lowering of the head");
@@ -985,16 +985,31 @@ mod tests {
         assert_eq!(issue(&unpushed, NOW), Verdict::of(Intent::Working, note));
     }
 
-    /// At high's cap, the human's approval of the head accepts the open rows; each still needs its disposition. An
-    /// approval of another head accepts nothing.
+    /// At high's cap, the human's approval of the head is the disposition of the rows it names: the land waits on no
+    /// dispatch, and no worker answers a row the human took on. An approval of another head accepts nothing, and one
+    /// that names a row less leaves that row holding.
     fn the_human_s_approval_accepts_the_rows_at_the_cap(moved: &Issue, cap: &str) {
-        let elsewhere = Issue { approvals: vec!["h2".into()], ..moved.clone() };
-        assert_eq!(issue(&elsewhere, NOW), Verdict::of(Intent::Blocked, cap));
-        let mut accepted = Issue { approvals: vec!["h3".into()], ..moved.clone() };
-        assert_eq!(issue(&accepted, NOW).intent, Some(Intent::NeedsResponse));
-        accepted.reviews.last_mut().unwrap().rows[0].answer = Some(Answer::Declined);
+        let approval = |head: &str, rows: &[(&str, u64)]| Approval {
+            head: head.into(),
+            accepts: rows.iter().map(|(id, n)| (id.to_string(), *n)).collect(),
+        };
+        let both = [("r/h3-verify", 1), ("r/h2-verify", 1)];
+        let with = |a: Approval| Issue { approvals: vec![a], ..moved.clone() };
+        assert_eq!(issue(&with(approval("h2", &both)), NOW), Verdict::of(Intent::Blocked, cap), "another head");
+        assert_eq!(
+            issue(&with(approval("h3", &[])), NOW),
+            Verdict::of(Intent::Blocked, cap),
+            "an approval naming none"
+        );
+        let accepted = with(approval("h3", &both));
         assert!(holding(&accepted, "h3").0.is_empty());
-        assert_eq!(issue(&accepted, NOW), Verdict::of(Intent::NeedsLanding, ""));
+        assert_eq!(issue(&accepted, NOW), Verdict::of(Intent::NeedsLanding, ""), "no row waits on a response");
+        let other = with(approval("h3", &both[1..]));
+        assert_eq!(issue(&other, NOW), Verdict::of(Intent::Blocked, cap), "a row the approval did not name");
+        let mut later = accepted.clone();
+        later.reviews.push(review("h3", 3, Lens::Conformance, vec![Row::default()]));
+        let note = "no disposition: findings 1";
+        assert_eq!(issue(&later, NOW), Verdict::of(Intent::NeedsResponse, note), "a row added after the approval");
     }
 
     #[test]

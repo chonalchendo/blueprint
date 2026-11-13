@@ -187,7 +187,7 @@ fn reviewed<'a>(i: &'a Issue, pr: &PullRequest, head: &str) -> [(Gate, Option<Un
         let detail = format!("round {round} at {head}: missing lenses: {}", names.join(", "));
         (gate("review", GateState::Pending, detail), Some(Unmet::Lenses { round, missing }))
     };
-    let open = rounds::unanswered(&i.reviews);
+    let open = super::open(&i.reviews, &i.approvals, &pr.head);
     let answered = if open.is_empty() {
         (gate("dispositions", GateState::Pass, "each row answered".into()), None)
     } else {
@@ -202,7 +202,7 @@ fn reviewed<'a>(i: &'a Issue, pr: &PullRequest, head: &str) -> [(Gate, Option<Un
         (gate("error rows", GateState::Fail, detail), Some(Unmet::Holding(blocking)))
     };
     let signed = match level {
-        Level::High if i.approvals.contains(&pr.head) => {
+        Level::High if i.approvals.iter().any(|a| a.head == pr.head) => {
             (gate("signed approval", GateState::Pass, format!("recorded at {head}; land verifies it")), None)
         }
         Level::High => {
@@ -216,7 +216,7 @@ fn reviewed<'a>(i: &'a Issue, pr: &PullRequest, head: &str) -> [(Gate, Option<Un
 
 #[cfg(test)]
 mod tests {
-    use super::super::evidence;
+    use super::super::{Approval as Signed, evidence};
     use super::*;
     use crate::rounds::{Answer, Row};
 
@@ -467,7 +467,7 @@ mod tests {
             (
                 "high, approved at the head",
                 green.clone(),
-                Issue { approvals: vec![H.into()], ..high() },
+                Issue { approvals: vec![Signed { head: H.into(), ..Signed::default() }], ..high() },
                 Some(true),
                 "none",
                 states(ok, Pass),
@@ -475,7 +475,7 @@ mod tests {
             (
                 "high, approved at another head",
                 green.clone(),
-                Issue { approvals: vec!["0123".into()], ..high() },
+                Issue { approvals: vec![Signed { head: "0123".into(), ..Signed::default() }], ..high() },
                 Some(true),
                 "approval",
                 states(with(6, Pending), Pass),
@@ -553,7 +553,7 @@ mod tests {
             gates(&unknown, &green, None).gates[0].detail,
             "the claim records no base; land tests origin's default branch"
         );
-        let approved = Issue { approvals: vec![H.into()], ..high() };
+        let approved = Issue { approvals: vec![Signed { head: H.into(), ..Signed::default() }], ..high() };
         let g = gates(&approved, &green, None);
         assert_eq!(g.gates[6].detail, "recorded at abcdef0; land verifies it");
     }

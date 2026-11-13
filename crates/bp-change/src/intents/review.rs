@@ -57,15 +57,57 @@ pub fn missing(i: &Issue, head: &str) -> Vec<rounds::Lens> {
     rounds::missing(level(i, head).0, security(i, head), &i.reviews, head)
 }
 
-/// The error rows that hold the land at `head` ([`rounds::blocking`] at the level in force), and whether one is past
-/// high's round cap. Past it the human decides (37, design change 6): an approval record of the head accepts the
-/// open rows, so none holds. `land` keeps only the approval that verifies.
+/// An approval record: the head it signs and the rows it accepts, each as a review's id and the row's number (37,
+/// design change 6). The rows are named only when the human approved at high's round cap.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Approval {
+    /// The head the human approved.
+    pub head: String,
+    /// The rows the human took on at the cap.
+    pub accepts: Vec<(String, u64)>,
+}
+
+/// `rows` less each row an approval of `head` accepts (37, design change 6). At high's cap the human's approval is the
+/// disposition `accepted` of the rows it names, so neither the dispositions nor the land wait on them. A row no
+/// approval of this head names, such as one a review adds after the approval, still needs its own.
+pub fn unaccepted<'a>(
+    rows: Vec<(&'a Review, Vec<u64>)>,
+    approvals: &[Approval],
+    head: &str,
+) -> Vec<(&'a Review, Vec<u64>)> {
+    let accepted = |r: &Review, n: u64| {
+        approvals.iter().any(|a| a.head == head && a.accepts.iter().any(|(id, m)| *id == r.id && *m == n))
+    };
+    let left = |(r, ns): (&'a Review, Vec<u64>)| (r, ns.into_iter().filter(|n| !accepted(r, *n)).collect::<Vec<_>>());
+    rows.into_iter().map(left).filter(|(_, ns)| !ns.is_empty()).collect()
+}
+
+/// The rows that still need a disposition at `head`: [`rounds::unanswered`] less the rows an approval accepts.
+pub fn open<'a>(reviews: &'a [Review], approvals: &[Approval], head: &str) -> Vec<(&'a Review, Vec<u64>)> {
+    unaccepted(rounds::unanswered(reviews), approvals, head)
+}
+
+/// The error rows that hold the land at `head` ([`rounds::blocking`] at the level in force, less the rows an approval
+/// of `head` accepts), and whether one is past high's round cap. Past it the human decides (37, design change 6): the
+/// approval record of the head names the open rows it accepts. `land` keeps only the approval that verifies.
 pub fn holding<'a>(i: &'a Issue, head: &str) -> (Vec<(&'a Review, Vec<u64>)>, bool) {
     let level = level(i, head).0;
-    let rows = rounds::blocking(level, &i.reviews);
+    let rows = unaccepted(rounds::blocking(level, &i.reviews), &i.approvals, head);
     let capped = level == Level::High && rows.iter().any(|(r, _)| r.round >= rounds::cap(Level::High));
-    if capped && i.approvals.iter().any(|a| a == head) {
-        return (Vec::new(), false);
-    }
     (rows, capped)
+}
+
+/// The rows the human's approval of `head` would accept now: every row that holds the land or needs a disposition,
+/// when an error row is past high's round cap, else none (37, design change 6). `bp approve` names them in the record.
+pub fn accepting(i: &Issue, head: &str) -> Vec<(String, u64)> {
+    let (holding, capped) = holding(i, head);
+    if !capped {
+        return Vec::new();
+    }
+    let mut rows = open(&i.reviews, &i.approvals, head);
+    rows.extend(holding);
+    let mut named: Vec<(String, u64)> = rows.iter().flat_map(|(r, ns)| ns.iter().map(|n| (r.id.clone(), *n))).collect();
+    named.sort();
+    named.dedup();
+    named
 }

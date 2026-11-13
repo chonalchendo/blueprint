@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use bp_change::rounds::{self, Answer};
+use bp_change::rounds::Answer;
 use bp_change::{MilestoneStatus, intents};
 use bp_operation::Action;
 use bp_reasoning::ThreadStatus;
@@ -114,7 +114,8 @@ fn responded(vault: &Vault, index: &Index, id: &Id, forge_age: &mut Option<i64>)
     };
     let fixed =
         reviews.iter().filter(|r| r.head == *head).flat_map(|r| &r.rows).any(|r| r.answer == Some(Answer::Fixed));
-    Ok(rounds::unanswered(&reviews).is_empty() && !(fixed && *head == pr))
+    let approvals = bp_read::inputs::approvals(index, id.as_str())?;
+    Ok(intents::open(&reviews, &approvals, &pr).is_empty() && !(fixed && *head == pr))
 }
 
 /// The head of the issue's open pull request while a claim is held, and the claim's worktree when this machine has
