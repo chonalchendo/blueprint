@@ -2,6 +2,10 @@
 //! Blueprint commit it builds `bp` from, in `.bp/risk.yml`. Unlike the bundle, both are tracked files: they act only
 //! once they are committed to the default branch, and that commit is high.
 
+use std::path::Path;
+
+use bp_vault::{Code, Refusal};
+
 /// Where the workflow lives, from the clone's top.
 pub const WORKFLOW: &str = ".github/workflows/bp-gate.yml";
 
@@ -28,8 +32,91 @@ pub enum Pin<'a> {
     Built(&'a str),
 }
 
+/// What `install` writes of the two tracked files, and the pin in force after it. [`plan`] reads and checks both
+/// before the bundle writes anything, so a refusal leaves the clone as it was (review of #99, row 36).
+pub(crate) struct Tracked {
+    writes: Vec<(&'static str, String)>,
+    pub(crate) gate: Option<String>,
+}
+
+impl Tracked {
+    /// Writes each changed file whole, by a rename: an install cut short leaves the old file, never a short one that
+    /// still parses (review of #99, row 37). `true` when it wrote one.
+    pub(crate) fn write(&self, top: &Path) -> Result<bool, Refusal> {
+        for (rel, text) in &self.writes {
+            let path = top.join(rel);
+            let dir = path.parent().expect("a tracked file has a parent");
+            let tmp = dir.join(format!(".{}.{}", path.file_name().expect("a file").display(), std::process::id()));
+            let failed =
+                |e: std::io::Error| Refusal::failed(path.display().to_string(), format!("{e}; fix it, then rerun"));
+            std::fs::create_dir_all(dir).map_err(failed)?;
+            std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &path)).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                failed(e)
+            })?;
+        }
+        Ok(!self.writes.is_empty())
+    }
+}
+
+/// The workflow for `project` and the risk file with `pin`, as [`Pin`]'s rule writes it, each checked: inside the top,
+/// under a writable directory, and with a pin the workflow reads as `bp gate` does.
+pub(crate) fn plan(top: &Path, project: &str, pin: Option<Pin<'_>>) -> Result<Tracked, Refusal> {
+    for rel in [WORKFLOW, RISK_FILE] {
+        if !crate::inside(top, rel) {
+            return Err(Refusal::new(
+                Code::BundleInvalid,
+                rel,
+                "install writes only inside the clone's top: no absolute path, no `..`, no symlink out (17)",
+                format!("{rel} is not the install's to touch at {}; remove the link, then rerun", top.display()),
+            ));
+        }
+    }
+    let read = |rel: &str| {
+        crate::read(&top.join(rel)).map_err(|e| Refusal::failed(e.subject, format!("{}; fix {rel}, then rerun", e.fix)))
+    };
+    let risk = read(RISK_FILE)?;
+    let new_risk = pin.and_then(|p| written(risk.as_deref(), p));
+    let gate = match new_risk.as_deref().or(risk.as_deref()) {
+        Some(text) => in_force(text).map_err(|why| {
+            Refusal::new(
+                Code::RiskFileInvalid,
+                RISK_FILE,
+                "the forge check reads its pin from the one line `gate: <40 lower-case hex digits>` of .bp/risk.yml \
+                 (37, design change 5)",
+                why,
+            )
+        })?,
+        None => None,
+    };
+    let mut writes = Vec::new();
+    let flow = workflow(project);
+    if read(WORKFLOW)?.as_deref() != Some(flow.as_str()) {
+        writes.push((WORKFLOW, flow));
+    }
+    if let Some(new) = new_risk.filter(|new| risk.as_deref() != Some(new.as_str())) {
+        writes.push((RISK_FILE, new));
+    }
+    for (rel, _) in &writes {
+        let path = top.join(rel);
+        let near = path.ancestors().skip(1).find(|a| a.exists()).expect("the top exists");
+        let why = if !near.is_dir() {
+            "is not a directory"
+        } else if near.metadata().is_ok_and(|m| m.permissions().readonly()) {
+            "is read-only"
+        } else {
+            continue;
+        };
+        return Err(Refusal::failed(
+            near.display().to_string(),
+            format!("{} {why}, so install cannot write {rel}; fix it, then rerun", near.display()),
+        ));
+    }
+    Ok(Tracked { writes, gate })
+}
+
 /// The risk file's text after the install writes `pin`; `None` when the file stays as it is. A file that does not
-/// parse holds a pin for this rule: the install cannot tell, and the gate refuses that file anyway.
+/// parse holds a pin for this rule: the install cannot tell, and [`in_force`] refuses that file anyway.
 pub(crate) fn written(text: Option<&str>, pin: Pin<'_>) -> Option<String> {
     let holds = || {
         let docs = text.map(yaml_rust2::YamlLoader::load_from_str);
@@ -46,12 +133,22 @@ pub(crate) fn written(text: Option<&str>, pin: Pin<'_>) -> Option<String> {
     }
 }
 
-/// The pin in force: the value of the one line `gate: <40 lower-case hex digits>`, as the workflow reads it.
-pub(crate) fn in_force(text: Option<&str>) -> Option<String> {
+/// The pin in force, by the workflow's own rule: the one line `gate: <40 lower-case hex digits>`, split at `\n` only,
+/// as `sed` reads it. `Err` names the line when the file is not YAML, or its `gate` key is in another form (quoted,
+/// with a comment, twice, or with a CR line end): the workflow would read no pin, or `bp gate` another (review of #99,
+/// row 38).
+pub(crate) fn in_force(text: &str) -> Result<Option<String>, String> {
+    let line = |at: Option<usize>| at.map_or_else(String::new, |i| format!("line {} of {RISK_FILE}: ", i + 1));
+    let gate_line = text.split('\n').position(|l| l.trim_start_matches([' ', '"', '\'']).starts_with("gate"));
+    let fix = "; write the pin as the one line `gate: <40 lower-case hex digits>` with LF line ends, then rerun";
+    let docs = yaml_rust2::YamlLoader::load_from_str(text).map_err(|e| format!("{RISK_FILE} is not YAML: {e}{fix}"))?;
     let hex = |s: &&str| s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-    match text?.lines().filter_map(|l| l.strip_prefix("gate: ")).filter(hex).collect::<Vec<_>>()[..] {
-        [one] => Some(one.to_string()),
-        _ => None,
+    let read: Vec<&str> = text.split('\n').filter_map(|l| l.strip_prefix("gate: ")).filter(hex).collect();
+    let key = docs.first().map(|d| &d["gate"]).filter(|g| !g.is_badvalue());
+    match (key, &read[..]) {
+        (None, []) => Ok(None),
+        (Some(k), [one]) if k.as_str() == Some(one) => Ok(Some((*one).to_string())),
+        _ => Err(format!("{}the workflow reads no one pin here{fix}", line(gate_line))),
     }
 }
 
@@ -72,6 +169,7 @@ pub(crate) fn pinned(text: Option<&str>, sha: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use bp_vault::Code;
     use serde_json::json;
     use yaml_rust2::{Yaml, YamlLoader};
 
@@ -204,6 +302,24 @@ mod tests {
     }
 
     #[test]
+    fn gate_workflow_reads_the_whole_base_and_ends_a_stalled_run() {
+        // Review of #99, rows 35 and 42: keys that change no text a reader checks, but every run.
+        let doc = &YamlLoader::load_from_str(&workflow("bp")).unwrap()[0];
+        let job = &doc["jobs"]["bp-gate"];
+        let steps = job["steps"].as_vec().unwrap();
+        let checkout = &steps[0]["with"];
+        // The whole history: a shallow base has no merge base, and every pull request would read high.
+        assert_eq!(checkout["fetch-depth"].as_i64(), Some(0), "the test merge needs the base's history");
+        assert_eq!(checkout["path"].as_str(), Some("base"), "the base sits beside bp-source, not around it");
+        let gate_step = steps.iter().find(|s| s["name"].as_str() == Some("bp gate")).unwrap();
+        assert_eq!(gate_step["working-directory"].as_str(), Some("base"), "bp gate runs in the base's clone");
+        // A stalled network step ends the run, and a newer push ends the older run of the same pull request.
+        assert_eq!(job["timeout-minutes"].as_i64(), Some(30));
+        assert_eq!(job["concurrency"]["group"].as_str(), Some("bp-gate-${{ github.event.pull_request.number }}"));
+        assert_eq!(job["concurrency"]["cancel-in-progress"].as_bool(), Some(true));
+    }
+
+    #[test]
     fn install_pins_the_gate_in_the_risk_file_and_keeps_the_rest() {
         let top = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(top.path().join(".git/info")).unwrap();
@@ -228,12 +344,29 @@ mod tests {
         assert_eq!(risk(), format!("{mine}gate: {next}\n"), "--gate replaces the old line");
         let exclude = std::fs::read_to_string(t.join(".git/info/exclude")).unwrap();
         assert!(!exclude.contains(RISK_FILE), "the pin is tracked, so it can be committed: {exclude}");
-        // A `gate` key in another form, or a file that does not parse, holds a pin: no second `gate:` line.
-        for held in ["\"gate\": 'x'\n", "gate: [\n"] {
+        // A `gate` key in a form the workflow cannot read, or a file that does not parse, refuses: nothing is written.
+        for held in ["\"gate\": 'x'\n", "gate: [\n", &format!("gate: {PIN} # pin\n"), &format!("gate: {PIN}\r\n")] {
             std::fs::write(t.join(RISK_FILE), held).unwrap();
-            let (_, v) = run(Some(Pin::Built(PIN)));
-            assert!(risk() == held && v["gate"].is_null(), "{held:?}: {v}");
+            std::fs::remove_file(t.join(WORKFLOW)).ok();
+            for pin in [Some(Pin::Built(PIN)), None] {
+                let r = crate::install(t, crate::Target::Claude, "bp", pin).unwrap_err();
+                assert_eq!((r.code, r.subject.as_str()), (Code::RiskFileInvalid, RISK_FILE), "{held:?}: {r:?}");
+                // The gate line, or for a file that is not YAML the parser's own line and column.
+                assert!(r.fix.starts_with("line 1 of .bp/risk.yml: ") || r.fix.contains(" line 2 column 1"), "{r:?}");
+                assert!(risk() == held && !t.join(WORKFLOW).exists(), "{held:?}: nothing is written");
+            }
         }
+        // `--gate` over a quoted pin adds a second `gate` key, which refuses too.
+        std::fs::write(t.join(RISK_FILE), format!("low: []\n'gate': {PIN}\n")).unwrap();
+        let r = crate::install(t, crate::Target::Claude, "bp", Some(Pin::Given(next))).unwrap_err();
+        assert!(
+            r.code == Code::RiskFileInvalid && r.fix.contains("duplicated key in mapping at byte 63 line 3"),
+            "{r:?}"
+        );
+        // A plain-`gate:` line that does not parse is the one `--gate` mends.
+        std::fs::write(t.join(RISK_FILE), "gate: [\n").unwrap();
+        let (_, v) = run(Some(Pin::Given(next)));
+        assert!(v["gate"] == next && risk() == format!("gate: {next}\n"), "{v}");
         // With no known commit, the pin stays as it is: the check fails closed until the human writes one.
         std::fs::write(t.join(RISK_FILE), format!("gate: {next}\n")).unwrap();
         let (_, v) = run(None);
@@ -245,13 +378,53 @@ mod tests {
 
     #[test]
     fn in_force_reads_the_one_pin_line_the_workflow_reads() {
-        assert_eq!(in_force(Some(&format!("low: []\ngate: {PIN}\n"))).as_deref(), Some(PIN));
-        for text in
-            [String::new(), format!("gate: '{PIN}'\n"), format!("gate: {PIN}\ngate: {PIN}\n"), "gate: abc\n".into()]
-        {
-            assert_eq!(in_force(Some(&text)), None, "{text:?}");
+        // The workflow's own line, run by `sh` over each file: the install's reader and the workflow's agree on every
+        // pin they read, and the install refuses each file where the workflow reads none but YAML reads a `gate`.
+        let flow = workflow("bp");
+        let line = flow.lines().find(|l| l.contains("risk.yml\" | sed")).unwrap();
+        let sed = &line[line.find("sed -n").unwrap()..line.rfind(')').unwrap()];
+        let dir = tempfile::tempdir().unwrap();
+        let workflow_reads = |text: &str| {
+            std::fs::write(dir.path().join("risk.yml"), text).unwrap();
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("gate=$({sed} < risk.yml); [ \"${{#gate}}\" -eq 40 ] && printf %s \"$gate\""))
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            Some(String::from_utf8(out.stdout).unwrap()).filter(|g| !g.is_empty())
+        };
+        let ok = |text: &str| in_force(text).unwrap();
+        for (text, pin) in [
+            (format!("low: []\ngate: {PIN}\n"), Some(PIN)),
+            (format!("gate: {PIN}"), Some(PIN)),
+            ("low: [docs/]\n".into(), None),
+            (String::new(), None),
+            ("# gate: none yet\n".into(), None),
+        ] {
+            assert_eq!(ok(&text).as_deref(), pin, "{text:?}");
+            assert_eq!(workflow_reads(&text).as_deref(), pin, "the workflow reads the same: {text:?}");
         }
-        assert_eq!(in_force(None), None);
+        for (text, why) in [
+            (format!("gate: '{PIN}'\n"), "quoted"),
+            (format!("\"gate\": {PIN}\n"), "a quoted key"),
+            (format!("gate: {PIN} # pin\n"), "a comment"),
+            (format!("gate: {PIN}\ngate: {PIN}\n"), "twice"),
+            (format!("low: []\r\ngate: {PIN}\r\n"), "CRLF"),
+            ("gate: abc\n".into(), "short"),
+            ("gate:\n  - a\n".into(), "a list"),
+            (format!("high:\n\t- : [\ngate: {PIN}\n"), "not YAML"),
+            (format!("a: 1\n---\ngate: {PIN}\n"), "in a second document"),
+        ] {
+            let e = in_force(&text).unwrap_err();
+            assert!(e.contains("write the pin as the one line"), "{why}: {e}");
+            // Each refused file is one where the workflow and a YAML reader disagree, or YAML reads nothing at all.
+            if let Ok(docs) = YamlLoader::load_from_str(&text) {
+                let yaml = docs.first().map(|d| &d["gate"]).filter(|g| !g.is_badvalue()).map(|g| format!("{g:?}"));
+                let sed = workflow_reads(&text).map(|g| format!("{:?}", Yaml::String(g)));
+                assert_ne!(yaml, sed, "{why}");
+            }
+        }
     }
 
     #[test]

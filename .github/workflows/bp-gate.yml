@@ -22,6 +22,12 @@ jobs:
   bp-gate:
     name: bp-gate
     runs-on: ubuntu-latest
+    # Three steps wait on the network. A stalled one would hold the required check pending for GitHub's six hours; a
+    # newer push ends the older run of the same pull request.
+    timeout-minutes: 30
+    concurrency:
+      group: bp-gate-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     env:
       BP_PROJECT: "bp"
       BP_SOURCE: https://github.com/chonalchendo/blueprint
@@ -44,7 +50,7 @@ jobs:
         run: |
           gate=$(git -C base show "$BP_BASE:.bp/risk.yml" | sed -n -E 's/^gate: ([0-9a-f]{40})$/\1/p')
           if [ "${#gate}" -ne 40 ]; then
-            echo "::error::.bp/risk.yml on the default branch holds no one line gate: <sha>; bp install writes it"
+            echo "::error::.bp/risk.yml on the default branch holds no one line gate: <sha>; bp install --gate <sha> writes it"
             exit 1
           fi
           echo "BP_GATE=$gate" >> "$GITHUB_ENV"

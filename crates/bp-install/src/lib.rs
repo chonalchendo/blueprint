@@ -52,20 +52,13 @@ bp_vault::closed_enum! {
 /// `(false, result)` when the clone already holds them, so the verb exits 3. The result's `gate` is the pin in force
 /// after the install.
 pub fn install(top: &Path, target: Target, project: &str, pin: Option<Pin<'_>>) -> Result<(bool, Value), Refusal> {
-    let (mut wrote, mut result) = bundle(top, target)?;
-    let risk = read(&top.join(RISK_FILE))?;
-    // `bundle` refused a path outside the top, these two included, before it wrote anything. Neither is excluded:
-    // each acts only once the human commits it to the default branch.
-    let new_risk = pin.and_then(|p| gate::written(risk.as_deref(), p));
-    let pinned = new_risk.clone().map(|new| (RISK_FILE, risk.clone(), new));
-    for (rel, old, new) in std::iter::once((WORKFLOW, read(&top.join(WORKFLOW))?, workflow(project))).chain(pinned) {
-        if old.as_deref() != Some(new.as_str()) {
-            put(&top.join(rel), new.as_bytes())?;
-            wrote = true;
-        }
-    }
+    // Both tracked files are read and checked first, so a refusal of either leaves the bundle unwritten. Neither is
+    // excluded: each acts only once the human commits it to the default branch.
+    let tracked = gate::plan(top, project, pin)?;
+    let (wrote, mut result) = bundle(top, target)?;
+    let wrote = tracked.write(top)? || wrote;
     result["workflow"] = WORKFLOW.into();
-    result["gate"] = gate::in_force(new_risk.as_deref().or(risk.as_deref())).into();
+    result["gate"] = tracked.gate.into();
     Ok((wrote, result))
 }
 
@@ -126,7 +119,7 @@ fn bundle(top: &Path, target: Target) -> Result<(bool, Value), Refusal> {
     let mut writes = files
         .keys()
         .map(String::as_str)
-        .chain([spec.always_on, spec.settings, &manifest_rel, WORKFLOW, RISK_FILE])
+        .chain([spec.always_on, spec.settings, &manifest_rel])
         .chain(import)
         .chain(stale.iter().copied());
     let dirs = [spec.skills, spec.agents, spec.dispatch, spec.hooks];

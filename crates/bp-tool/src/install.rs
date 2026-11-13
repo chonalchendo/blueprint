@@ -55,7 +55,8 @@ pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
     };
     let top = bp_read::snapshot::clone_of(cwd, &index, &project)?;
     let (wrote, v) = bp_install::install(&top, target, &project, gate)?;
-    if gate.is_none() && v["gate"].is_null() {
+    // Only an install with no pin to write ends with none in force: `--gate` and a built pin are written, or refused.
+    if v["gate"].is_null() {
         eprintln!(
             "bp install wrote no pin: this bp is not built from a commit on Blueprint's default branch, so the \
              bp-gate check fails; rerun with --gate <sha of a commit on Blueprint's default branch>"

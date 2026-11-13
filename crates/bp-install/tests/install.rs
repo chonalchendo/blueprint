@@ -249,6 +249,64 @@ fn install_never_writes_through_a_symlink_out_of_the_top() {
     assert!(r.subject.starts_with(".agents/"), "{r:?}");
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     assert!(!t.join("AGENTS.md").exists(), "a refusal writes nothing");
+    // The two tracked files too, on a first install and on a repeat of the bundle (review of #99, row 43).
+    for (link, subject) in [(".github", ".github/workflows/bp-gate.yml"), (".bp/risk.yml", ".bp/risk.yml")] {
+        for repeat in [false, true] {
+            let out = tempfile::tempdir().unwrap();
+            let dir = top();
+            let t = dir.path();
+            if repeat {
+                install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
+                std::fs::remove_dir_all(t.join(".github")).unwrap();
+                std::fs::remove_file(t.join(".bp/risk.yml")).unwrap();
+            }
+            std::fs::create_dir_all(t.join(".bp")).unwrap();
+            std::os::unix::fs::symlink(out.path().join("x"), t.join(link)).unwrap();
+            let r = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap_err();
+            assert_eq!((r.code, r.subject.as_str()), (Code::BundleInvalid, subject), "{link} {repeat}: {r:?}");
+            assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0, "{link} {repeat}");
+            assert_eq!(t.join(".claude").exists(), repeat, "{link} {repeat}: a refusal writes nothing");
+        }
+    }
+}
+
+#[test]
+fn install_checks_the_tracked_files_before_it_writes_anything() {
+    // Review of #99, row 36: each fault in the workflow's or the risk file's path refuses before the bundle is written.
+    type Fault = fn(&Path);
+    let faults: [(&str, Fault); 4] = [
+        ("a .github that is a file", |t| write(t, ".github", "x")),
+        ("a risk file that is not UTF-8", |t| {
+            std::fs::create_dir_all(t.join(".bp")).unwrap();
+            std::fs::write(t.join(".bp/risk.yml"), b"\xff").unwrap();
+        }),
+        ("a risk file that is a directory", |t| std::fs::create_dir_all(t.join(".bp/risk.yml")).unwrap()),
+        ("a read-only workflows directory", |t| {
+            std::fs::create_dir_all(t.join(".github/workflows")).unwrap();
+            let ro = std::os::unix::fs::PermissionsExt::from_mode(0o555);
+            std::fs::set_permissions(t.join(".github/workflows"), ro).unwrap();
+        }),
+    ];
+    for (why, fault) in faults {
+        let dir = top();
+        let t = dir.path();
+        fault(t);
+        let r = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap_err();
+        assert_eq!(r.code, Code::CouldNotRun, "{why}: {r:?}");
+        assert!(r.fix.ends_with(", then rerun"), "{why}: the fix names the rerun: {r:?}");
+        assert!(!t.join(".claude").exists() && !t.join("CLAUDE.md").exists(), "{why}: nothing is written");
+        if t.join(".github/workflows").is_dir() {
+            let rw = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+            std::fs::set_permissions(t.join(".github/workflows"), rw).unwrap();
+        }
+    }
+    // The pin goes in by a rename, so no temporary file stays beside it.
+    let dir = top();
+    let t = dir.path();
+    install(t, Target::Claude, "bp", Some(Pin::Given(PIN))).unwrap();
+    let names: Vec<String> =
+        std::fs::read_dir(t.join(".bp")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    assert_eq!(names, ["risk.yml"]);
 }
 
 #[test]
