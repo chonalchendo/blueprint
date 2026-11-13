@@ -338,10 +338,10 @@ pub struct Computed {
 
 /// The level of a diff (36, section 1). High when a path holds a non-ASCII character, is under, at or above a
 /// built-in high path, has a built-in high name or matches a high pattern (each in any ASCII case), when a path is a
-/// gitlink or has a size git does not count (under a low pattern too: an attribute line can hide any size), when the lines outside the low patterns exceed `high_lines`, or when more packages than
-/// `packages` change. Low only when each path matches a low pattern and the diff changes fewer than `low_lines`
-/// lines. Medium otherwise. A package is a top-level directory that holds a changed path outside the low patterns; a
-/// file at the top is in no package.
+/// gitlink or has a size git does not count (under a low pattern too: an attribute line can hide any size), when the
+/// lines outside the low patterns exceed `high_lines`, or when more packages than `packages` change. Low only when
+/// each path matches a low pattern and the diff changes fewer than `low_lines` lines. Medium otherwise. A package is a
+/// top-level directory that holds a changed path outside the low patterns; a file at the top is in no package.
 pub fn computed(diff: &[Changed], config: &Config) -> Computed {
     let limits = config.limits;
     let low_path = |path: &str| config.low.iter().any(|p| p.matches(path));
