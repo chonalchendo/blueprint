@@ -420,7 +420,7 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
         ("bp show x; bp set x tags a", Some("Explore"), "agent type 'Explore' is no bp role, so its bp set"),
         ("bp stamp m", None, "bp stamp is outside the session role"),
         ("bp install --target claude", None, "ask the human to run it from a shell"),
-        ("bp set x tags a", Some("bp-reviewer"), "(where show list search walk risk), so"),
+        ("bp set x tags a", Some("bp-reviewer"), "(where show list search walk risk gate), so"),
         ("bp diagram --spec-file a.yaml --out a.html", Some("bp-worker"), "bp diagram is outside the worker role"),
         ("bp diagram --spec-file a.yaml --out a.html", Some("bp-reviewer"), "bp diagram is outside the reviewer role"),
         (

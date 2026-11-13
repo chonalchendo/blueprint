@@ -11,6 +11,7 @@ mod delta;
 mod diagram;
 mod done;
 mod editorial;
+mod gate;
 mod install;
 mod land;
 mod link;
@@ -115,6 +116,9 @@ pub enum Verb {
     Approve(approve::Approve),
     /// The human's signed lowering of the issue's risk level at its pull request's head.
     Lower(approve::Lower),
+    /// The forge check `bp-gate`, in a plain clone with no vault: the level of the head's diff by the base's
+    /// `.bp/risk.yml`, and for high a comment with the human's valid signature of this pull request's head.
+    Gate(gate::Gate),
     /// Check, render and write a diagram spec and its page into a draft design; or preview a spec, or the diff of
     /// two, in a file outside the vault.
     Diagram(diagram::Diagram),
@@ -225,6 +229,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Diagram(d) => diagram::run(cwd, d, cli.json, out),
         Verb::Approve(a) => wrote(approve::approve(cwd, a), cli.json, out),
         Verb::Lower(l) => wrote(approve::lower(cwd, l), cli.json, out),
+        Verb::Gate(g) => finish(gate::gate(cwd, g), cli.json, out),
     }
 }
 

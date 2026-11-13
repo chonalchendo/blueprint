@@ -137,6 +137,13 @@ impl Gh {
         self.run(&["pr", "edit", &number.to_string(), "--body", body]).map(drop)
     }
 
+    /// Posts one comment on the pull request (`gh pr comment --body`): the human's signed approval, for the forge
+    /// check.
+    #[cfg(feature = "write")]
+    pub fn comment(&self, number: u64, body: &str) -> Result<(), Refusal> {
+        self.run(&["pr", "comment", &number.to_string(), "--body", body]).map(drop)
+    }
+
     /// Squash-merges the pull request, only while its head is `head`: a push after the reads makes the forge refuse.
     #[cfg(feature = "write")]
     pub fn merge(&self, number: u64, head: &str) -> Result<(), Refusal> {
