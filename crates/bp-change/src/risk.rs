@@ -331,8 +331,9 @@ pub struct Computed {
     pub level: Level,
     /// Each rule that set the level, in words: a path and its pattern, a line count, a package count.
     pub reasons: Vec<String>,
-    /// A changed path is high by its path and matches no low pattern, so round one adds the security lens (37, design
-    /// change 8). A test or a doc on a high path does not set it.
+    /// A changed path is high by its path and matches no low pattern, or the diff hides what lands (a submodule commit,
+    /// a size git does not count), so round one adds the security lens (37, design change 8). A test or a doc on a
+    /// high path does not set it.
     pub security: bool,
 }
 
@@ -366,8 +367,12 @@ pub fn computed(diff: &[Changed], config: &Config) -> Computed {
         security |= high.len() > before && !low_path(path);
     }
     let outside: Vec<&Changed> = diff.iter().filter(|c| !low(c)).collect();
+    // A submodule commit and a size git does not count hide what lands, as a head with no test merge does, so each
+    // calls the security lens (review of #99, late list).
+    let unknown = high.len();
     high.extend(diff.iter().filter(|c| c.gitlink).map(|c| format!("{} is a submodule commit", c.path)));
     high.extend(diff.iter().filter(|c| c.lines.is_none()).map(|c| format!("size unknown: {}", c.path)));
+    security |= high.len() > unknown;
     let lines: u64 = outside.iter().filter_map(|c| c.lines).sum();
     if lines > limits.high_lines {
         high.push(format!("{lines} changed lines outside the low patterns exceed high_lines {}", limits.high_lines));
@@ -749,5 +754,9 @@ mod tests {
         assert_eq!(at(&[change("src/a.rs", 30, 0)]), (Level::High, false), "high by size, not by a path");
         assert_eq!(at(&[change("src/a.rs", 1, 0)]), (Level::Medium, false));
         assert_eq!(at(&[change("docs/a.md", 30, 0), change("infra/x", 1, 0)]), (Level::High, true));
+        // What lands is not known, so the security lens reads it, under a low pattern too (review of #99, late list).
+        let gitlink = Changed { gitlink: true, ..no_size("docs/lib") };
+        assert_eq!(at(&[gitlink]), (Level::High, true), "a submodule commit");
+        assert_eq!(at(&[no_size("docs/a.md")]), (Level::High, true), "a size git does not count");
     }
 }
