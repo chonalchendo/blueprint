@@ -1466,6 +1466,8 @@ fn a_label_no_commit_holds_is_no_label() {
     let path = v.join(format!("{ISSUE}.md"));
     let text = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, text.replacen("status: in-progress\n", "status: in-progress\nrisk: low\n", 1)).unwrap();
+    // Staged, so the index reads the edit; no commit holds it.
+    git(v, &["add", &format!("{ISSUE}.md")]);
     let (_, risk) = bp(v, t, &[], &["risk", ISSUE]);
     assert_eq!((&risk["level"], &risk["declared"]), (&json!("medium"), &json!("medium")), "{risk}");
     assert_eq!(intent(v), (json!("needs-review"), json!("round 1: missing lenses: failure-paths")));
