@@ -192,14 +192,17 @@ fn forge_shas<'a>(branch: &str, pr: &'a PullRequest) -> Result<(&'a str, &'a str
     if !is_sha(head) {
         return Err(Refusal::failed(
             format!("gh pr list --head {branch}"),
-            format!("the forge gave head {head:?}, not a full commit sha; fix gh or the pull request, then rerun"),
+            format!("the forge gave head {head}, not a full commit sha; fix gh or the pull request, then rerun"),
         ));
     }
     let base = pr.base_ref_name.as_deref().unwrap_or_default();
     if !is_branch(base) {
         return Err(Refusal::failed(
             format!("gh pr list --head {branch}"),
-            format!("the forge gave base branch {base:?}, not a branch name; fix gh or the pull request, then rerun"),
+            format!(
+                "the forge gave base branch {}, not a branch name; fix gh or the pull request, then rerun",
+                if base.is_empty() { "nothing" } else { base }
+            ),
         ));
     }
     Ok((head, base))

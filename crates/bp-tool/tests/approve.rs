@@ -257,6 +257,9 @@ fn approve_refuses_a_head_that_is_not_a_full_sha() {
         std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
         let (code, out) = bp(v, t, &[], &["approve", ISSUE, "--key", &human]);
         assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{head:?}: {out}");
+        // The value, not Rust's debug form (review of #100, W4).
+        let fix = out["fix"].as_str().unwrap();
+        assert!(fix.starts_with(&format!("the forge gave head {head}, not a full commit sha")), "{fix}");
         assert!(!v.join(ISSUE).join("approvals").exists(), "{head:?}: no record is written");
     }
     // The base branch is a line of the signed message too.
@@ -266,6 +269,9 @@ fn approve_refuses_a_head_that_is_not_a_full_sha() {
         std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
         let (code, out) = bp(v, t, &[], &["approve", ISSUE, "--key", &human]);
         assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{base}: {out}");
+        let shown = base.as_str().filter(|b| !b.is_empty()).unwrap_or("nothing");
+        let fix = out["fix"].as_str().unwrap();
+        assert!(fix.starts_with(&format!("the forge gave base branch {shown}, not a branch name")), "{fix}");
         assert!(!v.join(ISSUE).join("approvals").exists(), "{base}: no record is written");
     }
 }
