@@ -195,17 +195,21 @@ mod tests {
 
     #[test]
     fn a_lens_a_level_rise_adds_routes_as_a_full_review() {
-        // Round one at medium; each lens recorded a `risk` row, which raises the issue to high.
+        // Round one at medium closed at `h`; its `risk` row raises the issue to high. Round two read `h2`. At `h3` the
+        // round is 3, and it still lacks the tests-and-checks lens that high adds: a full review, not a verification.
         let raise = Row { risk: true, ..Row::default() };
-        let i = Issue {
-            pr: Some(pr("h2")),
-            runs: computed(Level::Medium),
-            reviews: round_one(Level::Medium, &[raise]),
-            ..held(Level::Medium, false)
-        };
+        let mut reviews = round_one(Level::Medium, &[raise]);
+        reviews.push(Review {
+            id: "r/verify".into(),
+            head: "h2".into(),
+            round: 2,
+            lens: rounds::Lens::Verify,
+            rows: vec![],
+        });
+        let i = Issue { pr: Some(pr("h3")), runs: computed(Level::Medium), reviews, ..held(Level::Medium, false) };
         let v = issue(&i, NOW);
-        assert!(v.note.contains("tests-and-checks"), "{v:?}");
-        assert_eq!(v.route, Some(Route { model: Fable, effort: High }), "a full lens at high is round one");
+        assert!(v.note.starts_with("round 3") && v.note.contains("tests-and-checks"), "{v:?}");
+        assert_eq!(v.route, Some(Route { model: Fable, effort: High }), "a full lens at high routes as round one");
     }
 
     #[test]
