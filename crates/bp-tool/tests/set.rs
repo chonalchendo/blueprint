@@ -388,3 +388,35 @@ fn set_lowers_risk_while_the_milestone_is_planned() {
     git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "rename"]);
     assert_eq!(lower().1["code"], "not_a_label", "a renamed milestone");
 }
+
+/// `complex` follows `risk`: setting it is always a label; clearing it refuses after the milestone's first approval or
+/// once the issue holds a claim (36, section 3).
+#[test]
+fn set_clears_complex_only_while_the_milestone_is_planned() {
+    let (issue, milestone) = ("projects/bp/issues/0002.b", "projects/bp/milestones/m");
+    let dir = common::vault(&[
+        (&format!("{milestone}.md"), "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\nGoal.\n"),
+        (
+            &format!("{issue}.md"),
+            &format!("---\nkind: issue\ntitle: B\nstatus: open\nunder: {milestone}\n---\n\nLead.\n"),
+        ),
+        ("shared/.keep", ""),
+    ]);
+    let root = dir.path();
+    for value in ["true", "false", "true"] {
+        let (code, v) = bp(root, &["set", issue, "complex", value]);
+        assert_eq!(code, Some(0), "planned, {value}: {v}");
+    }
+    let path = root.join(format!("{milestone}.md"));
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("planned", "approved")).unwrap();
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "approve"]);
+    for dry in [false, true] {
+        let args: Vec<&str> =
+            ["set", issue, "complex", "false"].into_iter().chain(dry.then_some("--dry-run")).collect();
+        let (code, v) = bp(root, &args);
+        assert_eq!((code, v["code"].as_str()), (Some(2), Some("not_a_label")), "after approval: {v}");
+    }
+    assert_eq!(bp(root, &["show", issue]).1["complex"], true, "the refusal wrote nothing");
+    // A raise after approval stays free: the first value, and a repeat reads as nothing to do.
+    assert_eq!(bp(root, &["set", issue, "complex", "true"]).0, Some(3));
+}

@@ -16,9 +16,13 @@ use crate::rounds::{self, Review};
 mod gates;
 mod planning;
 mod review;
+mod route;
+mod stack;
 pub use gates::*;
 pub use planning::*;
 pub use review::*;
+pub use route::*;
+pub use stack::*;
 
 /// Twelve hours: a claim older than this with no run since reads `working (stale)`.
 pub const STALE_AFTER: i64 = 12 * 3600;
@@ -173,67 +177,6 @@ pub struct PullRequest {
     pub failed: bool,
 }
 
-/// The branch a held claim's pull request lands on (15, a dependency chain to landed).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Base {
-    /// Not recorded: a converted claim names no base branch. `land` tests origin's default branch; a read without the
-    /// clone cannot, so needs landing holds and the Change page withholds the command.
-    #[default]
-    Unknown,
-    /// This branch.
-    Branch(String),
-    /// The claim was cut from this dependency's pull request head, and the dependency is not resolved yet.
-    Unmerged(String),
-}
-
-/// A `depends` target.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Dependency {
-    /// The target id.
-    pub id: String,
-    /// The target's status; `None` when the target is not in the vault.
-    pub status: Option<String>,
-    /// The target holds an open pull request.
-    pub open_pr: bool,
-    /// The stack a dependant would sit on: the target, then each held claim's unresolved `base_issue` below it, at
-    /// most [`STACK_DEPTH`]. Read only for an unresolved target with an open pull request.
-    pub layers: Vec<String>,
-}
-
-/// A stack is at most three layers deep; the cap is a choice, not a measurement (15, a dependency chain to landed).
-pub const STACK_DEPTH: usize = 3;
-
-/// Why an issue cannot be cut on its unresolved dependencies (15, a dependency chain to landed).
-#[derive(Debug, PartialEq, Eq)]
-pub enum Unstacked<'a> {
-    /// These hold no open pull request to base on (`dependency_unpushed`).
-    Unpushed(Vec<&'a str>),
-    /// No one stack holds them all (`dependency_split`).
-    Split(Vec<&'a str>),
-    /// The new layer would sit on these, the top first, past the cap (`stack_too_deep`).
-    Deep(&'a [String]),
-}
-
-/// The dependency an issue is cut on: the unresolved one whose stack holds every other; `None` when each is resolved.
-/// `cut` refuses on the error and ready waits on it, so the two never disagree (21, rule 1).
-pub fn stack(depends: &[Dependency]) -> Result<Option<&Dependency>, Unstacked<'_>> {
-    let below: Vec<&Dependency> = depends.iter().filter(|d| d.status.as_deref() != Some("resolved")).collect();
-    let unpushed: Vec<&str> = below.iter().filter(|d| !d.open_pr).map(|d| d.id.as_str()).collect();
-    if !unpushed.is_empty() {
-        return Err(Unstacked::Unpushed(unpushed));
-    }
-    if below.is_empty() {
-        return Ok(None);
-    }
-    let Some(&top) = below.iter().find(|d| below.iter().all(|o| d.layers.contains(&o.id))) else {
-        return Err(Unstacked::Split(below.iter().map(|d| d.id.as_str()).collect()));
-    };
-    if top.layers.len() >= STACK_DEPTH {
-        return Err(Unstacked::Deep(&top.layers));
-    }
-    Ok(Some(top))
-}
-
 /// Everything the issue predicates read. The caller builds it only for a live issue.
 #[derive(Debug, Clone, Default)]
 pub struct Issue {
@@ -247,13 +190,14 @@ pub struct Issue {
     pub runs: Vec<Run>,
     /// The issue's named `error` blocks; read only while a pull request is in view.
     pub blocks: Vec<Block>,
-    /// The review records, each as its first commit wrote it, with its dispositions; read only while a pull request
-    /// is in view.
+    /// The review records, each as its first commit wrote it, with its dispositions; an earlier pull request's `risk`
+    /// rows still raise a ready issue.
     pub reviews: Vec<Review>,
-    /// The issue's `risk` label; `None` reads medium. Read only while a pull request is in view.
+    /// The issue's `risk` label; `None` reads medium.
     pub declared: Option<Level>,
-    /// The issue caused a pending delta, which raises it to high (37, design change 1). Read only while a pull request
-    /// is in view.
+    /// The issue's `complex` label: its build and fix go to Fable (36, section 3).
+    pub complex: bool,
+    /// The issue caused a pending delta, which raises it to high (37, design change 1), with or without a pull request.
     pub delta: bool,
     /// Each approval record. The intents verify no signature; `land` keeps only the approval that verifies against
     /// the forge's pull request (37, design changes 3 and 4).
@@ -261,6 +205,9 @@ pub struct Issue {
     /// Each lowering record's head and level, in record order. The intents verify no signature; `land` keeps only the
     /// lowering that verifies (37, design change 2).
     pub lowerings: Vec<(String, Level)>,
+    /// What the reader could not parse in a label, named: it read `risk` as high and `complex` as true, and the
+    /// verdict's note says so, since silence would let a typo lower the gate and the worker's model.
+    pub unread: Vec<String>,
     /// The `depends` targets.
     pub depends: Vec<Dependency>,
     /// The open pull request, or the merged one of a held claim; `None` when there is none or the forge was not read.
@@ -282,15 +229,24 @@ pub struct Verdict {
     pub intent: Option<Intent>,
     /// What the intent names: the failed run, the targets waited on, `stale`.
     pub note: String,
+    /// The model and effort of the dispatch the intent leads to; `None` for an intent that dispatches no one (37,
+    /// design change 9).
+    #[serde(flatten)]
+    pub route: Option<Route>,
 }
 
 impl Verdict {
     fn of(intent: Intent, note: impl Into<String>) -> Self {
-        Self { intent: Some(intent), note: note.into() }
+        Self { intent: Some(intent), note: note.into(), route: None }
+    }
+
+    fn routed(mut self, task: Task, level: Level, complex: bool) -> Self {
+        self.route = Some(route(task, level, complex));
+        self
     }
 
     /// No predicate holds.
-    pub const NONE: Self = Self { intent: None, note: String::new() };
+    pub const NONE: Self = Self { intent: None, note: String::new(), route: None };
 }
 
 /// A live issue: open or in progress.
@@ -303,8 +259,18 @@ pub fn latest_claim(claims: &[Claim]) -> Option<&Claim> {
     claims.iter().max_by_key(|c| c.at)
 }
 
-/// The intent of one live issue at `now` (Unix seconds).
+/// The intent of one live issue at `now` (Unix seconds). A label the reader could not parse adds its note to every
+/// intent, since it changed the level or the route.
 pub fn issue(i: &Issue, now: i64) -> Verdict {
+    let mut v = verdict(i, now);
+    if v.intent.is_some() && !i.unread.is_empty() {
+        let note = i.unread.join("; ");
+        v.note = if v.note.is_empty() { note } else { format!("{}; {note}", v.note) };
+    }
+    v
+}
+
+fn verdict(i: &Issue, now: i64) -> Verdict {
     let held = i.claims.iter().find(|c| c.released.is_none());
     if let Some(pr) = &i.pr
         && failed_at(&i.runs, &pr.head)
@@ -327,7 +293,7 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     }
     if i.status == "open" && held.is_none() && i.pr.is_none() {
         return match stack(&i.depends) {
-            Ok(_) => Verdict::of(Intent::Ready, ""),
+            Ok(_) => Verdict::of(Intent::Ready, "").routed(Task::Build, level(i, "").0, i.complex),
             Err(Unstacked::Unpushed(waits)) => Verdict::of(Intent::Waiting, format!("waits for {}", waits.join(", "))),
             Err(Unstacked::Split(ids)) => {
                 Verdict::of(Intent::Waiting, format!("waits for one stack: land all but one of {}", ids.join(", ")))
@@ -344,6 +310,7 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
             c.at.is_some_and(|at| now - at > STALE_AFTER && !i.runs.iter().any(|r| r.at.is_none_or(|t| t > at)));
         return Verdict::of(Intent::Working, if stale { "stale" } else { "" });
     };
+    let (level, _) = level(i, &pr.head);
     let (blocking, capped) = holding(i, &pr.head);
     // At high's cap an error row goes to the human, not to another dispatch, until the human's approval of the head
     // accepts the open rows (37, design change 6).
@@ -357,12 +324,17 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     if !missing.is_empty() {
         let lenses: Vec<&str> = missing.iter().map(|l| l.as_str()).collect();
         let round = round(i, &pr.head);
-        return Verdict::of(Intent::NeedsReview, format!("round {round}: missing lenses: {}", lenses.join(", ")));
+        // A lens other than verify is a full review whatever the round: a level rise adds one to a later round.
+        let full = round == 1 || missing.iter().any(|l| *l != rounds::Lens::Verify);
+        let task = if full { Task::ReviewFirst } else { Task::ReviewVerify };
+        let note = format!("round {round}: missing lenses: {}", lenses.join(", "));
+        return Verdict::of(Intent::NeedsReview, note).routed(task, level, false);
     }
     // A finding without a disposition needs a response whatever the checks say: the fix may be what turns them green.
     let open = open(&i.reviews, &i.approvals, &pr.head);
     if !open.is_empty() {
-        return Verdict::of(Intent::NeedsResponse, format!("no disposition: {}", rounds::named(&open, &pr.head)));
+        let note = format!("no disposition: {}", rounds::named(&open, &pr.head));
+        return Verdict::of(Intent::NeedsResponse, note).routed(Task::Build, level, i.complex);
     }
     // Each row is answered, yet an error row holds (37, design change 6). A row answered `fixed` at the head is a fix
     // the worker has not pushed: its push and the `verify` review clear it. A decline does not clear it, and no
@@ -481,6 +453,11 @@ mod tests {
     fn dep(id: &str, status: &str, open_pr: bool) -> Dependency {
         let layers = if open_pr { vec![id.to_string()] } else { Vec::new() };
         Dependency { id: id.into(), status: Some(status.into()), open_pr, layers }
+    }
+
+    /// The verdict without its route: these tests read the intent and its note, and `route` reads the routing.
+    fn bare(v: Verdict) -> Verdict {
+        Verdict { route: None, ..v }
     }
 
     fn pr(head: &str, green: bool) -> PullRequest {
@@ -771,7 +748,7 @@ mod tests {
         let same = Issue { lowerings: vec![("h3".into(), Level::High)], ..i.clone() };
         assert_eq!(level(&same, "h3"), level(&i, "h3"), "a lowering to the level in force changes nothing");
         let note = "round 3: missing lenses: verify, tests-and-checks";
-        assert_eq!(issue(&i, NOW), Verdict::of(Intent::NeedsReview, note));
+        assert_eq!(bare(issue(&i, NOW)), Verdict::of(Intent::NeedsReview, note));
     }
 
     #[test]
@@ -810,7 +787,7 @@ mod tests {
     fn escalated_blocks_until_the_issue_changes() {
         let escalated = Claim { at: Some(NOW - 600), released: Some(NOW - 300), escalated: true };
         let i = Issue { claims: vec![escalated], answered: false, ..open() };
-        assert_eq!(issue(&i, NOW), Verdict::of(Intent::Blocked, "escalated"));
+        assert_eq!(bare(issue(&i, NOW)), Verdict::of(Intent::Blocked, "escalated"));
         let answered = Issue { answered: true, ..i };
         assert_eq!(issue(&answered, NOW).intent, Some(Intent::Ready));
     }
@@ -845,7 +822,7 @@ mod tests {
 
         let approved = Milestone { finish: vec![block("a"), block("b")], ..status("approved") };
         let v = milestone("m", &approved);
-        assert_eq!(v, Verdict::of(Intent::NeedsDerivation, "a, b uncovered; bp walk m --for derive"));
+        assert_eq!(bare(v), Verdict::of(Intent::NeedsDerivation, "a, b uncovered; bp walk m --for derive"));
         let full = Milestone { issues: vec!["open".into(), "in-progress".into(), "open".into()], ..approved.clone() };
         assert_eq!(of(&full), None, "a full batch waits for its issues");
         let covered = Milestone { covered: ["a".into(), "b".into()].into(), ..approved.clone() };
@@ -887,7 +864,7 @@ mod tests {
         let unproven = unproven_concerns(&answers, None);
         assert_eq!(unproven, ["a designed", "b open"], "no stamp proves the designed a; c is waived");
         let note = "a designed, b open; bp walk d --for shape";
-        assert_eq!(design("d", &[], &unproven, false), Verdict::of(Intent::NeedsShaping, note));
+        assert_eq!(bare(design("d", &[], &unproven, false)), Verdict::of(Intent::NeedsShaping, note));
         assert_eq!(design("d", &[], &unproven, true), Verdict::NONE, "a planned or approved milestone");
         assert_eq!(
             unproven_concerns(&answers, Some(NOW)),
@@ -913,7 +890,7 @@ mod tests {
             ..Issue::default()
         };
         let v = issue(&open_rows, NOW);
-        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 2, 3"));
+        assert_eq!(bare(v), Verdict::of(Intent::NeedsResponse, "no disposition: findings 2, 3"));
         let mut two = open_rows.clone();
         two.reviews[1].rows.push(Row::default());
         let v = issue(&two, NOW);
@@ -932,7 +909,7 @@ mod tests {
             ..Issue::default()
         };
         let v = issue(&red, NOW);
-        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"), "checks not green");
+        assert_eq!(bare(v), Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"), "checks not green");
         let answered = Issue { reviews: reviewed("h", vec![answered(Answer::Declined)]), ..red };
         assert_eq!(issue(&answered, NOW), Verdict::of(Intent::Working, "checks not green"), "every finding answered");
     }
@@ -950,7 +927,7 @@ mod tests {
         };
         i.reviews.extend([Lens::Conformance, Lens::FailurePaths].map(|l| review("h", 1, l, Vec::new())));
         let want = "round 1: missing lenses: conformance, failure-paths, tests-and-checks, security";
-        assert_eq!(issue(&i, NOW), Verdict::of(Intent::NeedsReview, want));
+        assert_eq!(bare(issue(&i, NOW)), Verdict::of(Intent::NeedsReview, want));
     }
 
     /// A new head before each lens has a record at one head is still round one, and needs every lens again; the
@@ -966,10 +943,10 @@ mod tests {
             reviews: vec![review("h", 1, Lens::Conformance, vec![Row { error: true, ..Row::default() }])],
             ..Issue::default()
         };
-        let v = issue(&partial, NOW);
+        let v = bare(issue(&partial, NOW));
         assert_eq!(v, Verdict::of(Intent::NeedsReview, "round 1: missing lenses: conformance, failure-paths"));
         partial.reviews.extend(reviewed("h2", Vec::new()));
-        let v = issue(&partial, NOW);
+        let v = bare(issue(&partial, NOW));
         assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: r/h-conformance findings 1"), "it holds");
         partial.reviews[0].rows[0].answer = Some(Answer::Declined);
         let v = issue(&partial, NOW);
@@ -1009,7 +986,11 @@ mod tests {
         let mut later = accepted.clone();
         later.reviews.push(review("h3", 3, Lens::Conformance, vec![Row::default()]));
         let note = "no disposition: findings 1";
-        assert_eq!(issue(&later, NOW), Verdict::of(Intent::NeedsResponse, note), "a row added after the approval");
+        assert_eq!(
+            bare(issue(&later, NOW)),
+            Verdict::of(Intent::NeedsResponse, note),
+            "a row added after the approval"
+        );
     }
 
     #[test]
@@ -1111,7 +1092,7 @@ mod tests {
         unpushed_fix_is_the_worker_s(&capped);
         // A moved head clears nothing: the row holds until a verify review of the next round does not re-report it.
         let mut moved = Issue { pr: Some(pr("h3", true)), ..capped.clone() };
-        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::NeedsReview, "round 3: missing lenses: verify"));
+        assert_eq!(bare(issue(&moved, NOW)), Verdict::of(Intent::NeedsReview, "round 3: missing lenses: verify"));
         let again = Row { error: true, of: Some(("r/h2-verify".into(), 1)), ..Row::default() };
         moved.reviews.push(review("h3", 3, Lens::Verify, vec![again]));
         // At high's cap, an error row goes to the human: no new dispatch.
@@ -1121,6 +1102,6 @@ mod tests {
         moved.pr = Some(pr("h4", true));
         assert_eq!(issue(&moved, NOW), Verdict::of(Intent::Blocked, cap), "at a new head");
         moved.reviews.last_mut().unwrap().rows.clear();
-        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::NeedsReview, "round 4: missing lenses: verify"));
+        assert_eq!(bare(issue(&moved, NOW)), Verdict::of(Intent::NeedsReview, "round 4: missing lenses: verify"));
     }
 }

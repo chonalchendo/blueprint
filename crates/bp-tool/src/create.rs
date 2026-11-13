@@ -70,13 +70,13 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     let mut fields = BTreeMap::new();
     for given in &create.field {
         match given.split_once('=') {
-            Some(("risk", level)) if kind == Kind::Issue => {
-                fields.insert("risk".to_string(), schema::label(kind, &id, "risk", level)?);
+            Some((field @ ("risk" | "complex"), value)) if kind == Kind::Issue => {
+                fields.insert(field.to_string(), schema::label(kind, &id, field, value)?);
             }
             _ => {
                 return Err(Refusal::usage(
                     format!("create {kind} --field {given}"),
-                    "create takes --field risk=<low|medium|high> on an issue; bp set writes any other label",
+                    "create takes --field risk=<low|medium|high> and --field complex=<true|false> on an issue; bp set writes any other label",
                 ));
             }
         }

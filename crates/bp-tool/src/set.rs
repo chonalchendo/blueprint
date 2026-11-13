@@ -99,10 +99,12 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     Ok(Wrote::Changed(result))
 }
 
-/// `not_a_label` when the write lowers an issue's `risk` and [`lowerable`] says no: the level is set at derive and
-/// approved with the milestone, so before the approval a level is a label; after it, only the human's signed record
-/// lowers a level (37, design changes 1 and 2). An issue with no label reads medium, so a first `low` is a lowering
-/// too, and so is a `low` at `create` (`create::create`). `lowerable` runs only for a lowering: it reads git.
+/// `not_a_label` when the write lowers an issue's `risk` or clears its `complex`, and [`lowerable`] says no: both are
+/// set at derive and approved with the milestone, so before the approval a level is a label; after it, only the
+/// human's signed record lowers a level (37, design changes 1 and 2). Setting `complex` is always allowed, as a raise
+/// of `risk` is; clearing it moves the worker from Fable to Sonnet (36, section 3). An issue with no `risk` label
+/// reads medium, so a first `low` is a lowering too, and so is a `low` at `create` (`create::create`). `lowerable`
+/// runs only for a lowering: it reads git.
 pub(crate) fn lowers(
     kind: Kind,
     id: &Id,
@@ -112,14 +114,28 @@ pub(crate) fn lowers(
     lowerable: impl FnOnce() -> Result<bool, Refusal>,
 ) -> Result<(), Refusal> {
     let rank = |v: Option<&Value>| v.and_then(Value::as_str).and_then(|l| l.parse::<Level>().ok());
+    let refuse = |rule: &'static str, fix: String| Refusal::new(Code::NotALabel, format!("{id} {field}"), rule, fix);
+    if kind != Kind::Issue {
+        return Ok(());
+    }
+    if field == "complex" && was.and_then(Value::as_bool) == Some(true) && value.as_bool() == Some(false) {
+        let fix = format!("the human clears complex in the header of {id} from a shell and commits it");
+        if lowerable()? {
+            return Ok(());
+        }
+        return Err(refuse(
+            "a label clears complex only while the issue's milestone is planned and was never approved, and the issue \
+             holds no claim; else only the human does (36, section 3)",
+            fix,
+        ));
+    }
     match (rank(was).or(Some(Level::Medium)), rank(Some(value))) {
-        (Some(was), Some(now)) if kind == Kind::Issue && field == "risk" && now < was && !lowerable()? => {
-            Err(Refusal::new(
-                Code::NotALabel,
-                format!("{id} risk"),
+        (Some(was), Some(now)) if field == "risk" && now < was && !lowerable()? => {
+            let fix = format!("the human runs bp lower {id} <level> --reason <why> from a shell");
+            Err(refuse(
                 "a label lowers a risk level only while the issue's milestone is planned and was never approved, and \
                  the issue holds no claim; else only a signed human record lowers it (37, design changes 1 and 2)",
-                format!("the human runs bp lower {id} <level> --reason <why> from a shell"),
+                fix,
             ))
         }
         _ => Ok(()),

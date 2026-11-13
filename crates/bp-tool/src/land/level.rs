@@ -169,7 +169,7 @@ fn forge_signer(c: &Claimed, gh: &Gh) -> Result<String, Refusal> {
 /// read from a record.
 pub(super) fn risen(c: &Claimed, id: &Id, issue: &Issue, head: &str, base: String) -> Result<(), Refusal> {
     let fresh = crate::risk::judge_at(&c.top, base, &c.target, vec![head.to_string()])?.computed;
-    let (was, now) = (intents::level(issue, head).0, intents::in_force(issue, head, fresh.level).0);
+    let (was, now) = (intents::level(issue, head).0, intents::in_force(issue, head, Some(fresh.level)).0);
     let security = fresh.security && !intents::security(issue, head);
     if now <= was && !security {
         return Ok(());

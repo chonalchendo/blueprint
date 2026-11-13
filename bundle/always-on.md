@@ -24,7 +24,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - An issue landed, a thread closed, or a run holds evidence: run the skill `bp-distil`.
 - The human parks a thought: run the skill `bp-capture`.
 - `blocked`: do what its note names.
-- `working` with the note `stale`: run `bp release <issue> --reason lost --json`. Then dispatch again.
+- `working` with the note `stale`: run `bp release <issue> --reason lost --json`. Then read the intent again and act on it.
 - `working` without `stale`: do nothing; the worker or the cause in its note moves it.
 - `waiting`: do nothing until the cause in its note clears.
 - `needs-landing`: run `bp land <issue> --json`. A low or medium issue lands with no human act. If `land` refuses, do what its `fix` names.
@@ -35,6 +35,9 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 
 - A dispatch template is a file `<role>-<action>.md` in the `bp/dispatch/` directory beside the skill directory.
 - Copy the template. Fill its four lines: `Node:`, `Skill:`, `Forbidden:` and `Stop:`. Add no text above the four lines.
+- An intent that leads to a dispatch carries `model` and `effort`. Pass both to the dispatch call. Do not pick another, and do not omit either: a hook denies a worker, reviewer or researcher call that names no `model` or no `effort`. An intent with neither dispatches no one.
+- A research dispatch is no intent. Pass `model` opus and `effort` high, for each researcher and each sub-researcher it starts.
+- Design, shape and derive run in this session, on its own model. Their intents carry no model and no effort. The human starts the session on Fable at high effort for design work.
 - A research dispatch holds its question below the four lines. A review dispatch carries its lens and round there: `Lens: <lens>` and `Round: <n>`.
 - The reviewer writes nothing in the vault or in a worktree; it probes in a copy. Write its review, from `head:` to the end of its `What holds:` list, to a file outside the vault.
 - Then run the record call on the last line of the reply. Its `--body-file` names that file. The record call returns `rows`, the count of the review's findings; its `findings` are the body lint, not the review's.

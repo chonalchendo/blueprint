@@ -7,13 +7,15 @@ use crate::risk::{self, Level};
 use crate::rounds;
 use crate::rounds::Review;
 
-/// The computed level that the intents read at `head`: the level `pr` recorded there. A head that no `pr` run names
-/// reads the highest level recorded at an earlier head, so a plain `git push` cannot lower the level or the lenses;
-/// none at all reads medium, never low. The intents fetch nothing, so `bp risk` and `land` judge the diff afresh.
-pub fn recorded(i: &Issue, head: &str) -> Level {
+/// The level `pr` recorded at `head`, as the intents read it. A head that no `pr` run names reads the highest level
+/// recorded at an earlier head, so a plain `git push` cannot lower the level or the lenses; with a pull request open
+/// and none at all, it reads medium, never low. A ready issue has no pull request and no head: the caller passes `""`,
+/// so every recorded run counts as an earlier head's, and the label alone sets the floor. The intents fetch nothing,
+/// so `bp risk` and `land` judge the diff afresh.
+fn recorded(i: &Issue, head: &str) -> Option<Level> {
     recorded_risk(&i.runs, head)
         .or_else(|| i.runs.iter().filter_map(|r| Some(r.risk?.level)).max())
-        .unwrap_or(Level::Medium)
+        .or(i.pr.as_ref().map(|_| Level::Medium))
 }
 
 /// A run at `head` records that the diff touches a high path outside the low patterns, so round one adds the
@@ -30,9 +32,9 @@ pub fn security(i: &Issue, head: &str) -> bool {
 /// level whose cap it passed. The highest of the declared level, `computed` and each raise (37, design changes 1 and
 /// 2); then the round caps (design change 6); then the latest lowering of `head`, when it is lower. A lowering binds
 /// its head: it lowers the label, the computed level, the raises and the caps there, and nothing at another head.
-pub fn in_force(i: &Issue, head: &str, computed: Level) -> (Level, Option<(u64, Level)>) {
+pub fn in_force(i: &Issue, head: &str, computed: Option<Level>) -> (Level, Option<(u64, Level)>) {
     let raises = i.reviews.iter().filter(|r| r.raises()).count() + usize::from(i.delta);
-    let judged = risk::level(i.declared.unwrap_or(Level::Medium), Some(computed), raises);
+    let judged = risk::level(i.declared.unwrap_or(Level::Medium), computed, raises);
     let (level, at) = rounds::capped(judged, &i.reviews);
     match i.lowerings.iter().rev().find(|(h, _)| h == head) {
         Some(&(_, lower)) if lower < level => (lower, None),

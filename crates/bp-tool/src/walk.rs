@@ -221,7 +221,12 @@ fn intents<'a>(
     for r in reached.iter().filter(|r| matches!(r.kind, Kind::Issue | Kind::Milestone | Kind::Design)) {
         let verdict = read.row(r.kind, &r.id, r.status.as_deref())?;
         if let Some(intent) = verdict.intent {
-            intents.push(json!({ "id": r.id, "intent": intent, "note": verdict.note }));
+            let mut item = json!({ "id": r.id, "intent": intent, "note": verdict.note });
+            if let Some(route) = verdict.route {
+                item["model"] = json!(route.model);
+                item["effort"] = json!(route.effort);
+            }
+            intents.push(item);
         }
     }
     Ok((read, intents))

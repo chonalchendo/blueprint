@@ -266,13 +266,30 @@ pub fn approvals(index: &Index, issue: &str) -> Result<Vec<intents::Approval>, R
 ///
 /// Never: the index holds ids.
 pub fn reviewed(vault: &Vault, index: &Index, issue: &str) -> Result<intents::Issue, Refusal> {
+    assemble(vault, index, issue, true)
+}
+
+/// [`reviewed`] with the `risk` label as the header holds it, with no read of the vault's history: for a read that
+/// routes a dispatch and gates nothing, such as an issue with no pull request in view.
+pub fn reviewed_by_header(vault: &Vault, index: &Index, issue: &str) -> Result<intents::Issue, Refusal> {
+    assemble(vault, index, issue, false)
+}
+
+fn assemble(vault: &Vault, index: &Index, issue: &str, committed: bool) -> Result<intents::Issue, Refusal> {
     let head = |r: &Record| text(&r.header, "head");
     let lowerings = index.records(issue, Kind::Lowering)?;
+    let header = index.header(issue)?.unwrap_or_default();
+    let labels = super::labels(&header);
+    // A `risk` value that does not parse reads high, whatever the history holds: a typo never lowers the gate.
+    let unparsed = labels.unread.iter().any(|u| u.starts_with("risk "));
+    let declared = if committed && !unparsed { super::declared(vault, index, issue)? } else { labels.declared };
     Ok(intents::Issue {
         id: issue.to_string(),
         runs: runs(index, issue)?,
         reviews: reviews(vault, index, issue)?,
-        declared: super::declared(vault, index, issue)?,
+        declared,
+        complex: labels.complex,
+        unread: labels.unread,
         delta: !crate::carried_deltas(index, &Id::parse(issue).expect("the index holds ids"))?.is_empty(),
         approvals: approvals(index, issue)?,
         lowerings: lowerings.iter().filter_map(|r| Some((head(r)?, text(&r.header, "level")?.parse().ok()?))).collect(),

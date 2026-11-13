@@ -150,6 +150,36 @@ pub(crate) fn text(m: &Map<String, Value>, k: &str) -> Option<String> {
     m.get(k).and_then(Value::as_str).map(str::to_string)
 }
 
+/// An issue's `risk` and `complex` labels as every reader reads them (21, rule 1). A label that `set` and `create` would
+/// refuse reads as the costly value, never the cheap one: `risk` high, `complex` true. `unread` names each such value.
+pub struct Labels {
+    /// The `risk` label; `None` when absent, which reads medium.
+    pub declared: Option<bp_change::risk::Level>,
+    /// The `complex` label.
+    pub complex: bool,
+    /// One note for each label read as the costly value.
+    pub unread: Vec<String>,
+}
+
+/// The [`Labels`] of an issue header.
+pub fn labels(header: &Map<String, Value>) -> Labels {
+    use bp_change::risk::Level;
+    let mut unread = Vec::new();
+    let declared = header.get("risk").map(|v| {
+        v.as_str().and_then(|l| l.parse().ok()).unwrap_or_else(|| {
+            unread.push(format!("risk {v} is not low, medium or high: read as high"));
+            Level::High
+        })
+    });
+    let complex = header.get("complex").is_some_and(|v| {
+        v.as_bool().unwrap_or_else(|| {
+            unread.push(format!("complex {v} is not true or false: read as true"));
+            true
+        })
+    });
+    Labels { declared, complex, unread }
+}
+
 /// The held claim of `issue`: the latest claim with no release `to`.
 pub fn held(index: &Index, issue: &Id) -> Result<Option<Record>, Refusal> {
     Ok(index

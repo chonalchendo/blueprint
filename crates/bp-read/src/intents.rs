@@ -305,11 +305,12 @@ fn of(
         let record = &records[claims.iter().position(|c| std::ptr::eq(c, latest)).expect("the latest is one of them")];
         Id::parse(id).ok().zip(Id::parse(&record.id).ok()).is_some_and(|(id, claim)| vault.touched_after(&id, &claim))
     });
-    // The reviews and the level's inputs matter only while a pull request is in view: needs review counts the lenses
-    // at its head, and needs response reads their dispositions (21; 37, design change 8).
+    // The reviews and the delta read with or without a pull request: ready routes its build by the same level the
+    // review path reads, so a delta the issue caused or an earlier review's `risk` row raises it (37, design changes
+    // 1 and 9). The vault's history judges the label only where a pull request is in view: that is where a gate reads it.
     let reviewed = match &pr {
         Some(_) => crate::inputs::reviewed(vault, index, id)?,
-        None => Issue::default(),
+        None => crate::inputs::reviewed_by_header(vault, index, id)?,
     };
     let issue = Issue {
         id: id.to_string(),
