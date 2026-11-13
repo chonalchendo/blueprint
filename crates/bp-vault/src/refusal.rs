@@ -21,7 +21,6 @@ crate::closed_enum! {
         StackTooDeep = "stack_too_deep",
         ReviewMissing = "review_missing",
         ChecksPending = "checks_pending",
-        DiffChanged = "diff_changed",
         BaseUnmerged = "base_unmerged",
         BaseMismatch = "base_mismatch",
         HeadBehindBase = "head_behind_base",
@@ -43,7 +42,6 @@ crate::closed_enum! {
         CheckFailed = "check_failed",
         IssuesOpen = "issues_open",
         EvidenceStale = "evidence_stale",
-        ReviewerInvalid = "reviewer_invalid",
         ChecksChanged = "checks_changed",
         RoleForbidden = "role_forbidden",
         DiagramInvalid = "diagram_invalid",
@@ -59,6 +57,9 @@ crate::closed_enum! {
         KeyInAgent = "key_in_agent",
         RiskFileInvalid = "risk_file_invalid",
         CheckVacuous = "check_vacuous",
+        FindingsOpen = "findings_open",
+        BaseUnconfirmed = "base_unconfirmed",
+        ClaimLost = "claim_lost",
     }
 }
 

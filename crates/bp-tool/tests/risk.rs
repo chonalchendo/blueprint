@@ -265,6 +265,23 @@ fn the_level_reads_the_base_commit_not_a_local_replace_of_it() {
 }
 
 #[test]
+fn the_level_reads_the_parents_the_commits_name_not_a_local_graft() {
+    // Review of #99, row 55: `.git/info/grafts`, which makes the head a root and the parent of origin's master, pushes
+    // nothing.
+    let mut w = world(Some("low"), Some("high: [infra/]\n"));
+    w.cut();
+    let head = w.commit(&[("infra/main.tf", "x\n")]);
+    let base = w.rev("origin/master");
+    let grafts = w.code.join(git(&w.code, &["rev-parse", "--git-path", "info/grafts"]).trim());
+    std::fs::create_dir_all(grafts.parent().unwrap()).unwrap();
+    std::fs::write(&grafts, format!("{base} {head}\n{head}\n")).unwrap();
+    assert_eq!(git(&w.code, &["merge-base", &base, &head]).trim(), head, "the graft is in force");
+    let v = w.risk();
+    assert_eq!(pick(&v), json!(["high", "low", "high"]), "{v}");
+    assert!(v["reasons"].to_string().contains("infra/main.tf matches the high pattern infra/"), "{v}");
+}
+
+#[test]
 fn a_link_named_as_a_high_directory_is_high() {
     let mut w = world(Some("low"), Some("high: [infra/]\nlow: [docs/]\n"));
     w.cut();
@@ -476,6 +493,25 @@ fn git_s_location_variables_do_not_send_the_level_to_another_repository() {
     let env = [("BP_VAULT", vault.as_str()), ("GIT_DIR", git_dir.as_str()), ("GIT_INDEX_FILE", index.as_str())];
     let (exit, v) = common::bp_env(&w.code, &env, &["risk", ISSUE]);
     assert_eq!((exit, pick(&v), &v["head"]), (Some(0), pick(&want), &want["head"]), "{v}");
+    // Each name alone, at a value that points git elsewhere (review of #98, row 39).
+    let objects = other.join(".git/objects").display().to_string();
+    let top = w.t.path().display().to_string();
+    for name in bp_vault::git::LOCATION {
+        let value = match name {
+            "GIT_DIR" | "GIT_COMMON_DIR" => git_dir.clone(),
+            "GIT_WORK_TREE" => other.display().to_string(),
+            "GIT_INDEX_FILE" => index.clone(),
+            "GIT_OBJECT_DIRECTORY" | "GIT_ALTERNATE_OBJECT_DIRECTORIES" => objects.clone(),
+            "GIT_CEILING_DIRECTORIES" => top.clone(),
+            "GIT_NAMESPACE" => "elsewhere".into(),
+            "GIT_REPLACE_REF_BASE" => "refs/elsewhere/".into(),
+            "GIT_PREFIX" => "docs/".into(),
+            _ => format!("{top}/nothing"),
+        };
+        let (exit, v) =
+            common::bp_env(&w.code, &[("BP_VAULT", vault.as_str()), (name, value.as_str())], &["risk", ISSUE]);
+        assert_eq!((exit, pick(&v), &v["head"]), (Some(0), pick(&want), &want["head"]), "{name}: {v}");
+    }
 }
 
 /// A transport variable reaches bp's own fetch: the sandbox's `GIT_ALLOW_PROTOCOL` guard holds (review of #98, row
@@ -686,15 +722,20 @@ fn an_exact_pattern_that_names_a_directory_refuses() {
             fix.starts_with(&format!("the pattern {dir:?} names a directory, so it matches no path: write {dir}/"))
         );
     }
-    // The check folds ASCII case, and reads each head's tree too: a directory the branch adds is one.
-    for (rules, dir) in [("high: [SRC]\n", "SRC"), ("high: [newdir]\n", "newdir")] {
-        let mut w = world(None, Some(rules));
-        w.cut();
-        w.commit(&[("newdir/a.rs", "fn a() {}\n")]);
-        let (exit, v) = w.bp(&["risk", ISSUE]);
-        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("risk_file_invalid")), "{v}");
-        assert!(v["fix"].as_str().unwrap().starts_with(&format!("the pattern {dir:?} names a directory")), "{v}");
-    }
+    // The check folds ASCII case.
+    let mut w = world(None, Some("high: [SRC]\n"));
+    w.cut();
+    w.commit(&[("newdir/a.rs", "fn a() {}\n")]);
+    let (exit, v) = w.bp(&["risk", ISSUE]);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("risk_file_invalid")), "{v}");
+    assert!(v["fix"].as_str().unwrap().starts_with("the pattern \"SRC\" names a directory"), "{v}");
+    // A directory only the head adds is the branch's: a high exact pattern holds each path under it, so a branch
+    // cannot read low by adding the directory the pattern names (review of #95, row 26).
+    let mut w = world(None, Some("high: [newdir]\n"));
+    w.cut();
+    w.commit(&[("newdir/a.rs", "fn a() {}\n")]);
+    let v = w.risk();
+    assert_eq!(v["computed"], "high", "{v}");
     let mut w = world(None, Some("high: [src/b.rs, nothing/here]\n"));
     w.cut();
     w.commit(&[("src/b.rs", "fn b2() {}\n")]);

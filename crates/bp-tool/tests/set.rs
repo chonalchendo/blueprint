@@ -299,9 +299,8 @@ fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
     let dir = vault();
     let root = dir.path();
     // Ids that name nothing: the role refuses first, so no other refusal shows.
-    let acts: [&[&str]; 6] = [
+    let acts: [&[&str]; 5] = [
         &["stamp", "projects/bp/milestones/none"],
-        &["land", "projects/bp/issues/none"],
         &["approve", "projects/bp/issues/none"],
         &["lower", "projects/bp/issues/none", "low", "--reason", "docs only"],
         &["transition", "projects/bp/milestones/none", "approved"],
@@ -313,6 +312,13 @@ fn an_agent_role_refuses_the_humans_acts_before_any_other_test() {
             assert_eq!((code, v["code"].as_str()), (Some(2), Some("role_forbidden")), "{role} {act:?}: {v}");
         }
     }
+    // The session lands a low or medium issue itself (37, design change 3); the other agents do not.
+    for role in ["worker", "reviewer", "researcher"] {
+        let (code, v) = bp_env(root, &[("BP_ROLE", role)], &["land", "projects/bp/issues/none"]);
+        assert_eq!((code, v["code"].as_str()), (Some(2), Some("role_forbidden")), "{role} land: {v}");
+    }
+    let (_, v) = bp_env(root, &[("BP_ROLE", "session")], &["land", "projects/bp/issues/none"]);
+    assert_eq!(v["code"], "illegal_transition", "the session passes the role test of land: {v}");
     let (_, v) = bp_env(root, &[("BP_ROLE", "session")], &["transition", "projects/bp/designs/none", "draft"]);
     assert_eq!(v["code"], "no_node", "another move is not the human's: {v}");
     let (_, v) = bp_env(root, &[("BP_ROLE", "")], &["transition", "projects/bp/designs/product", "active"]);
@@ -366,6 +372,21 @@ fn set_lowers_risk_while_the_milestone_is_planned() {
     git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "approve"]);
     let (code, v) = bp(root, &["set", issue, "risk", "low"]);
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("not_a_label")), "after approval: {v}");
+    // Back at planned, the history still holds the approval: as a file git treats as binary (review of #98, row 35),
+    // and through a rename of the milestone (row 39).
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("approved", "planned")).unwrap();
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "planned again"]);
+    let lower = || bp(root, &["set", issue, "risk", "low"]);
+    std::fs::create_dir_all(root.join(".git/info")).unwrap();
+    std::fs::write(root.join(".git/info/attributes"), "*.md -diff\n").unwrap();
+    assert_eq!(lower().1["code"], "not_a_label", "a -diff attribute");
+    std::fs::remove_file(root.join(".git/info/attributes")).unwrap();
+    git(root, &["mv", &format!("{milestone}.md"), "projects/bp/milestones/n.md"]);
+    let issue_path = root.join(format!("{issue}.md"));
+    let text = std::fs::read_to_string(&issue_path).unwrap().replace("milestones/m\n", "milestones/n\n");
+    std::fs::write(&issue_path, text).unwrap();
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "rename"]);
+    assert_eq!(lower().1["code"], "not_a_label", "a renamed milestone");
 }
 
 /// `complex` follows `risk`: setting it is always a label; clearing it refuses after the milestone's first approval or

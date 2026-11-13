@@ -1,6 +1,6 @@
 //! `cargo xtask stage`: a staged copy (32, design change 11). A scratch copy of `$BP_VAULT` and a fake forge for
 //! project `bp`, then the tool's own verbs make one issue of each intent the view must show: `needs-landing` (cut,
-//! `pr`, approved by the reviewer identity, green at the head), `working` (cut), `blocked` (cut, released
+//! `pr`, a review of each medium lens and green at the head), `working` (cut), `blocked` (cut, released
 //! `escalated`), `waiting` (depends on the working one), and a `planned` milestone (`needs-milestone-approval`). A
 //! `ready` issue is the copy's own. The converted vault's diagrams are anvil's pages, with none of 28's contract, so
 //! `bp diagram` renders one example spec into the system design, which its TL;DR cites: the Design page then shows
@@ -16,9 +16,6 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::scratch;
-
-/// The reviewer identity the fake forge approves as (26, design change 3).
-const REVIEWER: &str = "quokka-reviewer";
 
 /// The example spec the staged system design carries, rendered: `bp-diagram`'s container view of Blueprint.
 const EXAMPLE: &str = "crates/bp-diagram/examples/bp-containers.yaml";
@@ -62,7 +59,6 @@ impl Stage {
         let body = self.t.join("staged-body.md");
         std::fs::write(&body, BODY)?;
         let body = body.display().to_string();
-        self.bp(&["set", "projects/bp/project", "reviewer", REVIEWER])?;
         let design = "projects/bp/designs/system";
         let milestone =
             self.id(&["create", "milestone", "--project", "bp", "--title", "Staged milestone", "--under", design])?;
@@ -84,8 +80,9 @@ impl Stage {
         let (landing, working, blocked, waiting) =
             (issue("Staged landing")?, issue("Staged working")?, issue("Staged blocked")?, issue("Staged waiting")?);
 
-        // Needs landing: a commit that passes the block, its pull request, the reviewer's approval and a green check at
-        // the head. The later repo verbs rewrite the snapshot, so it reads the approval and the check.
+        // Needs landing: a commit that passes the block, its pull request, a review of each lens of medium with no
+        // finding, and a green check at the head (37, design change 3). The later repo verbs rewrite the snapshot, so
+        // it reads the check.
         let cut = self.bp(&["cut", &landing])?;
         let worktree =
             Path::new(cut["worktree"].as_str().with_context(|| format!("bp cut {landing} made no worktree"))?);
@@ -93,12 +90,15 @@ impl Stage {
         self.git(worktree, &["add", "staged.txt"])?;
         self.git(worktree, &["commit", "-qm", "staged"])?;
         let pr = self.bp(&["pr", &landing])?;
-        let (number, head) = (pr["pull_request"].to_string(), pr["head"].as_str().context("bp pr printed no head")?);
-        self.run(
-            Command::new(self.t.join("bin/gh"))
-                .args(["pr", "review", &number, "--approve"])
-                .env("FAKE_GH_LOGIN", REVIEWER),
-        )?;
+        let head = pr["head"].as_str().context("bp pr printed no head")?;
+        let review = self.t.join("staged-review.md");
+        std::fs::write(&review, format!("head: {head}\n\n| severity | location | finding |\n|---|---|---|\n"))?;
+        let (review, head_field) = (review.display().to_string(), format!("head={head}"));
+        for lens in ["lens=conformance", "lens=failure-paths"] {
+            let fields = [&head_field, "round=1", lens, "mode=full"].map(|f| ["--field", f]);
+            let args = [&["record", "review", &landing][..], fields.as_flattened(), &["--body-file", &review]];
+            self.bp(&args.concat())?;
+        }
         std::fs::write(self.t.join("forge/checks").join(format!("{head}.json")), "[{\"conclusion\":\"SUCCESS\"}]\n")?;
 
         self.bp(&["cut", &working])?;

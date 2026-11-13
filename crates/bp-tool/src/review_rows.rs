@@ -100,9 +100,17 @@ fn round(
         } else {
             format!("which closed when {} was reviewed", later.head)
         };
+        // After a push back to a reviewed head, the forge's last view still names the old head: `pr` refreshes it, and
+        // the head then reads as a new round (review of #98, row 37).
+        let refresh = pr.filter(|p| *p != head).map_or_else(String::new, |p| {
+            format!(
+                "; the forge's last view names {p} as the pull request's head: if the branch now points at {head}, \
+                 bp pr {id} refreshes that view, then rerun"
+            )
+        });
         let fix = format!(
             "{head} is round {round} of {id}, {state}: review the head of the pull request, as `bp walk {id} --for \
-             review` names it"
+             review` names it{refresh}"
         );
         return Err(crate::record::schema(format!("{id} review round"), fix));
     }
@@ -183,6 +191,17 @@ fn commit(vault: &Vault, index: &Index, issue: &Id, head: &str) -> Result<(Strin
              `bp walk {issue} --for review` names it"
         )));
     }
+    // After a rebase onto a newer base, a commit of the base branch is past the claim's recorded base and behind the
+    // head; the branch the pull request targets holds it now, so it is no head of the work (review of #98, row 38). A
+    // repo whose origin names no default branch, or a target origin does not hold, has no such commit to refuse.
+    let target = crate::risk::target(index, &claim, dir).ok();
+    let tip = target.as_deref().and_then(|t| crate::risk::at_origin(dir, t).ok().flatten());
+    if let (Some(target), Some(tip)) = (target.as_deref(), tip.filter(|tip| ancestor(head, tip))) {
+        return Err(refuse(format!(
+            "{head} is on origin's {target} at {tip}, the branch the pull request targets: write the head of the pull \
+             request, as `bp walk {issue} --for review` names it"
+        )));
+    }
     let pr = crate::done::open(&vault.root, index, issue, &mut None)?.map(|(p, _)| p.head_ref_oid);
     let tips = match &pr {
         Some(p) => vec![p.clone()],
@@ -237,7 +256,8 @@ fn review(
     }
     let issued = bp_read::inputs::reviewed(vault, index, issue.as_str())?;
     let of = bp_read::inputs::of_cells(body);
-    let at_of = cells(table[0]).iter().position(|c| c == "of");
+    let header = cells(table[0]);
+    let at_of = header.iter().position(|c| c == "of");
     let mut diff = None;
     // Each error row's location, whether it names a node, which no diff shows, and whether it re-reports a row.
     let mut errors = Vec::new();
@@ -246,6 +266,17 @@ fn review(
         if cells.len() < 3 || cells[..3].iter().any(String::is_empty) {
             let fix = format!(
                 "fill row {n}: `| error, warn or risk | <path>:<line> or a node id | what is wrong, and what would pass |`"
+            );
+            return Err(refuse(&format!("finding {n}"), fix));
+        }
+        // A cell past the header's columns is read by no one, so a re-report written without the `of` column would
+        // drop in silence (review of #98, the late list).
+        if cells.iter().skip(header.len()).any(|c| !c.is_empty()) {
+            let fix = format!(
+                "row {n} has {} cells under a header of {}: add the column to the header, as `| of |`, or write a \
+                 pipe inside a finding as `\\|`",
+                cells.len(),
+                header.len()
             );
             return Err(refuse(&format!("finding {n}"), fix));
         }
@@ -331,10 +362,19 @@ fn re_reports(
              review --under {issue}` names it, or leave the cell empty; write a pipe inside a finding as `\\|`"
         )));
     };
-    if !rounds::is_error(severity) || earlier.head == head {
+    if !rounds::is_error(severity) {
         return Err(refuse(format!(
-            "row {n}'s `of` cell names {}: only an `error` row re-reports, and only a row of an earlier head; leave \
-             the cell empty, and decline a duplicate at this head with the other row's id",
+            "row {n}'s `of` cell names {}: only an `error` row re-reports; leave the cell empty",
+            earlier.id
+        )));
+    }
+    // A branch reset to a reviewed head brings that head's rows back as its own: the row records with an empty cell
+    // and holds the land as a new error row (review of #98, row 37).
+    if earlier.head == head {
+        return Err(refuse(format!(
+            "row {n}'s `of` cell names {}, a review of this head {head}: a re-report names a row of an earlier \
+             head; leave the cell empty, so the row records as a new error row of this head, and decline a duplicate \
+             at this head with the other row's id",
             earlier.id
         )));
     }

@@ -185,8 +185,8 @@ fn a_delta_carries_its_diagrams_through_record_and_stamp() {
     assert!(git(root, &["status", "--porcelain"]).is_empty());
 }
 
-/// `pr` lists each diagram the delta changes, in its body and its result. A fake `gh` answers `api user`, an empty
-/// `pr list` and `pr create`, keeping the body it was given.
+/// `pr` lists each diagram the delta changes, in its body and its result. A fake `gh` answers an empty `pr list` and
+/// `pr create`, keeping the body it was given.
 #[test]
 fn pr_lists_each_diagram_a_delta_changes() {
     let t = tempfile::tempdir().unwrap();
@@ -203,7 +203,7 @@ fn pr_lists_each_diagram_a_delta_changes() {
     git(&code, &["remote", "set-head", "origin", "master"]);
     std::fs::create_dir(t.join("bin")).unwrap();
     let fake = format!(
-        "#!/bin/sh\ncase \"$1 $2\" in\n  \"api user\") echo '{{\"login\":\"agent\"}}' ;;\n  \"pr list\") echo '[]' ;;\n  \
+        "#!/bin/sh\ncase \"$1 $2\" in\n  \"pr list\") echo '[]' ;;\n  \
          \"pr create\") shift 9; printf '%s' \"$1\" > '{t}/body'; echo 'https://forge.invalid/o/r/pull/1' ;;\n  *) exit 9 ;;\nesac\n",
         t = t.display()
     );

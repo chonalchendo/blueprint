@@ -15,7 +15,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use crate::risk::{judge_by, rules};
-use crate::signed::{Act, Block, blocks, can_verify, cap, is_branch, is_sha, public_key, verify};
+use crate::signed::{Act, Block, accepts, blocks, can_verify, cap, is_branch, is_sha, public_key, verify};
 
 /// `bp gate --base <sha> --base-ref <branch> --default-ref <branch> --head <sha> --pr <n> --project <name> [--comments <path>]`.
 #[derive(Args)]
@@ -63,7 +63,7 @@ pub(crate) fn gate(cwd: &Path, g: &Gate) -> Result<Value, Refusal> {
     let top = bp_vault::git::Repo::find(cwd)
         .ok_or_else(|| Refusal::failed(cwd.display().to_string(), "bp gate runs in a clone of the repository"))?
         .top;
-    let config = rules(&top, &g.base, &g.base, std::slice::from_ref(&g.head))?;
+    let config = rules(&top, &g.base, &g.base)?;
     // The workflow built this binary from the pin; a base with no pin has no gate, so it fails closed.
     if config.gate.is_none() {
         return Err(Refusal::new(
@@ -74,7 +74,7 @@ pub(crate) fn gate(cwd: &Path, g: &Gate) -> Result<Value, Refusal> {
             "bp install writes the line `gate: <sha>` into .bp/risk.yml; commit it to the default branch from a shell",
         ));
     }
-    let judged = judge_by(&top, g.base.clone(), vec![g.head.clone()], &config)?;
+    let judged = judge_by(&top, g.base.clone(), vec![g.head.clone()], &config, false)?;
     let level = judged.computed.level;
     let result = |approval: &str| {
         json!({
@@ -158,7 +158,12 @@ fn signed(blocks: &[Block], g: &Gate, signer: &str, fix: String) -> Result<(), R
         if !Kind::Issue.fits(&node) || node.project() != Some(g.project.as_str()) {
             continue;
         }
-        let act = Act { verb: "approve", node: &node, pull_request: g.pr, base: &g.base_ref, head: &g.head, more: &[] };
+        // An approval at high's round cap signs the rows it accepts too: the block's own lines, as `bp approve` signs
+        // them (review of #100, W1). The gate reads no review, so the rows only rebuild the message.
+        let named: Vec<String> = b.fields.iter().filter(|(k, _)| k == "accepts").map(|(_, v)| v.clone()).collect();
+        let more = accepts(&named);
+        let act =
+            Act { verb: "approve", node: &node, pull_request: g.pr, base: &g.base_ref, head: &g.head, more: &more };
         let message = act.message();
         let Some(sig) = &b.signature else { continue };
         match verify(&message, sig, signer) {

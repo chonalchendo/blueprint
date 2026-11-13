@@ -1,6 +1,7 @@
 //! The live forge over `gh` (22, constraint 1). Each call parses `gh`'s JSON into the snapshot types; a call that
-//! fails, exits non-zero or prints what does not parse is `could_not_run`. No call approves: an approval comes only
-//! from the reviewer identity, whose credential never enters an agent's environment (15, Controls 1).
+//! fails, exits non-zero or prints what does not parse is `could_not_run`. No call approves or reads an approval: a
+//! high pull request lands on the human's signed approval record, whose key never enters an agent (37, design
+//! change 3).
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -17,7 +18,7 @@ use serde::Deserialize;
 use crate::{PullRequest, Snapshot};
 
 /// The fields every pull request read asks for, so a list row and a view parse into the same type.
-const FIELDS: &str = "number,url,state,author,baseRefName,headRefName,headRefOid,reviews,statusCheckRollup";
+const FIELDS: &str = "number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,mergeCommit,statusCheckRollup";
 
 /// How many open pull requests the snapshot lists; `gh pr list` stops at 30 unless told.
 const OPEN_LIMIT: &str = "1000";
@@ -54,13 +55,19 @@ impl Gh {
         CALLED.load(Ordering::Relaxed)
     }
 
-    /// The token's own login (`gh api user`).
-    pub fn login(&self) -> Result<String, Refusal> {
-        #[derive(Deserialize)]
-        struct User {
-            login: String,
-        }
-        self.json::<User>(&["api", "user"]).map(|u| u.login)
+    /// The forge's default branch and the commit at its head (`gh api graphql`). `land` trusts the signer of
+    /// `.bp/risk.yml` only at this commit (37, design change 4; review of #95, row 24). `gh` names the repository from
+    /// origin's url as git rewrites it, so a `url.<x>.insteadOf` rule onto another repository of the same host moves
+    /// this answer too: the url test of the signer read refuses that rule (review of #100, C10).
+    pub fn default_head(&self) -> Result<(String, String), Refusal> {
+        const QUERY: &str = "query=query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { \
+                             defaultBranchRef { name target { oid } } } }";
+        let args = ["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}", "-f", QUERY];
+        let out: serde_json::Value = self.json(&args)?;
+        let at = |p: &str| out.pointer(&format!("/data/repository/defaultBranchRef/{p}"))?.as_str().map(str::to_string);
+        at("name").zip(at("target/oid")).ok_or_else(|| {
+            Refusal::failed(Self::subject(&args), "the forge names no default branch; set one on the forge, then rerun")
+        })
     }
 
     /// Every pull request, open or not, whose head is `branch` (`gh pr list --head`).
@@ -186,6 +193,11 @@ impl Gh {
         CALLED.store(true, Ordering::Relaxed);
         let mut cmd = Command::new("gh");
         cmd.args(args).current_dir(&self.dir).stdin(Stdio::null());
+        // `gh` runs git in the clone to find its repository, so a location variable of the caller's would point it at
+        // another repository (review of #98, the late list).
+        for name in bp_vault::git::LOCATION {
+            cmd.env_remove(name);
+        }
         if let Some(path) = &self.path {
             cmd.env("PATH", path);
         }
@@ -222,8 +234,9 @@ impl Gh {
 }
 
 /// `cmd`'s output, or `TimedOut` once it has run `limit`: the child is killed then. Each pipe drains on its own
-/// thread, so a full pipe never stalls the child while the poll waits.
-fn output_within(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> {
+/// thread, so a full pipe never stalls the child while the poll waits. `bp-read` runs git through it too.
+pub fn output_within(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> {
+    let program = cmd.get_program().to_string_lossy().to_string();
     let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
@@ -237,7 +250,7 @@ fn output_within(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> 
             child.wait()?;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("gh did not answer within {limit:?}"),
+                format!("{program} did not answer within {limit:?}"),
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -283,7 +296,7 @@ mod tests {
         let gh = fake(
             ok.path(),
             r#"case "$1 $2" in
-  "api user") echo '{"login":"quokka-agent","id":1}' ;;
+  "api graphql") echo '{"data":{"repository":{"defaultBranchRef":{"name":"master","target":{"oid":"abc"}}}}}' ;;
   "pr list") echo '[{"number":3,"headRefName":"bp/q","headRefOid":"h","baseRefName":"master","author":{"login":"quokka-agent"}}]' ;;
   "pr view") [ "$5" = body ] && { echo '{"body":"b"}'; exit; }; echo '{"number":'$3',"headRefName":"bp/q","headRefOid":"h","state":"OPEN","reviews":[{"state":"APPROVED","author":{"login":"r"},"commit":{"oid":"h"}}]}' ;;
   "pr create") echo 'https://github.com/o/r/pull/3' ;;
@@ -291,14 +304,10 @@ mod tests {
   *) [ "$*" = "pr merge 3 --squash --match-head-commit h" ] || exit 9 ;;
 esac"#,
         );
-        assert_eq!(gh.login().unwrap(), "quokka-agent");
+        assert_eq!(gh.default_head().unwrap(), ("master".to_string(), "abc".to_string()));
         let prs = gh.prs_for_head("bp/q").unwrap();
-        assert_eq!(
-            (prs[0].base_ref_name.as_deref(), prs[0].author.as_ref().map(|a| a.login.as_str())),
-            (Some("master"), Some("quokka-agent"))
-        );
-        let pr = gh.pr(3).unwrap();
-        assert_eq!(pr.reviews[0].author.as_ref().unwrap().login, "r");
+        assert_eq!(prs[0].base_ref_name.as_deref(), Some("master"));
+        assert_eq!(gh.pr(3).unwrap().state.as_deref(), Some("OPEN"));
         assert_eq!(gh.body(3).unwrap(), "b");
 
         // The snapshot: the open list, a view per held pull request, and no view left of one no longer held.
@@ -323,8 +332,9 @@ esac"#,
 
         let bad = tempfile::tempdir().unwrap();
         let gh = fake(bad.path(), "echo 'HTTP 401: Bad credentials' >&2; exit 1");
-        let e = gh.login().unwrap_err();
-        assert_eq!((e.code, e.exit, e.subject.as_str()), (Code::CouldNotRun, 1, "gh api user"));
+        let e = gh.default_head().unwrap_err();
+        assert_eq!((e.code, e.exit), (Code::CouldNotRun, 1));
+        assert!(e.subject.starts_with("gh api graphql -F owner={owner} -F name={repo} -f query="), "{}", e.subject);
         assert!(e.fix.contains("Bad credentials"), "the fix carries gh's own words: {}", e.fix);
 
         let garbled = tempfile::tempdir().unwrap();
@@ -332,7 +342,7 @@ esac"#,
 
         let none = tempfile::tempdir().unwrap();
         let gh = Gh { dir: none.path().to_path_buf(), path: Some(none.path().as_os_str().to_owned()), deadline: None };
-        assert_eq!(gh.login().unwrap_err().code, Code::CouldNotRun, "no gh on PATH");
+        assert_eq!(gh.default_head().unwrap_err().code, Code::CouldNotRun, "no gh on PATH");
 
         // A deadline kills a call that hangs, and leaves a quick one as it was.
         let slow = tempfile::tempdir().unwrap();
@@ -342,9 +352,9 @@ esac"#,
         )
         .within(Duration::from_millis(300));
         let start = Instant::now();
-        let e = gh.login().unwrap_err();
+        let e = gh.default_head().unwrap_err();
         assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
-        assert_eq!((e.code, e.subject.as_str()), (Code::CouldNotRun, "gh api user"));
+        assert!(e.code == Code::CouldNotRun && e.subject.starts_with("gh api graphql"), "{e:?}");
         assert!(e.fix == "gh did not answer within 300ms", "{}", e.fix);
         assert_eq!(gh.pr(1).unwrap().head_ref_oid, "h");
     }

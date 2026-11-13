@@ -153,7 +153,7 @@ nodes:
     role: record
     at: [2, 3]
     label: Review
-    fields: ["#→ issue", "# head", patch_id, "pull_request, role, at", findings]
+    fields: ["#→ issue", "# head", "pull_request, role, at", findings]
     time: event · processing
   - id: pull-request
     noun: PullRequest

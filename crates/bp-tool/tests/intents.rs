@@ -37,7 +37,7 @@ fn vault() -> tempfile::TempDir {
     write(r, "projects/bp/issues/0005.dropped/claims/c.md", &claim("projects/bp/issues/0005.dropped", "dropped"));
     write(r, "projects/bp/issues/0006.escalated.md", &issue("open", ""));
     write(r, "projects/bp/issues/0006.escalated/claims/c.md", &claim("projects/bp/issues/0006.escalated", "escalated"));
-    // A re-review whose head sorts first, an approval of an older head, and two checks at one head.
+    // A re-review whose head sorts first, a forge approval of an older head, and two checks at one head.
     let pr7 = "projects/bp/issues/0007.reviewed";
     write(r, &format!("{pr7}.md"), &issue("in-progress", ""));
     for head in ["aaaa", "ffff"] {
@@ -60,8 +60,8 @@ fn vault() -> tempfile::TempDir {
             ),
         );
     }
-    // Needs landing: the reviewer's approval, green, and a passing run of the one `error` block's text at the head;
-    // no review record, as `land` reads none. The twin's approval is the author's, which counts for nothing.
+    // A forge approval counts for nothing (37, design change 3): `0009.lands` has one and no review record, so it needs
+    // review; its twin has each medium lens at the head, green and a passing run, so it needs landing.
     write(r, "projects/bp/project.md", "---\nkind: project\ntitle: Bp\nstatus: active\nreviewer: r\n---\n");
     for slug in ["0009.lands", "0010.twin"] {
         let id = format!("projects/bp/issues/{slug}");
@@ -142,12 +142,12 @@ fn the_forge_snapshot_moves_the_review_path_and_unblocks_dependents() {
     );
     assert_eq!(
         intent(&v, "projects/bp/issues/0007.reviewed"),
-        ("needs-approval", ""),
-        "an old approval needs renewing"
+        ("needs-landing", ""),
+        "a medium head with each lens needs no approval"
     );
     assert_eq!(intent(&v, "projects/bp/issues/0008.twochecks"), ("blocked", "run failed at head"));
-    assert_eq!(intent(&v, "projects/bp/issues/0009.lands"), ("needs-landing", ""), "land's own predicate");
-    assert_eq!(intent(&v, "projects/bp/issues/0010.twin"), ("needs-approval", ""), "only the reviewer's counts");
+    assert_eq!(intent(&v, "projects/bp/issues/0009.lands"), ("needs-review", lenses), "a forge approval is no review");
+    assert_eq!(intent(&v, "projects/bp/issues/0010.twin"), ("needs-landing", ""), "land's own predicate");
     // The vault's own snapshot reads the same, with its age; a project with none reads `not read`.
     let own = d.path().join(".bp/forge/bp");
     std::fs::create_dir_all(&own).unwrap();

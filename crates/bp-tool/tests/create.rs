@@ -415,7 +415,10 @@ fn create_refuses_low_under_an_approved_milestone() {
     let before = commits(root);
     let (code, v) = create("Approved low", "low");
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("not_a_label")), "{v}");
-    assert!(v["fix"].as_str().unwrap().contains("bp lower projects/bp/issues/approved-low <level> --reason"), "{v}");
+    // The issue does not exist, so the fix creates it at medium and names the lowering of its head (review of #98).
+    let fix = "create projects/bp/issues/approved-low with no risk field, which reads medium; once its pull request is \
+               open, the human runs bp lower projects/bp/issues/approved-low low --reason";
+    assert!(v["fix"].as_str().unwrap().starts_with(fix), "{v}");
     assert_eq!(commits(root), before, "a refusal writes nothing");
     for level in ["medium", "high"] {
         let (code, v) = create(&format!("Approved {level}"), level);
@@ -456,7 +459,9 @@ fn a_lowering_after_approval_or_a_claim_names_bp_lower() {
     let before = commits(root);
     refuses(&bp_env(root, &session, &["set", case, "risk", "low"]).1, case);
     let create = ["create", "issue", "--project", "bp", "--title", "Late low", "--under", M, "--field", "risk=low"];
-    refuses(&bp_env(root, &session, &create).1, "projects/bp/issues/late-low");
+    let (_, v) = bp_env(root, &session, &create);
+    assert_eq!(v["code"], "not_a_label", "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("bp lower projects/bp/issues/late-low low --reason"), "{v}");
     assert_eq!(commits(root), before, "a refusal writes nothing");
     assert_eq!(bp_env(root, &session, &["set", case, "risk", "high"]).0, Some(0), "a raise stays a label");
 }

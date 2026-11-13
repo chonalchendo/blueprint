@@ -9,7 +9,9 @@ use bp_change::intents::{self, Base, Block, Claim, Milestone, PullRequest, STACK
 use bp_vault::{Body, Check, Filter, Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::{Map, Value};
 
+mod declared;
 mod reviews;
+pub use declared::declared;
 pub use reviews::*;
 
 /// The issues under the milestone `id`, and while fewer than a batch are live, its finish line and the blocks the
@@ -133,23 +135,14 @@ pub fn blocks(vault: &Vault, id: &str) -> Result<Vec<Block>, Refusal> {
     Ok(named.map(|c| Block { name: c.attrs["name"].clone(), hash: c.hash() }).collect())
 }
 
-/// The project's reviewer identity, the forge login whose approval alone counts; empty when unset (13, Project).
-pub fn reviewer(index: &Index, id: &str) -> Result<String, Refusal> {
-    let project = Id::parse(id).ok().and_then(|i| i.project().map(str::to_string)).unwrap_or_default();
-    Ok(index.header(&format!("projects/{project}/project"))?.and_then(|h| text(&h, "reviewer")).unwrap_or_default())
-}
-
-/// The forge's pull request as the predicates read it: its head, its base, green or failed, and the reviewer's
-/// approval at the head.
-pub fn pull_request(p: &bp_forge::PullRequest, reviewer: &str) -> PullRequest {
-    let approved = p.approved_heads(reviewer).contains(&p.head_ref_oid.as_str());
+/// The forge's pull request as the predicates read it: its head, its base, and green or failed. No forge approval
+/// counts (37, design change 3).
+pub fn pull_request(p: &bp_forge::PullRequest) -> PullRequest {
     PullRequest {
         head: p.head_ref_oid.clone(),
         base: p.base_ref_name.clone(),
         green: p.is_green(),
         failed: p.has_failed(),
-        approved,
-        reviewer: reviewer.to_string(),
     }
 }
 

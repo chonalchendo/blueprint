@@ -3,6 +3,26 @@
 
 use std::path::{Path, PathBuf};
 
+/// The variables that move where git reads: the repository, its index, its objects, its refs and its history. A git
+/// hook that runs bp, or the caller's shell, may set one; each process bp starts on a code repository, git or `gh`,
+/// runs without them.
+pub const LOCATION: [&str; 14] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_PREFIX",
+];
+
 /// The git repository that holds a directory.
 pub struct Repo {
     /// The worktree top: the directory that holds `.git`.

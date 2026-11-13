@@ -44,7 +44,7 @@ Write the review in this shape:
 - The finding says what is wrong and what would pass, then gives the reproduction. Escape a `|` in a cell: `\|`.
 - After the table, the line `What holds:` and one line for each failed attack: what you ran, in backticks.
 - An attack that timed out or needs a denied verb gets a `not run:` line with its cause. It is never a pass.
-- If every row is `warn` or `risk`, the review is approvable: say so on the line before the last.
+- If every row is `warn` or `risk`, say so on the line before the last: no row holds the land.
 - Last line: the session's record call, which you do not run. `<mode>` is `verify` for the lens `verify`, else `full`.
 Call: `bp record review <id> --field head=<sha> --field round=<n> --field lens=<lens> --field mode=<mode> --field role=reviewer --body-file <file> --json`.
 

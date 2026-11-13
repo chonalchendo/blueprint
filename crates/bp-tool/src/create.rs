@@ -106,8 +106,18 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     let under = parent(&vault, index, kind, &id, under.as_ref())?;
     // Absent reads medium, so a first `low` is a lowering: a label only before the milestone's approval (37, design
     // change 1).
+    // The issue does not exist yet, so it has no head to lower: the fix creates it at medium (review of #98, the late
+    // list).
     if let Some(level) = fields.get("risk") {
-        set::lowers(kind, &id, "risk", None, level, || set::lowerable(&vault, index, under.as_ref(), &id))?;
+        set::lowers(kind, &id, "risk", None, level, || set::lowerable(&vault, index, under.as_ref(), &id)).map_err(
+            |mut r| {
+                r.fix = format!(
+                    "create {id} with no risk field, which reads medium; once its pull request is open, the human \
+                     runs bp lower {id} low --reason <why> from a shell"
+                );
+                r
+            },
+        )?;
     }
     let header = Header {
         kind,
