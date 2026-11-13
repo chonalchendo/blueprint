@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use bp_change::intents::Intent;
+use bp_change::intents::{Effort, Intent, Model};
 use bp_change::{IssueStatus, MilestoneStatus};
 use bp_design::{ConcernState, DeltaState, DesignStatus, ProjectStatus};
 use bp_reasoning::{ConventionStatus, DecisionStatus, InboxStatus, LearningStatus, ThreadStatus};
@@ -55,6 +55,12 @@ pub struct ListRow {
     /// What the intent names; present with the intent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The model of the dispatch the intent leads to (37, design change 9); absent when it leads to none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<Model>,
+    /// The effort of that dispatch; present with the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 }
 
 /// Where the intents read the forge from.
@@ -143,8 +149,10 @@ pub fn list(
     };
     let (rows, total) = index.list(&read)?;
     if !matches!(kind, Kind::Issue | Kind::Milestone | Kind::Design | Kind::Learning) {
-        let rows: Vec<ListRow> =
-            rows.into_iter().map(|row| ListRow { row, stale: None, intent: None, note: None }).collect();
+        let rows: Vec<ListRow> = rows
+            .into_iter()
+            .map(|row| ListRow { row, stale: None, intent: None, note: None, model: None, effort: None })
+            .collect();
         return Ok(List {
             truncated: total > rows.len(),
             rows,
@@ -175,7 +183,8 @@ pub fn list(
             _ => None,
         };
         let note = verdict.intent.map(|_| verdict.note);
-        out.push(ListRow { row, stale, intent: verdict.intent, note });
+        let (model, effort) = (verdict.route.map(|r| r.model), verdict.route.map(|r| r.effort));
+        out.push(ListRow { row, stale, intent: verdict.intent, note, model, effort });
     }
     let total = if ready { out.len() } else { total };
     out.truncate(filter.limit);

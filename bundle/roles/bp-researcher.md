@@ -1,7 +1,6 @@
 ---
 name: bp-researcher
 description: Use when a session needs one question answered before it designs, shapes or deliberates.
-model: sonnet
 tools: Bash, Read, Grep, Glob, WebSearch, WebFetch, Agent
 skills: bp-research
 ---

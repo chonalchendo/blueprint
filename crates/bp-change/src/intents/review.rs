@@ -44,3 +44,9 @@ pub fn round(i: &Issue, head: &str) -> u64 {
 pub fn missing(i: &Issue, head: &str) -> Vec<rounds::Lens> {
     rounds::missing(uncapped(i, head), security(i, head), &i.reviews, head)
 }
+
+/// The level before a pull request exists, which ready and an escalation route by: the label, read medium when absent,
+/// and the highest level an earlier head recorded, never lower. No diff is in view, so nothing is computed afresh.
+pub fn level_before_pr(i: &Issue) -> Level {
+    risk::level(i.declared.unwrap_or(Level::Medium), i.runs.iter().filter_map(|r| Some(r.risk?.level)).max(), 0)
+}

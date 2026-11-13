@@ -16,9 +16,11 @@ use crate::rounds::{self, Review};
 mod gates;
 mod planning;
 mod review;
+mod route;
 pub use gates::*;
 pub use planning::*;
 pub use review::*;
+pub use route::*;
 
 /// Twelve hours: a claim older than this with no run since reads `working (stale)`.
 pub const STALE_AFTER: i64 = 12 * 3600;
@@ -252,8 +254,10 @@ pub struct Issue {
     /// The review records, each as its first commit wrote it, with its dispositions; read only while a pull request
     /// is in view.
     pub reviews: Vec<Review>,
-    /// The issue's `risk` label; `None` reads medium. Read only while a pull request is in view.
+    /// The issue's `risk` label; `None` reads medium.
     pub declared: Option<Level>,
+    /// The issue's `complex` label: its build and fix go to Fable (36, section 3).
+    pub complex: bool,
     /// The issue caused a pending delta, which raises it to high (37, design change 1). Read only while a pull request
     /// is in view.
     pub delta: bool,
@@ -278,15 +282,24 @@ pub struct Verdict {
     pub intent: Option<Intent>,
     /// What the intent names: the failed run, the targets waited on, `stale`.
     pub note: String,
+    /// The model and effort of the dispatch the intent leads to; `None` for an intent that dispatches no one, and where
+    /// the table of 36, section 3 reads n/a (37, design change 9).
+    #[serde(flatten)]
+    pub route: Option<Route>,
 }
 
 impl Verdict {
     fn of(intent: Intent, note: impl Into<String>) -> Self {
-        Self { intent: Some(intent), note: note.into() }
+        Self { intent: Some(intent), note: note.into(), route: None }
+    }
+
+    fn routed(mut self, task: Task, level: Level, complex: bool) -> Self {
+        self.route = route(task, level, complex);
+        self
     }
 
     /// No predicate holds.
-    pub const NONE: Self = Self { intent: None, note: String::new() };
+    pub const NONE: Self = Self { intent: None, note: String::new(), route: None };
 }
 
 /// A live issue: open or in progress.
@@ -309,7 +322,8 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     }
     // Escalated holds until the issue changes after the release: the human's answer is a write to the issue.
     if latest_claim(&i.claims).is_some_and(|c| c.escalated) && !i.answered {
-        return Verdict::of(Intent::Blocked, "escalated");
+        let at = i.pr.as_ref().map_or_else(|| level_before_pr(i), |p| level(i, &p.head).0);
+        return Verdict::of(Intent::Blocked, "escalated").routed(Task::Escalation, at, false);
     }
     for d in &i.depends {
         match d.status.as_deref() {
@@ -323,7 +337,7 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     }
     if i.status == "open" && held.is_none() && i.pr.is_none() {
         return match stack(&i.depends) {
-            Ok(_) => Verdict::of(Intent::Ready, ""),
+            Ok(_) => Verdict::of(Intent::Ready, "").routed(Task::Build, level_before_pr(i), i.complex),
             Err(Unstacked::Unpushed(waits)) => Verdict::of(Intent::Waiting, format!("waits for {}", waits.join(", "))),
             Err(Unstacked::Split(ids)) => {
                 Verdict::of(Intent::Waiting, format!("waits for one stack: land all but one of {}", ids.join(", ")))
@@ -365,12 +379,15 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
     if !missing.is_empty() {
         let lenses: Vec<&str> = missing.iter().map(|l| l.as_str()).collect();
         let round = round(i, &pr.head);
-        return Verdict::of(Intent::NeedsReview, format!("round {round}: missing lenses: {}", lenses.join(", ")));
+        let task = if round == 1 { Task::ReviewFirst } else { Task::ReviewVerify };
+        let note = format!("round {round}: missing lenses: {}", lenses.join(", "));
+        return Verdict::of(Intent::NeedsReview, note).routed(task, level, false);
     }
     // A finding without a disposition needs a response whatever the checks say: the fix may be what turns them green.
     let open = rounds::unanswered(&i.reviews, &pr.head);
     if !open.is_empty() {
-        return Verdict::of(Intent::NeedsResponse, format!("no disposition: {}", rounds::named(&open, &pr.head)));
+        let note = format!("no disposition: {}", rounds::named(&open, &pr.head));
+        return Verdict::of(Intent::NeedsResponse, note).routed(Task::Build, level, i.complex);
     }
     if !pr.green {
         return Verdict::of(Intent::Working, "checks not green");
@@ -505,6 +522,11 @@ mod tests {
     }
 
     const BASE: Base = Base::Unknown;
+
+    /// The verdict without its route: these tests read the intent and its note, and `route` reads the routing.
+    fn bare(v: Verdict) -> Verdict {
+        Verdict { route: None, ..v }
+    }
 
     fn pr(head: &str, green: bool, approved: bool) -> PullRequest {
         PullRequest { head: head.into(), base: Some("master".into()), green, approved, ..PullRequest::default() }
@@ -802,7 +824,7 @@ mod tests {
     fn escalated_blocks_until_the_issue_changes() {
         let escalated = Claim { at: Some(NOW - 600), released: Some(NOW - 300), escalated: true };
         let i = Issue { claims: vec![escalated], answered: false, ..open() };
-        assert_eq!(issue(&i, NOW), Verdict::of(Intent::Blocked, "escalated"));
+        assert_eq!(bare(issue(&i, NOW)), Verdict::of(Intent::Blocked, "escalated"));
         let answered = Issue { answered: true, ..i };
         assert_eq!(issue(&answered, NOW).intent, Some(Intent::Ready));
     }
@@ -837,7 +859,7 @@ mod tests {
 
         let approved = Milestone { finish: vec![block("a"), block("b")], ..status("approved") };
         let v = milestone("m", &approved);
-        assert_eq!(v, Verdict::of(Intent::NeedsDerivation, "a, b uncovered; bp walk m --for derive"));
+        assert_eq!(bare(v), Verdict::of(Intent::NeedsDerivation, "a, b uncovered; bp walk m --for derive"));
         let full = Milestone { issues: vec!["open".into(), "in-progress".into(), "open".into()], ..approved.clone() };
         assert_eq!(of(&full), None, "a full batch waits for its issues");
         let covered = Milestone { covered: ["a".into(), "b".into()].into(), ..approved.clone() };
@@ -879,7 +901,7 @@ mod tests {
         let unproven = unproven_concerns(&answers, None);
         assert_eq!(unproven, ["a designed", "b open"], "no stamp proves the designed a; c is waived");
         let note = "a designed, b open; bp walk d --for shape";
-        assert_eq!(design("d", &[], &unproven, false), Verdict::of(Intent::NeedsShaping, note));
+        assert_eq!(bare(design("d", &[], &unproven, false)), Verdict::of(Intent::NeedsShaping, note));
         assert_eq!(design("d", &[], &unproven, true), Verdict::NONE, "a planned or approved milestone");
         assert_eq!(
             unproven_concerns(&answers, Some(NOW)),
@@ -905,7 +927,7 @@ mod tests {
             ..Issue::default()
         };
         let v = issue(&open_rows, NOW);
-        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 2, 3"));
+        assert_eq!(bare(v), Verdict::of(Intent::NeedsResponse, "no disposition: findings 2, 3"));
         let mut two = open_rows.clone();
         two.reviews[1].rows.push(Row::default());
         let v = issue(&two, NOW);
@@ -924,10 +946,14 @@ mod tests {
             ..Issue::default()
         };
         let v = issue(&red, NOW);
-        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"), "checks not green");
+        assert_eq!(bare(v), Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"), "checks not green");
         let approved = Issue { pr: Some(pr("h", false, true)), ..red.clone() };
         let v = issue(&approved, NOW);
-        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"), "approved, checks not green");
+        assert_eq!(
+            bare(v),
+            Verdict::of(Intent::NeedsResponse, "no disposition: findings 1"),
+            "approved, checks not green"
+        );
         let answered = Issue { reviews: reviewed("h", vec![answered(Answer::Declined)]), ..red };
         assert_eq!(issue(&answered, NOW), Verdict::of(Intent::Working, "checks not green"), "every finding answered");
     }
@@ -945,7 +971,7 @@ mod tests {
         };
         i.reviews.extend([Lens::Conformance, Lens::FailurePaths].map(|l| review("h", 1, l, Vec::new())));
         let want = "round 1: missing lenses: conformance, failure-paths, tests-and-checks, security";
-        assert_eq!(issue(&i, NOW), Verdict::of(Intent::NeedsReview, want));
+        assert_eq!(bare(issue(&i, NOW)), Verdict::of(Intent::NeedsReview, want));
     }
 
     #[test]
@@ -1017,7 +1043,11 @@ mod tests {
         assert_eq!(note(&partial), "round 1: missing lenses: conformance, failure-paths");
         partial.reviews.extend(reviewed("h2", Vec::new()));
         let v = issue(&partial, NOW);
-        assert_eq!(v, Verdict::of(Intent::NeedsResponse, "no disposition: r/h-conformance findings 1"), "it holds");
+        assert_eq!(
+            bare(v),
+            Verdict::of(Intent::NeedsResponse, "no disposition: r/h-conformance findings 1"),
+            "it holds"
+        );
         partial.reviews[0].rows[0].answer = Some(Answer::Declined);
         let v = issue(&partial, NOW);
         assert_eq!(v.note, "error rows hold the land: r/h-conformance findings 1", "a decline holds at a new head");
@@ -1051,7 +1081,7 @@ mod tests {
         assert_eq!(issue(&capped, NOW), Verdict::of(Intent::NeedsApproval, note));
         // A moved head clears nothing: the row holds until a verify review of the next round does not re-report it.
         let mut moved = Issue { pr: Some(pr("h3", true, false)), ..capped.clone() };
-        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::NeedsReview, "round 3: missing lenses: verify"));
+        assert_eq!(bare(issue(&moved, NOW)), Verdict::of(Intent::NeedsReview, "round 3: missing lenses: verify"));
         let again = Row { error: true, of: Some(("r/h2-verify".into(), 1)), ..Row::default() };
         moved.reviews.push(review("h3", 3, Lens::Verify, vec![again]));
         // At high's cap, an error row goes to the human: no new dispatch.
@@ -1059,6 +1089,6 @@ mod tests {
         moved.pr = Some(pr("h4", true, false));
         assert_eq!(issue(&moved, NOW), Verdict::of(Intent::Blocked, "round cap: the human decides"), "at a new head");
         moved.reviews.last_mut().unwrap().rows.clear();
-        assert_eq!(issue(&moved, NOW), Verdict::of(Intent::NeedsReview, "round 4: missing lenses: verify"));
+        assert_eq!(bare(issue(&moved, NOW)), Verdict::of(Intent::NeedsReview, "round 4: missing lenses: verify"));
     }
 }
