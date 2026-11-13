@@ -1,7 +1,6 @@
 ---
 name: bp-worker
 description: Use to complete one ready issue, or to answer the review of its pull request.
-model: sonnet
 tools: Bash, Read, Edit, Write, Grep, Glob
 skills: bp-complete, bp-respond
 ---

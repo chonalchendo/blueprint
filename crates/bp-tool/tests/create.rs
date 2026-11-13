@@ -380,6 +380,23 @@ fn an_issue_takes_its_risk_level_at_create() {
 }
 
 #[test]
+fn an_issue_takes_its_complex_label_at_create() {
+    let dir = vault();
+    let root = dir.path();
+    let create = |title: &str, value: &str| {
+        let field = format!("complex={value}");
+        bp(root, &["create", "issue", "--project", "bp", "--title", title, "--under", M, "--field", &field])
+    };
+    let (code, v) = create("Hard one", "true");
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(bp(root, &["show", "projects/bp/issues/hard-one"]).1["complex"], true, "37, design change 9");
+    let before = commits(root);
+    let (code, v) = create("Other", "yes");
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("unknown_value")), "a bool is true or false: {v}");
+    assert_eq!(commits(root), before, "a refusal writes nothing");
+}
+
+#[test]
 fn create_refuses_low_under_an_approved_milestone() {
     let dir = vault();
     let root = dir.path();

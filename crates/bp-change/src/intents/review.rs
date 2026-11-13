@@ -8,14 +8,16 @@ use crate::rounds;
 
 /// The level at `head` before the round caps: the highest of the declared level, the level `pr` recorded at the head
 /// and each raise (37, design changes 1 and 2). A head that no `pr` run names reads the highest level recorded at an
-/// earlier head, so a plain `git push` cannot lower the level or the lenses; none at all reads medium, never low. The
-/// intents fetch nothing, so `bp risk` alone judges the diff afresh.
+/// earlier head, so a plain `git push` cannot lower the level or the lenses; with a pull request open and none at all,
+/// the computed level reads medium, never low. A ready issue has no pull request and no head: the caller passes `""`,
+/// so every recorded run counts as an earlier head's, and the label alone sets the floor. The intents fetch nothing,
+/// so `bp risk` alone judges the diff afresh.
 fn uncapped(i: &Issue, head: &str) -> Level {
     let raises = i.reviews.iter().filter(|r| r.raises()).count() + usize::from(i.delta);
     let computed = recorded_risk(&i.runs, head)
         .or_else(|| i.runs.iter().filter_map(|r| Some(r.risk?.level)).max())
-        .unwrap_or(Level::Medium);
-    risk::level(i.declared.unwrap_or(Level::Medium), Some(computed), raises)
+        .or(i.pr.as_ref().map(|_| Level::Medium));
+    risk::level(i.declared.unwrap_or(Level::Medium), computed, raises)
 }
 
 /// A run at `head` records that the diff touches a high path outside the low patterns, so round one adds the

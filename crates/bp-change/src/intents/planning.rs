@@ -140,7 +140,8 @@ pub fn design(id: &str, uncited: &[String], unproven: &[String], due: bool) -> V
         return Verdict::of(Intent::Drifted, format!("{}; bp walk {id} --for triage-drift", uncited.join(", ")));
     }
     if !unproven.is_empty() && !due {
-        return Verdict::of(Intent::NeedsShaping, format!("{}; bp walk {id} --for shape", unproven.join(", ")));
+        let note = format!("{}; bp walk {id} --for shape", unproven.join(", "));
+        return Verdict::of(Intent::NeedsShaping, note);
     }
     Verdict::NONE
 }

@@ -1,7 +1,6 @@
 ---
 name: bp-reviewer
 description: Use to review the pull request of one issue, and return the review.
-model: opus
 tools: Bash, Read, Grep, Glob
 skills: bp-review
 ---

@@ -104,7 +104,8 @@ pub fn milestone(vault: &Vault, index: &Index, project: &str, id: &str) -> Resul
     let mut issues = Vec::new();
     for row in index.list(&under)?.0 {
         let v = intents.row(Kind::Issue, &row.id, row.status.as_deref())?;
-        issues.push(ListRow { row, stale: None, note: v.intent.map(|_| v.note), intent: v.intent });
+        let (model, effort) = (v.route.map(|r| r.model), v.route.map(|r| r.effort));
+        issues.push(ListRow { row, stale: None, note: v.intent.map(|_| v.note), intent: v.intent, model, effort });
     }
     let show = show(vault, Some(index), &id, None, None, false)?;
     let runs = index.records(id.as_str(), Kind::Run)?;

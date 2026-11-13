@@ -305,15 +305,12 @@ fn of(
         let record = &records[claims.iter().position(|c| std::ptr::eq(c, latest)).expect("the latest is one of them")];
         Id::parse(id).ok().zip(Id::parse(&record.id).ok()).is_some_and(|(id, claim)| vault.touched_after(&id, &claim))
     });
-    // The reviews and the level's inputs matter only while a pull request is in view: needs review counts the lenses
-    // at its head, and needs response reads their dispositions (21; 37, design change 8).
-    let (reviews, declared, delta) = match &pr {
-        Some(_) => {
-            let r = crate::inputs::reviewed(vault, index, id)?;
-            (r.reviews, r.declared, r.delta)
-        }
-        None => (Vec::new(), None, false),
-    };
+    // The reviews and the delta read with or without a pull request: ready routes its build by the same level the
+    // review path reads, so a delta the issue caused or an earlier review's `risk` row raises it (37, design changes
+    // 1 and 9).
+    let reviewed = crate::inputs::reviewed(vault, index, id)?;
+    let (reviews, delta) = (reviewed.reviews, reviewed.delta);
+    let crate::inputs::Labels { declared, complex, unread } = crate::inputs::labels(&header);
     let issue = Issue {
         status: status.into(),
         claims,
@@ -321,7 +318,9 @@ fn of(
         blocks,
         reviews,
         declared,
+        complex,
         delta,
+        unread,
         depends,
         pr,
         base,
