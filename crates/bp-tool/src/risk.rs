@@ -121,18 +121,24 @@ fn judged(cwd: &Path, index: &Index, id: &Id) -> Result<Option<Judged>, Refusal>
     judge(&top, &target, heads).map(Some)
 }
 
-/// The level of each head's diff against the base that origin names for `target`, by the rules on that base; the
-/// highest wins, and a tie keeps the first head's reasons. `pr` calls it with the head it pushes.
+/// The level of each head's diff against the base that origin names for `target`, by the rules on that base. `pr`
+/// calls it with the head it pushes.
 pub(crate) fn judge(top: &Path, target: &str, heads: Vec<String>) -> Result<Judged, Refusal> {
     let Some(base) = at_origin(top, target)? else {
         return Err(Refusal::failed(format!("origin/{target}"), "origin holds no base branch of the claim"));
     };
-    let config = rules(top, &base, target, &heads)?;
+    let config = rules(top, &base, &format!("origin/{target}"), &heads)?;
+    judge_by(top, base, heads, &config)
+}
+
+/// The level of each head's diff against `base`, by `config`; the highest wins, and a tie keeps the first head's
+/// reasons. `bp gate` calls it with the base the forge names and that base's rules.
+pub(crate) fn judge_by(top: &Path, base: String, heads: Vec<String>, config: &Config) -> Result<Judged, Refusal> {
     let mut best: Option<Computed> = None;
     for head in &heads {
         let range = format!("{base}...{head}");
         let args = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--numstat", "-z", "--find-renames", &range];
-        let c = risk::computed(&risk::numstat(&git(top, &args)?), &config);
+        let c = risk::computed(&risk::numstat(&git(top, &args)?), config);
         if best.as_ref().is_none_or(|b| c.level > b.level) {
             best = Some(c);
         }
@@ -155,14 +161,16 @@ fn at_origin(top: &Path, branch: &str) -> Result<Option<String>, Refusal> {
 
 /// `.bp/risk.yml` on the base commit; the default when it holds none. An exact pattern that names a directory of the
 /// base tree or of a head's, in any ASCII case, matches no path under it, so it refuses as a parse failure does.
-fn rules(top: &Path, base: &str, target: &str, heads: &[String]) -> Result<Config, Refusal> {
+/// `place` names the base in a refusal: `origin/<branch>`, or the sha `bp gate` was given.
+pub(crate) fn rules(top: &Path, base: &str, place: &str, heads: &[String]) -> Result<Config, Refusal> {
     let at = format!("{base}:{RISK_FILE}");
     let invalid = |why: String| {
+        let branch = place.strip_prefix("origin/").unwrap_or(place);
         Refusal::new(
             Code::RiskFileInvalid,
-            format!("origin/{target}:{RISK_FILE}"),
+            format!("{place}:{RISK_FILE}"),
             "the risk file holds `high` and `low` lists of path patterns, `limits` and `signer` (37, design change 1)",
-            format!("{why}; edit {RISK_FILE} on {target} by hand, then git commit it"),
+            format!("{why}; edit {RISK_FILE} on {branch} by hand, then git commit it"),
         )
     };
     if git(top, &["cat-file", "-e", &at]).is_err() {

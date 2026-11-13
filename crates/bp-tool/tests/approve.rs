@@ -32,7 +32,11 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
     let bin = t.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let t_ = t.path().display();
-    let gh = format!("#!/bin/sh\n[ \"$1 $2\" = 'pr list' ] || exit 9\ncat '{t_}/prs.json' 2>/dev/null || echo '[]'\n");
+    // `gh pr comment <n> --body <text>` keeps the number and the text.
+    let gh = format!(
+        "#!/bin/sh\n[ \"$1 $2 $4\" = 'pr comment --body' ] && {{ echo \"$3\" > '{t_}/posted'; printf %s \"$5\" >> '{t_}/posted'; exit 0; }}\n\
+         [ \"$1 $2\" = 'pr list' ] || exit 9\ncat '{t_}/prs.json' 2>/dev/null || echo '[]'\n"
+    );
     let ssh_add = format!("#!/bin/sh\n[ \"$1\" = -L ] && [ -s '{t_}/agent-keys' ] || exit 1\ncat '{t_}/agent-keys'\n");
     for (name, text) in [("gh", gh), ("ssh-add", ssh_add)] {
         std::fs::write(bin.join(name), text).unwrap();
@@ -127,7 +131,18 @@ fn approve_and_lower_sign_the_head_with_the_signers_key() {
     let message = git(v, &["log", "-1", "--format=%B"]);
     assert!(message.contains("Bp-Verb: approve") && message.contains("Bp-Role: human"), "{message}");
     assert_eq!(common::commits(v).parse::<u32>().unwrap(), before.parse::<u32>().unwrap() + 1);
+    // The comment for the forge check: the signed message's lines and the record's signature, in one block.
+    let comment = out["comment"].as_str().unwrap();
+    let block = format!("```bp-approval\nact: approve\nproject: bp\nnode: {ISSUE}\npull_request: 4\nhead: {HEAD}\n");
+    assert!(comment.contains(&format!("{block}-----BEGIN SSH SIGNATURE-----\n")), "{comment}");
+    let signature = &comment[comment.find("-----BEGIN").unwrap()..comment.rfind("\n```").unwrap()];
+    assert!(signature.ends_with("-----END SSH SIGNATURE-----") && text.contains(signature), "{comment}");
+    assert!(!t.join("posted").exists(), "no --post, no comment");
     assert_eq!(approve(&[], &human).0, Some(3), "a valid approval at this head is a repeat");
+    let (code, again) = bp(v, t, &[], &["approve", ISSUE, "--key", &human, "--post"]);
+    assert_eq!((code, &again["comment"]), (Some(3), &out["comment"]), "a repeat posts the same comment: {again}");
+    let posted = std::fs::read_to_string(t.join("posted")).unwrap();
+    assert_eq!(posted, format!("4\n{comment}"), "gh pr comment 4 --body <the comment>");
 
     let lower = |level: &str, k: &str| bp(v, t, &[], &["lower", ISSUE, level, "--reason", "docs only", "--key", k]);
     assert_eq!(lower("high", &human).0, Some(4), "a lowering names low or medium");
