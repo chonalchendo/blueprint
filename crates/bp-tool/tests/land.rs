@@ -1490,6 +1490,25 @@ fn a_body_line_is_never_the_label() {
     assert_eq!(risk["declared"], "high", "{risk}");
 }
 
+/// A ready issue routes by the level the review path reads, the committed history included (37, design change 9;
+/// review of #100, W5): a label lowered by hand after the milestone's approval routes as the one it replaced.
+#[test]
+fn a_ready_issue_routes_by_the_label_its_history_holds() {
+    let (v, _t) = setup();
+    let v = v.path();
+    let route = || {
+        let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "issue"]);
+        let row = list["rows"].as_array().unwrap().iter().find(|r| r["id"] == ISSUE).unwrap().clone();
+        (row["intent"].clone(), row["model"].clone(), row["effort"].clone())
+    };
+    assert_eq!(common::bp(v, &["set", ISSUE, "risk", "high"]).0, Some(0), "a label rises at any time");
+    assert_eq!(route(), (json!("ready"), json!("opus"), json!("high")));
+    let path = v.join(format!("{ISSUE}.md"));
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("risk: high\n", "risk: low\n")).unwrap();
+    git(v, &["commit", "-qam", "by hand"]);
+    assert_eq!(route(), (json!("ready"), json!("opus"), json!("high")), "the hand edit lowers nothing");
+}
+
 /// A high head lands only on the human's signed approval of that head, of that pull request, into that base (37,
 /// design changes 3 and 4). The intents read an approval record as it stands; `land` verifies it, so a hand-written
 /// label, a record of another pull request or base, a changed field and an approval of an earlier head refuse.

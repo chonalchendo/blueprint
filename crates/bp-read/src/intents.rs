@@ -306,12 +306,9 @@ fn of(
         Id::parse(id).ok().zip(Id::parse(&record.id).ok()).is_some_and(|(id, claim)| vault.touched_after(&id, &claim))
     });
     // The reviews and the delta read with or without a pull request: ready routes its build by the same level the
-    // review path reads, so a delta the issue caused or an earlier review's `risk` row raises it (37, design changes
-    // 1 and 9). The vault's history judges the label only where a pull request is in view: that is where a gate reads it.
-    let reviewed = match &pr {
-        Some(_) => crate::inputs::reviewed(vault, index, id)?,
-        None => crate::inputs::reviewed_by_header(vault, index, id)?,
-    };
+    // review path reads, the label from the vault's history included, so a delta the issue caused or an earlier
+    // review's `risk` row raises it, and a label lowered by hand does not lower it (37, design changes 1 and 9).
+    let reviewed = crate::inputs::reviewed(vault, index, id)?;
     let issue = Issue {
         id: id.to_string(),
         status: status.into(),
