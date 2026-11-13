@@ -356,3 +356,25 @@ fn a_dry_run_on_a_vault_with_no_commit_refuses_as_the_write_does() {
     assert_eq!((code, write["code"].as_str()), (Some(1), Some("could_not_run")), "{write}");
     assert_eq!((dry_code, &dry), (code, &write), "set's dry run refuses with the write's refusal");
 }
+
+#[test]
+fn an_issue_takes_its_risk_level_at_create() {
+    let dir = vault();
+    let root = dir.path();
+    let args = |title: &str, field: &str| {
+        ["create", "issue", "--project", "bp", "--title", title, "--under", M, "--field", field].map(str::to_string)
+    };
+    let run = |a: &[String]| bp(root, &a.iter().map(String::as_str).collect::<Vec<_>>());
+    let (code, v) = run(&args("Low one", "risk=low"));
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(bp(root, &["show", "projects/bp/issues/low-one"]).1["risk"], "low", "37, design change 1");
+    let before = commits(root);
+    for (field, exit, want) in [("risk=lowest", 2, "unknown_value"), ("severity=low", 4, "usage"), ("risk", 4, "usage")]
+    {
+        let (code, v) = run(&args("Other", field));
+        assert_eq!((code, v["code"].as_str()), (Some(exit), Some(want)), "{field}: {v}");
+    }
+    let milestone = ["create", "milestone", "--project", "bp", "--title", "N", "--field", "risk=low"];
+    assert_eq!(bp(root, &milestone).1["code"], "usage", "only an issue carries a risk level");
+    assert_eq!(commits(root), before, "a refusal writes nothing");
+}

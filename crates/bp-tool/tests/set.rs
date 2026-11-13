@@ -343,3 +343,27 @@ fn set_refuses_risk_lowering() {
     assert_eq!(bp(root, &["show", ISSUE]).1["risk"], "high");
     assert_eq!(bp(root, &["set", ISSUE, "risk", "high"]).0, Some(3), "the same level is a repeat");
 }
+
+#[test]
+fn set_lowers_risk_while_the_milestone_is_planned() {
+    let (issue, milestone) = ("projects/bp/issues/0002.b", "projects/bp/milestones/m");
+    let dir = common::vault(&[
+        (&format!("{milestone}.md"), "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\nGoal.\n"),
+        (
+            &format!("{issue}.md"),
+            &format!("---\nkind: issue\ntitle: B\nstatus: open\nunder: {milestone}\n---\n\nLead.\n"),
+        ),
+        ("shared/.keep", ""),
+    ]);
+    let root = dir.path();
+    // The level is set at derive and approved with the milestone (37, design change 1): a first low, and a lowering.
+    for level in ["low", "high", "medium"] {
+        let (code, v) = bp(root, &["set", issue, "risk", level]);
+        assert_eq!(code, Some(0), "{level}: {v}");
+    }
+    let path = root.join(format!("{milestone}.md"));
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("planned", "approved")).unwrap();
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "approve"]);
+    let (code, v) = bp(root, &["set", issue, "risk", "low"]);
+    assert_eq!((code, v["code"].as_str()), (Some(2), Some("not_a_label")), "after approval: {v}");
+}

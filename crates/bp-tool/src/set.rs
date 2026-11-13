@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use bp_change::MilestoneStatus;
 use bp_change::risk::Level;
 use bp_design::DesignStatus;
 use bp_operation::Role;
@@ -77,7 +78,13 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
         if was.as_ref() == Some(&value) {
             return Ok(Wrote::Already(serde_json::json!({ "id": id })));
         }
-        lowers(header.kind, &id, field, was.as_ref(), &value)?;
+        let planned = match &header.under {
+            Some(m) => {
+                bp_read::inputs::status(index, m.as_str())?.as_deref() == Some(MilestoneStatus::Planned.as_str())
+            }
+            None => false,
+        };
+        lowers(header.kind, &id, field, was.as_ref(), &value, planned)?;
         let new = bp_vault::set_field(&text, field, &value);
         (new, serde_json::json!({ "id": id, "field": field, "value": value, "was": was }), field.as_str())
     };
@@ -98,17 +105,18 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     Ok(Wrote::Changed(result))
 }
 
-/// `not_a_label` when the write lowers an issue's `risk`: only the human's signed record lowers a level (37, design
-/// change 2), so `set` writes a level at or above the one in force. An issue with no label reads medium, so a first
+/// `not_a_label` when the write lowers an issue's `risk` after its milestone is approved: the level is set at derive
+/// and approved with the milestone, so while the milestone is `planned` a level is a label; after it, only the
+/// human's signed record lowers a level (37, design changes 1 and 2). An issue with no label reads medium, so a first
 /// `low` is a lowering too.
-fn lowers(kind: Kind, id: &Id, field: &str, was: Option<&Value>, value: &Value) -> Result<(), Refusal> {
+fn lowers(kind: Kind, id: &Id, field: &str, was: Option<&Value>, value: &Value, planned: bool) -> Result<(), Refusal> {
     let rank = |v: Option<&Value>| v.and_then(Value::as_str).and_then(|l| l.parse::<Level>().ok());
     match (rank(was).or(Some(Level::Medium)), rank(Some(value))) {
-        (Some(was), Some(now)) if kind == Kind::Issue && field == "risk" && now < was => Err(Refusal::new(
+        (Some(was), Some(now)) if kind == Kind::Issue && field == "risk" && now < was && !planned => Err(Refusal::new(
             Code::NotALabel,
             format!("{id} risk"),
-            "only a signed human record lowers a risk level; set writes a first level or a higher one (37, design \
-             change 2)",
+            "after its milestone is approved, only a signed human record lowers a risk level; set writes a first \
+             level or a higher one (37, design changes 1 and 2)",
             format!("the human runs bp lower {id} <level> --reason <why> from a shell"),
         )),
         _ => Ok(()),
