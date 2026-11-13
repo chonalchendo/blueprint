@@ -830,6 +830,8 @@ fn a_level_rise_after_round_one_adds_its_missing_lenses() {
         assert_eq!(code, Some(0), "{lens}: {got}");
     }
     assert_eq!(intent(v), (json!("needs-approval"), json!("")));
+}
+
 /// Replaces the `## Check` section of [`ISSUE`] with `blocks` and commits the vault.
 fn checks(v: &Path, blocks: &str) {
     let path = v.join(format!("{ISSUE}.md"));
