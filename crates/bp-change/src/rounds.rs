@@ -50,6 +50,10 @@ pub fn lenses(level: Level, security: bool) -> Vec<Lens> {
     out
 }
 
+/// The severity words `record review` accepts (15, record). A word outside them is refused at record; one already in
+/// a record counts as an error ([`is_error`]).
+pub const SEVERITIES: [&str; 3] = ["error", "warn", crate::risk::RISK_ROW];
+
 /// A severity cell counts as an error unless it is `warn` or `risk`: a word the tool does not know blocks, as an
 /// error does.
 pub fn is_error(severity: &str) -> bool {
@@ -61,9 +65,9 @@ pub fn is_error(severity: &str) -> bool {
 pub enum Answer {
     /// `fixed`: the next head carries the fix.
     Fixed,
-    /// `declined`, with a reason that names no other issue.
+    /// `declined`, with a reason that names no live follow-up issue.
     Declined,
-    /// `declined`, with a reason that names a follow-up issue (37, design change 7).
+    /// `declined`, with a reason that names a live follow-up issue under the same milestone (37, design change 7).
     FollowUp,
 }
 
@@ -74,10 +78,12 @@ pub struct Row {
     pub error: bool,
     /// A `risk` row: it raises the level to high and needs no disposition (37, design change 2).
     pub risk: bool,
-    /// An error row of a `verify` review whose location the fix diff does not show; `record` writes the list.
+    /// A new error row of a `verify` review at a path the fix diff does not show; `record` writes the list.
     pub late: bool,
     /// The disposition that answers it; `None` while none does.
     pub answer: Option<Answer>,
+    /// The earlier row it re-reports, as the review id and the row counted from 1: its `of` cell.
+    pub of: Option<(String, u64)>,
 }
 
 impl Row {
@@ -110,11 +116,23 @@ impl Review {
     }
 }
 
-/// The round of `head` (37, design change 6): the round of the reviews at it; else the round after the latest, or 1
-/// when no head has a review yet. Round one is the first head with a review; each later head with one is the next.
-pub fn round_of(reviews: &[Review], head: &str) -> u64 {
+/// Round one is still open (37, design change 6): no review of a later round exists, and no head holds a review of
+/// each lens of `level`. A later round, once recorded, keeps round one closed whatever the level reads after it.
+pub fn round_one_open(level: Level, security: bool, reviews: &[Review]) -> bool {
+    let complete = |head: &str| {
+        lenses(level, security).iter().all(|l| reviews.iter().any(|r| r.round == 1 && r.head == head && r.lens == *l))
+    };
+    !reviews.iter().any(|r| r.round > 1) && !reviews.iter().any(|r| complete(&r.head))
+}
+
+/// The round of `head` (37, design change 6): the round of the reviews at it; else round one while it is open, so a
+/// new head before round one completes needs every lens again; else the round after the latest.
+pub fn round_of(level: Level, security: bool, reviews: &[Review], head: &str) -> u64 {
     if let Some(round) = reviews.iter().filter(|r| r.head == head).map(|r| r.round).max() {
         return round;
+    }
+    if round_one_open(level, security, reviews) {
+        return 1;
     }
     reviews.iter().map(|r| r.round).max().map_or(1, |r| r + 1)
 }
@@ -124,16 +142,18 @@ pub const fn mode(round: u64) -> Mode {
     if round > 1 { Mode::Verify } else { Mode::Full }
 }
 
-/// The head the last round before `round` reviewed: the base of the fix diff that a `verify` review reads.
+/// The head the last round before `round` reviewed, by time: the base of the fix diff that a `verify` review reads.
 pub fn prior_head(reviews: &[Review], round: u64) -> Option<&str> {
-    reviews.iter().filter(|r| r.round < round).max_by_key(|r| r.round).map(|r| r.head.as_str())
+    let before = reviews.iter().filter(|r| r.round < round);
+    before.max_by_key(|r| r.round).map(|r| r.head.as_str())
 }
 
-/// The level after the round caps (37, design change 6), and the round that raised it last. From `base`, each
-/// `verify` round at or past the cap of the level so far, whose reviews hold an error row that blocks, raises the
-/// level one step. Round one never raises: a low issue fixes its round-one errors, and the next head needs one
-/// `verify` round. High stays high past its cap: the human decides (34, design change 6).
-pub fn capped(base: Level, reviews: &[Review]) -> (Level, Option<u64>) {
+/// The level after the round caps (37, design change 6), and the round that raised it last with the level whose cap
+/// that round passed. From `base`, each `verify` round at or past the cap of the level so far, whose reviews hold an
+/// error row that blocks, raises the level one step. Round one never raises: a low issue fixes its round-one errors,
+/// and the next head needs one `verify` round. High stays high past its cap: the intent reads blocked, and the human
+/// decides.
+pub fn capped(base: Level, reviews: &[Review]) -> (Level, Option<(u64, Level)>) {
     let mut rounds: Vec<u64> = reviews.iter().map(|r| r.round).filter(|&r| r > 1).collect();
     rounds.sort_unstable();
     rounds.dedup();
@@ -146,51 +166,78 @@ pub fn capped(base: Level, reviews: &[Review]) -> (Level, Option<u64>) {
                 Level::Medium | Level::High => Level::High,
             };
             if up != level {
-                (level, at) = (up, Some(round));
+                (level, at) = (up, Some((round, level)));
             }
         }
     }
     (level, at)
 }
 
-/// The reviews needs review still waits for at `head` (37, design change 8): at a round-one head, each lens of
-/// `level` with no review record there; at a later head, one `verify` review.
+/// The reviews needs review still waits for at `head` (37, design change 8): in round one, each lens of `level` with
+/// no review record at this head; in a later round, one `verify` review.
 pub fn missing(level: Level, security: bool, reviews: &[Review], head: &str) -> Vec<Lens> {
-    let want = if round_of(reviews, head) == 1 { lenses(level, security) } else { vec![Lens::Verify] };
+    let want = if round_of(level, security, reviews, head) == 1 { lenses(level, security) } else { vec![Lens::Verify] };
     want.into_iter().filter(|l| !reviews.iter().any(|r| r.head == head && r.lens == *l)).collect()
 }
 
-/// The rows of each review at `head` that no disposition answers, counted from 1, less each `risk` row (21, needs
-/// response). Reviews with every row answered are left out.
+/// Row `n` of `review` still holds (37, design change 6): no later row re-reports it, and no `verify` review of a
+/// later round exists. A moved head alone clears nothing; a later `verify` review that does not re-report the row
+/// clears it, and one that does carries it on as its own row.
+fn holds(reviews: &[Review], review: &Review, n: u64) -> bool {
+    let reported = reviews
+        .iter()
+        .flat_map(|r| &r.rows)
+        .any(|row| row.of.as_ref().is_some_and(|(id, m)| *id == review.id && *m == n));
+    let verified = reviews.iter().any(|r| r.lens == Lens::Verify && r.round > review.round);
+    !reported && !verified
+}
+
+/// The rows that need a disposition at `head`, counted from 1, less each `risk` row (21, needs response): each row of
+/// a review at `head` with no answer, and each error row of an earlier head that still holds with no answer. Reviews
+/// with every row answered are left out.
 pub fn unanswered<'a>(reviews: &'a [Review], head: &str) -> Vec<(&'a Review, Vec<u64>)> {
-    rows_at(reviews, head, |row| !row.risk && row.answer.is_none())
+    rows(reviews, |r, n, row| {
+        !row.risk && row.answer.is_none() && (r.head == head || (row.error && holds(reviews, r, n)))
+    })
 }
 
-/// The error rows of each review at `head` that hold the land at `level` (37, design change 7; 36, section 1: no
-/// error row): each error row, but a late one of a low or medium issue declined with a follow-up issue. A row marked
-/// `fixed` still holds at this head: the fix is a new head, which a `verify` round reads.
-pub fn blocking<'a>(level: Level, reviews: &'a [Review], head: &str) -> Vec<(&'a Review, Vec<u64>)> {
+/// The error rows that hold the land at `level` (37, design changes 6 and 7; 36, section 1: no error row): each error
+/// row that still holds, at any head, but a late one of a low or medium issue declined with a live follow-up issue. A
+/// row marked `fixed` still holds until a later `verify` review does not re-report it.
+pub fn blocking(level: Level, reviews: &[Review]) -> Vec<(&Review, Vec<u64>)> {
     let followed = |row: &Row| row.late && level < Level::High && row.answer == Some(Answer::FollowUp);
-    rows_at(reviews, head, |row| row.error && !followed(row))
+    rows(reviews, |r, n, row| row.error && !followed(row) && holds(reviews, r, n))
 }
 
-fn rows_at<'a>(reviews: &'a [Review], head: &str, keep: impl Fn(&Row) -> bool) -> Vec<(&'a Review, Vec<u64>)> {
+fn rows(reviews: &[Review], keep: impl Fn(&Review, u64, &Row) -> bool) -> Vec<(&Review, Vec<u64>)> {
     reviews
         .iter()
-        .filter(|r| r.head == head)
-        .map(|r| (r, (1..).zip(&r.rows).filter(|(_, row)| keep(row)).map(|(n, _)| n).collect::<Vec<u64>>()))
+        .map(|r| (r, (1..).zip(&r.rows).filter(|(n, row)| keep(r, *n, row)).map(|(n, _)| n).collect::<Vec<u64>>()))
         .filter(|(_, rows)| !rows.is_empty())
         .collect()
 }
 
-/// The rows of `by` in words, for a note: `findings 2, 3`, with each review's lens when more than one review holds
-/// rows.
-pub fn named(by: &[(&Review, Vec<u64>)]) -> String {
+/// The rows of `by` in words, for a note: `findings 2, 3`, with each review's lens when more than one review at
+/// `head` holds rows, and the review's id for a review of another head.
+pub fn named(by: &[(&Review, Vec<u64>)], head: &str) -> String {
     let one = |rows: &[u64]| rows.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
     match by {
-        [(_, rows)] => format!("findings {}", one(rows)),
-        _ => by.iter().map(|(r, rows)| format!("{} findings {}", r.lens, one(rows))).collect::<Vec<_>>().join("; "),
+        [(r, rows)] if r.head == head => format!("findings {}", one(rows)),
+        _ => by
+            .iter()
+            .map(|(r, rows)| {
+                let whose = if r.head == head { r.lens.to_string() } else { r.id.clone() };
+                format!("{whose} findings {}", one(rows))
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
     }
+}
+
+/// The rows of `by` with their review, for the note of an error row that holds the land: `<review> findings 1, 3`.
+pub fn cited(by: &[(&Review, Vec<u64>)]) -> String {
+    let one = |rows: &[u64]| rows.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
+    by.iter().map(|(r, rows)| format!("{} findings {}", r.id, one(rows))).collect::<Vec<_>>().join("; ")
 }
 
 #[cfg(test)]
@@ -202,7 +249,12 @@ mod tests {
     }
 
     fn error(late: bool, answer: Option<Answer>) -> Row {
-        Row { error: true, risk: false, late, answer }
+        Row { error: true, late, answer, ..Row::default() }
+    }
+
+    /// An error row of a later review that re-reports row `n` of `of`.
+    fn again(of: &Review, n: u64) -> Row {
+        Row { of: Some((of.id.clone(), n)), ..error(false, None) }
     }
 
     #[test]
@@ -216,18 +268,40 @@ mod tests {
 
     #[test]
     fn the_round_of_a_head_follows_the_heads_with_a_review() {
+        let m = Level::Medium;
         let reviews = [
             review("a", 1, Lens::Conformance, vec![]),
             review("a", 1, Lens::FailurePaths, vec![]),
             review("b", 2, Lens::Verify, vec![]),
         ];
-        assert_eq!(round_of(&[], "a"), 1, "the first head");
-        assert_eq!((round_of(&reviews, "a"), round_of(&reviews, "b"), round_of(&reviews, "c")), (1, 2, 3));
+        assert_eq!(round_of(m, false, &[], "a"), 1, "the first head");
+        let of = |head| round_of(m, false, &reviews, head);
+        assert_eq!((of("a"), of("b"), of("c")), (1, 2, 3));
         assert_eq!((mode(1), mode(2)), (Mode::Full, Mode::Verify));
         assert_eq!(
             (prior_head(&reviews, 1), prior_head(&reviews, 2), prior_head(&reviews, 3)),
             (None, Some("a"), Some("b"))
         );
+    }
+
+    #[test]
+    fn round_one_holds_until_each_lens_is_recorded_at_one_head() {
+        let m = Level::Medium;
+        let one = [review("a", 1, Lens::Conformance, vec![error(false, None)])];
+        // A new head before round one completes is still round one, and needs every lens again.
+        assert!(round_one_open(m, false, &one));
+        assert_eq!(round_of(m, false, &one, "b"), 1);
+        assert_eq!(missing(m, false, &one, "b"), [Lens::Conformance, Lens::FailurePaths]);
+        // The lenses split over two heads do not complete it.
+        let split = [one[0].clone(), review("b", 1, Lens::FailurePaths, vec![])];
+        assert_eq!(round_of(m, false, &split, "c"), 1);
+        // Each lens at one head does; the next head is round two. Low needs conformance alone.
+        let whole = [split[0].clone(), split[1].clone(), review("b", 1, Lens::Conformance, vec![])];
+        assert_eq!((round_of(m, false, &whole, "c"), round_of(Level::Low, false, &one, "b")), (2, 2));
+        // A level that rises after round two exists leaves round one closed.
+        let two = [whole[0].clone(), whole[1].clone(), whole[2].clone(), review("c", 2, Lens::Verify, vec![])];
+        assert_eq!(round_of(Level::High, true, &two, "d"), 3);
+        assert_eq!(round_of(Level::High, true, &whole, "c"), 1, "high asks for its lenses until round two exists");
     }
 
     #[test]
@@ -240,12 +314,13 @@ mod tests {
         // Low: one round. Its round-one error is fixed, and the next head needs one verify round.
         assert_eq!(capped(Level::Low, std::slice::from_ref(&r1)), (Level::Low, None), "round one never raises");
         assert_eq!(missing(Level::Low, false, std::slice::from_ref(&r1), "b"), [Lens::Verify]);
-        // An error in the verify round is past low's cap, so low reads medium; round 3 is past medium's.
-        assert_eq!(capped(Level::Low, &[r1.clone(), r2.clone()]), (Level::Medium, Some(2)));
-        assert_eq!(capped(Level::Low, &[r1.clone(), r2.clone(), r3.clone()]), (Level::High, Some(3)));
+        // An error in the verify round is past low's cap, so low reads medium; round 3 is past medium's. Each raise
+        // names the level whose cap it passed.
+        assert_eq!(capped(Level::Low, &[r1.clone(), r2.clone()]), (Level::Medium, Some((2, Level::Low))));
+        assert_eq!(capped(Level::Low, &[r1.clone(), r2.clone(), r3.clone()]), (Level::High, Some((3, Level::Medium))));
         // Medium holds through round one and reads high at its cap, round 2.
         assert_eq!(capped(Level::Medium, std::slice::from_ref(&r1)), (Level::Medium, None));
-        assert_eq!(capped(Level::Medium, &[r1.clone(), r2.clone()]), (Level::High, Some(2)));
+        assert_eq!(capped(Level::Medium, &[r1.clone(), r2.clone()]), (Level::High, Some((2, Level::Medium))));
         // High holds through rounds 2 and 3 and stays high past its cap: the human decides.
         assert_eq!(capped(Level::High, &[r1.clone(), r2.clone(), r3.clone(), r4]), (Level::High, None));
         // A verify round with no error row raises nothing.
@@ -258,7 +333,8 @@ mod tests {
         let r1 = review("a", 1, Lens::Conformance, vec![error(false, Some(Answer::Fixed))]);
         let fixed = review("a", 1, Lens::FailurePaths, vec![]);
         let inside = review("b", 2, Lens::Verify, vec![error(false, None)]);
-        assert_eq!(capped(Level::Medium, &[r1.clone(), fixed.clone(), inside.clone()]), (Level::High, Some(2)));
+        let raised = Some((2, Level::Medium));
+        assert_eq!(capped(Level::Medium, &[r1.clone(), fixed.clone(), inside.clone()]), (Level::High, raised));
         // A late error outside the fix does not block medium, so it raises nothing.
         let late = review("b", 2, Lens::Verify, vec![error(true, None)]);
         assert_eq!(capped(Level::Medium, &[r1.clone(), fixed.clone(), late]), (Level::Medium, None));
@@ -267,7 +343,7 @@ mod tests {
         assert_eq!(capped(Level::Medium, &[r1.clone(), fixed, declined]).0, Level::High);
         // Once high, the next head is round 3, high's cap, and its cap is the one that holds.
         let r3 = review("c", 3, Lens::Verify, vec![]);
-        assert_eq!(capped(Level::Medium, &[r1, inside, r3]), (Level::High, Some(2)));
+        assert_eq!(capped(Level::Medium, &[r1, inside, r3]), (Level::High, raised));
     }
 
     #[test]
@@ -279,13 +355,13 @@ mod tests {
         assert_eq!(unanswered(&open, "b").len(), 1);
         let followed = [r1.clone(), late(Some(Answer::FollowUp))];
         assert!(unanswered(&followed, "b").is_empty());
-        assert!(blocking(Level::Medium, &followed, "b").is_empty(), "medium");
-        assert!(blocking(Level::Low, &followed, "b").is_empty(), "low");
+        assert!(blocking(Level::Medium, &followed).is_empty(), "medium");
+        assert!(blocking(Level::Low, &followed).is_empty(), "low");
         // A decline that names no follow-up issue, or a fix not yet pushed, still holds the land.
-        assert_eq!(blocking(Level::Medium, &[r1.clone(), late(Some(Answer::Declined))], "b")[0].1, [1]);
-        assert_eq!(blocking(Level::Medium, &[r1.clone(), late(Some(Answer::Fixed))], "b")[0].1, [1]);
+        assert_eq!(blocking(Level::Medium, &[r1.clone(), late(Some(Answer::Declined))])[0].1, [1]);
+        assert_eq!(blocking(Level::Medium, &[r1.clone(), late(Some(Answer::Fixed))])[0].1, [1]);
         // High: a late error blocks as any error does.
-        assert_eq!(blocking(Level::High, &followed, "b")[0].1, [1]);
+        assert_eq!(blocking(Level::High, &followed)[0].1, [1]);
     }
 
     #[test]
@@ -293,20 +369,50 @@ mod tests {
         let r1 = review("a", 1, Lens::Conformance, vec![error(false, Some(Answer::Fixed))]);
         let inside = [r1, review("b", 2, Lens::Verify, vec![Row::default(), error(false, Some(Answer::FollowUp))])];
         for level in Level::ALL {
-            assert_eq!(blocking(*level, &inside, "b")[0].1, [2], "{level}");
+            assert_eq!(blocking(*level, &inside)[0].1, [2], "{level}");
         }
-        assert_eq!(named(&blocking(Level::Low, &inside, "b")), "findings 2");
+        assert_eq!(named(&blocking(Level::Low, &inside), "b"), "findings 2");
+        assert_eq!(cited(&blocking(Level::Low, &inside)), "r/b-verify findings 2");
+    }
+
+    #[test]
+    fn an_error_row_holds_until_a_later_verify_review_does_not_re_report_it() {
+        let r1 = review("a", 1, Lens::Conformance, vec![error(false, Some(Answer::Declined)), error(false, None)]);
+        let paths = review("a", 1, Lens::FailurePaths, vec![]);
+        let round_one = [r1.clone(), paths.clone()];
+        assert_eq!(blocking(Level::Medium, &round_one)[0].1, [1, 2]);
+        // A moved head alone clears nothing: the declined row still blocks, and the unanswered one needs an answer.
+        assert_eq!(blocking(Level::Low, &round_one)[0].1, [1, 2], "at a new head too");
+        assert_eq!(unanswered(&round_one, "b")[0].1, [2]);
+        assert_eq!(named(&unanswered(&round_one, "b"), "b"), "r/a-conformance findings 2");
+        // A row that re-reports row 2 carries it as its own row; row 1 still holds.
+        let echo = review("a", 1, Lens::FailurePaths, vec![again(&r1, 2)]);
+        let echoed = [r1.clone(), echo];
+        let held: Vec<_> = blocking(Level::Medium, &echoed).into_iter().map(|(r, n)| (&*r.id, n)).collect();
+        assert_eq!(held, [("r/a-conformance", vec![1]), ("r/a-failure-paths", vec![1])]);
+        // A verify review that re-reports row 1 carries it as its own row; row 2 clears.
+        let v2 = review("b", 2, Lens::Verify, vec![again(&r1, 1)]);
+        let two = [r1.clone(), paths.clone(), v2.clone()];
+        let held = blocking(Level::Medium, &two);
+        assert_eq!((held.len(), held[0].0.id.as_str(), &held[0].1), (1, "r/b-verify", &vec![1]));
+        assert_eq!(unanswered(&two, "b")[0].1, [1]);
+        // The next verify review that does not re-report it clears it.
+        let three = [r1, paths, v2, review("c", 3, Lens::Verify, vec![])];
+        assert!(blocking(Level::High, &three).is_empty());
+        assert!(unanswered(&three, "c").is_empty());
     }
 
     #[test]
     fn warn_and_risk_rows_hold_nothing() {
         assert!(is_error("error") && is_error("major") && is_error(""), "a word the tool does not know is an error");
         assert!(!is_error("warn") && !is_error("risk"));
+        assert_eq!(SEVERITIES, ["error", "warn", "risk"]);
         let warn = Row::default();
         let risk = Row { risk: true, ..Row::default() };
         let r = [review("a", 1, Lens::Conformance, vec![warn.clone(), risk])];
         assert_eq!(unanswered(&r, "a")[0].1, [1], "a warn row needs a disposition; a risk row does not");
-        assert!(blocking(Level::High, &r, "a").is_empty());
+        assert!(unanswered(&r, "b").is_empty(), "nor does a warn row of another head");
+        assert!(blocking(Level::High, &r).is_empty());
         assert!(r[0].raises());
     }
 }

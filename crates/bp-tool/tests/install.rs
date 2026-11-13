@@ -328,7 +328,14 @@ fn the_role_hook_prefix_names_the_harness_for_a_later_walk() {
 #[test]
 fn a_handoff_seed_follows_a_record_to_its_node() {
     let w = World::new();
-    let head = "a".repeat(40);
+    // A held claim whose clone is the vault itself, so the vault's commit is a head `record review` accepts.
+    let v = w.vault.path();
+    let claim = format!("---\nkind: claim\nunder: {ISSUE}\nworktree: {}\nbase: HEAD\n---\n", v.display());
+    std::fs::create_dir_all(v.join(format!("{ISSUE}/claims"))).unwrap();
+    std::fs::write(v.join(format!("{ISSUE}/claims/c.md")), claim).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "claim"]);
+    let head = git(v, &["rev-parse", "HEAD"]).trim().to_string();
     let body = tempfile::tempdir().unwrap();
     let file = body.path().join("review.md");
     std::fs::write(&file, format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n")).unwrap();

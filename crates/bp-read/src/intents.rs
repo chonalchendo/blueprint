@@ -309,9 +309,8 @@ fn of(
     // at its head, and needs response reads their dispositions (21; 37, design change 8).
     let (reviews, declared, delta) = match &pr {
         Some(_) => {
-            let issue = Id::parse(id).expect("the index holds ids");
-            let declared = text(&header, "risk").and_then(|l| l.parse().ok());
-            (crate::inputs::reviews(vault, index, id)?, declared, !crate::carried_deltas(index, &issue)?.is_empty())
+            let r = crate::inputs::reviewed(vault, index, id)?;
+            (r.reviews, r.declared, r.delta)
         }
         None => (Vec::new(), None, false),
     };

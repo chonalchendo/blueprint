@@ -519,6 +519,34 @@ fn a_risk_row_raises_the_level_and_needs_no_disposition() {
     git(w.vault.path(), &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "lower it by hand"]);
     let v = w.risk();
     assert_eq!((v["level"].as_str(), &v["raised_by"]), (Some("high"), &json!([id])), "{v}");
+    // Git's location variables cannot turn the read off: the call clears them (review of #98, finding 6).
+    let vault = w.vault.path().display().to_string();
+    let (_, v) = common::bp_env(&w.code, &[("BP_VAULT", &vault), ("GIT_DIR", "/nonexistent")], &["risk", ISSUE]);
+    assert_eq!(v["level"], "high", "{v}");
+    // A rename moves the record in a commit that adds it at the new path; the first add at the old path counts, so
+    // the rename does not launder the edit (finding 7). The rename takes the claim's branch, so read with no clone.
+    let root = w.vault.path();
+    let (exit, v) = common::bp(root, &["rename", ISSUE, "a2"]);
+    assert_eq!(exit, Some(0), "{v}");
+    let (renamed, moved) = ("projects/bp/issues/a2", id.replace("/issues/a/", "/issues/a2/"));
+    let (_, v) = common::bp(root, &["risk", renamed]);
+    assert_eq!((v["level"].as_str(), &v["raised_by"]), (Some("high"), &json!([moved])), "{v}");
+    // A delete and a re-add of the edited text: the first add still counts (finding 11 j).
+    let path = root.join(format!("{moved}.md"));
+    let edited = std::fs::read_to_string(&path).unwrap();
+    git(root, &["rm", "-q", &format!("{moved}.md")]);
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "drop it"]);
+    write(root, &format!("{moved}.md"), &edited);
+    git(root, &["add", "-A"]);
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add it back"]);
+    let (_, v) = common::bp(root, &["risk", renamed]);
+    assert_eq!(v["level"], "high", "{v}");
+    // A first commit git cannot read refuses; it never falls back to the present text (finding 6).
+    let first = git(root, &["log", "--diff-filter=A", "--format=%H", "--", &format!("{id}.md")]);
+    let blob = git(root, &["rev-parse", &format!("{}:{id}.md", first.trim())]).trim().to_string();
+    std::fs::remove_file(root.join(format!(".git/objects/{}/{}", &blob[..2], &blob[2..]))).unwrap();
+    let (exit, v) = common::bp(root, &["risk", renamed]);
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
 }
 
 #[test]

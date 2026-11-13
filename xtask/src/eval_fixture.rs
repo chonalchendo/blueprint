@@ -261,7 +261,10 @@ impl Fixture {
 
     /// The review the session records for `bp-respond`: the `head:` line and one table row per ground-truth item.
     pub fn review_body(&self) -> String {
-        let rows = self.truth.iter().map(|t| format!("| {} | `{}` | {} |", t.severity, t.location(), t.what));
+        // `record review` takes `error`, `warn` or `risk`; a past review's word (`major`, `nit`) read as an error.
+        let severity = |s: &str| if matches!(s, "warn" | "risk") { s.to_string() } else { "error".to_string() };
+        let rows =
+            self.truth.iter().map(|t| format!("| {} | `{}` | {} |", severity(&t.severity), t.location(), t.what));
         let table = ["| severity | location | finding |".into(), "|---|---|---|".into()];
         format!("head: {}\n{}", self.head, table.into_iter().chain(rows).collect::<Vec<String>>().join("\n"))
     }
@@ -571,7 +574,10 @@ mod tests {
         assert_eq!(f.probes, [(1, "test -f a.rs | true".to_string())]);
         assert!(f.truth[0].touched(&["x/a.rs".into()]) && !f.truth[0].touched(&["b.rs".into()]));
         assert!(Fixture::parse("x", &text.replace("declined", "kept")).is_err());
-        assert!(f.review_body().contains("| nit | `a.rs:9` | Two. |"), "the expected closing stays out of the review");
+        assert!(
+            f.review_body().contains("| error | `a.rs:9` | Two. |"),
+            "the expected closing stays out of the review"
+        );
     }
 
     #[test]
@@ -602,7 +608,11 @@ mod tests {
         let review = Review::parse(&f.review_body()).unwrap();
         assert_eq!((review.head.as_str(), review.tables, review.findings.len()), ("h1", 1, 2));
         let rows: Vec<String> = f.review_body().lines().skip(3).map(str::to_string).collect();
-        assert_eq!(rows, ["| major | `a/x.rs:20` | One. |", "| warn | `b.rs` | Two. |"]);
+        assert_eq!(
+            rows,
+            ["| error | `a/x.rs:20` | One. |", "| warn | `b.rs` | Two. |"],
+            "a past review's word reads error"
+        );
         assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\n---\nbody").is_err(), "no truth and no scope");
         assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\nscope: a\nstack: only-a-sha\n---\nb").is_err());
         assert!(Fixture::parse("x", "base: b\nhead: h\ntitle: T\nscope: a\n---\nbody").is_ok(), "a scope is a truth");

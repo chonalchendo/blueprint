@@ -33,6 +33,13 @@ fn vault() -> tempfile::TempDir {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, text).unwrap();
     }
+    // A held claim whose clone is the vault itself, so the vault's commit is a head `record review` accepts.
+    let claim = format!(
+        "---\nkind: claim\nunder: {ISSUE}\nfrom: 2026-10-19T09:00:00Z\nworktree: {}\nbase: HEAD\n---\n",
+        root.display()
+    );
+    std::fs::create_dir_all(root.join(format!("{ISSUE}/claims"))).unwrap();
+    std::fs::write(root.join(format!("{ISSUE}/claims/c.md")), claim).unwrap();
     std::fs::create_dir_all(root.join("shared")).unwrap();
     std::fs::write(root.join(".gitignore"), ".bp/\nchange.md\n").unwrap();
     git(root, &["init", "-q"]);
@@ -70,7 +77,7 @@ fn each_kind_writes_one_file_at_its_path() {
     let root = dir.path();
     let body = root.join("change.md");
     std::fs::write(&body, "One change.\n").unwrap();
-    let head = "0123456789abcdef0123456789abcdef01234567";
+    let head = &git(root, &["rev-parse", "HEAD"]).trim().to_string();
     let ms = format!("milestone={MILESTONE}");
     let (h, iss, review) = (format!("head={head}"), format!("issue={ISSUE}"), format!("{ISSUE}/reviews/{head}"));
     let found = tempfile::tempdir().unwrap();
@@ -152,7 +159,7 @@ fn each_kind_writes_one_file_at_its_path() {
 fn an_identity_refuses_a_second_and_a_retry_changes_nothing() {
     let dir = vault();
     let root = dir.path();
-    let head = "0123456789abcdef0123456789abcdef01234567";
+    let head = &git(root, &["rev-parse", "HEAD"]).trim().to_string();
     let review = format!("{ISSUE}/reviews/{head}");
     let found = tempfile::tempdir().unwrap();
     let r = review_body(found.path(), head);

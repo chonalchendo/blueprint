@@ -6,10 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bp_change::IssueStatus;
 use bp_change::intents::{self, Base, Block, Claim, Milestone, PullRequest, STACK_DEPTH};
-use bp_change::risk::RISK_ROW;
-use bp_change::rounds::{self, Answer, Lens, Review, Row};
 use bp_vault::{Body, Check, Filter, Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::{Map, Value};
+
+mod reviews;
+pub use reviews::*;
 
 /// The issues under the milestone `id`, and while fewer than a batch are live, its finish line and the blocks the
 /// issues' checks name: needs derivation's records, which derive's stop reads too (21).
@@ -48,95 +49,6 @@ fn named(body: &str, heading: &str) -> Vec<Block> {
 #[must_use]
 pub fn rows(body: &str) -> usize {
     body.lines().filter(|l| l.trim_start().starts_with('|')).count().saturating_sub(2)
-}
-
-/// The severity cell of each finding of a review body, in row order: the first cell of each of the [`rows`].
-fn severities(body: &str) -> Vec<String> {
-    let table = body.lines().map(str::trim_start).filter(|l| l.starts_with('|'));
-    let first = |l: &str| l[1..].split('|').next().unwrap_or_default().trim().trim_matches('`').to_string();
-    table.skip(2).map(first).collect()
-}
-
-/// The findings of a review that no disposition answers, counted from 1, and whether a disposition is `fixed` (21,
-/// respond). The findings are the [`rows`] of the body; a disposition of an index past the last row answers nothing.
-/// A `risk` row only raises the level, so it needs no answer (37, design change 2).
-pub fn findings(index: &Index, review: &Record) -> Result<(Vec<u64>, bool), Refusal> {
-    let risk = severities(&review.body).into_iter().map(|s| s == RISK_ROW);
-    let dispositions = index.records(&review.id, Kind::Disposition)?;
-    let answered: BTreeSet<u64> = dispositions.iter().filter_map(|d| d.header.get("finding")?.as_u64()).collect();
-    let fixed = dispositions.iter().any(|d| text(&d.header, "as").as_deref() == Some("fixed"));
-    let open = (1..).zip(risk).filter(|&(n, risk)| !risk && !answered.contains(&n)).map(|(n, _)| n);
-    Ok((open.collect(), fixed))
-}
-
-/// The reviews of `issue`, in time order, each as its first commit wrote it, with its dispositions (37, design changes
-/// 2, 6 and 7). A later edit of a record cannot drop a `risk` row, an error row or its round; a record git does not
-/// hold yet reads as it stands. A converted review with no round reads round 1, `conformance`.
-///
-/// # Panics
-///
-/// Never: the index holds ids.
-pub fn reviews(vault: &Vault, index: &Index, issue: &str) -> Result<Vec<Review>, Refusal> {
-    let records = index.records(issue, Kind::Review)?;
-    let first = if records.is_empty() { BTreeMap::new() } else { vault.added(&format!("{issue}/reviews")) };
-    let mut out = Vec::new();
-    for r in records {
-        let id = Id::parse(&r.id).expect("the index holds ids");
-        let (header, body) = match first.get(&r.id).and_then(|sha| vault.read_at(&id, sha).ok()) {
-            Some(f) => (f.header.map(|h| h.to_json(&id)).unwrap_or_default(), f.body.text),
-            None => (r.header.clone(), r.body.clone()),
-        };
-        let late: BTreeSet<u64> =
-            header.get("late").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).collect();
-        let answers = answers(index, issue, &r.id)?;
-        let rows = (1..)
-            .zip(severities(&body))
-            .map(|(n, severity)| Row {
-                error: rounds::is_error(&severity),
-                risk: severity == RISK_ROW,
-                late: late.contains(&n),
-                answer: answers.get(&n).copied(),
-            })
-            .collect();
-        out.push(Review {
-            head: text(&header, "head").unwrap_or_default(),
-            round: header.get("round").and_then(Value::as_u64).unwrap_or(1),
-            lens: text(&header, "lens").and_then(|l| l.parse().ok()).unwrap_or(Lens::Conformance),
-            id: r.id,
-            rows,
-        });
-    }
-    Ok(out)
-}
-
-/// The answer of each disposition of `review`, by finding.
-fn answers(index: &Index, issue: &str, review: &str) -> Result<BTreeMap<u64, Answer>, Refusal> {
-    let mut out = BTreeMap::new();
-    for d in index.records(review, Kind::Disposition)? {
-        let Some(n) = d.header.get("finding").and_then(Value::as_u64) else { continue };
-        let answer = match text(&d.header, "as").as_deref() {
-            Some("fixed") => Answer::Fixed,
-            _ if follow_up(index, issue, &text(&d.header, "reason").unwrap_or_default())?.is_some() => Answer::FollowUp,
-            _ => Answer::Declined,
-        };
-        out.insert(n, answer);
-    }
-    Ok(out)
-}
-
-/// The follow-up issue a decline's reason names (37, design change 7): its first word that is the id of an issue
-/// other than `issue`; `None` when no word is.
-pub fn follow_up(index: &Index, issue: &str, reason: &str) -> Result<Option<String>, Refusal> {
-    let cut = |c: char| c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '[' | ']' | '`' | '"' | '\'');
-    for word in reason.split(cut).map(|w| w.trim_end_matches(['.', ':'])) {
-        if word.is_empty() || word == issue || Id::parse(word).is_err() {
-            continue;
-        }
-        if index.header(word)?.is_some_and(|h| h.get("kind").and_then(Value::as_str) == Some("issue")) {
-            return Ok(Some(word.to_string()));
-        }
-    }
-    Ok(None)
 }
 
 /// The drift runs under a design that no delta or thread cites: the runs of 21's drifted, which the intent, the

@@ -294,3 +294,30 @@ fn a_designed_concern_needs_shaping_until_a_milestone_stamped_after_it() {
     let v = list(r, &["design", "--project", "q"], false);
     assert_eq!(intent(&v, "projects/q/designs/product"), ("-", "-"), "a stamp after the record's own stamp");
 }
+
+/// The issue's `risk` label and a pending delta it caused reach needs review: each reads high, so round one asks for
+/// the tests-and-checks lens (37, design changes 1 and 8; review of #98, finding 11 d and e).
+#[test]
+fn the_label_and_a_pending_delta_reach_the_lenses() {
+    let d = vault();
+    let r = d.path();
+    let labelled = "projects/bp/issues/0011.labelled";
+    let caused = "projects/bp/issues/0012.caused";
+    write(r, &format!("{labelled}.md"), "---\nkind: issue\ntitle: L\nstatus: in-progress\nrisk: high\n---\n\nBody.\n");
+    write(r, &format!("{caused}.md"), &issue("in-progress", ""));
+    write(r, "projects/bp/designs/system.md", "---\nkind: design\ntitle: S\nstatus: active\n---\n\n## One\n\nOld.\n");
+    let delta =
+        format!("---\nkind: delta\nunder: projects/bp/designs/system\ncause: {caused}\n---\n\n## One\n\nNew.\n");
+    write(r, "projects/bp/designs/system/deltas/d.md", &delta);
+    let prs = r.join("forge/open-prs.json");
+    let mut open: Vec<serde_json::Value> = serde_json::from_str(&std::fs::read_to_string(&prs).unwrap()).unwrap();
+    for (n, slug) in [(14, "0011.labelled"), (15, "0012.caused")] {
+        open.push(serde_json::json!({ "number": n, "headRefName": format!("bp/{slug}"), "headRefOid": "dddd" }));
+    }
+    std::fs::write(&prs, serde_json::to_string(&open).unwrap()).unwrap();
+    let v = list(r, &["issue"], true);
+    let note = "round 1: missing lenses: conformance, failure-paths, tests-and-checks";
+    assert_eq!(intent(&v, labelled), ("needs-review", note), "the label");
+    assert_eq!(intent(&v, caused), ("needs-review", note), "the delta");
+    assert_eq!(intent(&v, "projects/bp/issues/0003.held").1, "round 1: missing lenses: conformance, failure-paths");
+}

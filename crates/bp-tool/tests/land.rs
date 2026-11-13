@@ -264,6 +264,29 @@ fn pr_records_the_risk_level_of_its_head_on_each_run() {
     assert!(again.contains("\nrisk: medium\n"), "{again}");
 }
 
+/// A diff that touches a high path outside the low patterns records `security` on each run, and the intents read it
+/// there: round one asks for the security lens (37, design change 8; review of #98, finding 11 b and c).
+#[test]
+fn pr_records_security_and_round_one_asks_for_its_lens() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    std::fs::create_dir_all(w.join(".github/workflows")).unwrap();
+    std::fs::write(w.join(".github/workflows/x.yml"), "on: push\n").unwrap();
+    let h = commit(&w, &["add", "-A"], "hello");
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(0));
+    let run = std::fs::read_to_string(v.join(format!("{ISSUE}/runs/hello-{h}-1.md"))).unwrap();
+    assert!(run.contains("\nrisk: high\n") && run.contains("\nsecurity: true\n"), "{run}");
+    forge(t, &h, &[], &[]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "the repeat refreshes the snapshot");
+    let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "issue"]);
+    let row = list["rows"].as_array().unwrap().iter().find(|r| r["id"] == ISSUE).unwrap().clone();
+    let note = "round 1: missing lenses: conformance, failure-paths, tests-and-checks, security";
+    assert_eq!((&row["intent"], &row["note"]), (&json!("needs-review"), &json!(note)), "{row}");
+}
+
 /// `check` on an issue with a held claim runs at the claim's worktree head, as `pr` does, wherever the caller stands.
 #[test]
 fn check_runs_the_blocks_in_the_held_claims_worktree() {

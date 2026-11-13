@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bp_change::rounds::{self, Answer};
 use bp_change::{MilestoneStatus, intents};
 use bp_operation::Action;
 use bp_reasoning::ThreadStatus;
@@ -56,14 +57,13 @@ pub(crate) fn done(
                 _ => false,
             }
         }
+        // Review is done when needs review no longer holds at the head: each lens of round one, or the round's
+        // `verify` review, has a record there (21, rule 1).
         Action::Review => match open_head(&vault.root, index, id, forge_age)? {
-            Some((pr, _)) => index
-                .records(id.as_str(), Kind::Review)?
-                .iter()
-                .any(|r| field(r, "head").as_deref() == Some(pr.as_str())),
+            Some((pr, _)) => intents::missing(&bp_read::inputs::reviewed(vault, index, id.as_str())?, &pr).is_empty(),
             None => false,
         },
-        Action::Respond => responded(&vault.root, index, id, forge_age)?,
+        Action::Respond => responded(vault, index, id, forge_age)?,
         Action::TriageDrift => {
             // The drifted predicate over each design the seed covers: a project's drift runs sit under its designs.
             let kind = text("kind").and_then(|k| k.parse().ok()).expect("the index stores closed kinds");
@@ -104,21 +104,18 @@ fn escalated(index: &Index, id: &Id) -> Result<bool, Refusal> {
     Ok(intents::latest_claim(&claims).is_some_and(|c| c.escalated))
 }
 
-/// Every finding of each review at the latest reviewed head, one per lens (37, design change 8), has a disposition,
-/// matched by its index, and the head moved if one is `fixed`.
-fn responded(root: &Path, index: &Index, id: &Id, forge_age: &mut Option<i64>) -> Result<bool, Refusal> {
-    let reviews = index.records(id.as_str(), Kind::Review)?;
-    let (Some((pr, _)), Some(head)) =
-        (open_head(root, index, id, forge_age)?, reviews.last().map(|r| field(r, "head")))
+/// Every row that needs a disposition at the latest reviewed head has one: each row of each review there, one per lens
+/// (37, design change 8), and each error row of an earlier head that still holds, as the intents read them from each
+/// review's first commit. The head moved if one is `fixed`.
+fn responded(vault: &Vault, index: &Index, id: &Id, forge_age: &mut Option<i64>) -> Result<bool, Refusal> {
+    let reviews = bp_read::inputs::reviews(vault, index, id.as_str())?;
+    let (Some((pr, _)), Some(head)) = (open_head(&vault.root, index, id, forge_age)?, reviews.last().map(|r| &r.head))
     else {
         return Ok(false);
     };
-    let (mut answered, mut fixed) = (true, false);
-    for review in reviews.iter().filter(|r| field(r, "head") == head) {
-        let (open, any) = bp_read::inputs::findings(index, review)?;
-        (answered, fixed) = (answered && open.is_empty(), fixed || any);
-    }
-    Ok(answered && !(fixed && head == Some(pr)))
+    let fixed =
+        reviews.iter().filter(|r| r.head == *head).flat_map(|r| &r.rows).any(|r| r.answer == Some(Answer::Fixed));
+    Ok(rounds::unanswered(&reviews, head).is_empty() && !(fixed && *head == pr))
 }
 
 /// The head of the issue's open pull request while a claim is held, and the claim's worktree when this machine has

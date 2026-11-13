@@ -89,8 +89,8 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
         }
         reasons.extend(raised_by.iter().map(|r| format!("review {r} holds a risk row")));
     }
-    if let Some(round) = capped {
-        reasons.push(format!("round cap: the review of round {round} holds an error row at or past the cap of {base}"));
+    if let Some((round, from)) = capped {
+        reasons.push(format!("round cap: the review of round {round} holds an error row at or past the cap of {from}"));
     }
     Ok(json!({
         "level": level,
