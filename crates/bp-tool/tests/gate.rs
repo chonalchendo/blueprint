@@ -493,6 +493,22 @@ fn gate_reads_the_base_commit_not_a_local_replace_of_it() {
 }
 
 #[test]
+fn gate_reads_the_parents_the_commits_name_not_a_local_graft() {
+    // Review of #99, row 55: `.git/info/grafts` makes the head a root and the parent of the base, so the test merge is
+    // the base's own tree and a high head reads low.
+    let w = World::new(RULES);
+    let top = w.code();
+    let head = w.commit(&[("infra/b.tf", "b\n")]);
+    let grafts = top.join(git(&top, &["rev-parse", "--git-path", "info/grafts"]).trim());
+    std::fs::create_dir_all(grafts.parent().unwrap()).unwrap();
+    std::fs::write(&grafts, format!("{} {head}\n{head}\n", w.base)).unwrap();
+    assert_eq!(git(&top, &["merge-base", &w.base, &head]).trim(), head, "the graft is in force");
+    let (exit, v) = w.gate(&head, None);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("approval_missing")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("infra/b.tf matches the high pattern infra/"), "{v}");
+}
+
+#[test]
 fn gate_reads_no_attribute_of_the_developers_git_configuration() {
     // A global `core.attributesFile` that marks `docs/**` `-diff` would hide the size of a low change.
     let w = World::new(RULES);

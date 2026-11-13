@@ -265,6 +265,23 @@ fn the_level_reads_the_base_commit_not_a_local_replace_of_it() {
 }
 
 #[test]
+fn the_level_reads_the_parents_the_commits_name_not_a_local_graft() {
+    // Review of #99, row 55: `.git/info/grafts`, which makes the head a root and the parent of origin's master, pushes
+    // nothing.
+    let mut w = world(Some("low"), Some("high: [infra/]\n"));
+    w.cut();
+    let head = w.commit(&[("infra/main.tf", "x\n")]);
+    let base = w.rev("origin/master");
+    let grafts = w.code.join(git(&w.code, &["rev-parse", "--git-path", "info/grafts"]).trim());
+    std::fs::create_dir_all(grafts.parent().unwrap()).unwrap();
+    std::fs::write(&grafts, format!("{base} {head}\n{head}\n")).unwrap();
+    assert_eq!(git(&w.code, &["merge-base", &base, &head]).trim(), head, "the graft is in force");
+    let v = w.risk();
+    assert_eq!(pick(&v), json!(["high", "low", "high"]), "{v}");
+    assert!(v["reasons"].to_string().contains("infra/main.tf matches the high pattern infra/"), "{v}");
+}
+
+#[test]
 fn a_link_named_as_a_high_directory_is_high() {
     let mut w = world(Some("low"), Some("high: [infra/]\nlow: [docs/]\n"));
     w.cut();
