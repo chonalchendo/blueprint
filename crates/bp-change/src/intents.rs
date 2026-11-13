@@ -968,7 +968,7 @@ mod tests {
     fn the_human_s_approval_accepts_the_rows_at_the_cap(moved: &Issue, cap: &str) {
         let approval = |head: &str, rows: &[(&str, u64)]| Approval {
             head: head.into(),
-            accepts: rows.iter().map(|(id, n)| (id.to_string(), *n)).collect(),
+            accepts: rows.iter().map(|(id, n)| ((*id).to_string(), *n)).collect(),
         };
         let both = [("r/h3-verify", 1), ("r/h2-verify", 1)];
         let with = |a: Approval| Issue { approvals: vec![a], ..moved.clone() };

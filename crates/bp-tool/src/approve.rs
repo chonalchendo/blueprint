@@ -94,22 +94,7 @@ fn act(
             format!("{branch} has no open pull request; the worker runs bp pr {id}, then rerun"),
         ));
     };
-    let head = pr.head_ref_oid.as_str();
-    // The head names the record's file and a line of the signed message, so a slash or a newline from the forge
-    // would move the one and add a field to the other.
-    if !is_sha(head) {
-        return Err(Refusal::failed(
-            format!("gh pr list --head {branch}"),
-            format!("the forge gave head {head:?}, not a full commit sha; fix gh or the pull request, then rerun"),
-        ));
-    }
-    let base = pr.base_ref_name.as_deref().unwrap_or_default();
-    if !is_branch(base) {
-        return Err(Refusal::failed(
-            format!("gh pr list --head {branch}"),
-            format!("the forge gave base branch {base:?}, not a branch name; fix gh or the pull request, then rerun"),
-        ));
-    }
+    let (head, base) = forge_shas(&branch, &pr)?;
     let (signer, _) = signer(&top)?;
     if in_agent(&signer) {
         return Err(Refusal::new(
@@ -193,6 +178,27 @@ fn act(
         v["comment"] = share(&gh, &id, pr.number, &message, &signature, post)?.into();
     }
     Ok(Wrote::Changed(v))
+}
+
+/// The head and the base branch the forge names, each a shape a record and a signed line can hold. The head names the
+/// record's file and a line of the signed message, so a slash or a newline from the forge would move the one and add a
+/// field to the other.
+fn forge_shas<'a>(branch: &str, pr: &'a PullRequest) -> Result<(&'a str, &'a str), Refusal> {
+    let head = pr.head_ref_oid.as_str();
+    if !is_sha(head) {
+        return Err(Refusal::failed(
+            format!("gh pr list --head {branch}"),
+            format!("the forge gave head {head:?}, not a full commit sha; fix gh or the pull request, then rerun"),
+        ));
+    }
+    let base = pr.base_ref_name.as_deref().unwrap_or_default();
+    if !is_branch(base) {
+        return Err(Refusal::failed(
+            format!("gh pr list --head {branch}"),
+            format!("the forge gave base branch {base:?}, not a branch name; fix gh or the pull request, then rerun"),
+        ));
+    }
+    Ok((head, base))
 }
 
 /// The forge comment of a signed approval, printed to stderr for the human to post, or posted with `gh pr comment`

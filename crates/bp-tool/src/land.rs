@@ -31,8 +31,10 @@ use crate::claim::{default_branch, git};
 use crate::{Wrote, finish, node_id, subject};
 
 mod level;
+mod merging;
 
 use level::{lander, risen, trusted};
+use merging::{kept, merge, remove, worktree_clean};
 
 /// How long one `gh` or git call of `land` may run before it refuses `could_not_run` (review of #100, F11).
 const DEADLINE: Duration = Duration::from_secs(120);
@@ -216,17 +218,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     // The dry run takes no writer, so it runs the writer's commit precondition here (34, design change 7).
     vault.committed()?;
     vault.clean([&id, &c.claim])?;
-    if c.worktree.is_dir() && !git(&c.worktree, &["status", "--porcelain"])?.is_empty() {
-        return Err(Refusal::new(
-            Code::PathDirty,
-            c.worktree.display().to_string(),
-            "land removes the worktree, so it holds no uncommitted work (26, design change 2)",
-            format!(
-                "dispatch a worker to commit the changes in {} and run `bp pr {id}`, or to stash them; then rerun",
-                c.worktree.display()
-            ),
-        ));
-    }
+    worktree_clean(&c, &id)?;
     let blocks = bp_read::inputs::blocks(&vault, id.as_str())?;
     let mut issue = Issue { base: c.base.clone(), blocks, ..bp_read::inputs::reviewed(&vault, &index, id.as_str())? };
     let read = bp_read::inputs::pull_request(&pr);
@@ -270,17 +262,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     }
     let pr = if merged(&pr) { pr } else { merge(&vault, &gh, &c, &id, &pr)? };
     drop(index);
-    // A release during the merge, or since a land that stopped, leaves the merge in place: nothing else is removed.
-    if held(&Index::open(&vault)?, &id)?.is_none_or(|h| h.id != c.claim.as_str()) {
-        let at = pr.merge_commit.as_ref().map_or(pr.head_ref_oid.as_str(), |m| m.oid.as_str());
-        return Err(Refusal::failed(
-            c.claim.as_str(),
-            format!(
-                "pull request {n} merged at {at}, but the claim closed meanwhile, so land removed nothing; bp show {id} \
-                 names who closed it"
-            ),
-        ));
-    }
+    kept(&vault, &id, &c, &pr)?;
     // Each layer above moves onto the base before the branch below goes (15, a dependency chain to landed).
     git(&c.top, &["fetch", "-q", "origin"])?;
     let moved = crate::stack::restack(&gh, &children, &c.target, &c.branch)?;
@@ -334,48 +316,6 @@ fn repeat(vault: &Vault, index: &mut Index, id: &Id, dry_run: bool) -> Result<Op
         *index = Index::open(vault)?;
     }
     Ok(status(index)?.then(|| Wrote::Already(json!({ "id": id, "status": resolved }))))
-}
-
-/// Merges `pr` at the head the gates read, once the claim is still the one `land` read (review of #100, F10), then
-/// reads the pull request again: `gh pr merge` exits 0 when a merge queue or auto-merge takes the pull request and
-/// merges nothing, so only the forge's `MERGED` at that head lets `land` remove the branch (F1). Else it refuses and
-/// changes nothing.
-fn merge(vault: &Vault, gh: &Gh, c: &Claimed, id: &Id, pr: &PullRequest) -> Result<PullRequest, Refusal> {
-    let (n, head) = (pr.number, pr.head_ref_oid.as_str());
-    if held(&Index::open(vault)?, id)?.is_none_or(|h| h.id != c.claim.as_str()) {
-        return Err(Refusal::new(
-            Code::ClaimLost,
-            c.claim.as_str(),
-            "land merges only under the claim it read; nothing merged (15, land)",
-            format!("bp show {id} names who closed it; to land it, dispatch a worker to run `bp cut {id}`, then rerun"),
-        ));
-    }
-    gh.merge(n, head).map_err(|e| match gh.pr(n) {
-        // The forge refuses a head that moved since the reads: no review has read that head yet.
-        Ok(now) if now.head_ref_oid != head => Refusal::new(
-            Code::ReviewMissing,
-            id.as_str(),
-            "land merges only the head its reviews read (37, design change 3)",
-            format!(
-                "the head moved to {}; dispatch a worker to run `bp pr {id}`; then its review, then bp land {id}",
-                now.head_ref_oid
-            ),
-        ),
-        _ => e,
-    })?;
-    let now = gh.pr(n)?;
-    if merged(&now) && now.head_ref_oid == head {
-        return Ok(now);
-    }
-    Err(Refusal::failed(
-        format!("gh pr merge {n}"),
-        format!(
-            "gh exited 0, but the forge reads pull request {n} as {} at {}: a merge queue or auto-merge holds it, and \
-             land removed nothing; once the forge merges it, rerun bp land {id}",
-            now.state.as_deref().unwrap_or("OPEN"),
-            now.head_ref_oid
-        ),
-    ))
 }
 
 /// `head_behind_base` unless `head` holds origin's `target` as last fetched: the forge merges no head behind its base
@@ -471,39 +411,6 @@ fn claimed(cwd: &Path, index: &Index, id: &Id) -> Result<Claimed, Refusal> {
         base,
         target,
     })
-}
-
-/// Removes what the claim added to the clone: the worktree, the branch and the forge's copy of it. Each step skips
-/// what is already gone, so a land that stopped part way finishes on its rerun. A branch with a commit the merged
-/// head lacks stays, so no work is lost, and so does one a `stranded` layer still targets; the result is `true` then.
-fn remove(c: &Claimed, merged: &str, stranded: bool) -> Result<bool, Refusal> {
-    if c.worktree.is_dir() {
-        git(&c.top, &["worktree", "remove", &c.worktree.display().to_string()])?;
-    }
-    if stranded {
-        return Ok(true);
-    }
-    git(&c.top, &["fetch", "-q", "--prune", "origin"])?;
-    let exists = |r: &str| git(&c.top, &["rev-parse", "--verify", "-q", r]).is_ok();
-    // A squash merge leaves the branch unmerged by ancestry, so the test is the merged head, not the base.
-    let held = |r: &str| git(&c.top, &["merge-base", "--is-ancestor", r, merged]).is_ok();
-    let (local, remote) = (format!("refs/heads/{}", c.branch), format!("refs/remotes/origin/{}", c.branch));
-    let mut kept = false;
-    if exists(&local) {
-        if held(&local) {
-            git(&c.top, &["branch", "-q", "-D", &c.branch])?;
-        } else {
-            kept = true;
-        }
-    }
-    if exists(&remote) {
-        if held(&remote) {
-            git(&c.top, &["push", "-q", "origin", "--delete", &c.branch])?;
-        } else {
-            kept = true;
-        }
-    }
-    Ok(kept)
 }
 
 fn merged(p: &PullRequest) -> bool {

@@ -246,9 +246,9 @@ pub fn follow_up(index: &Index, issue: &str, reason: &str) -> Result<Option<Stri
 /// The rows an approval record accepts: its `accepts` list, each name as `<review id>#<row>`. A name that does not
 /// read as one accepts nothing.
 pub fn accepted(r: &Record) -> Vec<(String, u64)> {
-    let names = r.header.get("accepts").and_then(Value::as_array);
-    let named = names.into_iter().flatten().filter_map(Value::as_str);
-    named.filter_map(|n| n.rsplit_once('#')).filter_map(|(id, n)| Some((id.to_string(), n.parse().ok()?))).collect()
+    let list = r.header.get("accepts").and_then(Value::as_array);
+    let rows = list.into_iter().flatten().filter_map(Value::as_str);
+    rows.filter_map(|n| n.rsplit_once('#')).filter_map(|(id, n)| Some((id.to_string(), n.parse().ok()?))).collect()
 }
 
 /// The approval records of `issue`: each one's head and the rows it accepts.
