@@ -26,7 +26,7 @@ The dispatch names one lens on its `Lens:` line and the round on its `Round:` li
    - Design: each design in the `cites` of `bp show <id> --json`. Which of its checks could the change break?
    - Convention: each convention id in the slice. Which rule under its headings could the change break?
    One attack varies what the blocks hold fixed: the environment, the paths, or real project data for written input.
-6. Copy the head to a temporary `<dir>`: `git clone -q --no-checkout <worktree> <dir>`, then `git -C <dir> checkout -q <head>`. Run every probe there with the project's commands, with a timeout of 10 minutes, the shell tool's cap.
+6. Copy the head to a temporary `<dir>`: `git clone -q --no-checkout <worktree> <dir>`, then `git -C <dir> checkout -q <head>`. Run every probe there with the project's commands, with a timeout of 10 minutes.
 7. Read the diff: `git -C <worktree> diff <base> <head>`. Add an attack for each change the issue does not ask for. Add one for each change no named `## Check` block tests.
 8. A change that makes a cited design false needs a delta whose `cause` is `<id>`. List them with `bp list delta --under <design> --json`, and read each with `bp show <delta> --json`.
 9. Read only the convention sections that the diff touches: `bp show <convention> --section <heading> --json`. Add an attack for each rule that the diff could break.
@@ -48,4 +48,4 @@ Write the review in this shape:
 - Last line: the session's record call, which you do not run. `<mode>` is `full` in round 1, else `verify`.
 Call: `bp record review <id> --field head=<sha> --field round=<n> --field lens=<lens> --field mode=<mode> --field role=reviewer --body-file <file> --json`.
 
-Stop: return the review. The session records it, and then `bp walk <id> --for review --done --json` returns `done` true.
+Stop: return the review. After the session records each lens, `bp walk <id> --for review --done --json` returns `done` true.
