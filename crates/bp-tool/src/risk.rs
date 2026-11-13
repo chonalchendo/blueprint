@@ -360,7 +360,9 @@ mod tests {
         assert_eq!((c.level, c.security, judged.unmerged), (Level::High, true, true), "{:?}", c.reasons);
         assert!(c.reasons[0].starts_with(&format!("{head} has no test merge with {base}: ")), "{:?}", c.reasons);
         // `land` and `pr` read a test merge that fails as a tool fault, never as a level (review of #100, V2).
-        let refused = super::judge_by(top, base.clone(), vec![head.clone()], &config, true).unwrap_err();
+        let Err(refused) = super::judge_by(top, base.clone(), vec![head.clone()], &config, true) else {
+            panic!("a failed test merge is no level");
+        };
         assert_eq!(refused.code, bp_vault::Code::CouldNotRun, "{refused:?}");
         assert!(refused.fix.starts_with("git cannot test-merge the head into the base: "), "{}", refused.fix);
         // The same change from the base merges: low, and no rebase is the next step.
