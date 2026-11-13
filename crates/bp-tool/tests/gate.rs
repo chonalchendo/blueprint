@@ -168,6 +168,10 @@ fn gate_needs_a_signed_approval_of_this_pull_request_and_head_for_high() {
             let f = ["approve", "bp", "projects/mentat/issues/a", &pr, &head];
             w.comment("human", f, f)
         }),
+        ("another project's valid approval, relabelled", {
+            let theirs = ["approve", "mentat", "projects/mentat/issues/a", &pr, &head];
+            w.comment("human", ["approve", "bp", "projects/mentat/issues/a", &pr, &head], theirs)
+        }),
         (
             "no signature",
             format!("```bp-approval\nact: approve\nproject: bp\nnode: {ISSUE}\npull_request: {PR}\nhead: {head}\n```"),
