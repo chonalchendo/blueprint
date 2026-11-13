@@ -55,7 +55,7 @@ mod tests {
     fn gate_workflow_runs_from_base_and_requires_signature_for_high() {
         let top = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(top.path().join(".git/info")).unwrap();
-        crate::install(top.path(), crate::Target::Claude, "bp", PIN).unwrap();
+        crate::install(top.path(), crate::Target::Claude, "bp", Some(PIN)).unwrap();
         let text = std::fs::read_to_string(top.path().join(WORKFLOW)).unwrap();
         assert_eq!(text, workflow("bp"));
         let exclude = std::fs::read_to_string(top.path().join(".git/info/exclude")).unwrap();
@@ -158,19 +158,25 @@ mod tests {
         std::fs::create_dir_all(top.path().join(".git/info")).unwrap();
         let t = top.path();
         let risk = || std::fs::read_to_string(t.join(RISK_FILE)).unwrap();
-        crate::install(t, crate::Target::Claude, "bp", PIN).unwrap();
+        crate::install(t, crate::Target::Claude, "bp", Some(PIN)).unwrap();
         assert_eq!(risk(), format!("gate: {PIN}\n"), "a clone with no risk file gets one");
         let mine = "high: [infra/]\n# the human's key\nsigner: ssh-ed25519 AAAA me\n";
         std::fs::write(t.join(RISK_FILE), mine).unwrap();
-        let (wrote, v) = crate::install(t, crate::Target::Claude, "bp", PIN).unwrap();
+        let (wrote, v) = crate::install(t, crate::Target::Claude, "bp", Some(PIN)).unwrap();
         assert!(wrote && v["gate"] == PIN, "{v}");
         assert_eq!(risk(), format!("{mine}gate: {PIN}\n"), "the human's lines stay");
-        assert!(!crate::install(t, crate::Target::Claude, "bp", PIN).unwrap().0, "a repeat writes nothing");
+        assert!(!crate::install(t, crate::Target::Claude, "bp", Some(PIN)).unwrap().0, "a repeat writes nothing");
         let next = "fedcba9876543210fedcba9876543210fedcba98";
-        assert!(crate::install(t, crate::Target::Claude, "bp", next).unwrap().0);
+        assert!(crate::install(t, crate::Target::Claude, "bp", Some(next)).unwrap().0);
         assert_eq!(risk(), format!("{mine}gate: {next}\n"), "a new pin replaces the old line");
         let exclude = std::fs::read_to_string(t.join(".git/info/exclude")).unwrap();
         assert!(!exclude.contains(RISK_FILE), "the pin is tracked, so it can be committed: {exclude}");
+        // With no known commit, the pin stays as it is: the check fails closed until the human writes one.
+        let (_, v) = crate::install(t, crate::Target::Claude, "bp", None).unwrap();
+        assert!(v["gate"].is_null() && risk().ends_with(&format!("gate: {next}\n")), "{v}");
+        std::fs::remove_file(t.join(RISK_FILE)).unwrap();
+        crate::install(t, crate::Target::Claude, "bp", None).unwrap();
+        assert!(!t.join(RISK_FILE).exists(), "no risk file is made with no pin");
     }
 
     #[test]
