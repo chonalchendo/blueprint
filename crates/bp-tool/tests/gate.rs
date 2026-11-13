@@ -1,5 +1,5 @@
 //! `bp gate` through the binary, in a plain clone with no vault: the forge check of 37, design change 5. The keys are
-//! made here with no passphrase; no test reads `~/.ssh` or reaches an ssh-agent.
+//! made here with no passphrase; no test reads `~/.ssh`, the developer's git configuration or an ssh-agent.
 
 #[allow(dead_code)]
 mod common;
@@ -95,6 +95,17 @@ impl World {
 
     /// `bp gate` for `head` onto the branch `base_ref`, in a repository whose default branch is `master`.
     fn gate_onto(&self, base_ref: &str, head: &str, comments: Option<&Value>) -> (Option<i32>, Value) {
+        self.gate_env(base_ref, head, comments, &[])
+    }
+
+    /// [`World::gate_onto`] with extra environment variables for `bp`.
+    fn gate_env(
+        &self,
+        base_ref: &str,
+        head: &str,
+        comments: Option<&Value>,
+        env: &[(&str, &str)],
+    ) -> (Option<i32>, Value) {
         let pr = PR.to_string();
         let mut args = vec!["gate", "--base", &self.base, "--base-ref", base_ref, "--default-ref", "master"];
         args.extend(["--head", head, "--pr", &pr, "--project", "bp"]);
@@ -104,7 +115,14 @@ impl World {
             std::fs::write(&path, c.to_string()).unwrap();
             args.extend(["--comments", &path_text]);
         }
-        common::bp_env(&self.code(), &[("SSH_AUTH_SOCK", "")], &args)
+        common::bp_env(&self.code(), env, &args)
+    }
+
+    /// The fields and the comment of the human's valid approval of `head`.
+    fn approval(&self, head: &str) -> Value {
+        let pr = PR.to_string();
+        let f = ["approve", "bp", ISSUE, &pr, "master", head];
+        json!([self.comment("human", f, f)])
     }
 }
 
@@ -192,6 +210,15 @@ fn gate_needs_a_signed_approval_of_this_pull_request_and_head_for_high() {
         assert_eq!(refused(Some(&json!([body]))), (Some(2), "signature_invalid".into()), "{why}");
     }
 
+    // A valid signature of another act, or of a node that is not an issue, approves nothing at this head.
+    assert_eq!(refused(Some(&json!([w.comment("human", lower, lower)]))), (Some(2), "approval_missing".into()));
+    let milestone = ["approve", "bp", "projects/bp/milestones/m", &pr, "master", &head];
+    let not_issue = json!([w.comment("human", milestone, milestone)]);
+    assert_eq!(refused(Some(&not_issue)), (Some(2), "signature_invalid".into()), "a milestone signs no approval");
+    // One comment holds a forged block before the valid one: every block is read.
+    let one = format!("{}{}", w.comment("agent", at(&good), at(&good)), w.comment("human", at(&good), at(&good)));
+    assert_eq!(refused(Some(&json!([one]))), (Some(0), String::new()), "the second block of a body counts");
+
     // The human's signature passes, beside forged ones, in `gh api`'s own shape: one array per page, CRLF line ends.
     let valid = w.comment("human", at(&good), at(&good)).replace('\n', "\r\n");
     let forged = w.comment("agent", at(&good), at(&good));
@@ -267,7 +294,7 @@ fn gate_passes_high_onto_the_default_branch_only() {
     let onto = ["approve", "bp", ISSUE, &pr, "master", &head];
     let both = json!([w.comment("human", stacked, stacked), w.comment("human", onto, onto)]);
     assert_eq!(code(&w.gate_onto("master", &head, Some(&both))), (Some(0), String::new()), "a new signature passes");
-    for bad in ["", "a b", "master\nhead: x"] {
+    for bad in ["", "a b", "master\nhead: x", "mas\u{1}ter"] {
         assert_eq!(code(&w.gate_onto(bad, &head, Some(&both))), (Some(4), "usage".into()), "{bad:?}");
     }
     let path = w.dir.path().join("comments.json").display().to_string();
@@ -283,6 +310,8 @@ fn git_dated(dir: &std::path::Path, date: &str, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
+        .envs(common::ISOLATED)
+        .env_remove("SSH_AUTH_SOCK")
         .env("GIT_AUTHOR_DATE", date)
         .env("GIT_COMMITTER_DATE", date)
         .args(args)
@@ -378,6 +407,14 @@ fn gate_reads_a_gitlink_and_an_attribute_that_hide_a_change() {
         let (_, v) = w.gate(&head, Some(&json!([w.comment("human", fields, fields)])));
         assert_eq!((v["level"].as_str(), v["reasons"][0].as_str()), (Some("high"), Some(says)), "{v}");
     }
+    // A deleted gitlink: only the old side has mode 160000 (review of #99, row 41).
+    git(&code_dir, &["checkout", "-q", "--detach", &w.base]);
+    git(&code_dir, &["rm", "-q", "--cached", "src/lib"]);
+    git(&code_dir, &["commit", "-qm", "unlink"]);
+    let unlinked = git(&code_dir, &["rev-parse", "HEAD"]).trim().to_string();
+    git(&code_dir, &["checkout", "-q", "--detach", &w.base]);
+    let (_, v) = w.gate(&unlinked, Some(&w.approval(&unlinked)));
+    assert_eq!((v["level"].as_str(), v["reasons"][0].as_str()), (Some("high"), Some("src/lib is a submodule commit")));
     // Review row 19. The base marks `docs/**` `-diff`, so git counts no line of a big change under the low pattern.
     let big = "a line\n".repeat(1000);
     let head = w.commit(&[("docs/a.md", &big)]);
@@ -399,4 +436,122 @@ fn gate_refuses_a_base_with_no_pin_of_its_own_build() {
     let w = World::new("signer: {human}\n");
     let head = w.commit(&[(".bp/risk.yml", &format!("signer: {}\ngate: {}\n", w.public("human"), "f".repeat(40)))]);
     assert_eq!(code(&w.gate(&head, None)), (Some(2), "risk_file_invalid".into()));
+}
+
+#[test]
+fn gate_reads_no_attribute_of_the_developers_git_configuration() {
+    // A global `core.attributesFile` that marks `docs/**` `-diff` would hide the size of a low change.
+    let w = World::new(RULES);
+    let attributes = w.dir.path().join("attributes");
+    std::fs::write(&attributes, "docs/** -diff\n").unwrap();
+    let config = w.dir.path().join("gitconfig");
+    std::fs::write(&config, format!("[core]\n\tattributesFile = {}\n", attributes.display())).unwrap();
+    let head = w.commit(&[("docs/b.md", "b\n")]);
+    let config = config.display().to_string();
+    let (exit, v) = w.gate_env("master", &head, None, &[("GIT_CONFIG_GLOBAL", &config)]);
+    assert_eq!((exit, v["level"].as_str()), (Some(0), Some("low")), "{v}");
+}
+
+#[test]
+fn gate_refusals_name_the_level_and_the_next_step() {
+    // Review of #99, row 31: a refusal names the level and its reasons, and a head with no test merge needs a rebase.
+    let w = World::new(RULES);
+    let head = w.commit(&[("infra/b.tf", "b\n")]);
+    let (_, v) = w.gate(&head, None);
+    let fix = v["fix"].as_str().unwrap();
+    assert!(fix.ends_with("; the head reads high: infra/b.tf matches the high pattern infra/"), "{v}");
+    let (_, v) = w.gate_onto("bp/lower", &head, None);
+    assert!(v["fix"].as_str().unwrap().contains("the head reads high: infra/b.tf"), "{v}");
+
+    // An orphan head shares no history with the base, so `git merge-tree` fails: high, and the fix is a rebase.
+    let code_dir = w.code();
+    git(&code_dir, &["checkout", "-q", "--orphan", "orphan"]);
+    std::fs::write(code_dir.join("docs/a.md"), "b\n").unwrap();
+    git(&code_dir, &["commit", "-qm", "orphan"]);
+    let orphan = git(&code_dir, &["rev-parse", "HEAD"]).trim().to_string();
+    git(&code_dir, &["checkout", "-q", "--detach", &w.base]);
+    let (exit, v) = w.gate(&orphan, None);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("approval_missing")), "{v}");
+    let fix = v["fix"].as_str().unwrap();
+    assert!(fix.starts_with("rebase the head onto master and push it"), "{v}");
+    assert!(fix.contains(&format!("the head reads high: {orphan} has no test merge with {}", w.base)), "{v}");
+    assert!(!fix.contains("bp approve"), "a signature is not the next step: {v}");
+
+    // A conflict: the same.
+    let theirs = w.commit(&[("src/a.rs", "theirs\n")]);
+    let mut w = w;
+    w.base = w.commit(&[("src/a.rs", "ours\n")]);
+    let (exit, v) = w.gate(&theirs, None);
+    assert_eq!(exit, Some(2), "{v}");
+    let fix = v["fix"].as_str().unwrap();
+    assert!(fix.starts_with("rebase the head onto master") && fix.contains("conflicts with"), "{v}");
+}
+
+#[test]
+fn gate_fails_closed_on_a_tool_or_input_fault() {
+    let w = World::new(RULES);
+    let head = w.commit(&[("infra/b.tf", "b\n")]);
+    let pr = PR.to_string();
+    let args = |base: &str, comments: &str| {
+        let mut a = vec!["gate", "--base", base, "--base-ref", "master", "--default-ref", "master", "--head", &head];
+        a.extend(["--pr", &pr, "--project", "bp", "--comments", comments]);
+        a.into_iter().map(String::from).collect::<Vec<_>>()
+    };
+    let run = |args: &[String], env: &[(&str, &str)], stdin: &str| {
+        let out = assert_cmd::Command::cargo_bin("bp")
+            .unwrap()
+            .current_dir(w.code())
+            .envs(common::ISOLATED)
+            .env_remove("SSH_AUTH_SOCK")
+            .envs(env.iter().copied())
+            .args(args)
+            .arg("--json")
+            .write_stdin(stdin)
+            .output()
+            .unwrap();
+        (out.status.code(), serde_json::from_slice::<Value>(&out.stdout).unwrap_or(Value::Null))
+    };
+    let valid = w.approval(&head).to_string();
+
+    // `--comments -` reads stdin, as the verb's help says.
+    let (exit, v) = run(&args(&w.base, "-"), &[], &valid);
+    assert_eq!((exit, v["approval"].as_str()), (Some(0), Some("signed")), "{v}");
+    // `--base` is a full sha, as `--head` is.
+    let (exit, v) = run(&args("abc", "-"), &[], &valid);
+    assert_eq!((exit, v["code"].as_str()), (Some(4), Some("usage")), "{v}");
+
+    // Review row 33: a base the clone lacks, or no git, is a clone fault, not a risk file to install.
+    let absent = "a".repeat(40);
+    let (exit, v) = run(&args(&absent, "-"), &[], &valid);
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains(&format!("git fetch origin {absent}")), "{v}");
+    let empty = w.dir.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let (exit, v) = run(&args(&w.base, "-"), &[("PATH", empty.to_str().unwrap())], &valid);
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "no git: {v}");
+
+    // Review row 32: an `ssh-keygen` that cannot verify is a tool fault; the valid signature is not called false.
+    let fake = w.dir.path().join("fake");
+    std::fs::create_dir(&fake).unwrap();
+    std::fs::write(fake.join("ssh-keygen"), "#!/bin/sh\necho 'ssh-keygen: illegal option -- Y' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(fake.join("ssh-keygen"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap());
+    let (exit, v) = run(&args(&w.base, "-"), &[("PATH", &path)], &valid);
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
+    assert!(v["fix"].as_str().unwrap().starts_with("ssh-keygen: illegal option -- Y; install OpenSSH 8.2"), "{v}");
+
+    // Review row 34: each bad read of the comments names the rerun, and an echoed value is cut.
+    let file = w.dir.path().join("comments.json");
+    let at = file.display().to_string();
+    let long = format!("{{\"message\":\"Not Found\",\"x\":\"{}\"}}", "y".repeat(1000));
+    for (why, text) in [("missing", None), ("truncated", Some("[\"a")), ("the forge's error", Some(long.as_str()))] {
+        if let Some(text) = text {
+            std::fs::write(&file, text).unwrap();
+        }
+        let (exit, v) = run(&args(&w.base, &at), &[], "");
+        assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{why}: {v}");
+        let fix = v["fix"].as_str().unwrap();
+        assert!(fix.contains("; rerun the bp-gate check, whose step `read the comments` writes"), "{why}: {v}");
+        assert!(fix.len() < 400, "{why}: the value is cut: {v}");
+    }
 }

@@ -76,8 +76,9 @@ pub(crate) fn sign(message: &str, key: &Path) -> Result<String, Refusal> {
     Ok(signature)
 }
 
-/// Whether `signature` is a valid signature of `message` by `signer`, a public key line. `Err` only when
-/// `ssh-keygen` cannot run.
+/// Whether `signature` is a valid signature of `message` by `signer`, a public key line. `Err` when `ssh-keygen` cannot
+/// run, or cannot verify at all: a usage error names no signature false, and a new signature would fail the same way
+/// (review of #99, row 32). OpenSSH exits 255 with "Could not verify signature." for a false one.
 pub(crate) fn verify(message: &str, signature: &str, signer: &str) -> Result<bool, Refusal> {
     let Some(signer) = public_key(signer) else { return Ok(false) };
     let dir = Scratch::new()?;
@@ -95,12 +96,34 @@ pub(crate) fn verify(message: &str, signature: &str, signer: &str) -> Result<boo
         .env_remove("SSH_AUTH_SOCK")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| Refusal::failed("ssh-keygen", format!("{e}; install OpenSSH 8.2 or later")))?;
     let fed = child.stdin.take().expect("stdin is piped").write_all(message.as_bytes());
-    let status = child.wait().map_err(|e| Refusal::failed("ssh-keygen", e.to_string()))?;
-    Ok(fed.is_ok() && status.success())
+    let out = child.wait_with_output().map_err(|e| Refusal::failed("ssh-keygen", e.to_string()))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let usage = ["usage:", "illegal option", "unknown option", "invalid option", "Unsupported operation"];
+    if !out.status.success() && usage.iter().any(|u| stderr.contains(u)) {
+        return Err(Refusal::failed(
+            "ssh-keygen -Y verify",
+            format!("{}; install OpenSSH 8.2 or later, then rerun", cap(stderr.trim())),
+        ));
+    }
+    Ok(fed.is_ok() && out.status.success())
+}
+
+/// `text` cut to its first 200 bytes, at a character boundary, with a mark when cut: a value echoed in an envelope
+/// never carries a whole page of input.
+pub(crate) fn cap(text: &str) -> String {
+    const MAX: usize = 200;
+    if text.len() <= MAX {
+        return text.to_string();
+    }
+    let mut end = MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 /// A directory of this process's own under the system temp directory, removed on drop.
@@ -265,7 +288,7 @@ pub(crate) fn armour(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sha, signer_of};
+    use super::{cap, is_sha, signer_of};
 
     const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey";
     const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther";
@@ -293,5 +316,15 @@ mod tests {
             assert!(!is_sha(&bad), "{bad}");
         }
         assert!(!is_sha(&format!("{}\nact", "a".repeat(36))));
+    }
+
+    #[test]
+    fn cap_cuts_at_200_bytes_on_a_character_boundary() {
+        assert_eq!(cap("short"), "short");
+        assert_eq!(cap(&"a".repeat(200)), "a".repeat(200));
+        assert_eq!(cap(&"a".repeat(201)), format!("{}…", "a".repeat(200)));
+        // A two-byte character that ends at byte 200 stays; one across the cut goes whole.
+        assert_eq!(cap(&format!("{}é", "a".repeat(198))), format!("{}é", "a".repeat(198)));
+        assert_eq!(cap(&format!("{}é", "a".repeat(199))), format!("{}…", "a".repeat(199)));
     }
 }
