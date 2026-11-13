@@ -716,6 +716,24 @@ mod tests {
             ]
         );
         assert_eq!(changes(""), []);
+        // Review of #99, row 41. A deleted gitlink has mode 160000 on the old side only. The second path of a rename is
+        // read as a path, so a file whose name reads as a raw entry cannot swallow the gitlink entry after it.
+        let entries = [
+            ":100644 100644 aaaaaaa aaaaaaa R100",
+            "docs/old.md",
+            ":160000 000000 aaaaaaa 0000000 D",
+            ":160000 000000 aaaaaaa 0000000 D",
+            "docs/skills",
+            "0\t0\t",
+            "docs/old.md",
+            ":160000 000000 aaaaaaa 0000000 D",
+            "0\t1\tdocs/skills",
+            "",
+        ];
+        assert_eq!(
+            changes(&entries.join("\0")),
+            [renamed("docs/old.md", ":160000 000000 aaaaaaa 0000000 D"), link("docs/skills", 0, 1)]
+        );
     }
 
     #[test]

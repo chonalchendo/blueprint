@@ -41,26 +41,45 @@ mod tests {
             std::fs::create_dir_all(t.path().join(path).parent().unwrap()).unwrap();
             std::fs::write(t.path().join(path), text).unwrap();
         };
+        let commit = |msg: &str| {
+            let isolated = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"];
+            g(&[&isolated[..], &["commit", "-qm", msg]].concat());
+        };
         g(&["init", "-q"]);
+        // The bundle's own files are excluded, as `install` excludes them.
+        write(".git/info/exclude", "/.claude/\n");
         write(".github/workflows/bp-gate.yml", "committed\n");
         write(".github/workflows/ci.yml", "ci\n");
         g(&["add", "-A"]);
-        g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one"]);
-        // The install rewrites the tracked workflow and adds a risk file the commit lacks.
+        commit("one");
+        // The install rewrites the tracked workflow, adds a risk file the commit lacks, and writes the bundle.
+        let ran = std::cell::Cell::new(0);
         let install = || {
+            ran.set(ran.get() + 1);
             write(".github/workflows/bp-gate.yml", "installed\n");
             write(".bp/risk.yml", "gate: 0\n");
+            write(".claude/x", "bundle\n");
             Ok(())
         };
         as_committed(t.path(), install).unwrap();
+        assert_eq!(ran.get(), 1, "the install runs");
         assert_eq!(g(&["status", "--porcelain"]), "", "the clone is as the fixture committed it");
         assert_eq!(std::fs::read_to_string(t.path().join(".github/workflows/bp-gate.yml")).unwrap(), "committed\n");
+        assert!(t.path().join(".claude/x").exists(), "the bundle stays");
 
         // A commit with no workflow: the install's goes, and so do its empty directories.
         g(&["rm", "-q", "-r", ".github"]);
-        g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "two"]);
+        commit("two");
         as_committed(t.path(), install).unwrap();
-        assert_eq!(g(&["status", "--porcelain", "--ignored"]), "");
-        assert!(!t.path().join(".github").exists());
+        assert_eq!(g(&["status", "--porcelain"]), "");
+        assert!(!t.path().join(".github").exists() && !t.path().join(".bp/risk.yml").exists());
+
+        // An install that writes neither file, as a `bp` built off the default branch over a clone with no risk file.
+        as_committed(t.path(), || {
+            write(".claude/x", "bundle\n");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(g(&["status", "--porcelain"]), "");
     }
 }
