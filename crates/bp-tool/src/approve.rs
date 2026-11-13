@@ -125,14 +125,7 @@ fn act(
         let mut v = json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number });
         if kind == Kind::Approval {
             let signature = armour(&r.body).expect("a record that verifies holds a signature");
-            // A repeat posts only when no comment carries this signature: a failed post is then not stranded, and a
-            // rerun adds no second copy (review of #99, row 30).
-            let posted = || -> Result<bool, Refusal> {
-                let bodies = gh.comments(pr.number)?;
-                Ok(bodies.iter().flat_map(|b| blocks(b)).any(|b| b.signature.as_deref() == Some(signature.as_str())))
-            };
-            let post = post && !posted()?;
-            v["comment"] = share(&gh, &id, pr.number, &message, &signature, post)?.into();
+            v["comment"] = again(&gh, &id, pr.number, &message, &signature, post)?.into();
         }
         return Ok(Wrote::Already(v));
     }
@@ -193,6 +186,21 @@ fn share(gh: &Gh, issue: &Id, number: u64, message: &str, signature: &str, post:
         eprint!("bp approve: post this comment on pull request {number}, then rerun its bp-gate check:\n\n{text}");
     }
     Ok(text)
+}
+
+/// A repeat's comment. With `post`, it posts only when no comment holds this whole block as `bp gate` reads it: a
+/// failed post is then not stranded, and a rerun adds no second copy (review of #99, row 30). The signature under
+/// another field is a block the gate does not count, so it posts (row 53).
+fn again(gh: &Gh, issue: &Id, number: u64, message: &str, signature: &str, post: bool) -> Result<String, Refusal> {
+    let text = comment(message, signature);
+    if post {
+        let want = blocks(&text);
+        if gh.comments(number)?.iter().flat_map(|b| blocks(b)).any(|b| want.contains(&b)) {
+            eprintln!("bp approve: pull request {number} holds the signed comment; rerun its bp-gate check");
+            return Ok(text);
+        }
+    }
+    share(gh, issue, number, message, signature, post)
 }
 
 /// A signed record's file: its header fields, then the armoured signature as its one section.

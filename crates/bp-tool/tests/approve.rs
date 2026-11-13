@@ -151,6 +151,13 @@ fn approve_and_lower_sign_the_head_with_the_signers_key() {
     let (code, again) = post();
     assert_eq!((code, &again["comment"]), (Some(3), &out["comment"]), "a repeat gives the same comment: {again}");
     assert!(!t.join("posted").exists(), "the pull request holds this signature, so the repeat posts nothing");
+    // The signature under another pull request's line is a block `bp gate` does not count: the repeat posts (row 53).
+    let moved = comment.replace("pull_request: 4\n", "pull_request: 5\n");
+    assert_ne!(moved, comment);
+    std::fs::write(t.join("comments.json"), json!([{ "body": moved }]).to_string()).unwrap();
+    assert_eq!(post().0, Some(3));
+    assert_eq!(std::fs::read_to_string(t.join("posted")).unwrap(), format!("4\n{comment}"), "one post");
+    std::fs::remove_file(t.join("posted")).unwrap();
     std::fs::remove_file(t.join("comments.json")).unwrap();
 
     // A retarget changes the signed base: the old approval is no repeat. Its post fails, and the record stays.

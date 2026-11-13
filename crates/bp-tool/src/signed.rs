@@ -264,6 +264,7 @@ pub(crate) fn comment(message: &str, signature: &str) -> String {
 }
 
 /// One signed block of a comment: its `key: value` lines in order, and its armoured signature, if any.
+#[derive(PartialEq)]
 pub(crate) struct Block {
     pub(crate) fields: Vec<(String, String)>,
     pub(crate) signature: Option<String>,
