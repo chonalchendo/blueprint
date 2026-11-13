@@ -245,7 +245,7 @@ pub(crate) fn armour(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sha, signer_of};
+    use super::{is_branch, is_sha, signer_of};
 
     const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey";
     const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther";
@@ -276,5 +276,13 @@ mod tests {
             assert!(!is_sha(&bad), "{bad}");
         }
         assert!(!is_sha(&format!("{}\nact", "a".repeat(36))));
+    }
+
+    #[test]
+    fn a_base_is_one_line_of_a_message() {
+        assert!(is_branch("master") && is_branch("bp/a-b_c.1"));
+        for bad in ["", "a b", "master\nact: lower", "a\tb", "a\u{7f}"] {
+            assert!(!is_branch(bad), "{bad:?}");
+        }
     }
 }

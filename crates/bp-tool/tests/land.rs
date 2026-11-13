@@ -784,6 +784,10 @@ fn a_branch_reset_to_a_reviewed_head_needs_a_verify_review() {
     assert_eq!(review(v, t, &fixed, &["round=2", "lens=verify", "mode=verify"], &[]).0, Some(0));
     assert_eq!(intent(v), (json!("needs-landing"), json!("")), "the verify round cleared the error at the fix");
     git(&work, &["reset", "-q", "--hard", &first]);
+    // Until `pr` refreshes it, the forge's last view names the old head, and the refusal says so (review of #98, row 37).
+    let (code, got) = review(v, t, &first, &["round=3", "lens=verify", "mode=verify"], &[]);
+    assert_eq!((code, got["code"].as_str()), (Some(2), Some("schema_invalid")), "{got}");
+    assert!(got["fix"].as_str().unwrap().contains(&format!("the forge's last view names {fixed}")), "{got}");
     pushed(v, t, &first);
     assert_eq!(intent(v), (json!("needs-review"), json!("round 3: missing lenses: verify")));
     // The open pull request's head takes the review whatever its history; the error is found again there.
@@ -1344,6 +1348,9 @@ fn land_high_refuses_without_signed_review() {
     let (code, out) =
         bp(v, t, &[("SSH_AUTH_SOCK", "")], &["lower", ISSUE, "medium", "--reason", "docs", "--key", &human]);
     assert_eq!(code, Some(0), "{out}");
+    let (_, out) = bp(v, t, &[], &["risk", ISSUE]);
+    assert_eq!(out["level"], "medium", "bp risk reads the signed lowering of this head: {out}");
+    assert!(out["reasons"].to_string().contains("the human's signed lowering of this head sets medium"), "{out}");
     let (code, out) = bp(v, t, &[("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")], &["land", ISSUE]);
     let got = (code, out["status"].as_str(), out["level"].as_str());
     assert_eq!(got, (Some(0), Some("resolved"), Some("medium")), "{out}");
