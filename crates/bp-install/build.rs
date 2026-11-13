@@ -5,7 +5,9 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+#[path = "src/built_from.rs"]
+mod built_from;
 
 fn main() {
     // `cargo xtask eval` builds the arms that lack the skill, or hold filler for it, from a copy of the bundle (29,
@@ -27,29 +29,11 @@ fn main() {
     out.push(']');
     let dest = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR")).join("bundle.rs");
     std::fs::write(dest, out).expect("OUT_DIR is writable");
-    println!("cargo:rustc-env=BP_BUILT_FROM={}", built_from().unwrap_or_default());
-}
-
-/// The commit of the clone this crate sits in, when `origin/master` holds it; `None` outside a clone (a source
-/// archive) or for a commit of a worktree or a pull request branch. The workflow refuses a pin off the default branch,
-/// and a squash merge never takes a branch commit there. The check reads local refs only, with no network. Cargo
-/// reruns this when `HEAD`, its branch or `origin/master` moves. Only existing files are watched: cargo reruns a
-/// script that watches a missing one on every build.
-fn built_from() -> Option<String> {
-    let git = |args: &[&str]| {
-        let out = Command::new("git").current_dir(env!("CARGO_MANIFEST_DIR")).args(args).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    let fixed = ["HEAD", "packed-refs", "refs/remotes/origin/master"].map(str::to_string);
-    let watched = fixed.into_iter().chain(git(&["symbolic-ref", "-q", "HEAD"]));
-    for name in watched {
-        let path = git(&["rev-parse", "--path-format=absolute", "--git-path", &name])?;
-        if Path::new(&path).exists() {
-            println!("cargo:rerun-if-changed={path}");
-        }
+    let (sha, watched) = built_from::built_from(Path::new(env!("CARGO_MANIFEST_DIR")));
+    for path in watched {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
-    git(&["merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/master"])?;
-    git(&["rev-parse", "--verify", "-q", "HEAD^{commit}"])
+    println!("cargo:rustc-env=BP_BUILT_FROM={}", sha.unwrap_or_default());
 }
 
 fn walk(dir: &Path, files: &mut Vec<PathBuf>) {

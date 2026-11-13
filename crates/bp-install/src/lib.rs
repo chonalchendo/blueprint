@@ -4,6 +4,8 @@
 //! 27, design changes 1 and 2). It also writes the forge check's workflow, a tracked file (37, design change 5). The
 //! install is local: it calls no forge and writes nothing outside the clone.
 
+#[cfg(test)]
+mod built_from;
 mod gate;
 mod hashes;
 mod section;
