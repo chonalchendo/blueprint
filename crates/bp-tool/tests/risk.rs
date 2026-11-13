@@ -374,17 +374,19 @@ fn a_git_rename_counts_both_paths_and_no_lines() {
 }
 
 #[test]
-fn a_size_git_does_not_count_is_high_outside_the_low_patterns() {
+fn a_size_git_does_not_count_is_high_under_a_low_pattern_too() {
     let mut w = world(Some("low"), Some("low: [docs/]\nlimits: {low_lines: 10, high_lines: 20}\n"));
     w.cut();
-    // An untracked attribute in the clone's own checkout hides the size from numstat; the diff does not show it.
+    // An untracked attribute in the clone's own checkout hides the size from numstat; the diff does not show it. It
+    // can hide a change of any size, so an unknown size is high under a low pattern too (review row 19).
     write(&w.code, ".gitattributes", "*.rs -diff\n*.md -diff\n");
     w.commit(&[("docs/a.md", "One.\n")]);
-    assert_eq!(pick(&w.risk()), json!(["low", "low", "low"]), "an unknown size under a low pattern counts 0");
+    let v = w.risk();
+    assert_eq!((pick(&v), &v["reasons"]), (json!(["high", "low", "high"]), &json!(["size unknown: docs/a.md"])));
     w.commit(&[("src/a.rs", &"fn a() {}\n".repeat(41))]);
     let v = w.risk();
     assert_eq!(pick(&v), json!(["high", "low", "high"]), "{v}");
-    assert_eq!(v["reasons"], json!(["size unknown: src/a.rs"]));
+    assert_eq!(v["reasons"], json!(["size unknown: docs/a.md", "size unknown: src/a.rs"]));
 }
 
 #[test]
