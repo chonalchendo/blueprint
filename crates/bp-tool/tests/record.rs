@@ -35,7 +35,8 @@ fn vault() -> tempfile::TempDir {
     }
     std::fs::create_dir_all(root.join("shared")).unwrap();
     std::fs::write(root.join(".gitignore"), ".bp/\nchange.md\n").unwrap();
-    git(root, &["init", "-q"]);
+    // The vault's branch is the claim's, so each commit it gains is a head on the claim's branch.
+    git(root, &["init", "-q", "-b", "bp/i"]);
     git(root, &["config", "user.name", "t"]);
     git(root, &["config", "user.email", "t@t"]);
     git(root, &["commit", "-q", "--allow-empty", "-m", "base"]);

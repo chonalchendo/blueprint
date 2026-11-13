@@ -721,3 +721,111 @@ fn land_notes_no_step_on_a_layer_released_during_the_merge() {
     assert!(text.ends_with("reason: escalated\n") && !text.contains("## Next"), "{text}");
     assert_eq!(git(v, &["status", "--porcelain"]), "");
 }
+
+/// `bp record review` of [`ISSUE`] at `head` with `fields` and one row per item of `rows`.
+fn review(v: &Path, t: &Path, head: &str, fields: &[&str], rows: &[&str]) -> (Option<i32>, Value) {
+    let file = t.join("review.md");
+    let table = format!("head: {head}\n\n| severity | location | finding |\n|---|---|---|\n{}\n", rows.join("\n"));
+    std::fs::write(&file, table).unwrap();
+    let head = format!("head={head}");
+    let mut args = vec!["record", "review", ISSUE, "--field", &head];
+    for f in fields {
+        args.extend(["--field", f]);
+    }
+    args.extend(["--body-file", file.to_str().unwrap()]);
+    bp(v, t, &[], &args)
+}
+
+/// The intent and note of [`ISSUE`] as `bp list issue` reads them.
+fn intent(v: &Path) -> (Value, Value) {
+    let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "issue"]);
+    let row = list["rows"].as_array().unwrap().iter().find(|r| r["id"] == ISSUE).unwrap().clone();
+    (row["intent"].clone(), row["note"].clone())
+}
+
+/// `pr` at the worktree's head, and the forge's pull request there, green; the repeat refreshes the snapshot.
+fn pushed(v: &Path, t: &Path, head: &str) {
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert!(matches!(code, Some(0 | 3)), "{out}");
+    forge(t, head, &[], &["SUCCESS"]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "the repeat refreshes the snapshot");
+}
+
+/// A branch reset to a reviewed head is a new head: its error row, cleared by a later round at another head, is read
+/// again, and the open pull request's head takes the review (review of #98, row 30).
+#[test]
+fn a_branch_reset_to_a_reviewed_head_needs_a_verify_review() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
+    let work = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(work.join("hello.txt"), "hi\n").unwrap();
+    let first = commit(&work, &["add", "hello.txt"], "hello");
+    pushed(v, t, &first);
+    let one = |lens: &str| ["round=1".to_string(), format!("lens={lens}"), "mode=full".into()];
+    let (code, got) =
+        review(v, t, &first, &one("conformance").each_ref().map(String::as_str), &["| error | hello.txt:1 | Wrong. |"]);
+    assert_eq!(code, Some(0), "{got}");
+    assert_eq!(review(v, t, &first, &one("failure-paths").each_ref().map(String::as_str), &[]).0, Some(0));
+    let id = got["id"].as_str().unwrap();
+    let (code, answer) = bp(v, t, &[], &["record", "disposition", id, "--field", "finding=1", "--field", "as=fixed"]);
+    assert_eq!(code, Some(0), "{answer}");
+    std::fs::write(work.join("hello.txt"), "hello\n").unwrap();
+    let fixed = commit(&work, &["add", "hello.txt"], "fix");
+    pushed(v, t, &fixed);
+    assert_eq!(review(v, t, &fixed, &["round=2", "lens=verify", "mode=verify"], &[]).0, Some(0));
+    assert_eq!(intent(v), (json!("needs-approval"), json!("")), "the verify round cleared the error at the fix");
+    git(&work, &["reset", "-q", "--hard", &first]);
+    pushed(v, t, &first);
+    assert_eq!(intent(v), (json!("needs-review"), json!("round 3: missing lenses: verify")));
+    // The open pull request's head takes the review whatever its history; the error is found again there.
+    let (code, got) =
+        review(v, t, &first, &["round=3", "lens=verify", "mode=verify"], &["| error | hello.txt:1 | Still wrong. |"]);
+    assert_eq!(code, Some(0), "{got}");
+    // Round 3 is past medium's cap, so the error raises the issue to high, at its cap: the human decides.
+    assert_eq!(intent(v), (json!("blocked"), json!("round cap: the human decides")));
+    // The head that the reset left behind is no head of the work (row 33).
+    let (code, got) = review(v, t, &fixed, &["round=3", "lens=verify", "mode=verify"], &[]);
+    assert_eq!((code, got["code"].as_str()), (Some(2), Some("finding_invalid")), "{got}");
+}
+
+/// A level that rises after round one adds the lenses of the new level that no review has read, beside the verify
+/// review, whatever the round (review of #98, row 32).
+#[test]
+fn a_level_rise_after_round_one_adds_its_missing_lenses() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
+    let work = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(work.join("hello.txt"), "hi\n").unwrap();
+    let first = commit(&work, &["add", "hello.txt"], "hello");
+    pushed(v, t, &first);
+    for lens in ["conformance", "failure-paths"] {
+        let field = format!("lens={lens}");
+        assert_eq!(review(v, t, &first, &["round=1", &field, "mode=full"], &[]).0, Some(0));
+    }
+    std::fs::write(work.join("hello.txt"), "hello\n").unwrap();
+    let fixed = commit(&work, &["add", "hello.txt"], "fix");
+    pushed(v, t, &fixed);
+    assert_eq!(review(v, t, &fixed, &["round=2", "lens=verify", "mode=verify"], &[]).0, Some(0));
+    assert_eq!(intent(v), (json!("needs-approval"), json!("")));
+    // Round three touches a high path: the verify review, and the two high lenses no review has read.
+    std::fs::create_dir_all(work.join(".github/workflows")).unwrap();
+    std::fs::write(work.join(".github/workflows/x.yml"), "on: push\n").unwrap();
+    let high = commit(&work, &["add", "-A"], "workflow");
+    pushed(v, t, &high);
+    let note = "round 3: missing lenses: verify, tests-and-checks, security";
+    assert_eq!(intent(v), (json!("needs-review"), json!(note)));
+    // Each missing lens records at the head in its round as a full review; a lens review in verify mode refuses.
+    let (code, got) = review(v, t, &high, &["round=3", "lens=security", "mode=verify"], &[]);
+    assert_eq!((code, got["code"].as_str()), (Some(2), Some("schema_invalid")), "{got}");
+    assert!(got["fix"].as_str().unwrap().ends_with("--field round=3 --field mode=full"), "{got}");
+    assert_eq!(review(v, t, &high, &["round=3", "lens=verify", "mode=verify"], &[]).0, Some(0));
+    assert_eq!(intent(v), (json!("needs-review"), json!("round 3: missing lenses: tests-and-checks, security")));
+    for lens in ["tests-and-checks", "security"] {
+        let field = format!("lens={lens}");
+        let (code, got) = review(v, t, &high, &["round=3", &field, "mode=full"], &[]);
+        assert_eq!(code, Some(0), "{lens}: {got}");
+    }
+    assert_eq!(intent(v), (json!("needs-approval"), json!("")));
+}

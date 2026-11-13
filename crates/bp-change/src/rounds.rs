@@ -128,16 +128,20 @@ pub fn round_one_open(level: Level, security: bool, reviews: &[Review]) -> bool 
     !reviews.iter().any(|r| r.round > 1) && !reviews.iter().any(|r| complete(&r.head))
 }
 
-/// The round of `head` (37, design change 6): the round of the reviews at it; else round one while it is open, so a
-/// new head before round one completes needs every lens again; else the round after the latest.
+/// The round of `head` (37, design change 6): the round of the reviews at it while that is the latest round; else round
+/// one while it is open, so a new head before round one completes needs every lens again; else the round after the
+/// latest. A head whose reviews are of an earlier round, such as a branch reset to it, is a new head: an error row
+/// that a later round cleared at another head is read again (review of #98, row 30).
 pub fn round_of(level: Level, security: bool, reviews: &[Review], head: &str) -> u64 {
-    if let Some(round) = reviews.iter().filter(|r| r.head == head).map(|r| r.round).max() {
+    let latest = reviews.iter().map(|r| r.round).max();
+    if let Some(round) = reviews.iter().filter(|r| r.head == head).map(|r| r.round).max().filter(|r| Some(*r) == latest)
+    {
         return round;
     }
     if round_one_open(level, security, reviews) {
         return 1;
     }
-    reviews.iter().map(|r| r.round).max().map_or(1, |r| r + 1)
+    latest.map_or(1, |r| r + 1)
 }
 
 /// The mode a review of round `round` reads in: `full` at round one, `verify` after it.
@@ -177,10 +181,18 @@ pub fn capped(base: Level, reviews: &[Review]) -> (Level, Option<(u64, Level)>) 
 }
 
 /// The reviews needs review still waits for at `head` (37, design change 8): in round one, each lens of `level` with
-/// no review record at this head; in a later round, one `verify` review.
+/// no review of the round at this head; in a later round, one `verify` review of the round at this head, and each lens
+/// of `level` that no review of the issue has read. So a level rise after round one still adds its lenses (review of
+/// #98, row 32).
 pub fn missing(level: Level, security: bool, reviews: &[Review], head: &str) -> Vec<Lens> {
-    let want = if round_of(level, security, reviews, head) == 1 { lenses(level, security) } else { vec![Lens::Verify] };
-    want.into_iter().filter(|l| !reviews.iter().any(|r| r.head == head && r.lens == *l)).collect()
+    let round = round_of(level, security, reviews, head);
+    let here = |l: Lens| reviews.iter().any(|r| r.head == head && r.round == round && r.lens == l);
+    let lenses = lenses(level, security);
+    if round == 1 {
+        return lenses.into_iter().filter(|l| !here(*l)).collect();
+    }
+    let verify = (!here(Lens::Verify)).then_some(Lens::Verify);
+    verify.into_iter().chain(lenses.into_iter().filter(|l| !reviews.iter().any(|r| r.lens == *l))).collect()
 }
 
 /// Row `n` of `review` still holds (37, design change 6): no error row of a later review at another head re-reports
@@ -282,7 +294,12 @@ mod tests {
         ];
         assert_eq!(round_of(m, false, &[], "a"), 1, "the first head");
         let of = |head| round_of(m, false, &reviews, head);
-        assert_eq!((of("a"), of("b"), of("c")), (1, 2, 3));
+        assert_eq!((of("b"), of("c")), (2, 3));
+        // A head whose reviews are of an earlier round is a new head (review of #98, row 30): a branch reset to `a`
+        // needs one `verify` review, and the round-one lenses there do not stand in for it.
+        assert_eq!(of("a"), 3);
+        assert_eq!(missing(m, false, &reviews, "a"), [Lens::Verify]);
+        assert!(missing(m, false, &reviews, "b").is_empty());
         assert_eq!((mode(1), mode(2)), (Mode::Full, Mode::Verify));
         assert_eq!(
             (prior_head(&reviews, 1), prior_head(&reviews, 2), prior_head(&reviews, 3)),
@@ -308,6 +325,26 @@ mod tests {
         let two = [whole[0].clone(), whole[1].clone(), whole[2].clone(), review("c", 2, Lens::Verify, vec![])];
         assert_eq!(round_of(Level::High, true, &two, "d"), 3);
         assert_eq!(round_of(Level::High, true, &whole, "c"), 1, "high asks for its lenses until round two exists");
+    }
+
+    #[test]
+    fn a_level_rise_after_round_one_adds_its_missing_lenses() {
+        use Lens::*;
+        let one = [review("a", 1, Conformance, vec![]), review("a", 1, FailurePaths, vec![])];
+        // Before round two, a rise reopens round one with each lens of the new level.
+        assert_eq!(missing(Level::High, true, &one, "b"), [Conformance, FailurePaths, TestsAndChecks, Security]);
+        assert_eq!(missing(Level::Medium, true, &one, "b"), [Verify]);
+        // After a verify review at b, round two exists, and round one stays closed. A rise read at b, or at a later
+        // head, still asks for each high lens no review has read, beside the verify review (review of #98, row 32).
+        let two = [one[0].clone(), one[1].clone(), review("b", 2, Verify, vec![])];
+        assert_eq!(missing(Level::High, true, &two, "b"), [TestsAndChecks, Security]);
+        assert_eq!(missing(Level::High, true, &two, "c"), [Verify, TestsAndChecks, Security]);
+        // A lens review at any head of the issue reads that lens; the next head needs its verify review alone.
+        let three = [two[0].clone(), two[1].clone(), two[2].clone(), review("b", 2, TestsAndChecks, vec![])];
+        let four = [three.to_vec(), vec![review("b", 2, Security, vec![])]].concat();
+        assert_eq!(missing(Level::High, true, &three, "b"), [Security]);
+        assert!(missing(Level::High, true, &four, "b").is_empty());
+        assert_eq!(missing(Level::High, true, &four, "c"), [Verify]);
     }
 
     #[test]

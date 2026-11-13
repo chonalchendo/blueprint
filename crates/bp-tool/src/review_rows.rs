@@ -75,31 +75,39 @@ fn late(vault: &Vault, index: &Index, review: &Id, finding: &str, reason: &str) 
 }
 
 /// The round, lens and mode a review of `head` must name: the head's round, `full` and a round-one lens at round
-/// one, `verify` after it (37, design change 6). A `verify` review while round one is open names the lenses it lacks.
+/// one; after it, `verify`, or `full` for a lens of the level that no review of the issue has read (37, design change
+/// 6; review of #98, row 32). A `verify` review while round one is open names the lenses it lacks. `pr` is the open
+/// pull request's head, which takes a review whatever its history (row 30).
 fn round(
     issue: &intents::Issue,
     id: &Id,
     head: &str,
     given: &BTreeMap<&str, &str>,
-    worktree: &Path,
+    (worktree, pr): (&Path, Option<&str>),
 ) -> Result<Mode, Refusal> {
     let round = intents::round(issue, head);
-    let mode = rounds::mode(round);
     let verify = Lens::Verify.as_str();
+    let missing = intents::missing(issue, head);
     // A review at a head whose round has closed would move the fix diff's base back, and two reviews of one round
     // would disagree on what is late (review of #98, row 27). It has closed when a later round is recorded, or a
     // reviewed head descends from it. Records of one second sort by id, so their order cannot say which came later.
     let descends = |h: &str| git(worktree, &["merge-base", "--is-ancestor", head, h]).is_ok();
-    if let Some(later) = issue.reviews.iter().find(|r| r.head != head && (r.round > round || descends(&r.head))) {
+    let later = issue.reviews.iter().find(|r| r.head != head && (r.round > round || descends(&r.head)));
+    if let Some(later) = later.filter(|_| pr != Some(head)) {
+        let open = later.round == round && !intents::missing(issue, &later.head).is_empty();
+        let state = if open {
+            format!("which is open at {}", later.head)
+        } else {
+            format!("which closed when {} was reviewed", later.head)
+        };
         let fix = format!(
-            "{head} is round {round} of {id}, which closed when {} was reviewed: review the head of the pull request, \
-             as `bp walk {id} --for review` names it",
-            later.head
+            "{head} is round {round} of {id}, {state}: review the head of the pull request, as `bp walk {id} --for \
+             review` names it"
         );
         return Err(crate::record::schema(format!("{id} review round"), fix));
     }
     if round == 1 && (given["mode"] == Mode::Verify.as_str() || given["lens"] == verify) {
-        let lenses: Vec<&str> = intents::missing(issue, head).iter().map(|l| l.as_str()).collect();
+        let lenses: Vec<&str> = missing.iter().map(|l| l.as_str()).collect();
         let fix = if lenses.is_empty() {
             format!(
                 "{head} is round 1 of {id}, and each of its lenses is recorded: a `verify` review reads the next head"
@@ -113,23 +121,33 @@ fn round(
         };
         return Err(crate::record::schema(format!("{id} review round"), fix));
     }
+    let lens = missing.iter().any(|l| *l != Lens::Verify && l.as_str() == given["lens"]);
+    let mode = if lens { Mode::Full } else { rounds::mode(round) };
     if given["round"].parse() != Ok(round) || given["mode"] != mode.as_str() {
         let fix = format!("{head} is round {round} of {id}: --field round={round} --field mode={mode}");
         return Err(crate::record::schema(format!("{id} review round"), fix));
     }
     match mode {
         Mode::Verify if given["lens"] != verify => {
-            let fix = format!("round {round} verifies the fix in one review: --field lens={verify}");
+            let lenses: Vec<&str> = missing.iter().filter(|l| **l != Lens::Verify).map(|l| l.as_str()).collect();
+            let also = if lenses.is_empty() {
+                String::new()
+            } else {
+                format!("; a lens review with --field mode=full takes one of: {}", lenses.join(", "))
+            };
+            let fix = format!("round {round} verifies the fix in one review: --field lens={verify}{also}");
             Err(crate::record::schema(format!("{id} review lens"), fix))
         }
         _ => Ok(mode),
     }
 }
 
-/// Refuses a head that no commit of the claim's clone is, after a fetch of the claim's branch, and one that does not
-/// lie past the claim's base: a review at a sha that is no head of the work, such as the base, would count as a round
-/// (37, design change 6). Returns the clone.
-fn commit(index: &Index, issue: &Id, head: &str) -> Result<String, Refusal> {
+/// Refuses a head that no commit of the claim's clone is, after a fetch of the claim's branch, one that does not lie
+/// past the claim's base, and one that is not the open pull request's head or behind it: a review at a sha that is no
+/// head of the work, such as the base, a sibling issue's head or a newer commit of the base branch, would count as a
+/// round (37, design change 6; review of #98, row 33). With no pull request in view, the claim branch's tip in the
+/// clone or at origin stands in for its head. Returns the clone and the pull request's head.
+fn commit(vault: &Vault, index: &Index, issue: &Id, head: &str) -> Result<(String, Option<String>), Refusal> {
     let refuse = |fix: String| Refusal::new(Code::FindingInvalid, format!("{issue} review head {head}"), RULE, fix);
     let Some(claim) = held(index, issue)? else {
         return Err(refuse(format!(
@@ -139,10 +157,11 @@ fn commit(index: &Index, issue: &Id, head: &str) -> Result<String, Refusal> {
     let worktree = field(&claim, "worktree").expect("a claim holds its worktree and base");
     let base = field(&claim, "base").expect("a claim holds its worktree and base");
     let dir = Path::new(&worktree);
+    let branch = crate::claim::branch(issue);
     let known = || git(dir, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_ok();
     if !known() {
         // The pull request's head may be newer than the clone; a failed fetch leaves the refusal below to say so.
-        let _ = git(dir, &["fetch", "-q", "origin", &format!("refs/heads/{}", crate::claim::branch(issue))]);
+        let _ = git(dir, &["fetch", "-q", "origin", &format!("refs/heads/{branch}")]);
     }
     if !known() {
         return Err(refuse(format!(
@@ -158,13 +177,31 @@ fn commit(index: &Index, issue: &Id, head: &str) -> Result<String, Refusal> {
     } else {
         ancestor(&base, head) && !ancestor(head, &base)
     };
-    if past {
-        return Ok(worktree);
+    if !past {
+        return Err(refuse(format!(
+            "{head} is the claim's base {base} or does not descend from it: write the head of the pull request, as \
+             `bp walk {issue} --for review` names it"
+        )));
     }
-    Err(refuse(format!(
-        "{head} is the claim's base {base} or does not descend from it: write the head of the pull request, as `bp \
-         walk {issue} --for review` names it"
-    )))
+    let pr = crate::done::open(&vault.root, index, issue, &mut None)?.map(|(p, _)| p.head_ref_oid);
+    let tips = match &pr {
+        Some(p) => vec![p.clone()],
+        None => vec![format!("refs/heads/{branch}"), format!("refs/remotes/origin/{branch}")],
+    };
+    if !tips.iter().any(|tip| known_tip(dir, &branch, tip) && ancestor(head, tip)) {
+        return Err(refuse(format!(
+            "{head} is not {} or behind it on the claim's branch: write the head of the pull request, as `bp walk \
+             {issue} --for review` names it",
+            tips.join(" or ")
+        )));
+    }
+    Ok((worktree, pr))
+}
+
+/// The clone holds `tip`: a pull request's head newer than the clone comes with a fetch of the claim's branch.
+fn known_tip(dir: &Path, branch: &str, tip: &str) -> bool {
+    let known = || git(dir, &["cat-file", "-e", &format!("{tip}^{{commit}}")]).is_ok();
+    known() || (git(dir, &["fetch", "-q", "origin", &format!("refs/heads/{branch}")]).is_ok() && known())
 }
 
 fn review(
@@ -182,7 +219,7 @@ fn review(
     if !named.any(|h| h.len() >= 7 && head.starts_with(h)) {
         return Err(refuse("head", format!("write `head: {head}` as line 1 of the body")));
     }
-    let worktree = commit(index, issue, head)?;
+    let (worktree, pr) = commit(vault, index, issue, head)?;
     // The rows are what `bp_read::inputs::reduced` counts: each line that starts with `|`, less the header and
     // separator.
     let table: Vec<&str> = body.lines().map(str::trim).filter(|l| l.starts_with('|')).collect();
@@ -253,7 +290,7 @@ fn review(
         }
     }
     let mut added = BTreeMap::new();
-    if round(&issued, issue, head, given, Path::new(&worktree))? == Mode::Full {
+    if round(&issued, issue, head, given, (Path::new(&worktree), pr.as_deref()))? == Mode::Full {
         return Ok(added);
     }
     // The fix diff is the diff from the head the round before read. A new error row at a path it does not show is
@@ -291,7 +328,7 @@ fn re_reports(
     let Some(earlier) = earlier else {
         return Err(refuse(format!(
             "row {n}'s `of` cell is `{cell}`: write `<review id>#<row>` of an earlier review of {issue}, as `bp list \
-             review --under {issue}` names it, or leave the cell empty"
+             review --under {issue}` names it, or leave the cell empty; write a pipe inside a finding as `\\|`"
         )));
     };
     if !rounds::is_error(severity) || earlier.head == head {

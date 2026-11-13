@@ -497,6 +497,12 @@ fn a_cell_holds_an_escaped_pipe_in_each_table_shape() {
     };
     let (exit, v) = w.at(ISSUE, &w.head, &["round=1", "lens=failure-paths", "mode=full"], &four(&w.head, ""));
     assert_eq!((exit, v["rows"].as_u64()), (Some(0), Some(1)), "four columns, an empty `of`: {v}");
+    // An unescaped pipe in four columns splits the finding into the `of` cell; the refusal names the escape (row 34).
+    let split =
+        "head: {h}\n\n| severity | location | finding | of |\n|---|---|---|---|\n| error | src/a.rs:1 | a | b | |\n";
+    let (exit, v) = w.at(ISSUE, &w.head, &["round=1", "lens=conformance", "mode=full"], &split.replace("{h}", &w.head));
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{v}");
+    assert!(v["fix"].as_str().unwrap().ends_with(r"write a pipe inside a finding as `\|`"), "{v}");
     let two = w.fix();
     let (exit, v) = w.at(ISSUE, &two, &["round=2", "lens=verify", "mode=verify"], &four(&two, &format!("{first}#1")));
     assert_eq!((exit, &v["late"]), (Some(0), &serde_json::json!([])), "the `of` cell is the fourth cell: {v}");
@@ -517,6 +523,33 @@ fn refuses_a_head_at_or_behind_the_claims_base() {
     }
 }
 
+/// A commit past the base that is not on the claim's branch is no head of the work: a dangling child of the base,
+/// and a newer commit of origin's master (review of #98, row 33). All claims share one clone, so a sibling's head is
+/// such a commit too.
+#[test]
+fn refuses_a_head_off_the_claims_branch() {
+    let w = world();
+    let base = git(&w.worktree, &["rev-parse", "HEAD~1"]).trim().to_string();
+    let tree = format!("{}^{{tree}}", w.head);
+    let dangling = git(&w.worktree, &["commit-tree", &tree, "-p", &base, "-m", "dangling"]).trim().to_string();
+    let other = w.t.path().join("other");
+    git(w.t.path(), &["clone", "-q", &w.t.path().join("origin.git").display().to_string(), "other"]);
+    std::fs::write(other.join("src/c.rs"), "fn c() {}\n").unwrap();
+    git(&other, &["add", "-A"]);
+    git(&other, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "master moves"]);
+    git(&other, &["push", "-q", "origin", "HEAD:refs/heads/master"]);
+    git(&w.worktree, &["fetch", "-q", "origin"]);
+    let master = git(&w.worktree, &["rev-parse", "origin/master"]).trim().to_string();
+    for head in [&dangling, &master] {
+        let before = commits(w.v());
+        let body = format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n");
+        let (exit, v) = w.at(ISSUE, head, &["round=1", "lens=conformance", "mode=full"], &body);
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{head}: {v}");
+        assert!(v["fix"].as_str().unwrap().contains("or behind it on the claim's branch"), "{v}");
+        assert_eq!(commits(w.v()), before, "a refusal writes nothing");
+    }
+}
+
 #[test]
 fn a_review_at_a_head_whose_round_closed_refuses() {
     let w = world();
@@ -525,9 +558,13 @@ fn a_review_at_a_head_whose_round_closed_refuses() {
         |head: &str, lens: &str| w.at(ISSUE, head, &["round=1", &format!("lens={lens}"), "mode=full"], &empty(head));
     assert_eq!(lens(&w.head, "conformance").0, Some(0));
     let two = w.fix();
-    for l in ["conformance", "failure-paths"] {
-        assert_eq!(lens(&two, l).0, Some(0), "round one again at the new head");
-    }
+    assert_eq!(lens(&two, "conformance").0, Some(0), "round one again at the new head");
+    // Round one is open at the second head, so the first head's review refuses, and the text says open (row 34).
+    let (exit, v) = lens(&w.head, "failure-paths");
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{v}");
+    let want = format!("{} is round 1 of {ISSUE}, which is open at {two}", w.head);
+    assert!(v["fix"].as_str().unwrap().starts_with(&want), "{v}");
+    assert_eq!(lens(&two, "failure-paths").0, Some(0), "round one completes at the new head");
     // The first head's round closed when the second head was reviewed (review of #98, row 27).
     let (exit, v) = lens(&w.head, "failure-paths");
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{v}");
@@ -553,12 +590,16 @@ fn a_review_at_a_head_before_a_later_round_refuses_after_a_rebase() {
     // A rebased head: the same tree on the claim's base, so the first head is not its ancestor.
     let tree = format!("{}^{{tree}}", w.head);
     let rebased = git(&w.worktree, &["commit-tree", &tree, "-p", "HEAD~1", "-m", "rebased"]).trim().to_string();
+    // A head off the branch is no head of the work (review of #98, row 33); the rebase moves the branch.
+    let (exit, v) = w.at(ISSUE, &rebased, &["round=2", "lens=verify", "mode=verify"], &empty(&rebased));
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{v}");
+    git(&w.worktree, &["reset", "-q", "--hard", &rebased]);
     let (exit, v) = w.at(ISSUE, &rebased, &["round=2", "lens=verify", "mode=verify"], &empty(&rebased));
     assert_eq!(exit, Some(0), "{v}");
-    // Round 2 is recorded, so round one, at the first head, has closed (review of #98, row 27).
+    // The first head is off the rebased branch now, so it is no head of the work.
     let (exit, v) = w.at(ISSUE, &w.head, &["round=1", "lens=conformance", "mode=full"], &empty(&w.head));
-    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{v}");
-    let want = format!("{} is round 1 of {ISSUE}, which closed when {rebased} was reviewed", w.head);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{v}");
+    let want = format!("{} is not refs/heads/bp/a or refs/remotes/origin/bp/a or behind it", w.head);
     assert!(v["fix"].as_str().unwrap().starts_with(&want), "{v}");
 }
 
@@ -577,6 +618,7 @@ fn a_stacked_claim_takes_a_head_rebased_off_its_base() {
     git(w.v(), &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "stacked claim"]);
     let tree = format!("{}^{{tree}}", w.head);
     let rebased = git(&w.worktree, &["commit-tree", &tree, "-p", "HEAD~1", "-m", "rebased"]).trim().to_string();
+    git(&w.worktree, &["reset", "-q", "--hard", &rebased]);
     let empty = |head: &str| format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n");
     let one = ["round=1", "lens=conformance", "mode=full"];
     let (exit, v) = w.at(ISSUE, &rebased, &one, &empty(&rebased));
