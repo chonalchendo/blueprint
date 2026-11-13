@@ -38,7 +38,7 @@ pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
         ));
     };
     let top = bp_read::snapshot::clone_of(cwd, &index, &project)?;
-    Ok(match bp_install::install(&top, target)? {
+    Ok(match bp_install::install(&top, target, &project)? {
         (true, v) => Wrote::Changed(v),
         (false, v) => Wrote::Already(v),
     })

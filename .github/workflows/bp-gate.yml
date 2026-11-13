@@ -1,0 +1,66 @@
+# The forge check bp-gate (37, design change 5), written by `bp install`. Branch protection requires the job
+# `bp-gate` and CI. The run never holds code from the pull request: `pull_request_target` runs this file as the
+# default branch holds it, the one checkout of this repository is the default branch's commit, and the head is
+# fetched as data for `git diff` only. A change to this file is high, as every path under `.github/workflows/` is.
+name: bp-gate
+
+on:
+  pull_request_target:
+    # `edited` covers a retarget. A new signed comment needs a rerun of this check: a comment run is not a check of
+    # the head, and it would mark the default branch's commit instead.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  bp-gate:
+    name: bp-gate
+    runs-on: ubuntu-latest
+    env:
+      BP_PROJECT: "bp"
+      BP_SOURCE: https://github.com/chonalchendo/blueprint
+      BP_REF: master
+      BP_BASE: ${{ github.sha }}
+      BP_HEAD: ${{ github.event.pull_request.head.sha }}
+      BP_PR: ${{ github.event.pull_request.number }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: base
+          fetch-depth: 0
+      # The cache scope of this run is the default branch, which a pull request's own runs cannot write.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            bp-target
+          key: bp-gate-${{ runner.os }}-${{ hashFiles('base/Cargo.lock') }}
+          restore-keys: bp-gate-${{ runner.os }}-
+      - name: build bp from the base
+        run: |
+          # Blueprint's own repository builds bp from the base; another builds it from Blueprint's source.
+          if [ -f base/crates/bp-tool/Cargo.toml ]; then
+            src=base
+          else
+            git clone -q "$BP_SOURCE" bp-source
+            git -C bp-source checkout -q "$BP_REF"
+            src=bp-source
+          fi
+          cd "$src"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/bp-target" cargo build --locked --release -p bp-tool
+      - name: fetch the head as data
+        run: git -C base fetch -q --no-tags origin "$BP_HEAD"
+      - name: read the comments
+        run: gh api --paginate "repos/$GH_REPO/issues/$BP_PR/comments" > "$RUNNER_TEMP/comments.json"
+      - name: bp gate
+        working-directory: base
+        run: |
+          "$GITHUB_WORKSPACE/bp-target/release/bp" gate --base "$BP_BASE" --head "$BP_HEAD" --pr "$BP_PR" \
+            --project "$BP_PROJECT" --comments "$RUNNER_TEMP/comments.json"

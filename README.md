@@ -18,4 +18,6 @@ The toolchain is pinned in `rust-toolchain.toml`. `cargo deny` and `cargo machet
 
 ## Pull requests
 
+Branch protection on `master` requires the checks `bp-gate` (`.github/workflows/bp-gate.yml`, which `bp install` writes) and CI. On a private repository on GitHub's free plan, GitHub refuses branch protection, so `bp-gate` is advisory there.
+
 Every pull request body follows `.github/pull_request_template.md`. `gh pr create --body` does not load the template, so copy its sections into the body.
