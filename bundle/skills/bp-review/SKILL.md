@@ -45,7 +45,7 @@ Write the review in this shape:
 - After the table, the line `What holds:` and one line for each failed attack: what you ran, in backticks.
 - An attack that timed out or needs a denied verb gets a `not run:` line with its cause. It is never a pass.
 - If every row is `warn` or `risk`, the review is approvable: say so on the line before the last.
-- Last line: the session's record call, which you do not run. `<mode>` is `full` in round 1, else `verify`.
+- Last line: the session's record call, which you do not run. `<mode>` is `verify` for the lens `verify`, else `full`.
 Call: `bp record review <id> --field head=<sha> --field round=<n> --field lens=<lens> --field mode=<mode> --field role=reviewer --body-file <file> --json`.
 
 Stop: return the review. After the session records each lens, `bp walk <id> --for review --done --json` returns `done` true.
