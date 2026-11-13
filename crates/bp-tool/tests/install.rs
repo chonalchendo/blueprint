@@ -553,7 +553,7 @@ fn the_agent_hook_keeps_a_researcher_to_researchers() {
     let call = |tool: &str, agent: Option<&str>, child: &str| {
         let mut input = serde_json::json!({
             "hook_event_name": "PreToolUse", "session_id": "s", "tool_name": tool,
-            "tool_input": { "subagent_type": child, "prompt": "print hello" },
+            "tool_input": { "subagent_type": child, "prompt": "print hello", "model": "sonnet", "effort": "high" },
         });
         if let Some(a) = agent {
             input["agent_id"] = "a-one".into();
@@ -587,5 +587,46 @@ fn the_agent_hook_keeps_a_researcher_to_researchers() {
         let out = w.hook("bp-agent.sh", input, path, &[]);
         assert_eq!(out.status.code(), Some(2), "{cause}");
         assert!(String::from_utf8_lossy(&out.stderr).contains(cause), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+/// A worker, reviewer or researcher dispatch names its model and its effort, since no role file fixes either; the
+/// reason names where the route is (36, section 3). Any other type passes without them.
+#[test]
+fn the_agent_hook_denies_a_dispatch_with_no_model_or_effort() {
+    let w = World::new();
+    w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    let path = std::env::var("PATH").unwrap();
+    let call = |tool: &str, child: &str, extra: serde_json::Value| {
+        let mut tool_input = serde_json::json!({ "subagent_type": child, "prompt": "print hello" });
+        tool_input.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let input = serde_json::json!({ "hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input });
+        w.hook("bp-agent.sh", &input.to_string(), &path, &[])
+    };
+    for tool in ["Agent", "Task"] {
+        for (child, route) in [
+            ("bp-worker", "ready or needs-response"),
+            ("bp-reviewer", "needs-review"),
+            ("bp-researcher", "opus at high effort"),
+        ] {
+            for (extra, missing) in [
+                (serde_json::json!({}), "model"),
+                (serde_json::json!({ "model": "opus" }), "effort"),
+                (serde_json::json!({ "effort": "high" }), "model"),
+                (serde_json::json!({ "model": "", "effort": "high" }), "model"),
+                (serde_json::json!({ "model": "opus", "effort": 3 }), "effort"),
+                (serde_json::json!({ "model": null, "effort": "high" }), "model"),
+            ] {
+                let out = call(tool, child, extra.clone());
+                let said = String::from_utf8_lossy(&out.stderr);
+                assert_eq!(out.status.code(), Some(2), "{tool} {child} {extra}");
+                assert!(said.contains(&format!("{child} dispatch must name its {missing}")), "{said}");
+                assert!(said.contains(route), "the reason names the route: {said}");
+            }
+            let both = serde_json::json!({ "model": "opus", "effort": "high" });
+            assert!(call(tool, child, both).status.success(), "{tool} {child} names both");
+        }
+        let out = call(tool, "Explore", serde_json::json!({}));
+        assert!(out.status.success(), "{tool}: another type needs neither");
     }
 }
