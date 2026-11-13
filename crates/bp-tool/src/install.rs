@@ -3,22 +3,38 @@
 
 use std::path::Path;
 
-use bp_install::Target;
+use bp_install::{Pin, Target};
 use bp_vault::{Code, Filter, Index, Kind, Refusal, Vault};
 use clap::Args;
 
 use crate::Wrote;
 
-/// `bp install --target <claude|codex>`.
+/// `bp install --target <claude|codex> [--gate <sha>]`.
 #[derive(Args)]
 pub struct Install {
     /// The harness: `claude` (Claude Code) or `codex`.
     #[arg(long, value_parser = ["claude", "codex"])]
     pub target: String,
+    /// The Blueprint commit the forge check `bp-gate` builds `bp` from, written as `gate:` in `.bp/risk.yml`; it
+    /// replaces a pin the file holds. Default: the commit this `bp` is built from, written only into a file with no
+    /// pin. A `bp` built from a commit off Blueprint's default branch writes no pin, and the check fails until the
+    /// human adds one.
+    #[arg(long)]
+    pub gate: Option<String>,
 }
 
 pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
     let target: Target = i.target.parse().expect("clap holds the target to the set");
+    let built = Some(bp_install::BUILT_FROM).filter(|s| !s.is_empty()).map(Pin::Built);
+    let gate = i.gate.as_deref().map(Pin::Given).or(built);
+    if let Some(Pin::Given(g) | Pin::Built(g)) = gate
+        && !bp_change::risk::is_commit(g)
+    {
+        return Err(Refusal::usage(
+            format!("--gate {g}"),
+            "--gate takes the full 40-digit sha of a Blueprint commit that holds bp gate",
+        ));
+    }
     let vault = Vault::discover(cwd)?;
     let index = Index::open(&vault)?;
     let Some(project) = vault.project_for(cwd)? else {
@@ -38,8 +54,13 @@ pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
         ));
     };
     let top = bp_read::snapshot::clone_of(cwd, &index, &project)?;
-    Ok(match bp_install::install(&top, target)? {
-        (true, v) => Wrote::Changed(v),
-        (false, v) => Wrote::Already(v),
-    })
+    let (wrote, v) = bp_install::install(&top, target, &project, gate)?;
+    // Only an install with no pin to write ends with none in force: `--gate` and a built pin are written, or refused.
+    if v["gate"].is_null() {
+        eprintln!(
+            "bp install wrote no pin: this bp is not built from a commit on Blueprint's default branch, so the \
+             bp-gate check fails; rerun with --gate <sha of a commit on Blueprint's default branch>"
+        );
+    }
+    Ok(if wrote { Wrote::Changed(v) } else { Wrote::Already(v) })
 }

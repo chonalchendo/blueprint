@@ -206,7 +206,9 @@ impl Sandbox {
         {
             install.env(key, cfg.join(dir));
         }
-        capture(install.args(["install", "--target", "claude", "--json"]))?;
+        crate::eval_install::as_committed(&self.code(), || {
+            capture(install.args(["install", "--target", "claude", "--json"])).map(drop)
+        })?;
         if let Some((arm, at)) = check_arm {
             self.assert_arm(skill, arm, at)?;
         }
@@ -511,6 +513,41 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn install_runs_bp_install_in_the_clone_with_every_home_in_the_forge() {
+        let t = tempfile::tempdir().unwrap();
+        let sb = super::Sandbox {
+            vault: t.path().join("v"),
+            forge: t.path().join("f"),
+            issue: String::new(),
+            bindir: t.path().join("bin"),
+            tmp: t.path().to_path_buf(),
+            target: t.path().join("target"),
+            start: String::new(),
+            scope_base: String::new(),
+            head: String::new(),
+        };
+        let code = sb.code();
+        std::fs::create_dir_all(&code).unwrap();
+        git(&code, &["init", "-q"]).unwrap();
+        // A `bp` that logs its call and writes a risk file, as an install off the default branch's commit does.
+        let calls = t.path().join("calls");
+        let bp = format!(
+            "#!/bin/sh\necho \"$* HOME=$HOME\" >> '{}'\nmkdir -p .bp && echo 'gate: x' > .bp/risk.yml\necho '{{}}'\n",
+            calls.display()
+        );
+        std::fs::create_dir_all(t.path().join("bin")).unwrap();
+        std::fs::write(t.path().join("bin/bp"), bp).unwrap();
+        std::fs::set_permissions(t.path().join("bin/bp"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        sb.install(&Skill::parse("bp-review").unwrap(), None).unwrap();
+        let home = t.path().join("f/config/home");
+        assert_eq!(
+            std::fs::read_to_string(&calls).unwrap(),
+            format!("install --target claude --json HOME={}\n", home.display())
+        );
+        assert!(!code.join(".bp/risk.yml").exists(), "the clone stays as the fixture committed it");
+    }
 
     #[test]
     fn an_arm_from_a_ref_holds_that_refs_body() {

@@ -3,8 +3,11 @@
 
 use std::path::Path;
 
-use bp_install::{Target, check, install};
+use bp_install::{Pin, Target, check, install};
 use bp_vault::Code;
+
+/// The Blueprint commit each install here pins the forge check to.
+const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn top() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -42,7 +45,7 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
         "permissions": {"allow": ["Bash(ls *)", "Bash(export BP_ROLE=old)"]}, "env": {"MINE": "1", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "5"}}"#;
     write(t, ".claude/settings.local.json", mine);
     assert_eq!(checked(t), "ok", "a clone with no bp- entry is not checked");
-    let (wrote, v) = install(t, Target::Claude).unwrap();
+    let (wrote, v) = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     assert!(wrote);
     assert_eq!(v["target"], "claude");
     for entry in ["AGENTS.md#bp", "CLAUDE.md#bp", "settings.local.json#hooks"] {
@@ -84,7 +87,7 @@ fn installs_keeps_the_users_lines_and_a_repeat_writes_nothing() {
     let guard = std::fs::metadata(t.join(".claude/hooks/bp-guard.sh")).unwrap();
     assert_eq!(std::os::unix::fs::PermissionsExt::mode(&guard.permissions()) & 0o111, 0o111, "run by path");
     assert_eq!(checked(t), "ok");
-    let (wrote, again) = install(t, Target::Claude).unwrap();
+    let (wrote, again) = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     assert!(!wrote, "a repeat exits 3");
     assert_eq!(again, v);
     assert_eq!(read(t, ".git/info/exclude"), exclude, "a repeat adds no exclude line");
@@ -101,7 +104,7 @@ fn check_catches_each_drift_and_install_repairs_it() {
     let dir = top();
     let t = dir.path();
     write(t, "CLAUDE.md", "# Mine\n");
-    install(t, Target::Claude).unwrap();
+    install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     let (skill, settings, manifest) =
         (".claude/skills/bp-complete/SKILL.md", ".claude/settings.local.json", ".claude/skills/bundle.json");
     let tamper = |rel: &'static str| {
@@ -136,7 +139,7 @@ fn check_catches_each_drift_and_install_repairs_it() {
     for (edit, subject) in edits {
         edit(t);
         assert_eq!(checked(t), subject);
-        assert!(install(t, Target::Claude).unwrap().0, "{subject}");
+        assert!(install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap().0, "{subject}");
         assert_eq!(checked(t), "ok", "{subject}");
     }
 }
@@ -145,8 +148,8 @@ fn check_catches_each_drift_and_install_repairs_it() {
 fn a_named_harness_checks_only_its_own_bundle() {
     let dir = top();
     let t = dir.path();
-    install(t, Target::Codex).unwrap();
-    install(t, Target::Claude).unwrap();
+    install(t, Target::Codex, "bp", Some(Pin::Built(PIN))).unwrap();
+    install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     let hook = ".codex/hooks/bp-start.sh";
     write(t, hook, &(read(t, hook) + "# stale\n"));
     assert_eq!(check(t, Some(Target::Claude)).map_err(|r| r.subject), Ok(()), "the Claude session is not stopped");
@@ -158,7 +161,7 @@ fn a_named_harness_checks_only_its_own_bundle() {
 fn a_cached_hash_never_hides_an_edit_and_a_wrong_one_heals() {
     let dir = top();
     let t = dir.path();
-    install(t, Target::Claude).unwrap();
+    install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     let (skill, cache) = (".claude/skills/bp-complete/SKILL.md", ".git/bp-bundle-hashes");
     let held = std::fs::metadata(t.join(skill)).unwrap().modified().unwrap();
     let cached = |t: &Path| {
@@ -189,13 +192,13 @@ fn a_cached_hash_never_hides_an_edit_and_a_wrong_one_heals() {
 fn a_reinstall_removes_what_the_bundle_no_longer_holds() {
     let dir = top();
     let t = dir.path();
-    install(t, Target::Claude).unwrap();
+    install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     let mut manifest: serde_json::Value = serde_json::from_str(&read(t, ".claude/skills/bundle.json")).unwrap();
     manifest["files"][".claude/skills/bp-old/SKILL.md"] = "0".into();
     write(t, ".claude/skills/bundle.json", &manifest.to_string());
     std::fs::create_dir_all(t.join(".claude/skills/bp-old")).unwrap();
     write(t, ".claude/skills/bp-old/SKILL.md", "old");
-    assert!(install(t, Target::Claude).unwrap().0);
+    assert!(install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap().0);
     assert!(!t.join(".claude/skills/bp-old").exists());
     assert_eq!(checked(t), "ok");
 }
@@ -214,24 +217,24 @@ fn a_reinstall_removes_nothing_outside_its_directories() {
         std::fs::write(&victim, "mine").unwrap();
         let dir = top();
         let t = dir.path();
-        install(t, Target::Claude).unwrap();
+        install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
         std::os::unix::fs::symlink(out.path(), t.join(".claude/skills/bp-link")).unwrap();
         let mut manifest: serde_json::Value = serde_json::from_str(&read(t, ".claude/skills/bundle.json")).unwrap();
         manifest["files"][&entry] = "0".into();
         write(t, ".claude/skills/bundle.json", &manifest.to_string());
-        let r = install(t, Target::Claude).unwrap_err();
+        let r = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap_err();
         assert_eq!((r.code, r.exit, r.subject.as_str()), (Code::BundleInvalid, 2, entry.as_str()), "{r:?}");
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "mine", "{entry}");
     }
     // Inside the top, but outside the target's directories: the user's own file.
     let dir = top();
     let t = dir.path();
-    install(t, Target::Claude).unwrap();
+    install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     write(t, "mine.txt", "mine");
     let mut manifest: serde_json::Value = serde_json::from_str(&read(t, ".claude/skills/bundle.json")).unwrap();
     manifest["files"]["mine.txt"] = "0".into();
     write(t, ".claude/skills/bundle.json", &manifest.to_string());
-    assert_eq!(install(t, Target::Claude).unwrap_err().subject, "mine.txt");
+    assert_eq!(install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap_err().subject, "mine.txt");
     assert_eq!(read(t, "mine.txt"), "mine");
 }
 
@@ -241,11 +244,69 @@ fn install_never_writes_through_a_symlink_out_of_the_top() {
     let dir = top();
     let t = dir.path();
     std::os::unix::fs::symlink(out.path(), t.join(".agents")).unwrap();
-    let r = install(t, Target::Codex).unwrap_err();
+    let r = install(t, Target::Codex, "bp", Some(Pin::Built(PIN))).unwrap_err();
     assert_eq!(r.code, Code::BundleInvalid, "{r:?}");
     assert!(r.subject.starts_with(".agents/"), "{r:?}");
     assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0);
     assert!(!t.join("AGENTS.md").exists(), "a refusal writes nothing");
+    // The two tracked files too, on a first install and on a repeat of the bundle (review of #99, row 43).
+    for (link, subject) in [(".github", ".github/workflows/bp-gate.yml"), (".bp/risk.yml", ".bp/risk.yml")] {
+        for repeat in [false, true] {
+            let out = tempfile::tempdir().unwrap();
+            let dir = top();
+            let t = dir.path();
+            if repeat {
+                install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
+                std::fs::remove_dir_all(t.join(".github")).unwrap();
+                std::fs::remove_file(t.join(".bp/risk.yml")).unwrap();
+            }
+            std::fs::create_dir_all(t.join(".bp")).unwrap();
+            std::os::unix::fs::symlink(out.path().join("x"), t.join(link)).unwrap();
+            let r = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap_err();
+            assert_eq!((r.code, r.subject.as_str()), (Code::BundleInvalid, subject), "{link} {repeat}: {r:?}");
+            assert_eq!(std::fs::read_dir(out.path()).unwrap().count(), 0, "{link} {repeat}");
+            assert_eq!(t.join(".claude").exists(), repeat, "{link} {repeat}: a refusal writes nothing");
+        }
+    }
+}
+
+#[test]
+fn install_checks_the_tracked_files_before_it_writes_anything() {
+    // Review of #99, row 36: each fault in the workflow's or the risk file's path refuses before the bundle is written.
+    type Fault = fn(&Path);
+    let faults: [(&str, Fault); 4] = [
+        ("a .github that is a file", |t| write(t, ".github", "x")),
+        ("a risk file that is not UTF-8", |t| {
+            std::fs::create_dir_all(t.join(".bp")).unwrap();
+            std::fs::write(t.join(".bp/risk.yml"), b"\xff").unwrap();
+        }),
+        ("a risk file that is a directory", |t| std::fs::create_dir_all(t.join(".bp/risk.yml")).unwrap()),
+        ("a read-only workflows directory", |t| {
+            std::fs::create_dir_all(t.join(".github/workflows")).unwrap();
+            let ro = std::os::unix::fs::PermissionsExt::from_mode(0o555);
+            std::fs::set_permissions(t.join(".github/workflows"), ro).unwrap();
+        }),
+    ];
+    for (why, fault) in faults {
+        let dir = top();
+        let t = dir.path();
+        fault(t);
+        let r = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap_err();
+        assert_eq!(r.code, Code::CouldNotRun, "{why}: {r:?}");
+        assert!(r.fix.ends_with(", then rerun"), "{why}: the fix names the rerun: {r:?}");
+        assert!(!t.join(".claude").exists() && !t.join("CLAUDE.md").exists(), "{why}: nothing is written");
+        if t.join(".github/workflows").is_dir() {
+            let rw = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+            std::fs::set_permissions(t.join(".github/workflows"), rw).unwrap();
+        }
+    }
+    // The pin goes in by a rename, so no temporary file stays beside it.
+    let dir = top();
+    let t = dir.path();
+    install(t, Target::Claude, "bp", Some(Pin::Given(PIN))).unwrap();
+    let names: Vec<String> =
+        std::fs::read_dir(t.join(".bp")).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    assert_eq!(names, ["risk.yml"]);
 }
 
 #[test]
@@ -254,7 +315,7 @@ fn unpaired_markers_stop_the_install() {
         let dir = top();
         let t = dir.path();
         write(t, "CLAUDE.md", text);
-        let r = install(t, Target::Claude).unwrap_err();
+        let r = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap_err();
         assert_eq!(r.subject, "CLAUDE.md", "{text:?}");
         assert_eq!(read(t, "CLAUDE.md"), text);
     }
@@ -264,7 +325,7 @@ fn unpaired_markers_stop_the_install() {
 fn codex_writes_its_own_paths_and_creates_an_excluded_agents_file() {
     let dir = top();
     let t = dir.path();
-    let (_, v) = install(t, Target::Codex).unwrap();
+    let (_, v) = install(t, Target::Codex, "bp", Some(Pin::Built(PIN))).unwrap();
     assert!(v["files"]["AGENTS.md#bp"].is_string() && v["files"]["hooks.json#hooks"].is_string(), "{v}");
     assert!(t.join(".agents/skills/bp-complete/SKILL.md").is_file());
     let hooks = read(t, ".codex/hooks.json");
@@ -300,7 +361,7 @@ fn the_claude_target_imports_agents_md_into_the_first_claude_file() {
         for (rel, text) in held {
             write(t, rel, text);
         }
-        let (wrote, v) = install(t, Target::Claude).unwrap();
+        let (wrote, v) = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
         assert!(wrote);
         let imports: Vec<String> = v["files"]
             .as_object()
@@ -325,16 +386,16 @@ fn the_claude_target_imports_agents_md_into_the_first_claude_file() {
             "no CLAUDE.md is created"
         );
         assert_eq!(checked(t), "ok");
-        assert!(!install(t, Target::Claude).unwrap().0, "a repeat exits 3: {held:?}");
+        assert!(!install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap().0, "a repeat exits 3: {held:?}");
     }
     // A Claude Code file added after the install hides the section, so the walk refuses until a reinstall imports it.
     let dir = top();
     let t = dir.path();
-    install(t, Target::Claude).unwrap();
+    install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     write(t, "CLAUDE.md", "# Late\n");
     assert_eq!(checked(t), "CLAUDE.md#bp");
     assert!(check(t, None).unwrap_err().fix.contains("CLAUDE.md now hides AGENTS.md"), "the reason names the cause");
-    assert!(install(t, Target::Claude).unwrap().0);
+    assert!(install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap().0);
     assert_eq!(read(t, "CLAUDE.md"), format!("# Late\n\n{IMPORT}"));
     assert_eq!(checked(t), "ok");
 }
@@ -348,7 +409,7 @@ fn a_claude_file_linked_to_agents_md_takes_the_section_once() {
         let t = dir.path();
         write(t, real, "# Mine\n");
         std::os::unix::fs::symlink(real, t.join(link)).unwrap();
-        let (wrote, v) = install(t, Target::Claude).unwrap();
+        let (wrote, v) = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
         assert!(wrote);
         let sections: Vec<&String> = v["files"].as_object().unwrap().keys().filter(|k| k.ends_with("#bp")).collect();
         assert_eq!(sections, ["AGENTS.md#bp"], "{real}");
@@ -356,7 +417,7 @@ fn a_claude_file_linked_to_agents_md_takes_the_section_once() {
         assert!(text.starts_with("# Mine\n\n<!-- bp:begin -->\n## ") && !text.contains("@AGENTS.md"), "{text}");
         assert_eq!(text.matches("<!-- bp:begin -->").count(), 1);
         assert_eq!(checked(t), "ok");
-        assert!(!install(t, Target::Claude).unwrap().0, "a repeat exits 3: {real}");
+        assert!(!install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap().0, "a repeat exits 3: {real}");
     }
 }
 
@@ -366,13 +427,13 @@ fn an_import_counts_outside_code_blocks_in_any_claude_file() {
     let dir = top();
     let t = dir.path();
     write(t, "CLAUDE.md", "```\n@AGENTS.md\n```\n");
-    let (_, v) = install(t, Target::Claude).unwrap();
+    let (_, v) = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     assert!(v["files"]["CLAUDE.md#bp"].is_string(), "a fenced line imports nothing: {v}");
     let dir = top();
     let t = dir.path();
     write(t, "CLAUDE.md", "# Mine\n");
     write(t, "CLAUDE.local.md", "@./AGENTS.md\n");
-    let (_, v) = install(t, Target::Claude).unwrap();
+    let (_, v) = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     assert!(v["files"]["CLAUDE.md#bp"].is_null() && v["files"]["CLAUDE.local.md#bp"].is_null(), "{v}");
     assert_eq!(read(t, "CLAUDE.md"), "# Mine\n");
     assert_eq!(checked(t), "ok");
@@ -385,14 +446,14 @@ fn a_moved_import_leaves_no_stale_section() {
     let t = dir.path();
     std::fs::create_dir_all(t.join(".claude")).unwrap();
     write(t, ".claude/CLAUDE.md", "Mine.\n");
-    install(t, Target::Claude).unwrap();
+    install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     write(t, "CLAUDE.md", "# Late\n");
-    let (_, v) = install(t, Target::Claude).unwrap();
+    let (_, v) = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     assert!(v["files"][".claude/CLAUDE.md#bp"].is_null() && v["files"]["CLAUDE.md#bp"].is_string(), "{v}");
     assert_eq!(read(t, ".claude/CLAUDE.md"), "Mine.\n");
     assert_eq!(read(t, "CLAUDE.md"), format!("# Late\n\n{IMPORT}"));
     write(t, "CLAUDE.md", &read(t, "CLAUDE.md").replace("# Late\n", "# Late\n@AGENTS.md\n"));
-    let (_, v) = install(t, Target::Claude).unwrap();
+    let (_, v) = install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     assert!(v["files"]["CLAUDE.md#bp"].is_null(), "{v}");
     assert_eq!(read(t, "CLAUDE.md"), "# Late\n@AGENTS.md\n");
     assert_eq!(checked(t), "ok");
@@ -403,11 +464,15 @@ fn codex_then_claude_share_one_section() {
     let dir = top();
     let t = dir.path();
     write(t, "CLAUDE.md", "# Mine\n");
-    install(t, Target::Codex).unwrap();
-    install(t, Target::Claude).unwrap();
+    install(t, Target::Codex, "bp", Some(Pin::Built(PIN))).unwrap();
+    install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap();
     assert_eq!(read(t, "AGENTS.md").matches("<!-- bp:begin -->").count(), 1);
     assert_eq!(read(t, ".git/info/exclude").lines().filter(|l| *l == "/AGENTS.md").count(), 1);
     assert_eq!(read(t, "CLAUDE.md"), format!("# Mine\n\n{IMPORT}"));
     assert_eq!(checked(t), "ok");
-    assert!(!install(t, Target::Codex).unwrap().0 && !install(t, Target::Claude).unwrap().0, "each repeat exits 3");
+    assert!(
+        !install(t, Target::Codex, "bp", Some(Pin::Built(PIN))).unwrap().0
+            && !install(t, Target::Claude, "bp", Some(Pin::Built(PIN))).unwrap().0,
+        "each repeat exits 3"
+    );
 }

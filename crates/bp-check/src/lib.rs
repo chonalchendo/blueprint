@@ -321,7 +321,12 @@ fn code_tree(vault: &Vault, repo: &Path) -> Result<(String, std::path::PathBuf),
             "a run records the commit it ran at: run bp check from the code repository, which needs a commit",
         )
     })?;
-    let status = Command::new("git").arg("-C").arg(&top).args(["status", "--porcelain"]).output();
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&top)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args(["status", "--porcelain"])
+        .output();
     match status {
         Ok(out) if out.status.success() && out.stdout.is_empty() => Ok((commit, top)),
         Ok(out) if out.status.success() => {

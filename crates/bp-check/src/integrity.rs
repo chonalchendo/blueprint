@@ -34,6 +34,7 @@ pub(crate) fn clean(vault: &Vault, owner: &Id) -> Result<(), Refusal> {
     let out = Command::new("git")
         .arg("-C")
         .arg(&vault.root)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .args(["--no-optional-locks", "status", "--porcelain", "--", &dir])
         .output();
     match out {

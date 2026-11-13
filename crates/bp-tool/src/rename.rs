@@ -218,6 +218,7 @@ fn in_head(root: &Path, path: &str) -> Result<Child, Refusal> {
     Command::new("git")
         .arg("-C")
         .arg(root)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .args(["cat-file", "-e", &format!("HEAD:./{path}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

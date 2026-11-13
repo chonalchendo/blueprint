@@ -1,4 +1,4 @@
-//! The tool: the 20 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
+//! The tool: the 23 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
 //! `--json`; diagnostics go to stderr.
 
 mod approve;
@@ -11,6 +11,7 @@ mod delta;
 mod diagram;
 mod done;
 mod editorial;
+mod gate;
 mod install;
 mod land;
 mod link;
@@ -108,13 +109,17 @@ pub enum Verb {
     /// the milestone at `done` in one commit, and a local tag. Or accept an editorial delta alone: no finish line,
     /// no version.
     Stamp(stamp::Stamp),
-    /// The bundle into a harness, at the clone's top, with its manifest; local, so it calls no forge.
+    /// The bundle into a harness, at the clone's top, with its manifest, the forge check's workflow and its pin; local,
+    /// so it calls no forge.
     Install(install::Install),
     /// The human's signed approval of the issue's pull request at its head; the key's passphrase is typed in a
     /// terminal, never in an agent.
     Approve(approve::Approve),
     /// The human's signed lowering of the issue's risk level at its pull request's head.
     Lower(approve::Lower),
+    /// The forge check `bp-gate`, in a plain clone with no vault: the level of the head's diff by the base's
+    /// `.bp/risk.yml`, and for high a comment with the human's valid signature of this pull request's head.
+    Gate(gate::Gate),
     /// Check, render and write a diagram spec and its page into a draft design; or preview a spec, or the diff of
     /// two, in a file outside the vault.
     Diagram(diagram::Diagram),
@@ -225,6 +230,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Diagram(d) => diagram::run(cwd, d, cli.json, out),
         Verb::Approve(a) => wrote(approve::approve(cwd, a), cli.json, out),
         Verb::Lower(l) => wrote(approve::lower(cwd, l), cli.json, out),
+        Verb::Gate(g) => finish(gate::gate(cwd, g), cli.json, out),
     }
 }
 

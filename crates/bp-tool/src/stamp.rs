@@ -431,8 +431,13 @@ fn tag_free(root: &Path, tag: &str) -> Result<(), Refusal> {
 
 /// Runs git in the vault: its stdout, or its stderr as the reason it failed.
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out =
-        Command::new("git").arg("-C").arg(root).args(args).output().map_err(|e| format!("git did not start: {e}"))?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .args(args)
+        .output()
+        .map_err(|e| format!("git did not start: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {

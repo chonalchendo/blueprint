@@ -7,7 +7,7 @@ use std::process::Command;
 use bp_vault::Refusal;
 
 /// The variables that move where git reads: the repository, its index, its objects, its refs and its history.
-const LOCATION: [&str; 14] = [
+const LOCATION: [&str; 13] = [
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
@@ -18,7 +18,6 @@ const LOCATION: [&str; 14] = [
     "GIT_SHALLOW_FILE",
     "GIT_GRAFT_FILE",
     "GIT_REPLACE_REF_BASE",
-    "GIT_NO_REPLACE_OBJECTS",
     "GIT_CEILING_DIRECTORIES",
     "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     "GIT_PREFIX",
@@ -36,6 +35,9 @@ pub fn command(dir: &Path) -> Command {
     for name in LOCATION {
         git.env_remove(name);
     }
+    // A local `git replace` swaps an object under every read with no push: a base commit whose tree names another
+    // signer, or drops a high path (review of #100, row S1). bp reads the objects the shas name.
+    git.env("GIT_NO_REPLACE_OBJECTS", "1");
     // A credential prompt would wait on a terminal no agent reads; the fetch fails instead.
     git.env("GIT_TERMINAL_PROMPT", "0");
     git
