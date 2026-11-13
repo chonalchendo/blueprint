@@ -42,20 +42,24 @@ pub(crate) struct Tracked {
 
 impl Tracked {
     /// Writes each changed file whole, by a rename: an install cut short leaves the old file, never a short one that
-    /// still parses (review of #99, row 37). `true` when it wrote one. A temp file that a killed install left beside
-    /// either file goes first, and the new one is created fresh, so a link planted at its name is not followed.
+    /// still parses (review of #99, row 37). `true` when it wrote one. A temp file or link that a killed install left
+    /// beside either file goes first, and the new one is created fresh, so a link planted at its name is not followed.
+    /// A directory at a temp name is no install's: it stays (review of #99, row 56).
     pub(crate) fn write(&self, top: &Path) -> Result<bool, Refusal> {
         for rel in [WORKFLOW, RISK_FILE] {
             let path = top.join(rel);
-            let failed =
-                |e: std::io::Error| Refusal::failed(path.display().to_string(), format!("{e}; fix it, then rerun"));
             let (dir, name) = (path.parent().expect("a tracked file has a parent"), temp_prefix(&path));
             let Ok(entries) = std::fs::read_dir(dir) else { continue };
             for entry in entries.map_while(Result::ok) {
                 let file = entry.file_name();
                 let pid = file.to_str().and_then(|f| f.strip_prefix(&name));
-                if pid.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) {
-                    std::fs::remove_file(entry.path()).map_err(failed)?;
+                let temp = pid.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+                if temp && !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    let stale = entry.path();
+                    std::fs::remove_file(&stale).map_err(|e| {
+                        let fix = format!("{e}; remove {} by hand, then rerun", stale.display());
+                        Refusal::failed(stale.display().to_string(), fix)
+                    })?;
                 }
             }
         }
@@ -359,6 +363,10 @@ mod tests {
         }
         assert!(!run(Some(Pin::Built(PIN))).0);
         assert!(stale.iter().all(|rel| !t.join(rel).exists()) && t.join(".bp/.risk.yml.keep").exists());
+        // A directory at a temp name is no install's: it stays, and the install goes on (review of #99, row 56).
+        std::fs::create_dir_all(t.join(".bp/.risk.yml.5555/x")).unwrap();
+        assert!(!run(Some(Pin::Built(PIN))).0);
+        assert!(t.join(".bp/.risk.yml.5555/x").is_dir());
         // A committed pin stays: only the human's `--gate` moves it, since a pin change is high.
         let next = "fedcba9876543210fedcba9876543210fedcba98";
         let (wrote, v) = run(Some(Pin::Built(next)));
