@@ -229,15 +229,14 @@ pub(crate) fn rules(top: &Path, base: &str, place: &str, heads: &[String]) -> Re
         )
     };
     // A base the clone lacks, or a git that cannot run, is no missing risk file: the default rules would turn a clone
-    // fault into a lower level, and `bp gate` would send the human to `install` (review of #99, row 33). git words a
-    // missing commit and a missing path alike, so the commit is read first.
+    // fault into a lower level, and `bp gate` would send the human to `install` (review of #99, row 33). The commit is
+    // read first; then `ls-tree` lists the path, and no line is no file. git's words for a missing path change with
+    // the work tree: `install` writes the file there before the base holds it (row 51).
     git(top, &["cat-file", "-e", &format!("{base}^{{commit}}")]).map_err(|e| {
         Refusal::failed(place, format!("{}; git fetch origin {base} brings the base commit, then rerun", e.fix))
     })?;
-    match git(top, &["cat-file", "-e", &at]) {
-        Ok(_) => {}
-        Err(e) if e.fix.contains("does not exist in") => return Ok(Config::default()),
-        Err(e) => return Err(e),
+    if git(top, &["ls-tree", "--full-tree", "--name-only", base, "--", RISK_FILE])?.is_empty() {
+        return Ok(Config::default());
     }
     let config = Config::parse(&git(top, &["show", &at])?).map_err(invalid)?;
     let mut dirs = BTreeSet::new();

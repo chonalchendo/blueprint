@@ -231,6 +231,24 @@ fn the_gates_own_paths_are_high_with_no_risk_file() {
 }
 
 #[test]
+fn a_risk_file_on_disk_only_is_no_risk_file() {
+    // Review of #99, row 51: `install` writes the pin into the clone, and the default branch holds no risk file yet.
+    let mut w = world(Some("low"), None);
+    w.cut();
+    w.commit(&[("src/a.rs", "fn a() {}\n")]);
+    let rules = format!("high: [src/]\ngate: {}\n", "a".repeat(40));
+    let wt = w.worktree.clone().unwrap();
+    for dir in [&w.code, &wt] {
+        write(dir, ".bp/risk.yml", &rules);
+    }
+    let v = w.risk();
+    assert_eq!(pick(&v), json!(["medium", "low", "medium"]), "the default rules, not the file on disk: {v}");
+    let env = w.env();
+    let (exit, v) = common::bp_env(&wt, &[(env[0].0, &env[0].1)], &["risk", ISSUE]);
+    assert_eq!((exit, pick(&v)), (Some(0), json!(["medium", "low", "medium"])), "from the worktree: {v}");
+}
+
+#[test]
 fn a_link_named_as_a_high_directory_is_high() {
     let mut w = world(Some("low"), Some("high: [infra/]\nlow: [docs/]\n"));
     w.cut();

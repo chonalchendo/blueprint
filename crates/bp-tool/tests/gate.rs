@@ -439,6 +439,24 @@ fn gate_refuses_a_base_with_no_pin_of_its_own_build() {
 }
 
 #[test]
+fn gate_reads_a_risk_file_on_disk_only_as_no_file() {
+    // Review of #99, row 51: `install` writes the file into the clone before the base holds it. The base's tree
+    // decides: the file on disk only is no file, so no pin, as for a clean clone.
+    let mut w = World::new(RULES);
+    let top = w.code();
+    git(&top, &["rm", "-q", ".bp/risk.yml"]);
+    git(&top, &["commit", "-qm", "no risk file"]);
+    w.base = git(&top, &["rev-parse", "HEAD"]).trim().to_string();
+    let head = w.commit(&[("src/b.rs", "b\n")]);
+    let clean = code(&w.gate(&head, None));
+    assert_eq!(clean, (Some(2), "risk_file_invalid".into()));
+    std::fs::create_dir_all(top.join(".bp")).unwrap();
+    std::fs::write(top.join(".bp/risk.yml"), RULES.replace("{human}", &w.public("human"))).unwrap();
+    let (exit, v) = w.gate(&head, None);
+    assert_eq!(code(&(exit, v.clone())), clean, "the file on disk only: {v}");
+}
+
+#[test]
 fn gate_reads_no_attribute_of_the_developers_git_configuration() {
     // A global `core.attributesFile` that marks `docs/**` `-diff` would hide the size of a low change.
     let w = World::new(RULES);
@@ -535,7 +553,7 @@ fn gate_fails_closed_on_a_tool_or_input_fault() {
     let broken = w.dir.path().join("broken");
     std::fs::create_dir(&broken).unwrap();
     let script = format!(
-        "#!/bin/sh\ncase \"$*\" in *'cat-file -e '*':.bp/risk.yml'*) echo 'error: unable to read' >&2; exit 128;; esac\nexec '{real}' \"$@\"\n"
+        "#!/bin/sh\ncase \"$*\" in *'ls-tree '*' -- .bp/risk.yml'*) echo 'error: unable to read' >&2; exit 128;; esac\nexec '{real}' \"$@\"\n"
     );
     std::fs::write(broken.join("git"), script).unwrap();
     std::fs::set_permissions(broken.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
