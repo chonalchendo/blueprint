@@ -79,6 +79,8 @@ mod tests {
         assert_eq!(job["env"]["BP_HEAD"].as_str(), Some("${{ github.event.pull_request.head.sha }}"));
         // A signature names the base branch, so a retarget reruns this check and needs a new signature.
         assert_eq!(job["env"]["BP_BASE_REF"].as_str(), Some("${{ github.event.pull_request.base.ref }}"));
+        // A pass belongs to the commit, so a high head passes onto the default branch only.
+        assert_eq!(job["env"]["BP_DEFAULT_REF"].as_str(), Some("${{ github.event.repository.default_branch }}"));
         assert_eq!(text.matches("github.event.pull_request.head").count(), 1, "only BP_HEAD names the head");
         assert_eq!(job["env"]["BP_PROJECT"].as_str(), Some("bp"));
         assert_eq!(job["env"]["BP_SOURCE"].as_str(), Some(env!("CARGO_PKG_REPOSITORY")));
@@ -131,7 +133,7 @@ mod tests {
             named,
             [
                 r#"git -C base -c "http.extraheader=AUTHORIZATION: basic $auth" fetch -q --no-tags origin "$BP_HEAD""#,
-                r#"--head "$BP_HEAD" --pr "$BP_PR" --project "$BP_PROJECT" --comments "$RUNNER_TEMP/comments.json""#,
+                r#"--default-ref "$BP_DEFAULT_REF" --head "$BP_HEAD" --pr "$BP_PR" --project "$BP_PROJECT" --comments "$RUNNER_TEMP/comments.json""#,
             ]
         );
         for word in ["checkout", "switch", "worktree", "reset", "restore", "merge", "pull "] {
@@ -145,7 +147,7 @@ mod tests {
             gate.starts_with(r#""$GITHUB_WORKSPACE/bp-source/target/release/bp" gate --base "$BP_BASE""#),
             "{gate}"
         );
-        assert!(gate.contains(r#"--base-ref "$BP_BASE_REF""#), "{gate}");
+        assert!(gate.contains(r#"--base-ref "$BP_BASE_REF" \"#), "{gate}");
         assert!(runs.iter().any(|r| r.starts_with("gh api --paginate \"repos/$GH_REPO/issues/$BP_PR/comments\"")));
         // This repository runs the same file, for its own project.
         let ours = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github/workflows/bp-gate.yml"));

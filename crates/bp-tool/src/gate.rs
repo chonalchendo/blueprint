@@ -1,9 +1,10 @@
-//! `bp gate --base <sha> --base-ref <branch> --head <sha> --pr <n> --project <name>`: the forge check `bp-gate` (37, design change 5).
-//! It runs in a plain clone with no vault, on the forge, from the base: the workflow checks out the base, fetches the
-//! head as data, and never runs code from it. The level comes from the diff by the one level function, with the
-//! rules and the signer of `.bp/risk.yml` at the base, never the head's copy. A high head passes only with a comment
-//! that carries the human's valid signature of the approval of this project, this pull request, its base branch and
-//! this head.
+//! `bp gate --base <sha> --base-ref <branch> --default-ref <branch> --head <sha> --pr <n> --project <name>`: the forge
+//! check `bp-gate` (37, design change 5). It runs in a plain clone with no vault, on the forge, from the base: the
+//! workflow checks out the base, fetches the head as data, and never runs code from it. The level is that of what the
+//! head lands on the base, by the one level function, with the rules and the signer of `.bp/risk.yml` at the base,
+//! never the head's copy. A high head passes only on a pull request into the default branch, with a comment that
+//! carries the human's valid signature of the approval of this project, this pull request, its base branch and this
+//! head.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,10 @@ pub struct Gate {
     /// new one.
     #[arg(long)]
     pub base_ref: String,
+    /// The repository's default branch, as the forge names it. A check passes a commit, not a pull request, and a
+    /// commit that passes onto a stacked branch can then be pushed to this one, so a high head passes onto it only.
+    #[arg(long)]
+    pub default_ref: String,
     /// The pull request's head commit, fetched as data.
     #[arg(long)]
     pub head: String,
@@ -50,8 +55,10 @@ pub(crate) fn gate(cwd: &Path, g: &Gate) -> Result<Value, Refusal> {
             ));
         }
     }
-    if !is_branch(&g.base_ref) {
-        return Err(Refusal::usage(format!("--base-ref {:?}", g.base_ref), "--base-ref takes a branch name"));
+    for (flag, branch) in [("--base-ref", &g.base_ref), ("--default-ref", &g.default_ref)] {
+        if !is_branch(branch) {
+            return Err(Refusal::usage(format!("{flag} {branch:?}"), format!("{flag} takes a branch name")));
+        }
     }
     let top = bp_vault::git::Repo::find(cwd)
         .ok_or_else(|| Refusal::failed(cwd.display().to_string(), "bp gate runs in a clone of the repository"))?
@@ -81,6 +88,19 @@ pub(crate) fn gate(cwd: &Path, g: &Gate) -> Result<Value, Refusal> {
     };
     if level < Level::High {
         return Ok(result("not_needed"));
+    }
+    if g.base_ref != g.default_ref {
+        return Err(Refusal::new(
+            Code::ApprovalMissing,
+            format!("pull request {} at {}", g.pr, g.head),
+            "a high pull request passes the forge check only into the default branch: a pass belongs to the commit, \
+             and the commit could then be pushed to the default branch (37, design change 5)",
+            format!(
+                "retarget pull request {} from {} to {} once the lower layers land, then the human runs bp approve \
+                 <issue> --post from a shell and reruns the bp-gate check",
+                g.pr, g.base_ref, g.default_ref
+            ),
+        ));
     }
     let Some(signer) = config.signer.as_deref().and_then(public_key) else {
         return Err(Refusal::new(
