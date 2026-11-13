@@ -385,7 +385,7 @@ fn the_round_reads_each_review_as_its_first_commit_wrote_it() {
 #[test]
 fn a_verify_review_marks_its_new_error_rows_outside_the_fix_late() {
     let w = world();
-    let (exit, v) = w.review(ISSUE, &w.body(&["| error | src/b.rs:30 | Wrong. |"]));
+    let (exit, v) = w.review(ISSUE, &w.body(&["| error | src/b.rs:29 | Wrong. |"]));
     assert_eq!(exit, Some(0), "{v}");
     let first = v["id"].as_str().unwrap().to_string();
     let (exit, v) = w.at(ISSUE, &w.head, &["round=1", "lens=failure-paths", "mode=full"], &w.body(&[]));
@@ -398,6 +398,7 @@ fn a_verify_review_marks_its_new_error_rows_outside_the_fix_late() {
         "| error | projects/bp/issues/x | A caller the fix breaks. | |",
         "| risk | src/b.rs:30 | It reads a secret. | |",
         &format!("| error | src/b.rs:30 | Still wrong. | `{first}#1` |"),
+        "| error | src/b.rs:29 | Found again, with no `of` cell. | |",
     ];
     let body =
         format!("head: {two}\n\n| severity | location | finding | of |\n|---|---|---|---|\n{}\n", rows.join("\n"));
@@ -408,8 +409,8 @@ fn a_verify_review_marks_its_new_error_rows_outside_the_fix_late() {
         assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{bad}: {v}");
         assert!(v["fix"].as_str().unwrap().starts_with("row 6's `of` cell"), "{v}");
     }
-    // A new error at a path outside the fix is late; a node row and a re-report never are (review of #98, findings
-    // 3 and 5).
+    // A new error at a path outside the fix is late; a node row and a re-report never are, and a row at an earlier
+    // error row's location is a re-report (review of #98, findings 3 and 5, row 24).
     let (exit, v) = w.at(ISSUE, &two, &["round=2", "lens=verify", "mode=verify"], &body);
     assert_eq!((exit, &v["late"]), (Some(0), &serde_json::json!([2])), "{v}");
     let review = v["id"].as_str().unwrap().to_string();
@@ -450,4 +451,136 @@ fn a_verify_review_marks_its_new_error_rows_outside_the_fix_late() {
     git(w.v(), &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "late by hand"]);
     let (exit, v) = decline("6", "out of scope");
     assert_eq!(exit, Some(0), "row 6 is no late row, so any reason declines it: {v}");
+}
+
+#[test]
+fn an_of_cell_re_reports_only_from_an_error_row_of_an_earlier_head() {
+    let w = world();
+    let (exit, v) = w.review(ISSUE, &w.body(&["| error | src/a.rs:1 | Wrong. |"]));
+    assert_eq!(exit, Some(0), "{v}");
+    let first = v["id"].as_str().unwrap().to_string();
+    let table = |head: &str, row: &str| {
+        format!("head: {head}\n\n| severity | location | finding | of |\n|---|---|---|---|\n{row}\n")
+    };
+    let refused = |head: &str, fields: &[&str], row: &str| {
+        let before = commits(w.v());
+        let (exit, v) = w.at(ISSUE, head, fields, &table(head, row));
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{row}: {v}");
+        assert_eq!(commits(w.v()), before, "a refusal writes nothing");
+        assert!(v["fix"].as_str().unwrap().contains("only an `error` row re-reports"), "{v}");
+    };
+    // A second lens at the same head, as a warn or as an error, re-reports nothing (review of #98, row 20).
+    let paths = ["round=1", "lens=failure-paths", "mode=full"];
+    refused(&w.head, &paths, &format!("| warn | src/a.rs:1 | The same. | {first}#1 |"));
+    refused(&w.head, &paths, &format!("| error | src/a.rs:1 | The same. | {first}#1 |"));
+    let (exit, v) = w.at(ISSUE, &w.head, &paths, &table(&w.head, ""));
+    assert_eq!(exit, Some(0), "{v}");
+    // At a later head, a warn row still re-reports nothing; an error row does.
+    let two = w.fix();
+    let verify = ["round=2", "lens=verify", "mode=verify"];
+    refused(&two, &verify, &format!("| warn | src/a.rs:1 | Fixed enough. | {first}#1 |"));
+    let (exit, v) = w.at(ISSUE, &two, &verify, &table(&two, &format!("| error | src/a.rs:1 | Still. | {first}#1 |")));
+    assert_eq!((exit, &v["late"]), (Some(0), &serde_json::json!([])), "{v}");
+}
+
+#[test]
+fn a_cell_holds_an_escaped_pipe_in_each_table_shape() {
+    let w = world();
+    let finding = r"Wrong: `bp list issue --json \| jq .rows` prints 0.";
+    let (exit, v) = w.review(ISSUE, &w.body(&[&format!("| error | src/a.rs:1 | {finding} |")]));
+    assert_eq!((exit, v["rows"].as_u64()), (Some(0), Some(1)), "three columns: {v}");
+    let first = v["id"].as_str().unwrap().to_string();
+    let four = |head: &str, of: &str| {
+        format!(
+            "head: {head}\n\n| severity | location | finding | of |\n|---|---|---|---|\n| error | src/a.rs:1 | {finding} | {of} |\n"
+        )
+    };
+    let (exit, v) = w.at(ISSUE, &w.head, &["round=1", "lens=failure-paths", "mode=full"], &four(&w.head, ""));
+    assert_eq!((exit, v["rows"].as_u64()), (Some(0), Some(1)), "four columns, an empty `of`: {v}");
+    let two = w.fix();
+    let (exit, v) = w.at(ISSUE, &two, &["round=2", "lens=verify", "mode=verify"], &four(&two, &format!("{first}#1")));
+    assert_eq!((exit, &v["late"]), (Some(0), &serde_json::json!([])), "the `of` cell is the fourth cell: {v}");
+}
+
+#[test]
+fn refuses_a_head_at_or_behind_the_claims_base() {
+    let w = world();
+    let base = git(&w.worktree, &["rev-parse", "HEAD~1"]).trim().to_string();
+    let orphan = git(&w.worktree, &["commit-tree", &format!("{}^{{tree}}", w.head), "-m", "orphan"]).trim().to_string();
+    for head in [&base, &orphan] {
+        let before = commits(w.v());
+        let body = format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n");
+        let (exit, v) = w.at(ISSUE, head, &["round=1", "lens=conformance", "mode=full"], &body);
+        assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{head}: {v}");
+        assert!(v["fix"].as_str().unwrap().contains("or does not descend from it"), "{v}");
+        assert_eq!(commits(w.v()), before, "a refusal writes nothing");
+    }
+}
+
+#[test]
+fn a_review_at_a_head_whose_round_closed_refuses() {
+    let w = world();
+    let empty = |head: &str| format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n");
+    let lens =
+        |head: &str, lens: &str| w.at(ISSUE, head, &["round=1", &format!("lens={lens}"), "mode=full"], &empty(head));
+    assert_eq!(lens(&w.head, "conformance").0, Some(0));
+    let two = w.fix();
+    for l in ["conformance", "failure-paths"] {
+        assert_eq!(lens(&two, l).0, Some(0), "round one again at the new head");
+    }
+    // The first head's round closed when the second head was reviewed (review of #98, row 27).
+    let (exit, v) = lens(&w.head, "failure-paths");
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{v}");
+    let want = format!("{} is round 1 of {ISSUE}, which closed when {two} was reviewed", w.head);
+    assert!(v["fix"].as_str().unwrap().starts_with(&want), "{v}");
+    // A `verify` review at the head that completed round one names the next head, not an empty list of lenses.
+    let (exit, v) = w.at(ISSUE, &two, &["round=1", "lens=verify", "mode=verify"], &empty(&two));
+    assert_eq!(exit, Some(2), "{v}");
+    let want = format!(
+        "{two} is round 1 of {ISSUE}, and each of its lenses is recorded: a `verify` review reads the next head"
+    );
+    assert_eq!(v["fix"], want.as_str());
+}
+
+#[test]
+fn a_review_at_a_head_before_a_later_round_refuses_after_a_rebase() {
+    let w = world();
+    let empty = |head: &str| format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n");
+    for lens in ["conformance", "failure-paths"] {
+        let (exit, v) = w.at(ISSUE, &w.head, &["round=1", &format!("lens={lens}"), "mode=full"], &empty(&w.head));
+        assert_eq!(exit, Some(0), "{v}");
+    }
+    // A rebased head: the same tree on the claim's base, so the first head is not its ancestor.
+    let tree = format!("{}^{{tree}}", w.head);
+    let rebased = git(&w.worktree, &["commit-tree", &tree, "-p", "HEAD~1", "-m", "rebased"]).trim().to_string();
+    let (exit, v) = w.at(ISSUE, &rebased, &["round=2", "lens=verify", "mode=verify"], &empty(&rebased));
+    assert_eq!(exit, Some(0), "{v}");
+    // Round 2 is recorded, so round one, at the first head, has closed (review of #98, row 27).
+    let (exit, v) = w.at(ISSUE, &w.head, &["round=1", "lens=conformance", "mode=full"], &empty(&w.head));
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("schema_invalid")), "{v}");
+    let want = format!("{} is round 1 of {ISSUE}, which closed when {rebased} was reviewed", w.head);
+    assert!(v["fix"].as_str().unwrap().starts_with(&want), "{v}");
+}
+
+#[test]
+fn a_stacked_claim_takes_a_head_rebased_off_its_base() {
+    let w = world();
+    // A claim stacked on the layer below starts at that layer's head; its land rebases this branch off it.
+    let claim = format!(
+        "---\nkind: claim\nunder: {ISSUE}\nfrom: 2026-10-19T09:00:00Z\nowner: worker\nworktree: {}\nbase: {}\n\
+         base_branch: bp/x\nbase_issue: {UNCLAIMED}\n---\n",
+        w.worktree.display(),
+        w.head
+    );
+    std::fs::write(w.v().join(format!("{ISSUE}/claims/2026-10-19T09-00-00Z.md")), claim).unwrap();
+    git(w.v(), &["add", "-A"]);
+    git(w.v(), &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "stacked claim"]);
+    let tree = format!("{}^{{tree}}", w.head);
+    let rebased = git(&w.worktree, &["commit-tree", &tree, "-p", "HEAD~1", "-m", "rebased"]).trim().to_string();
+    let empty = |head: &str| format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n");
+    let one = ["round=1", "lens=conformance", "mode=full"];
+    let (exit, v) = w.at(ISSUE, &rebased, &one, &empty(&rebased));
+    assert_eq!(exit, Some(0), "a head off the base, not behind it: {v}");
+    let (exit, v) = w.at(ISSUE, &w.head, &one, &empty(&w.head));
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "the base itself: {v}");
 }

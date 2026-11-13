@@ -150,13 +150,17 @@ pub fn reduced(index: &Index, issue: &str, written: &[Written]) -> Result<Vec<Re
         let answers = answers(index, issue, &w.id)?;
         let of = of_cells(&w.body);
         let rows = (1..)
-            .zip(severities(&w.body))
-            .map(|(n, severity)| Row {
-                error: rounds::is_error(&severity),
-                risk: severity == RISK_ROW,
-                late: late.contains(&n),
-                answer: answers.get(&n).copied(),
-                of: of.get(&n).cloned(),
+            .zip(findings(&w.body))
+            .map(|(n, cells)| {
+                let cell = |i: usize| cells.get(i).map_or("", |c| c.trim_matches('`'));
+                Row {
+                    error: rounds::is_error(cell(0)),
+                    risk: cell(0) == RISK_ROW,
+                    late: late.contains(&n),
+                    answer: answers.get(&n).copied(),
+                    of: of.get(&n).cloned(),
+                    at: cell(1).to_string(),
+                }
             })
             .collect();
         out.push(Review {
@@ -174,18 +178,35 @@ pub fn reduced(index: &Index, issue: &str, written: &[Written]) -> Result<Vec<Re
 /// `<review id>#<row>` (`bp-review`). A cell that does not parse names nothing; `record review` refuses it.
 #[must_use]
 pub fn of_cells(body: &str) -> BTreeMap<u64, (String, u64)> {
-    let table: Vec<Vec<&str>> = body
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with('|'))
-        .map(|l| l[1..].strip_suffix('|').unwrap_or(&l[1..]).split('|').map(|c| c.trim().trim_matches('`')).collect())
-        .collect();
-    let Some(at) = table.first().and_then(|h| h.iter().position(|c| *c == "of")) else { return BTreeMap::new() };
-    let cell = |row: &Vec<&str>| {
-        let (id, n) = row.get(at)?.rsplit_once('#')?;
+    let header = body.lines().map(str::trim).find(|l| l.starts_with('|')).map(cells).unwrap_or_default();
+    let Some(at) = header.iter().position(|c| c == "of") else { return BTreeMap::new() };
+    let cell = |row: &Vec<String>| {
+        let (id, n) = row.get(at)?.trim_matches('`').rsplit_once('#')?;
         Some((id.to_string(), n.parse().ok()?))
     };
-    (1..).zip(table.iter().skip(2)).filter_map(|(n, row)| Some((n, cell(row)?))).collect()
+    (1..).zip(findings(body)).filter_map(|(n, row)| Some((n, cell(&row)?))).collect()
+}
+
+/// The cells of one table line, trimmed. A `\|` is a literal pipe inside a cell (`bp-review`), so a reproduction can
+/// quote a pipeline in any table shape. The closing bar leaves no empty last cell; a line with none keeps its last.
+#[must_use]
+pub fn cells(line: &str) -> Vec<String> {
+    let line = line.trim();
+    let (mut out, mut cell, mut chars) = (Vec::new(), String::new(), line.strip_prefix('|').unwrap_or(line).chars());
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.as_str().starts_with('|') => {
+                cell.push('|');
+                chars.next();
+            }
+            '|' => out.push(std::mem::take(&mut cell)),
+            c => cell.push(c),
+        }
+    }
+    if !cell.is_empty() {
+        out.push(cell);
+    }
+    out.into_iter().map(|c| c.trim().to_string()).collect()
 }
 
 /// The answer of each disposition of `review`, by finding.
@@ -240,9 +261,24 @@ pub fn reviewed(vault: &Vault, index: &Index, issue: &str) -> Result<intents::Is
     })
 }
 
-/// The severity cell of each finding of a review body, in row order: the first cell of each of the [`rows`].
-fn severities(body: &str) -> Vec<String> {
-    let table = body.lines().map(str::trim_start).filter(|l| l.starts_with('|'));
-    let first = |l: &str| l[1..].split('|').next().unwrap_or_default().trim().trim_matches('`').to_string();
-    table.skip(2).map(first).collect()
+/// The [`cells`] of each finding of a review body, in row order: each line that starts with `|`, less the header and
+/// separator.
+fn findings(body: &str) -> Vec<Vec<String>> {
+    body.lines().map(str::trim).filter(|l| l.starts_with('|')).skip(2).map(cells).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cell_reads_an_escaped_pipe_as_a_literal_one() {
+        assert_eq!(cells("| error | f:3 | `a \\| b` |"), ["error", "f:3", "`a | b`"]);
+        assert_eq!(cells("| error | f:3 | `a \\| b` | |"), ["error", "f:3", "`a | b`", ""], "an empty last cell");
+        assert_eq!(cells("| error | f:3 | no closing bar"), ["error", "f:3", "no closing bar"]);
+        let body =
+            "head: h\n\n| severity | location | finding | of |\n|---|---|---|---|\n| error | f:3 | `x \\| y` | r#2 |\n";
+        assert_eq!(of_cells(body), BTreeMap::from([(1, ("r".to_string(), 2))]));
+        assert_eq!(findings(body)[0][2], "`x | y`");
+    }
 }

@@ -40,8 +40,8 @@ Write the review in this shape:
 - `severity` is `error`, `warn` or `risk`. It is `error` only when the reproduction shows the head failing the issue's goal or a cited design's rule. A style or wording point is `warn`.
 - Write a `risk` row when the diff touches the gate, contradicts a design, or you judge it high. It raises the issue to high.
 - `location` is `<path>:<line>` in the diff, or a node id.
-- `of` is empty, or `<review id>#<row>` of the earlier row that this row re-reports.
-- The finding says what is wrong and what would pass, then gives the reproduction.
+- `of` is empty, or `<review id>#<row>` of an earlier head's row that this `error` row re-reports.
+- The finding says what is wrong and what would pass, then gives the reproduction. Escape a `|` in a cell: `\|`.
 - After the table, the line `What holds:` and one line for each failed attack: what you ran, in backticks.
 - An attack that timed out or needs a denied verb gets a `not run:` line with its cause. It is never a pass.
 - If every row is `warn` or `risk`, the review is approvable: say so on the line before the last.

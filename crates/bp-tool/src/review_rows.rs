@@ -14,7 +14,7 @@ use bp_change::DispositionAs;
 use bp_change::intents;
 use bp_change::risk::RISK_ROW;
 use bp_change::rounds::{self, Lens, Mode};
-use bp_read::inputs::{field, held};
+use bp_read::inputs::{cells, field, held};
 use bp_vault::{Code, Id, Index, Kind, Refusal, Vault};
 use serde_json::Value;
 
@@ -76,17 +76,41 @@ fn late(vault: &Vault, index: &Index, review: &Id, finding: &str, reason: &str) 
 
 /// The round, lens and mode a review of `head` must name: the head's round, `full` and a round-one lens at round
 /// one, `verify` after it (37, design change 6). A `verify` review while round one is open names the lenses it lacks.
-fn round(issue: &intents::Issue, id: &Id, head: &str, given: &BTreeMap<&str, &str>) -> Result<Mode, Refusal> {
+fn round(
+    issue: &intents::Issue,
+    id: &Id,
+    head: &str,
+    given: &BTreeMap<&str, &str>,
+    worktree: &Path,
+) -> Result<Mode, Refusal> {
     let round = intents::round(issue, head);
     let mode = rounds::mode(round);
     let verify = Lens::Verify.as_str();
+    // A review at a head whose round has closed would move the fix diff's base back, and two reviews of one round
+    // would disagree on what is late (review of #98, row 27). It has closed when a later round is recorded, or a
+    // reviewed head descends from it. Records of one second sort by id, so their order cannot say which came later.
+    let descends = |h: &str| git(worktree, &["merge-base", "--is-ancestor", head, h]).is_ok();
+    if let Some(later) = issue.reviews.iter().find(|r| r.head != head && (r.round > round || descends(&r.head))) {
+        let fix = format!(
+            "{head} is round {round} of {id}, which closed when {} was reviewed: review the head of the pull request, \
+             as `bp walk {id} --for review` names it",
+            later.head
+        );
+        return Err(crate::record::schema(format!("{id} review round"), fix));
+    }
     if round == 1 && (given["mode"] == Mode::Verify.as_str() || given["lens"] == verify) {
         let lenses: Vec<&str> = intents::missing(issue, head).iter().map(|l| l.as_str()).collect();
-        let fix = format!(
-            "round one of {id} is open at {head}: missing lenses: {}; record each with --field round=1 --field \
-             mode=full --field lens=<lens>",
-            lenses.join(", ")
-        );
+        let fix = if lenses.is_empty() {
+            format!(
+                "{head} is round 1 of {id}, and each of its lenses is recorded: a `verify` review reads the next head"
+            )
+        } else {
+            format!(
+                "round one of {id} is open at {head}: missing lenses: {}; record each with --field round=1 --field \
+                 mode=full --field lens=<lens>",
+                lenses.join(", ")
+            )
+        };
         return Err(crate::record::schema(format!("{id} review round"), fix));
     }
     if given["round"].parse() != Ok(round) || given["mode"] != mode.as_str() {
@@ -102,9 +126,10 @@ fn round(issue: &intents::Issue, id: &Id, head: &str, given: &BTreeMap<&str, &st
     }
 }
 
-/// Refuses a head that no commit of the claim's clone is, after a fetch of the claim's branch: a review at a sha that
-/// is no commit would count as a round (37, design change 6).
-fn commit(index: &Index, issue: &Id, head: &str) -> Result<(), Refusal> {
+/// Refuses a head that no commit of the claim's clone is, after a fetch of the claim's branch, and one that does not
+/// lie past the claim's base: a review at a sha that is no head of the work, such as the base, would count as a round
+/// (37, design change 6). Returns the clone.
+fn commit(index: &Index, issue: &Id, head: &str) -> Result<String, Refusal> {
     let refuse = |fix: String| Refusal::new(Code::FindingInvalid, format!("{issue} review head {head}"), RULE, fix);
     let Some(claim) = held(index, issue)? else {
         return Err(refuse(format!(
@@ -112,19 +137,33 @@ fn commit(index: &Index, issue: &Id, head: &str) -> Result<(), Refusal> {
         )));
     };
     let worktree = field(&claim, "worktree").expect("a claim holds its worktree and base");
-    let known = || git(Path::new(&worktree), &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_ok();
-    if known() {
-        return Ok(());
+    let base = field(&claim, "base").expect("a claim holds its worktree and base");
+    let dir = Path::new(&worktree);
+    let known = || git(dir, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_ok();
+    if !known() {
+        // The pull request's head may be newer than the clone; a failed fetch leaves the refusal below to say so.
+        let _ = git(dir, &["fetch", "-q", "origin", &format!("refs/heads/{}", crate::claim::branch(issue))]);
     }
-    // The pull request's head may be newer than the clone; a failed fetch leaves the refusal below to say so.
-    let _ =
-        git(Path::new(&worktree), &["fetch", "-q", "origin", &format!("refs/heads/{}", crate::claim::branch(issue))]);
-    if known() {
-        return Ok(());
+    if !known() {
+        return Err(refuse(format!(
+            "no commit of {worktree} is {head}, after a fetch of the claim's branch: write the head of the pull \
+             request, as `bp walk {issue} --for review` names it"
+        )));
+    }
+    let ancestor = |a: &str, b: &str| git(dir, &["merge-base", "--is-ancestor", a, b]).is_ok();
+    // A land of the layer below rebases a stacked claim off its base (`stack::move_onto`), so its head need only not
+    // be the base or behind it.
+    let past = if field(&claim, "base_issue").is_some() {
+        !ancestor(head, &base)
+    } else {
+        ancestor(&base, head) && !ancestor(head, &base)
+    };
+    if past {
+        return Ok(worktree);
     }
     Err(refuse(format!(
-        "no commit of {worktree} is {head}, after a fetch of the claim's branch: write the head of the pull \
-         request, as `bp walk {issue} --for review` names it"
+        "{head} is the claim's base {base} or does not descend from it: write the head of the pull request, as `bp \
+         walk {issue} --for review` names it"
     )))
 }
 
@@ -143,7 +182,7 @@ fn review(
     if !named.any(|h| h.len() >= 7 && head.starts_with(h)) {
         return Err(refuse("head", format!("write `head: {head}` as line 1 of the body")));
     }
-    commit(index, issue, head)?;
+    let worktree = commit(index, issue, head)?;
     // The rows are what `bp_read::inputs::reduced` counts: each line that starts with `|`, less the header and
     // separator.
     let table: Vec<&str> = body.lines().map(str::trim).filter(|l| l.starts_with('|')).collect();
@@ -161,14 +200,13 @@ fn review(
     }
     let issued = bp_read::inputs::reviewed(vault, index, issue.as_str())?;
     let of = bp_read::inputs::of_cells(body);
-    let at_of = table[0][1..].split('|').position(|c| c.trim() == "of");
+    let at_of = cells(table[0]).iter().position(|c| c == "of");
     let mut diff = None;
     // Each error row's location, whether it names a node, which no diff shows, and whether it re-reports a row.
     let mut errors = Vec::new();
     for (n, row) in table[2..].iter().enumerate().map(|(i, r)| (i + 1, r)) {
-        let inner = row[1..].strip_suffix('|').unwrap_or(&row[1..]);
-        let cells: Vec<&str> = inner.split('|').map(str::trim).collect();
-        if cells.len() < 3 || cells[..3].iter().any(|c| c.is_empty()) {
+        let cells = cells(row);
+        if cells.len() < 3 || cells[..3].iter().any(String::is_empty) {
             let fix = format!(
                 "fill row {n}: `| error, warn or risk | <path>:<line> or a node id | what is wrong, and what would pass |`"
             );
@@ -190,22 +228,15 @@ fn review(
         }
         let cell = at_of.and_then(|i| cells.get(i)).map(|c| c.trim_matches('`')).filter(|c| !c.is_empty());
         if let Some(cell) = cell {
-            let named = of.get(&(n as u64)).and_then(|(id, m)| {
-                let earlier = issued.reviews.iter().find(|r| r.id == *id)?;
-                (1..=earlier.rows.len() as u64).contains(m).then_some(())
-            });
-            if named.is_none() {
-                let fix = format!(
-                    "row {n}'s `of` cell is `{cell}`: write `<review id>#<row>` of an earlier review of {issue}, as \
-                     `bp list review --under {issue}` names it, or leave the cell empty"
-                );
-                return Err(refuse(&format!("finding {n}"), fix));
-            }
+            re_reports(&issued, issue, head, (n, severity, cell), of.get(&(n as u64)))?;
         }
-        let at = cells[1].trim_matches('`');
-        let node = Id::parse(at).is_ok() && index.header(at)?.is_some();
+        let at = cells[1].trim_matches('`').to_string();
+        let node = Id::parse(&at).is_ok() && index.header(&at)?.is_some();
         if rounds::is_error(severity) {
-            errors.push((n as u64, at, node || cell.is_some()));
+            // An earlier error row at the same location is the same defect found again: a re-report, never late
+            // (review of #98, row 24).
+            let again = issued.reviews.iter().flat_map(|r| &r.rows).any(|r| r.error && r.at == at);
+            errors.push((n as u64, at.clone(), node || cell.is_some() || again));
         }
         if node {
             continue;
@@ -213,7 +244,7 @@ fn review(
         if diff.is_none() {
             diff = Some(hunks(index, issue, None, head)?);
         }
-        if !diff.as_ref().is_some_and(|h| inside(h, at)) {
+        if !diff.as_ref().is_some_and(|h| inside(h, &at)) {
             let fix = format!(
                 "finding {n} cites `{at}`, which the diff of {head} against the claim's base does not show: cite a \
                  file and lines that `git diff <base> {head}` shows, or a node id, or drop the finding"
@@ -222,7 +253,7 @@ fn review(
         }
     }
     let mut added = BTreeMap::new();
-    if round(&issued, issue, head, given)? == Mode::Full {
+    if round(&issued, issue, head, given, Path::new(&worktree))? == Mode::Full {
         return Ok(added);
     }
     // The fix diff is the diff from the head the round before read. A new error row at a path it does not show is
@@ -239,6 +270,38 @@ fn review(
         added.insert("late".into(), Value::Array(late));
     }
     Ok(added)
+}
+
+/// Refuses an `of` cell that names no row of an earlier review of `issue`, one on a row that is no error, and one that
+/// names a review of `head`. A re-report carries an error row to a later head; a `warn` row or a second lens at the
+/// same head would clear it with no fix (37, design change 6; review of #98, row 20). `row` is the row's number,
+/// severity and `of` cell; `named` is what the cell parses to.
+fn re_reports(
+    issued: &intents::Issue,
+    issue: &Id,
+    head: &str,
+    (n, severity, cell): (usize, &str, &str),
+    named: Option<&(String, u64)>,
+) -> Result<(), Refusal> {
+    let refuse = |fix: String| Refusal::new(Code::FindingInvalid, format!("{issue} review finding {n}"), RULE, fix);
+    let earlier = named.and_then(|(id, m)| {
+        let earlier = issued.reviews.iter().find(|r| r.id == *id)?;
+        (1..=earlier.rows.len() as u64).contains(m).then_some(earlier)
+    });
+    let Some(earlier) = earlier else {
+        return Err(refuse(format!(
+            "row {n}'s `of` cell is `{cell}`: write `<review id>#<row>` of an earlier review of {issue}, as `bp list \
+             review --under {issue}` names it, or leave the cell empty"
+        )));
+    };
+    if !rounds::is_error(severity) || earlier.head == head {
+        return Err(refuse(format!(
+            "row {n}'s `of` cell names {}: only an `error` row re-reports, and only a row of an earlier head; leave \
+             the cell empty, and decline a duplicate at this head with the other row's id",
+            earlier.id
+        )));
+    }
+    Ok(())
 }
 
 /// The lines that `git diff <base> <head>` shows in the claim's worktree, `base` else the claim's, with git's three

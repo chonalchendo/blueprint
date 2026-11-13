@@ -84,6 +84,9 @@ pub struct Row {
     pub answer: Option<Answer>,
     /// The earlier row it re-reports, as the review id and the row counted from 1: its `of` cell.
     pub of: Option<(String, u64)>,
+    /// Its location cell: `<path>:<line>` or a node id. A new error row at an earlier error row's location is a
+    /// re-report, so it is never late (37, design change 7).
+    pub at: String,
 }
 
 impl Row {
@@ -180,14 +183,17 @@ pub fn missing(level: Level, security: bool, reviews: &[Review], head: &str) -> 
     want.into_iter().filter(|l| !reviews.iter().any(|r| r.head == head && r.lens == *l)).collect()
 }
 
-/// Row `n` of `review` still holds (37, design change 6): no later row re-reports it, and no `verify` review of a
-/// later round exists. A moved head alone clears nothing; a later `verify` review that does not re-report the row
-/// clears it, and one that does carries it on as its own row.
+/// Row `n` of `review` still holds (37, design change 6): no error row of a later review at another head re-reports
+/// it, and no `verify` review of a later round exists. A moved head alone clears nothing; a later `verify` review that
+/// does not re-report the row clears it, and one that does carries it on as its own row. A `warn` row, or a row of a
+/// second lens at the same head, re-reports nothing, so it cannot clear an error row in place of the fix.
 fn holds(reviews: &[Review], review: &Review, n: u64) -> bool {
     let reported = reviews
         .iter()
+        .skip_while(|r| r.id != review.id)
+        .filter(|r| r.head != review.head)
         .flat_map(|r| &r.rows)
-        .any(|row| row.of.as_ref().is_some_and(|(id, m)| *id == review.id && *m == n));
+        .any(|row| row.error && row.of.as_ref().is_some_and(|(id, m)| *id == review.id && *m == n));
     let verified = reviews.iter().any(|r| r.lens == Lens::Verify && r.round > review.round);
     !reported && !verified
 }
@@ -385,11 +391,19 @@ mod tests {
         assert_eq!(blocking(Level::Low, &round_one)[0].1, [1, 2], "at a new head too");
         assert_eq!(unanswered(&round_one, "b")[0].1, [2]);
         assert_eq!(named(&unanswered(&round_one, "b"), "b"), "r/a-conformance findings 2");
-        // A row that re-reports row 2 carries it as its own row; row 1 still holds.
+        // A row of a second lens at the same head re-reports nothing: rows 1 and 2 both hold (review of #98, row 20).
         let echo = review("a", 1, Lens::FailurePaths, vec![again(&r1, 2)]);
         let echoed = [r1.clone(), echo];
         let held: Vec<_> = blocking(Level::Medium, &echoed).into_iter().map(|(r, n)| (&*r.id, n)).collect();
-        assert_eq!(held, [("r/a-conformance", vec![1]), ("r/a-failure-paths", vec![1])]);
+        assert_eq!(held, [("r/a-conformance", vec![1, 2]), ("r/a-failure-paths", vec![1])]);
+        // Nor does a `warn` row at a later head: only an error row carries an earlier one.
+        let warned =
+            [r1.clone(), paths.clone(), review("b", 1, Lens::Conformance, vec![Row { error: false, ..again(&r1, 2) }])];
+        assert_eq!(blocking(Level::Medium, &warned)[0].1, [1, 2]);
+        // An error row at a later head carries row 2 as its own row; row 1 still holds.
+        let carried = [r1.clone(), paths.clone(), review("b", 1, Lens::Conformance, vec![again(&r1, 2)])];
+        let held: Vec<_> = blocking(Level::Medium, &carried).into_iter().map(|(r, n)| (&*r.id, n)).collect();
+        assert_eq!(held, [("r/a-conformance", vec![1]), ("r/b-conformance", vec![1])]);
         // A verify review that re-reports row 1 carries it as its own row; row 2 clears.
         let v2 = review("b", 2, Lens::Verify, vec![again(&r1, 1)]);
         let two = [r1.clone(), paths.clone(), v2.clone()];

@@ -330,7 +330,8 @@ fn a_handoff_seed_follows_a_record_to_its_node() {
     let w = World::new();
     // A held claim whose clone is the vault itself, so the vault's commit is a head `record review` accepts.
     let v = w.vault.path();
-    let claim = format!("---\nkind: claim\nunder: {ISSUE}\nworktree: {}\nbase: HEAD\n---\n", v.display());
+    let base = git(v, &["rev-parse", "HEAD"]).trim().to_string();
+    let claim = format!("---\nkind: claim\nunder: {ISSUE}\nworktree: {}\nbase: {base}\n---\n", v.display());
     std::fs::create_dir_all(v.join(format!("{ISSUE}/claims"))).unwrap();
     std::fs::write(v.join(format!("{ISSUE}/claims/c.md")), claim).unwrap();
     git(v, &["add", "-A"]);
