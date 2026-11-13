@@ -8,7 +8,8 @@ use bp_vault::Kind;
 pub use bp_vault::Requires;
 
 bp_vault::closed_enum! {
-    /// The actions an agent runs from a walk (21). Human acts (approve, land, stamp) read a page, not a walk.
+    /// The actions an agent runs from a walk (21). Human acts (approve, lower, stamp) read a page, not a walk; the
+    /// session runs `land` at needs-landing with no walk (37, design change 3).
     pub enum Action {
         Design = "design",
         Shape = "shape",
@@ -148,17 +149,18 @@ impl Action {
 }
 
 impl Role {
-    /// The write verbs the role runs: the union of its actions' rows, plus `release` for the session, which 21 gives
-    /// its own row because a resuming session runs it with no walk. The role hook denies any verb outside these and
-    /// `READ_VERBS`; a dispatch template's forbidden list is the complement of both. `None` for the human, whom no
-    /// list bounds: the forge is the gate.
+    /// The write verbs the role runs: the union of its actions' rows, plus `release` and `land` for the session. 21
+    /// gives `release` its own row because a resuming session runs it with no walk; the session runs `land` at
+    /// needs-landing, whose gates hold whoever runs it (37, design change 3). The role hook denies any verb outside
+    /// these and `READ_VERBS`; a dispatch template's forbidden list is the complement of both. `None` for the human,
+    /// whom no list bounds: the forge is the gate.
     pub fn verbs(self) -> Option<Vec<&'static str>> {
         if self == Self::Human {
             return None;
         }
         let rows = Action::ALL.iter().filter(|a| a.role() == self).flat_map(|a| a.verbs());
-        let release = (self == Self::Session).then_some(&"release");
-        Some(rows.chain(release).copied().collect::<BTreeSet<_>>().into_iter().collect())
+        let session: &[&str] = if self == Self::Session { &["release", "land"] } else { &[] };
+        Some(rows.chain(session).copied().collect::<BTreeSet<_>>().into_iter().collect())
     }
 }
 
@@ -181,8 +183,9 @@ mod tests {
             let verbs = r.verbs();
             assert_eq!(verbs.is_none(), r == Role::Human, "{r}");
             let verbs = verbs.unwrap_or_default();
-            let human = ["stamp", "land", "approve", "lower"];
+            let human = ["stamp", "approve", "lower"];
             assert!(verbs.iter().all(|v| !human.contains(v) && !READ_VERBS.contains(v)), "{r}");
+            assert_eq!(verbs.contains(&"land"), r == Role::Session, "{r}: the session lands (37, design change 3)");
         }
         assert!(Role::Reviewer.verbs().unwrap().is_empty(), "the session records the review (21)");
         assert!(Role::Session.verbs().unwrap().contains(&"check"), "the design action runs check (21)");
@@ -190,9 +193,10 @@ mod tests {
 
     #[test]
     fn role_verbs_are_the_union_of_action_rows() {
-        // The expected lists are 21's text: the worker's tool list, and the session's rows with the release row.
+        // The expected lists are 21's text: the worker's tool list, and the session's rows with the release row and
+        // `land` (37, design change 3).
         let want: [(Role, &[&str]); 4] = [
-            (Role::Session, &["check", "create", "diagram", "link", "record", "release", "set", "transition"]),
+            (Role::Session, &["check", "create", "diagram", "land", "link", "record", "release", "set", "transition"]),
             (Role::Worker, &["check", "cut", "pr", "record", "release"]),
             (Role::Reviewer, &[]),
             (Role::Researcher, &[]),

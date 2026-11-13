@@ -12,7 +12,7 @@ use bp_vault::{Body, Code, DeltaState, DesignLevel, Filter, Id, Index, Kind, Rec
 use serde_json::{Map, Value};
 
 use crate::World;
-use crate::inputs::{blocks, claims, derivation, drift, pull_request, reviewer, runs, text};
+use crate::inputs::{blocks, claims, derivation, drift, pull_request, runs, text};
 
 /// What one call reads to compute intents: the index, the world when an issue is in view, and what each project
 /// holds for every node in it, read once per project (24, call budget).
@@ -288,7 +288,7 @@ fn of(
     // the same gates.
     let held = claims.iter().any(|c| c.released.is_none());
     let open = world.pr(id).or_else(|| world.merged(id).filter(|_| held));
-    // The body, the reviewer and the base matter only to needs landing, which needs a pull request.
+    // The blocks and the base matter only to needs landing, which needs a pull request.
     let (pr, blocks, base) = match open {
         Some(p) => {
             let claim = records.iter().zip(&claims).find(|(_, c)| c.released.is_none()).map(|(r, _)| r);
@@ -296,7 +296,7 @@ fn of(
                 Some(c) => crate::inputs::base(index, c)?,
                 None => Base::Unknown,
             };
-            (Some(pull_request(p, &reviewer(index, id)?)), blocks(vault, id)?, base)
+            (Some(pull_request(p)), blocks(vault, id)?, base)
         }
         None => (None, Vec::new(), Base::Unknown),
     };
@@ -307,26 +307,22 @@ fn of(
     });
     // The reviews and the level's inputs matter only while a pull request is in view: needs review counts the lenses
     // at its head, and needs response reads their dispositions (21; 37, design change 8).
-    let (reviews, declared, delta) = match &pr {
-        Some(_) => {
-            let r = crate::inputs::reviewed(vault, index, id)?;
-            (r.reviews, r.declared, r.delta)
-        }
-        None => (Vec::new(), None, false),
+    let reviewed = match &pr {
+        Some(_) => crate::inputs::reviewed(vault, index, id)?,
+        None => Issue::default(),
     };
     let issue = Issue {
+        id: id.to_string(),
         status: status.into(),
         claims,
         runs,
         blocks,
-        reviews,
-        declared,
-        delta,
         depends,
         pr,
         base,
         answered,
         integrity,
+        ..reviewed
     };
     Ok(intents::issue(&issue, world.now))
 }

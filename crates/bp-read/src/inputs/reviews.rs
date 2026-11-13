@@ -252,11 +252,16 @@ pub fn follow_up(index: &Index, issue: &str, reason: &str) -> Result<Option<Stri
 /// Never: the index holds ids.
 pub fn reviewed(vault: &Vault, index: &Index, issue: &str) -> Result<intents::Issue, Refusal> {
     let header = index.header(issue)?.unwrap_or_default();
+    let head = |r: &Record| text(&r.header, "head");
+    let lowerings = index.records(issue, Kind::Lowering)?;
     Ok(intents::Issue {
+        id: issue.to_string(),
         runs: runs(index, issue)?,
         reviews: reviews(vault, index, issue)?,
         declared: text(&header, "risk").and_then(|l| l.parse().ok()),
         delta: !crate::carried_deltas(index, &Id::parse(issue).expect("the index holds ids"))?.is_empty(),
+        approvals: index.records(issue, Kind::Approval)?.iter().filter_map(head).collect(),
+        lowerings: lowerings.iter().filter_map(|r| Some((head(r)?, text(&r.header, "level")?.parse().ok()?))).collect(),
         ..intents::Issue::default()
     })
 }

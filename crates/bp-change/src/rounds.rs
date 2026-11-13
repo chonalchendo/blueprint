@@ -307,6 +307,21 @@ mod tests {
         );
     }
 
+    /// A branch reset to a head whose `verify` review is of an earlier round needs a `verify` review of the head's
+    /// own round: the old one counts for its round only (review of #98, row 39).
+    #[test]
+    fn a_reset_head_needs_a_verify_review_of_its_own_round() {
+        let reviews = [
+            review("a", 1, Lens::Conformance, vec![]),
+            review("a", 1, Lens::FailurePaths, vec![]),
+            review("b", 2, Lens::Verify, vec![]),
+            review("c", 3, Lens::Verify, vec![]),
+        ];
+        assert_eq!(round_of(Level::Medium, false, &reviews, "b"), 4);
+        assert_eq!(missing(Level::Medium, false, &reviews, "b"), [Lens::Verify]);
+        assert!(missing(Level::Medium, false, &reviews, "c").is_empty(), "the latest round's own head");
+    }
+
     #[test]
     fn round_one_holds_until_each_lens_is_recorded_at_one_head() {
         let m = Level::Medium;

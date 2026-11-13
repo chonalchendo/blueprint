@@ -15,8 +15,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - `ready`: an issue is open and unclaimed. Dispatch `bp-worker` with its `complete` template.
 - `needs-review`: its note names the round and each lens still missing. Dispatch `bp-reviewer` once per lens with its `review` template, its `Lens:` and `Round:` filled. Then record each review.
 - Round one ends when each lens has a review at one head. Each later head is the next round: one review with the lens `verify`. If the level rose, the note also names each new lens.
-- A review whose rows are all `warn` or `risk` is approvable: tell the human so in one line.
-- `blocked` with the note "round cap: the human decides": give the human the error rows. Dispatch no one.
+- `blocked` with a note that ends "the human decides": give the human the error rows. Dispatch no one.
 - A review's record call returns `late`: error rows outside the fix. For a low or medium issue, create one follow-up issue for each under the same milestone. Then decline the row: `bp record disposition <review> --field finding=<n> --field as=declined --field reason="follow-up <issue>" --json`.
 - `needs-response`: a review has a finding with no disposition. Dispatch `bp-worker` with its `respond` template.
 - `drifted`: a drift run failed, and nothing cites it. Run the skill `bp-triage-drift`.
@@ -28,7 +27,9 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - `working` with the note `stale`: run `bp release <issue> --reason lost --json`. Then dispatch again.
 - `working` without `stale`: do nothing; the worker or the cause in its note moves it.
 - `waiting`: do nothing until the cause in its note clears.
-- `needs-approval`, `needs-landing`, `needs-milestone-approval`, `needs-acceptance` or `re-asked`: the human acts. Give the human the line below that names the intent.
+- `needs-landing`: run `bp land <issue> --json`. A low or medium issue lands with no human act. If `land` refuses, do what its `fix` names.
+- `needs-approval`: a high issue waits for the human's signed approval of its head. Give the human its line below. Then run `bp land <issue> --json` when the intent is `needs-landing`.
+- `needs-milestone-approval`, `needs-acceptance` or `re-asked`: the human acts. Give the human the line below that names the intent.
 
 ### Dispatch
 
@@ -42,9 +43,8 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 
 Give the human these commands. Only the human runs `bp approve <issue>` and `bp lower <issue> low --reason <why>`, in a terminal. The signing key never goes into an agent.
 
-- `needs-approval`: approve the pull request on the forge.
+- `needs-approval`: `bp approve <issue>`, in a terminal. It signs the head of a high pull request.
 - `needs-milestone-approval`: `bp transition <milestone> approved --json`.
 - To activate a design draft: `bp transition <design> active --json`.
-- `needs-landing`: `bp land <issue> --json`.
 - `needs-acceptance`: `bp stamp <milestone> --json`.
 - `re-asked`: a waived block is open again. Its note names the `--waive` for the next stamp.

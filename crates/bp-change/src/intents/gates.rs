@@ -1,11 +1,13 @@
-//! The landing gates (32, design change 5; 26, design change 4): every part of needs landing in `land`'s refusal order,
-//! each in words, and the first that does not hold. [`landing`](super::landing) is that first unmet gate alone, so
-//! `land`, the needs-landing intent and the Change page read one function (21, rule 1).
+//! The landing gates (32, design change 5; 26, design change 4; 37, design change 3): every part of needs landing in
+//! `land`'s refusal order, each in words, and the first that does not hold. [`landing`] is that first unmet gate alone,
+//! so `land`, the needs-landing intent and the Change page read one function (21, rule 1).
 
 use serde::Serialize;
 use ts_rs::TS;
 
-use super::{Base, Block, PullRequest, Run, Unmet, latest_at};
+use super::{Base, Block, Issue, PullRequest, Run, latest_at, level, missing, round};
+use crate::risk::Level;
+use crate::rounds::{self, Lens, Review};
 
 /// One gate's state. A word, never a colour alone (19, principle 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -30,40 +32,88 @@ pub enum GateState {
 /// One gate: its name, its state, and the head, run or branch it refers to, in words.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct Gate {
-    /// What it tests: `base`, `approving review`, `forge checks`, `run <block>`, or `check set`.
+    /// What it tests: `base`, `forge checks`, `run <block>`, `review`, `dispositions`, `error rows`, `signed approval`
+    /// or `check set`.
     pub name: String,
     /// Whether it holds.
     pub state: GateState,
-    /// What it read: the sha, the reviewer, the run.
+    /// What it read: the sha, the run, the rows.
     pub detail: String,
 }
 
 /// Every gate, in order, and the first that does not hold.
 #[derive(Debug)]
 pub struct Gates<'a> {
-    /// The base, the approving review, the forge checks, one gate per run `evidence` reads, then the check set.
+    /// The base, the forge checks, one gate per run `evidence` reads, the review gates, then the check set.
     pub gates: Vec<Gate>,
     /// The first part of needs landing that does not hold; `None` when the pull request may land. It is the first
     /// gate that is not `pass`, past a gate the caller could not read: that one withholds the command, not refuses.
     pub unmet: Option<Unmet<'a>>,
 }
 
-/// The gates of the pull request `pr` on the claim's `base`, with the issue's runs, its `error` blocks now, and
-/// whether the head names the check set now (`named`; `None` when no clone was read). Pure.
+/// The first part of needs landing that does not hold, in `land`'s refusal order (26, design change 4).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unmet<'a> {
+    /// The claim was cut from this dependency's head, which has not landed (`base_unmerged`).
+    Unmerged(&'a str),
+    /// The pull request does not target this branch, the claim's base (`base_mismatch`).
+    Mismatch(&'a str),
+    /// The forge check at the head is not green.
+    Checks,
+    /// The latest run of this `error` block at the head did not pass.
+    Failed(&'a Run),
+    /// This `error` block has no run at the head of its current text: none, or one made before the block changed.
+    Evidence(&'a str),
+    /// The head's round lacks these reviews (`review_missing`; 37, design changes 6 and 8).
+    Lenses {
+        /// The head's round.
+        round: u64,
+        /// The lenses with no review in it.
+        missing: Vec<Lens>,
+    },
+    /// These rows have no disposition (`findings_open`; 21, needs response).
+    Unanswered(Vec<(&'a Review, Vec<u64>)>),
+    /// These error rows still hold the land (`findings_open`; 37, design change 6).
+    Holding(Vec<(&'a Review, Vec<u64>)>),
+    /// The level is high, and no approval record names the head (`approval_missing`; 37, design change 3). `land`
+    /// also verifies the signature of one that does.
+    Approval,
+    /// The head names another check set than the one the pull request carries now (`checks_changed`; 27, design
+    /// change 8): a block changed after the push the reviews read.
+    ChecksChanged,
+}
+
+/// Needs landing (21; 37, design change 3): every gate of [`gates`] but the check set, in `land`'s order. `land`
+/// refuses on the first part that does not hold, and the `Intents` function reads the same answer, so the two never
+/// disagree (21, rule 1). The check set needs the clone, which `land` reads and passes to [`gates`] itself.
+pub fn landing<'a>(i: &'a Issue, pr: &'a PullRequest) -> Result<(), Unmet<'a>> {
+    gates(i, pr, None).unmet.map_or(Ok(()), Err)
+}
+
+/// The run part of needs landing: the latest run of each `error` check at `head` passed, and each block has one whose
+/// `check_hash` is the block's hash now. `pr` reruns the blocks until this holds.
+pub fn evidence<'a>(runs: &'a [Run], head: &str, blocks: &'a [Block]) -> Result<(), Unmet<'a>> {
+    let latest = latest_at(runs, head);
+    if let Some(r) = latest.values().find(|r| !r.passed) {
+        return Err(Unmet::Failed(r));
+    }
+    match blocks.iter().find(|b| latest.get(b.name.as_str()).is_none_or(|r| r.check_hash != b.hash)) {
+        Some(b) => Err(Unmet::Evidence(&b.name)),
+        None => Ok(()),
+    }
+}
+
+/// The gates of the issue's pull request `pr`: its base, the forge checks, its runs and its `error` blocks now, its
+/// reviews at the level in force, an approval record at the head for high, and whether the head names the check set
+/// now (`named`; `None` when no clone was read). Pure: no forge approval counts (37, design change 3).
 ///
-/// The run gates follow the order of [`evidence`](super::evidence): each failed latest run by block name, a gone
-/// block's too, then each block in body order. So the first gate that is not `pass` is the refusal `land` gives.
-pub fn gates<'a>(
-    pr: &'a PullRequest,
-    base: &'a Base,
-    runs: &'a [Run],
-    blocks: &'a [Block],
-    named: Option<bool>,
-) -> Gates<'a> {
+/// The run gates follow the order of [`evidence`]: each failed latest run by block name, a gone block's too, then
+/// each block in body order. So the first gate that is not `pass` is the refusal `land` gives.
+pub fn gates<'a>(i: &'a Issue, pr: &'a PullRequest, named: Option<bool>) -> Gates<'a> {
     let head = &pr.head[..pr.head.len().min(7)];
     let gate = |name: &str, state, detail: String| Gate { name: name.into(), state, detail };
     let mut out: Vec<(Gate, Option<Unmet>)> = Vec::new();
-    out.push(match base {
+    out.push(match &i.base {
         Base::Unmerged(below) => {
             (gate("base", GateState::Pending, format!("lands after {below}")), Some(Unmet::Unmerged(below)))
         }
@@ -80,16 +130,6 @@ pub fn gates<'a>(
             None,
         ),
     });
-    let review = match (pr.reviewer.as_str(), pr.approved) {
-        ("", _) => gate(
-            "approving review",
-            GateState::NotConfigured,
-            "set the project's reviewer; land refuses reviewer_invalid".into(),
-        ),
-        (who, true) => gate("approving review", GateState::Pass, format!("approved at {head} by {who}")),
-        (who, false) => gate("approving review", GateState::Pending, format!("no approval by {who} at {head}")),
-    };
-    out.push((review, (!pr.approved).then_some(Unmet::Review)));
     out.push(match (pr.green, pr.failed) {
         (true, _) => (gate("forge checks", GateState::Pass, format!("green at {head}")), None),
         (false, true) => {
@@ -97,17 +137,17 @@ pub fn gates<'a>(
         }
         (false, false) => (gate("forge checks", GateState::Pending, format!("pending at {head}")), Some(Unmet::Checks)),
     });
-    let latest = latest_at(runs, &pr.head);
+    let latest = latest_at(&i.runs, &pr.head);
     // A failed run of a block the issue no longer holds still refuses the land, so it shows.
     for r in latest.values().filter(|r| !r.passed) {
-        let detail = if blocks.iter().any(|b| b.name == r.check) {
+        let detail = if i.blocks.iter().any(|b| b.name == r.check) {
             format!("fail at {head}, attempt {}", r.attempt)
         } else {
             format!("fail at {head}; the block is gone")
         };
         out.push((gate(&format!("run {}", r.check), GateState::Fail, detail), Some(Unmet::Failed(r))));
     }
-    for b in blocks.iter().filter(|b| latest.get(b.name.as_str()).is_none_or(|r| r.passed)) {
+    for b in i.blocks.iter().filter(|b| latest.get(b.name.as_str()).is_none_or(|r| r.passed)) {
         let name = format!("run {}", b.name);
         out.push(match latest.get(b.name.as_str()) {
             None => (gate(&name, GateState::Pending, format!("no run at {head}")), Some(Unmet::Evidence(&b.name))),
@@ -118,6 +158,7 @@ pub fn gates<'a>(
             Some(r) => (gate(&name, GateState::Pass, format!("pass at {head}, attempt {}", r.attempt)), None),
         });
     }
+    out.extend(reviewed(i, pr, head));
     out.push(match named {
         Some(true) => (gate("check set", GateState::Pass, format!("{head} names the error blocks carried now")), None),
         Some(false) => (
@@ -133,20 +174,56 @@ pub fn gates<'a>(
     Gates { gates: out.into_iter().map(|(g, _)| g).collect(), unmet }
 }
 
+/// The review gates at the level in force (37, design changes 3 and 6): each lens of the head's round, a disposition
+/// of each row, no error row that holds, and for high an approval record at the head. `head` is the short head.
+fn reviewed<'a>(i: &'a Issue, pr: &PullRequest, head: &str) -> [(Gate, Option<Unmet<'a>>); 4] {
+    let gate = |name: &str, state, detail: String| Gate { name: name.into(), state, detail };
+    let level = level(i, &pr.head).0;
+    let (round, missing) = (round(i, &pr.head), missing(i, &pr.head));
+    let lenses = if missing.is_empty() {
+        (gate("review", GateState::Pass, format!("round {round} at {head}: each review of {level} recorded")), None)
+    } else {
+        let names: Vec<&str> = missing.iter().map(|l| l.as_str()).collect();
+        let detail = format!("round {round} at {head}: missing lenses: {}", names.join(", "));
+        (gate("review", GateState::Pending, detail), Some(Unmet::Lenses { round, missing }))
+    };
+    let open = rounds::unanswered(&i.reviews, &pr.head);
+    let answered = if open.is_empty() {
+        (gate("dispositions", GateState::Pass, "each row answered".into()), None)
+    } else {
+        let detail = format!("no disposition: {}", rounds::named(&open, &pr.head));
+        (gate("dispositions", GateState::Pending, detail), Some(Unmet::Unanswered(open)))
+    };
+    let blocking = rounds::blocking(level, &i.reviews);
+    let rows = if blocking.is_empty() {
+        (gate("error rows", GateState::Pass, "no error row holds".into()), None)
+    } else {
+        let detail = format!("{} hold the land", rounds::cited(&blocking));
+        (gate("error rows", GateState::Fail, detail), Some(Unmet::Holding(blocking)))
+    };
+    let signed = match level {
+        Level::High if i.approvals.contains(&pr.head) => {
+            (gate("signed approval", GateState::Pass, format!("recorded at {head}; land verifies it")), None)
+        }
+        Level::High => {
+            let detail = format!("high: the human runs bp approve {} at {head}", i.id);
+            (gate("signed approval", GateState::Pending, detail), Some(Unmet::Approval))
+        }
+        _ => (gate("signed approval", GateState::Pass, format!("not needed at {level}")), None),
+    };
+    [lenses, answered, rows, signed]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::{evidence, landing};
+    use super::super::evidence;
     use super::*;
+    use crate::rounds::{Answer, Row};
 
-    fn pr(green: bool, failed: bool, approved: bool) -> PullRequest {
-        PullRequest {
-            head: "abcdef0123".into(),
-            base: Some("master".into()),
-            green,
-            failed,
-            approved,
-            reviewer: "quokka-reviewer".into(),
-        }
+    const H: &str = "abcdef0123";
+
+    fn pr(green: bool, failed: bool) -> PullRequest {
+        PullRequest { head: H.into(), base: Some("master".into()), green, failed }
     }
 
     fn run(check: &str, hash: &str, passed: bool) -> Run {
@@ -154,7 +231,7 @@ mod tests {
             id: format!("{check}-1"),
             check: check.into(),
             check_hash: hash.into(),
-            commit: "abcdef0123".into(),
+            commit: H.into(),
             attempt: 1,
             error: true,
             failed: !passed,
@@ -167,141 +244,303 @@ mod tests {
         Block { name: name.into(), hash: format!("#{name}") }
     }
 
-    /// A table row: the pull request, the base, the runs, whether the head names the check set, the unmet gate, and
-    /// each gate's name and state.
-    type Row<'a> = (PullRequest, &'a Base, &'a [Run], Option<bool>, Option<Unmet<'a>>, Vec<(&'a str, GateState)>);
+    fn review(id: &str, lens: Lens, rows: Vec<Row>) -> Review {
+        Review { id: id.into(), head: H.into(), round: 1, lens, rows }
+    }
 
-    fn states(g: &Gates) -> Vec<(String, GateState)> {
-        g.gates.iter().map(|g| (g.name.clone(), g.state)).collect()
+    /// A medium issue on `master` with one block `a`, a passing run of it at the head, and a review of each medium
+    /// lens there with no row.
+    fn medium() -> Issue {
+        Issue {
+            id: "projects/bp/issues/a".into(),
+            base: Base::Branch("master".into()),
+            runs: vec![run("a", "#a", true)],
+            blocks: vec![block("a")],
+            reviews: vec![review("c", Lens::Conformance, vec![]), review("f", Lens::FailurePaths, vec![])],
+            ..Issue::default()
+        }
+    }
+
+    /// [`medium`], declared high, with the third lens read.
+    fn high() -> Issue {
+        let mut i = Issue { declared: Some(Level::High), ..medium() };
+        i.reviews.push(review("t", Lens::TestsAndChecks, vec![]));
+        i
+    }
+
+    fn error(answer: Option<Answer>) -> Row {
+        Row { error: true, answer, at: "f.rs:1".into(), ..Row::default() }
+    }
+
+    /// The unmet gate as a word, so a table row need not borrow from the issue it builds.
+    fn word(u: Option<&Unmet>) -> &'static str {
+        match u {
+            None => "none",
+            Some(Unmet::Unmerged(_)) => "unmerged",
+            Some(Unmet::Mismatch(_)) => "mismatch",
+            Some(Unmet::Checks) => "checks",
+            Some(Unmet::Failed(_)) => "failed",
+            Some(Unmet::Evidence(_)) => "evidence",
+            Some(Unmet::Lenses { .. }) => "lenses",
+            Some(Unmet::Unanswered(_)) => "unanswered",
+            Some(Unmet::Holding(_)) => "holding",
+            Some(Unmet::Approval) => "approval",
+            Some(Unmet::ChecksChanged) => "checks changed",
+        }
+    }
+
+    /// One row of a gate table: why, the pull request, the issue, the check set read, the unmet as a word, the gates.
+    type Case = (&'static str, PullRequest, Issue, Option<bool>, &'static str, Vec<(&'static str, GateState)>);
+
+    const NAMES: [&str; 7] =
+        ["base", "forge checks", "run a", "review", "dispositions", "error rows", "signed approval"];
+
+    /// The gates in order with `s`, then the check set at `set`.
+    fn states(s: [GateState; 7], set: GateState) -> Vec<(&'static str, GateState)> {
+        NAMES.iter().copied().zip(s).chain([("check set", set)]).collect()
+    }
+
+    /// Every gate passes but the one at `at`.
+    fn with(at: usize, state: GateState) -> [GateState; 7] {
+        let mut s = [GateState::Pass; 7];
+        s[at] = state;
+        s
+    }
+
+    /// [`medium`] with one review, of `lens`.
+    fn only(lens: Lens) -> Issue {
+        Issue { reviews: vec![review("c", lens, vec![])], ..medium() }
+    }
+
+    /// [`medium`] with `row` on its first review.
+    fn rows(row: Row) -> Issue {
+        let mut i = medium();
+        i.reviews[0].rows.push(row);
+        i
+    }
+
+    /// Each case's gates and unmet, and `landing` as the first unmet with the check set unread.
+    fn hold(table: &[Case]) {
+        for (why, pr, issue, named, unmet, want) in table {
+            let g = gates(issue, pr, *named);
+            let got: Vec<(&str, GateState)> = g.gates.iter().map(|g| (g.name.as_str(), g.state)).collect();
+            assert_eq!(&got, want, "{why}");
+            assert_eq!(word(g.unmet.as_ref()), *unmet, "{why}");
+            let without = gates(issue, pr, None).unmet;
+            assert_eq!(landing(issue, pr).err(), without, "{why}: landing is the first unmet, the set unread");
+        }
     }
 
     #[test]
     fn gates_hold_every_unmet_in_land_order_and_landing_is_the_first() {
-        use GateState::{Fail, NotConfigured, NotRead, Pass, Pending};
-        let master = Base::Branch("master".into());
-        let below = Base::Unmerged("projects/bp/issues/a".into());
-        let stacked = Base::Branch("bp/a".into());
-        let blocks = [block("a")];
-        let pass = [run("a", "#a", true)];
-        let fail = [run("a", "#a", false)];
-        let old = [run("a", "#old", true)];
-        let gone = [run("a", "#a", true), run("z", "#z", false)];
-        let green = pr(true, false, true);
-        let unreviewed = PullRequest { reviewer: String::new(), ..pr(true, false, false) };
-        let gates4 = |b, r, c, a| vec![("base", b), ("approving review", r), ("forge checks", c), ("run a", a)];
-        let with = |mut g: Vec<(&'static str, GateState)>, s| {
-            g.push(("check set", s));
-            g
-        };
-        let ok = |b, r, c, a| with(gates4(b, r, c, a), Pass);
-        let table: Vec<Row> = vec![
-            (green.clone(), &master, &pass, Some(true), None, ok(Pass, Pass, Pass, Pass)),
+        use GateState::{Fail, NotRead, Pass, Pending};
+        let (ok, green) = ([Pass; 7], pr(true, false));
+        hold(&[
+            ("all hold", green.clone(), medium(), Some(true), "none", states(ok, Pass)),
             (
+                "the layer below is open",
                 green.clone(),
-                &below,
-                &pass,
+                Issue { base: Base::Unmerged("projects/bp/issues/b".into()), ..medium() },
                 Some(true),
-                Some(Unmet::Unmerged("projects/bp/issues/a")),
-                ok(Pending, Pass, Pass, Pass),
-            ),
-            (green.clone(), &stacked, &pass, Some(true), Some(Unmet::Mismatch("bp/a")), ok(Fail, Pass, Pass, Pass)),
-            (pr(true, false, false), &master, &pass, Some(true), Some(Unmet::Review), ok(Pass, Pending, Pass, Pass)),
-            (unreviewed, &master, &pass, Some(true), Some(Unmet::Review), ok(Pass, NotConfigured, Pass, Pass)),
-            (pr(false, false, true), &master, &pass, Some(true), Some(Unmet::Checks), ok(Pass, Pass, Pending, Pass)),
-            (pr(false, true, true), &master, &pass, Some(true), Some(Unmet::Checks), ok(Pass, Pass, Fail, Pass)),
-            (green.clone(), &master, &fail, Some(true), Some(Unmet::Failed(&fail[0])), ok(Pass, Pass, Pass, Fail)),
-            (green.clone(), &master, &[], Some(true), Some(Unmet::Evidence("a")), ok(Pass, Pass, Pass, Pending)),
-            (green.clone(), &master, &old, Some(true), Some(Unmet::Evidence("a")), ok(Pass, Pass, Pass, Pending)),
-            (
-                green.clone(),
-                &master,
-                &gone,
-                Some(true),
-                Some(Unmet::Failed(&gone[1])),
-                vec![
-                    ("base", Pass),
-                    ("approving review", Pass),
-                    ("forge checks", Pass),
-                    ("run z", Fail),
-                    ("run a", Pass),
-                    ("check set", Pass),
-                ],
+                "unmerged",
+                states(with(0, Pending), Pass),
             ),
             (
-                pr(false, true, false),
-                &below,
-                &fail,
+                "another base",
+                green.clone(),
+                Issue { base: Base::Branch("bp/b".into()), ..medium() },
                 Some(true),
-                Some(Unmet::Unmerged("projects/bp/issues/a")),
-                ok(Pending, Pending, Fail, Fail),
+                "mismatch",
+                states(with(0, Fail), Pass),
+            ),
+            ("checks pending", pr(false, false), medium(), Some(true), "checks", states(with(1, Pending), Pass)),
+            ("a check failed", pr(false, true), medium(), Some(true), "checks", states(with(1, Fail), Pass)),
+            (
+                "the run failed",
+                green.clone(),
+                Issue { runs: vec![run("a", "#a", false)], ..medium() },
+                Some(true),
+                "failed",
+                states(with(2, Fail), Pass),
+            ),
+            (
+                "no run",
+                green.clone(),
+                Issue { runs: vec![], ..medium() },
+                Some(true),
+                "evidence",
+                states(with(2, Pending), Pass),
+            ),
+            (
+                "a run of an older text",
+                green.clone(),
+                Issue { runs: vec![run("a", "#old", true)], ..medium() },
+                Some(true),
+                "evidence",
+                states(with(2, Pending), Pass),
             ),
             // The check set is the last gate: a changed set refuses only when every other gate holds.
-            (
-                green.clone(),
-                &master,
-                &pass,
-                Some(false),
-                Some(Unmet::ChecksChanged),
-                with(gates4(Pass, Pass, Pass, Pass), Fail),
-            ),
-            (
-                pr(true, false, false),
-                &master,
-                &pass,
-                Some(false),
-                Some(Unmet::Review),
-                with(gates4(Pass, Pending, Pass, Pass), Fail),
-            ),
+            ("the check set changed", green.clone(), medium(), Some(false), "checks changed", states(ok, Fail)),
+            ("and after an open gate", green.clone(), high(), Some(false), "approval", states(with(6, Pending), Fail)),
             // Not read: no unmet, so the page withholds the command and `land`, which reads it, decides.
-            (green.clone(), &master, &pass, None, None, with(gates4(Pass, Pass, Pass, Pass), NotRead)),
+            ("the check set unread", green.clone(), medium(), None, "none", states(ok, NotRead)),
             // A claim that records no base: `land` tests origin's default branch, which this read cannot.
-            (green.clone(), &Base::Unknown, &pass, Some(true), None, ok(Pending, Pass, Pass, Pass)),
-        ];
-        for (pr, base, runs, named, unmet, want) in &table {
-            let g = gates(pr, base, runs, &blocks, *named);
-            let got: Vec<(&str, GateState)> = g.gates.iter().map(|g| (g.name.as_str(), g.state)).collect();
-            assert_eq!(&got, want, "{:?}", states(&g));
-            assert_eq!(g.unmet.as_ref(), unmet.as_ref());
-            let without = gates(pr, base, runs, &blocks, None).unmet;
-            assert_eq!(landing(pr, base, runs, &blocks).err(), without, "landing is the first unmet, the set unread");
-        }
+            (
+                "no base recorded",
+                green.clone(),
+                Issue { base: Base::Unknown, ..medium() },
+                Some(true),
+                "none",
+                states(with(0, Pending), Pass),
+            ),
+            (
+                "the base comes first",
+                pr(false, true),
+                Issue {
+                    base: Base::Unmerged("b".into()),
+                    runs: vec![run("a", "#a", false)],
+                    ..only(Lens::Conformance)
+                },
+                Some(true),
+                "unmerged",
+                states([Pending, Fail, Fail, Pending, Pass, Pass, Pass], Pass),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn the_review_gates_hold_by_level() {
+        use GateState::{Fail, Pass, Pending};
+        let (ok, green) = ([Pass; 7], pr(true, false));
+        let late = Row { late: true, ..error(Some(Answer::FollowUp)) };
+        let lowered = Issue { lowerings: vec![(H.into(), Level::Medium)], ..high() };
+        hold(&[
+            (
+                "a lens unread",
+                green.clone(),
+                only(Lens::Conformance),
+                Some(true),
+                "lenses",
+                states(with(3, Pending), Pass),
+            ),
+            (
+                "an error row with no answer",
+                green.clone(),
+                rows(error(None)),
+                Some(true),
+                "unanswered",
+                states(
+                    {
+                        let mut s = with(4, Pending);
+                        s[5] = Fail;
+                        s
+                    },
+                    Pass,
+                ),
+            ),
+            (
+                "a declined error row holds",
+                green.clone(),
+                rows(error(Some(Answer::Declined))),
+                Some(true),
+                "holding",
+                states(with(5, Fail), Pass),
+            ),
+            (
+                "a fixed row holds until a verify review",
+                green.clone(),
+                rows(error(Some(Answer::Fixed))),
+                Some(true),
+                "holding",
+                states(with(5, Fail), Pass),
+            ),
+            ("a late row with a follow-up, at medium", green.clone(), rows(late), Some(true), "none", states(ok, Pass)),
+            (
+                "a warn row answered",
+                green.clone(),
+                rows(Row { answer: Some(Answer::Declined), ..Row::default() }),
+                Some(true),
+                "none",
+                states(ok, Pass),
+            ),
+            ("high, no approval", green.clone(), high(), Some(true), "approval", states(with(6, Pending), Pass)),
+            (
+                "high, approved at the head",
+                green.clone(),
+                Issue { approvals: vec![H.into()], ..high() },
+                Some(true),
+                "none",
+                states(ok, Pass),
+            ),
+            (
+                "high, approved at another head",
+                green.clone(),
+                Issue { approvals: vec!["0123".into()], ..high() },
+                Some(true),
+                "approval",
+                states(with(6, Pending), Pass),
+            ),
+            ("high, lowered at the head", green.clone(), lowered, Some(true), "none", states(ok, Pass)),
+            (
+                "high, lowered at another head",
+                green.clone(),
+                Issue { lowerings: vec![("0123".into(), Level::Low)], ..high() },
+                Some(true),
+                "approval",
+                states(with(6, Pending), Pass),
+            ),
+        ]);
     }
 
     /// Two blocks in body order `b`, `a`: no run of `b`, a failed run of `a`. `evidence` refuses on the failed run
     /// first, so its gate comes first, and the first gate that is not `pass` is the refusal.
     #[test]
     fn the_first_run_gate_that_is_not_pass_is_the_one_evidence_refuses() {
-        let (green, master) = (pr(true, false, true), Base::Branch("master".into()));
-        let (blocks, runs) = ([block("b"), block("a")], [run("a", "#a", false)]);
-        let g = gates(&green, &master, &runs, &blocks, Some(true));
-        let names: Vec<(&str, GateState)> = g.gates[3..].iter().map(|g| (g.name.as_str(), g.state)).collect();
-        assert_eq!(names, [("run a", GateState::Fail), ("run b", GateState::Pending), ("check set", GateState::Pass)]);
-        assert_eq!(g.unmet, Some(Unmet::Failed(&runs[0])));
-        assert_eq!(evidence(&runs, &green.head, &blocks).err(), g.unmet);
+        let i = Issue { blocks: vec![block("b"), block("a")], runs: vec![run("a", "#a", false)], ..medium() };
+        let green = pr(true, false);
+        let g = gates(&i, &green, Some(true));
+        let names: Vec<(&str, GateState)> = g.gates[2..4].iter().map(|g| (g.name.as_str(), g.state)).collect();
+        assert_eq!(names, [("run a", GateState::Fail), ("run b", GateState::Pending)]);
+        assert_eq!(g.unmet, Some(Unmet::Failed(&i.runs[0])));
+        assert_eq!(evidence(&i.runs, &green.head, &i.blocks).err(), g.unmet);
         let first = g.gates.iter().find(|g| g.state != GateState::Pass).map(|g| g.name.as_str());
         assert_eq!(first, Some("run a"));
     }
 
     #[test]
-    fn gates_name_the_head_the_reviewer_and_the_run() {
-        let (green, master, runs, blocks) =
-            (pr(true, false, true), Base::Branch("master".into()), [run("a", "#a", true)], [block("a")]);
-        let g = gates(&green, &master, &runs, &blocks, Some(true));
+    fn gates_name_the_head_the_rows_and_the_run() {
+        let (green, i) = (pr(true, false), medium());
+        let g = gates(&i, &green, Some(true));
         let words: Vec<(&str, &str)> = g.gates.iter().map(|g| (g.name.as_str(), g.detail.as_str())).collect();
         assert_eq!(
             words,
             [
                 ("base", "on master"),
-                ("approving review", "approved at abcdef0 by quokka-reviewer"),
                 ("forge checks", "green at abcdef0"),
                 ("run a", "pass at abcdef0, attempt 1"),
+                ("review", "round 1 at abcdef0: each review of medium recorded"),
+                ("dispositions", "each row answered"),
+                ("error rows", "no error row holds"),
+                ("signed approval", "not needed at medium"),
                 ("check set", "abcdef0 names the error blocks carried now"),
             ]
         );
-        let unset = PullRequest { reviewer: String::new(), ..pr(true, false, false) };
-        let g = gates(&unset, &Base::Unknown, &[], &[], None);
-        assert_eq!(g.gates[1].detail, "set the project's reviewer; land refuses reviewer_invalid");
-        assert_eq!(g.gates[0].detail, "the claim records no base; land tests origin's default branch");
-        assert_eq!(g.gates[3].detail, "no clone holds abcdef0, so its check set is not read");
+        let mut open = high();
+        open.reviews.truncate(1);
+        open.reviews[0].rows.push(error(Some(Answer::Declined)));
+        let g = gates(&open, &green, None);
+        let detail = |name: &str| g.gates.iter().find(|g| g.name == name).unwrap().detail.clone();
+        assert_eq!(detail("review"), "round 1 at abcdef0: missing lenses: failure-paths, tests-and-checks");
+        assert_eq!(detail("error rows"), "c findings 1 hold the land");
+        assert_eq!(detail("signed approval"), "high: the human runs bp approve projects/bp/issues/a at abcdef0");
+        assert_eq!(detail("check set"), "no clone holds abcdef0, so its check set is not read");
+        let unknown = Issue { base: Base::Unknown, ..medium() };
+        assert_eq!(
+            gates(&unknown, &green, None).gates[0].detail,
+            "the claim records no base; land tests origin's default branch"
+        );
+        let approved = Issue { approvals: vec![H.into()], ..high() };
+        let g = gates(&approved, &green, None);
+        assert_eq!(g.gates[6].detail, "recorded at abcdef0; land verifies it");
     }
 }

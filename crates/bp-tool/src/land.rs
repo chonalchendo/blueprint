@@ -3,19 +3,21 @@
 //! the red-first base (37, design change 10), runs the issue's blocks at the worktree's head with no lock held, pushes
 //! that head, opens or retargets the pull request, keeps its body current with what it carries (27, design change 8)
 //! and commits the runs, dropping the claim's `## Next`; a changed check set first gets a commit that names it. `land`
-//! reads the forge with no lock held and refuses on the reviewer, the base, the approval at the head, the forge check,
-//! the run evidence, the check set the head names and then a head behind its base, in that order, for a pull request
-//! already merged too, which skips the last. It merges at the head it read and moves each layer cut from it onto the
-//! base. Then it removes the worktree and a branch the merged head holds, and commits the claim's release and the issue
-//! at `resolved`; the result names each moved layer's next step, and a stranded layer's held claim takes its step as
-//! `## Next`.
+//! gates by the risk level (37, design change 3): it reads no forge approval. It reads the forge with no lock held and
+//! refuses on the base, the forge check, the run evidence, the reviews of the head's round, their dispositions, an
+//! error row that holds, for high the human's signed approval of the head, the check set the head names, a level
+//! that rose after `pr` and then a head behind its base, in that order, for a pull request already merged too, which
+//! skips the last. The session runs it; a low or medium head lands with no human act. It merges at the head it read
+//! and moves each layer cut from it onto the base. Then it removes the worktree and a branch the merged head holds, and
+//! commits the claim's release and the issue at `resolved`; the result names each moved layer's next step, and a
+//! stranded layer's held claim takes its step as `## Next`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bp_change::IssueStatus;
-use bp_change::intents::{self, Base};
+use bp_change::intents::{self, Base, Issue, Unmet};
 use bp_forge::{Gh, PullRequest};
 use bp_read::inputs::{field, held};
 use bp_read::landing;
@@ -26,6 +28,10 @@ use serde_json::{Value, json};
 
 use crate::claim::{default_branch, git};
 use crate::{Wrote, finish, node_id, subject};
+
+mod level;
+
+use level::{lander, risen, trusted};
 
 /// `bp pr <issue>`.
 #[derive(Args)]
@@ -179,7 +185,7 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
 }
 
 pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
-    let role = crate::set::human(format!("land {}", l.issue))?;
+    let role = lander(&l.issue)?;
     node_id(&l.issue)?;
     let vault = Vault::discover(cwd)?;
     let index = Index::open(&vault)?;
@@ -191,9 +197,8 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     }
     let c = claimed(cwd, &index, &id)?;
     let gh = Gh::new(&c.top);
-    let reviewer = reviewer(&index, &id, &gh.login()?)?;
-    // The diff an earlier approval saw, and the head's ancestry, are tested against the base as origin holds it now.
-    // The dry run fetches too, so a dry run that passes is a land the forge accepts (34, design change 5).
+    // The head's ancestry and its level are tested against the base as origin holds it now. The dry run fetches too,
+    // so a dry run that passes is a land the forge accepts (34, design change 5).
     git(&c.top, &["fetch", "-q", "origin"])?;
     let Some(pr) =
         gh.prs_for_head(&c.branch)?.into_iter().filter(|p| p.is_open() || merged(p)).max_by_key(|p| p.number)
@@ -212,20 +217,23 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
             format!("commit and bp pr {id}, or stash, the changes in {}, then rerun", c.worktree.display()),
         ));
     }
-    let runs = bp_read::inputs::runs(&index, id.as_str())?;
     let blocks = bp_read::inputs::blocks(&vault, id.as_str())?;
-    let read = bp_read::inputs::pull_request(&pr, &reviewer);
+    let mut issue = Issue { base: c.base.clone(), blocks, ..bp_read::inputs::reviewed(&vault, &index, id.as_str())? };
+    let read = bp_read::inputs::pull_request(&pr);
     let carried = crate::carry::read(&vault, &index, &id, crate::red_first::Based::default())?;
+    let level = trusted(&c, &gh, &index, &id, &pr, &mut issue)?;
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
-    // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
-    let compare = c.from.as_deref().map(|from| (c.top.as_path(), from));
-    // The check set and then the head's ancestry are the last gates, so a head the clone cannot read refuses only when
-    // every other gate holds.
+    // records and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
+    // The check set, the level after this fetch and then the head's ancestry are the last gates, so a head the clone
+    // cannot read refuses only when every other gate holds.
     let named = carried.named_by(&c.top, &pr.head_ref_oid);
-    let gate = match intents::gates(&read, &c.base, &runs, &blocks, named.as_ref().ok().copied()).unmet {
-        Some(unmet) => Err(landing::refusal(&unmet, &id, &pr, &reviewer, compare)),
-        // A merged head is behind its base by its own merge.
-        None => named.and_then(|_| if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid) }),
+    let gate = match intents::gates(&issue, &read, named.as_ref().ok().copied()).unmet {
+        Some(Unmet::Approval) => Err(level.1.unwrap_or_else(|| landing::refusal(&Unmet::Approval, &id, &pr))),
+        Some(unmet) => Err(landing::refusal(&unmet, &id, &pr)),
+        None => named.and_then(|_| risen(&c, &id, &issue, &pr.head_ref_oid)).and_then(|()| {
+            // A merged head is behind its base by its own merge.
+            if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid) }
+        }),
     };
     if let Err(mut r) = gate {
         if merged(&pr) {
@@ -233,21 +241,19 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         }
         return Err(r);
     }
+    let level = level.0;
     if l.dry_run {
-        return Ok(Wrote::Changed(json!({ "land": id, "head": pr.head_ref_oid, "dry_run": true })));
+        return Ok(Wrote::Changed(json!({ "land": id, "head": pr.head_ref_oid, "level": level, "dry_run": true })));
     }
     let children = crate::stack::children(&index, &id)?;
     if !merged(&pr) {
         gh.merge(n, &pr.head_ref_oid).map_err(|e| match gh.pr(n) {
-            // The forge refuses a head that moved since the reads: that head has no approval yet.
+            // The forge refuses a head that moved since the reads: no review has read that head yet.
             Ok(now) if now.head_ref_oid != pr.head_ref_oid => Refusal::new(
                 Code::ReviewMissing,
                 id.as_str(),
-                "land merges only the head the reviewer identity approved (15, Controls 1)",
-                format!(
-                    "the head moved to {}; bp pr {id}, then the reviewer approves it, then bp land {id}",
-                    now.head_ref_oid
-                ),
+                "land merges only the head its reviews read (37, design change 3)",
+                format!("the head moved to {}; bp pr {id}, then its review, then bp land {id}", now.head_ref_oid),
             ),
             _ => e,
         })?;
@@ -282,6 +288,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         "status": resolved,
         "pull_request": pr.number,
         "head": pr.head_ref_oid,
+        "level": level,
         "branch_kept": kept,
         "restacked": moved.restacked,
         "stranded": moved.stranded,
@@ -351,20 +358,6 @@ fn cleared(vault: &Vault, index: &Index, id: &Id, claim: &Id) -> Result<Option<(
         return Ok(None);
     }
     Ok(crate::claim::without_next(&vault.text(claim)?).map(|text| (claim.clone(), text)))
-}
-
-/// The project's reviewer identity, or `reviewer_invalid` when it is empty or the token's own `login`, case ignored.
-fn reviewer(index: &Index, id: &Id, login: &str) -> Result<String, Refusal> {
-    let reviewer = bp_read::inputs::reviewer(index, id.as_str())?;
-    if !reviewer.is_empty() && !reviewer.eq_ignore_ascii_case(login) {
-        return Ok(reviewer);
-    }
-    let why = if reviewer.is_empty() {
-        "the project names no reviewer".into()
-    } else {
-        format!("{login} is the token's own login")
-    };
-    Err(landing::reviewer_invalid(id, &why))
 }
 
 /// The issue's active claim, its clone, its branch and its base branch, or `illegal_transition`: the issue's status

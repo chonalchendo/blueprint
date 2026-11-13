@@ -1,7 +1,7 @@
 //! The human's signature (37, design change 4). The role label is forgeable, so a human act that a gate trusts carries
 //! an SSH signature by a key whose passphrase only the human types. OpenSSH's `ssh-keygen -Y` signs and verifies, run
 //! as a process: no crate. The signed message is canonical text that names the act, the project, the node, the pull
-//! request and the full head, so a signature of one act never verifies as another.
+//! request, its base branch and the full head, so a signature of one act never verifies as another.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,9 @@ pub(crate) struct Act<'a> {
     pub(crate) node: &'a Id,
     /// The pull request number on the forge.
     pub(crate) pull_request: u64,
+    /// The branch the pull request merges into. A stacked pull request retargeted to the default branch then needs a
+    /// new signature: the human saw the diff against the lower layer only.
+    pub(crate) base: &'a str,
     /// The full head sha of the pull request.
     pub(crate) head: &'a str,
     /// The act's own fields, in the order the act fixes: a lowering's `level`, then `reason`.
@@ -38,8 +41,8 @@ impl Act<'_> {
     pub(crate) fn message(&self) -> String {
         let project = self.node.project().unwrap_or_default();
         let mut text = format!(
-            "act: {}\nproject: {project}\nnode: {}\npull_request: {}\nhead: {}\n",
-            self.verb, self.node, self.pull_request, self.head
+            "act: {}\nproject: {project}\nnode: {}\npull_request: {}\nbase: {}\nhead: {}\n",
+            self.verb, self.node, self.pull_request, self.base, self.head
         );
         text.extend(self.more.iter().map(|(k, v)| format!("{k}: {v}\n")));
         text
@@ -125,14 +128,31 @@ impl Drop for Scratch {
 }
 
 /// The signer: the public key of the `signer` key of `.bp/risk.yml` on the forge's default branch, as `<type>
-/// <base64>`. The forge protects that branch, so an agent's edit of the file in a worktree, in the clone or on its own
-/// branch names no signer. Else `signer_missing`: `bp` cannot trust a human act without a key.
+/// <base64>`, and the sha it was read at. The forge protects that branch, so an agent's edit of the file in a worktree,
+/// in the clone or on its own branch names no signer. Else `signer_missing`: `bp` cannot trust a human act without a
+/// key; or `risk_file_invalid` when the file does not parse, as `bp risk` refuses it.
 ///
 /// The branch and its sha come from the server, by `git ls-remote --symref origin HEAD`, never from a local ref. The
 /// shared `default_branch` reads `refs/remotes/origin/HEAD`, and `git remote set-head` or `git update-ref` moves that
 /// ref and `refs/remotes/origin/*` with no push: an agent would point them at a branch that names its own key. The
-/// other verbs keep `default_branch`, because a wrong base there costs a bad claim, not a forged human act.
-pub(crate) fn signer(top: &Path) -> Result<String, Refusal> {
+/// other verbs keep `default_branch`, because a wrong base there costs a bad claim, not a forged human act. A
+/// `url.<x>.insteadOf` rule still redirects `ls-remote`, so a rewritten `origin` refuses here, and `land` compares the
+/// sha with the forge's own default-branch head (review of #95, row 24).
+pub(crate) fn signer(top: &Path) -> Result<(String, String), Refusal> {
+    let (url, read) =
+        (git(top, &["config", "--get", "remote.origin.url"])?, git(top, &["ls-remote", "--get-url", "origin"])?);
+    if url != read {
+        return Err(Refusal::new(
+            Code::SignerMissing,
+            "git ls-remote --get-url origin",
+            "bp reads the signer from the repository that origin names, never through a rewrite of its url (37, design \
+             change 4)",
+            format!(
+                "origin is {url}, but git reads {read}: remove the url.<x>.insteadOf rule (git config --get-regexp \
+                 '^url\\.'), then rerun"
+            ),
+        ));
+    }
     let listed = git(top, &["ls-remote", "--symref", "origin", "HEAD"])?;
     let branch = listed.lines().find_map(|l| l.strip_prefix("ref: refs/heads/")?.strip_suffix("\tHEAD"));
     let sha = listed.lines().find_map(|l| l.strip_suffix("\tHEAD").filter(|s| is_sha(s)));
@@ -146,7 +166,15 @@ pub(crate) fn signer(top: &Path) -> Result<String, Refusal> {
     };
     git(top, &["fetch", "-q", "origin", sha])?;
     let text = git(top, &["show", &format!("{sha}:{RISK_FILE}")]).unwrap_or_default();
-    signer_of(&text).ok_or_else(|| {
+    let key = signer_of(&text).map_err(|why| {
+        Refusal::new(
+            Code::RiskFileInvalid,
+            format!("origin/{branch}:{RISK_FILE}"),
+            "the risk file holds `high` and `low` lists of path patterns, `limits` and `signer` (37, design change 1)",
+            format!("{why}; edit {RISK_FILE} on {branch} by hand, then git commit it"),
+        )
+    })?;
+    let key = key.ok_or_else(|| {
         Refusal::new(
             Code::SignerMissing,
             format!("origin/{branch}:.bp/risk.yml at {sha}"),
@@ -157,19 +185,26 @@ pub(crate) fn signer(top: &Path) -> Result<String, Refusal> {
                  rerun"
             ),
         )
-    })
+    })?;
+    Ok((key, sha.to_string()))
 }
 
 /// The `signer` key of a risk file, as [`Config::parse`] reads it for the level: one reader of `.bp/risk.yml`. A file
-/// that does not parse names no signer, and a duplicate key fails the parse, so no second `signer` line can shadow
-/// the first.
-fn signer_of(text: &str) -> Option<String> {
-    Config::parse(text).ok()?.signer.as_deref().and_then(public_key)
+/// that does not parse is the parse error, not "no signer" (review of #95, row 25); a duplicate key fails the parse, so
+/// no second `signer` line can shadow the first.
+fn signer_of(text: &str) -> Result<Option<String>, String> {
+    Ok(Config::parse(text)?.signer.as_deref().and_then(public_key))
 }
 
 /// A full commit sha: 40 or 64 lower-case hex digits. A head that is not one never enters a message or a path.
 pub(crate) fn is_sha(text: &str) -> bool {
     matches!(text.len(), 40 | 64) && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A branch name that can be one line of a signed message: not empty, with no space or control character. Git refuses
+/// both in a ref name, so only a broken forge or a forged argument gives one.
+pub(crate) fn is_branch(name: &str) -> bool {
+    !name.is_empty() && !name.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// `<type> <base64>` of a public key line, or `None` when the line is not one.
@@ -217,7 +252,7 @@ mod tests {
 
     #[test]
     fn signer_reads_as_yaml() {
-        let one = signer_of;
+        let one = |text: &str| signer_of(text).ok().flatten();
         assert_eq!(one(&format!("high:\n  - .bp/\nsigner: {KEY} human\n")).as_deref(), Some(KEY));
         assert_eq!(one(&format!("signer: \"{KEY}\" # the human\n")).as_deref(), Some(KEY));
         // A second `signer` fails the parse: neither line names the signer.
@@ -229,6 +264,9 @@ mod tests {
         assert_eq!(one(&format!("x:\n  signer: {KEY}\n")), None, "only the top-level key names the signer");
         assert_eq!(one(&format!("signer: {KEY}\n---\nsigner: {OTHER}\n")), None, "two documents");
         assert_eq!(one(""), None, "an empty file");
+        assert_eq!(signer_of(""), Ok(None), "no signer is no parse error");
+        let bad = signer_of(&format!("high: [\"infra/*\"]\nsigner: {KEY}\n")).unwrap_err();
+        assert!(bad.contains("infra/*"), "a bad pattern names itself, not a missing signer: {bad}");
     }
 
     #[test]

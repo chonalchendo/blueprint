@@ -284,12 +284,18 @@ fn a_review_whose_rows_sit_in_the_diff_records() {
         "| warn | src/b.rs:30, 33 | Wrong. |",
         "| warn | src/b.rs | Wrong. |",
         "| warn | projects/bp/project | Wrong. |",
-        "| warn | src/a.rs:1 | Wrong. | extra |",
+        "| warn | src/a.rs:1 | Wrong. | |",
     ];
     let (exit, v) = w.review(ISSUE, &w.body(&rows));
-    assert_eq!(exit, Some(0), "{v}");
+    assert_eq!(exit, Some(0), "an empty cell past the header is no cell: {v}");
     let (_, shown) = common::bp(w.v(), &["show", v["id"].as_str().unwrap()]);
     assert!(shown["body"].as_str().unwrap().contains("projects/bp/project"), "{shown}");
+    // A fourth cell under a three-column header would drop text the header does not name (review of #98, late list).
+    let before = commits(w.v());
+    let (exit, v) = w.review(ISSUE, &w.body(&["| warn | src/a.rs:1 | Wrong. | extra |"]));
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{v}");
+    assert!(v["fix"].as_str().unwrap().starts_with("row 1 has 4 cells under a header of 3"), "{v}");
+    assert_eq!(commits(w.v()), before, "a refusal writes nothing");
 }
 
 #[test]
@@ -462,23 +468,26 @@ fn an_of_cell_re_reports_only_from_an_error_row_of_an_earlier_head() {
     let table = |head: &str, row: &str| {
         format!("head: {head}\n\n| severity | location | finding | of |\n|---|---|---|---|\n{row}\n")
     };
-    let refused = |head: &str, fields: &[&str], row: &str| {
+    let refused = |head: &str, fields: &[&str], row: &str, why: &str| {
         let before = commits(w.v());
         let (exit, v) = w.at(ISSUE, head, fields, &table(head, row));
         assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{row}: {v}");
         assert_eq!(commits(w.v()), before, "a refusal writes nothing");
-        assert!(v["fix"].as_str().unwrap().contains("only an `error` row re-reports"), "{v}");
+        assert!(v["fix"].as_str().unwrap().contains(why), "{v}");
     };
-    // A second lens at the same head, as a warn or as an error, re-reports nothing (review of #98, row 20).
+    // A second lens at the same head, as a warn or as an error, re-reports nothing (review of #98, row 20); each
+    // refusal names its own cause (row 37).
     let paths = ["round=1", "lens=failure-paths", "mode=full"];
-    refused(&w.head, &paths, &format!("| warn | src/a.rs:1 | The same. | {first}#1 |"));
-    refused(&w.head, &paths, &format!("| error | src/a.rs:1 | The same. | {first}#1 |"));
+    let warn = "only an `error` row re-reports";
+    refused(&w.head, &paths, &format!("| warn | src/a.rs:1 | The same. | {first}#1 |"), warn);
+    let same = "a re-report names a row of an earlier head";
+    refused(&w.head, &paths, &format!("| error | src/a.rs:1 | The same. | {first}#1 |"), same);
     let (exit, v) = w.at(ISSUE, &w.head, &paths, &table(&w.head, ""));
     assert_eq!(exit, Some(0), "{v}");
     // At a later head, a warn row still re-reports nothing; an error row does.
     let two = w.fix();
     let verify = ["round=2", "lens=verify", "mode=verify"];
-    refused(&two, &verify, &format!("| warn | src/a.rs:1 | Fixed enough. | {first}#1 |"));
+    refused(&two, &verify, &format!("| warn | src/a.rs:1 | Fixed enough. | {first}#1 |"), warn);
     let (exit, v) = w.at(ISSUE, &two, &verify, &table(&two, &format!("| error | src/a.rs:1 | Still. | {first}#1 |")));
     assert_eq!((exit, &v["late"]), (Some(0), &serde_json::json!([])), "{v}");
 }
@@ -524,8 +533,8 @@ fn refuses_a_head_at_or_behind_the_claims_base() {
 }
 
 /// A commit past the base that is not on the claim's branch is no head of the work: a dangling child of the base,
-/// and a newer commit of origin's master (review of #98, row 33). All claims share one clone, so a sibling's head is
-/// such a commit too.
+/// and a newer commit of origin's master (review of #98, rows 33 and 38). All claims share one clone, so a sibling's
+/// head is such a commit too. The branch the pull request targets holds the second, so its refusal names that.
 #[test]
 fn refuses_a_head_off_the_claims_branch() {
     let w = world();
@@ -540,14 +549,36 @@ fn refuses_a_head_off_the_claims_branch() {
     git(&other, &["push", "-q", "origin", "HEAD:refs/heads/master"]);
     git(&w.worktree, &["fetch", "-q", "origin"]);
     let master = git(&w.worktree, &["rev-parse", "origin/master"]).trim().to_string();
-    for head in [&dangling, &master] {
+    let target = format!("is on origin's master at {master}, the branch the pull request targets");
+    for (head, why) in [(&dangling, "or behind it on the claim's branch"), (&master, target.as_str())] {
         let before = commits(w.v());
         let body = format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n");
         let (exit, v) = w.at(ISSUE, head, &["round=1", "lens=conformance", "mode=full"], &body);
         assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{head}: {v}");
-        assert!(v["fix"].as_str().unwrap().contains("or behind it on the claim's branch"), "{v}");
+        assert!(v["fix"].as_str().unwrap().contains(why), "{v}");
         assert_eq!(commits(w.v()), before, "a refusal writes nothing");
     }
+}
+
+/// With a pull request in view, its head is the one tip: a local commit past it is no head of the review (review of
+/// #98, row 39).
+#[test]
+fn refuses_a_local_commit_past_the_pull_request_head() {
+    let w = world();
+    let pr = format!(
+        r#"[{{"number":1,"state":"OPEN","headRefName":"bp/a","headRefOid":"{}","baseRefName":"master"}}]"#,
+        w.head
+    );
+    std::fs::create_dir_all(w.v().join(".bp/forge/bp")).unwrap();
+    std::fs::write(w.v().join(".bp/forge/bp/open-prs.json"), pr).unwrap();
+    let local = w.fix();
+    let before = commits(w.v());
+    let body = format!("head: {local}\n| severity | location | finding |\n|---|---|---|\n");
+    let (exit, v) = w.at(ISSUE, &local, &["round=1", "lens=conformance", "mode=full"], &body);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("finding_invalid")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains(&format!("is not {} or behind it", w.head)), "{v}");
+    assert_eq!(commits(w.v()), before, "a refusal writes nothing");
+    assert_eq!(w.review(ISSUE, &w.body(&[])).0, Some(0), "the pull request's head records");
 }
 
 #[test]

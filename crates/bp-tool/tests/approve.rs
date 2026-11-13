@@ -191,3 +191,37 @@ fn approve_refuses_a_head_that_is_not_a_full_sha() {
         assert!(!v.join(ISSUE).join("approvals").exists(), "{head:?}: no record is written");
     }
 }
+
+/// The signer is read only from origin's own default branch: a `url.<x>.insteadOf` rule that sends `origin` to
+/// another repository refuses, and a risk file that does not parse refuses `risk_file_invalid` (review of #95, rows
+/// 24 and 25).
+#[test]
+fn approve_refuses_a_rewritten_origin_and_a_risk_file_that_does_not_parse() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let human = t.join("human").display().to_string();
+    let pr =
+        json!([{ "number": 4, "state": "OPEN", "headRefName": "bp/a", "headRefOid": HEAD, "baseRefName": "master" }]);
+    std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
+    let approve = || bp(v, t, &[], &["approve", ISSUE, "--key", &human]);
+    let code = t.join("code");
+    let code_dir = code.join(".bp");
+    std::fs::create_dir_all(&code_dir).unwrap();
+    std::fs::write(code_dir.join("risk.yml"), "high: [\n").unwrap();
+    git(&code, &["add", ".bp/risk.yml"]);
+    git(&code, &["commit", "-qm", "broken"]);
+    git(&code, &["push", "-q", "origin", "master"]);
+    let (exit, out) = approve();
+    assert_eq!((exit, out["code"].as_str()), (Some(2), Some("risk_file_invalid")), "{out}");
+    assert_eq!(out["subject"], "origin/master:.bp/risk.yml", "{out}");
+
+    // Another repository whose risk file names the agent's key, behind a rewrite of origin's url.
+    let other = t.join("other.git");
+    git(t, &["clone", "-q", "--bare", &t.join("origin.git").display().to_string(), "other.git"]);
+    let origin = t.join("origin.git").display().to_string();
+    git(&code, &["config", &format!("url.{}.insteadOf", other.display()), &origin]);
+    let (exit, out) = approve();
+    assert_eq!((exit, out["code"].as_str()), (Some(2), Some("signer_missing")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains("remove the url.<x>.insteadOf rule"), "{out}");
+    assert!(!v.join(ISSUE).join("approvals").exists(), "no approval is written");
+}

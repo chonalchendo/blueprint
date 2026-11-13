@@ -1,21 +1,21 @@
 //! The Change page object (18, Change; 32, design change 5): one issue's gates, its stack, the deltas its pull request
 //! carries, its diff, and the land command or the refusal `land` would give. The gates are `bp-change`'s, and the
 //! refusal is built by [`crate::landing`], as `land` builds it, so the page and the verb never disagree (21, rule 1).
-//! `land`'s own pre-gates past the claim and the reviewer (the role, a clean worktree) depend on the human's shell,
-//! so the page does not test them.
+//! `land`'s own pre-gates past the claim (the role, a clean worktree), its fresh level and its check of the human's
+//! signature read the shell, the clone and the forge, so the page does not test them.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use bp_change::IssueStatus;
-use bp_change::intents::{Base, Gate, GateState, Intent, gates};
+use bp_change::intents::{Base, Gate, GateState, Intent, Issue, gates};
 use bp_vault::{Body, Code, DeltaState, Filter, Id, Index, Kind, Record, Refusal, Vault};
 use serde::Serialize;
 use serde_json::Value;
 use ts_rs::TS;
 
 pub use crate::diff::{DIFF_CAP, Diff, DiffFile};
-use crate::inputs::{base, blocks, field, held, pull_request, reviewer, runs};
+use crate::inputs::{base, blocks, held, pull_request, runs};
 use crate::moving::{head_words, unread};
 pub use crate::stack::Layer;
 use crate::{Forge, Intents, landing};
@@ -42,8 +42,7 @@ pub struct Change {
     pub pull_request: Option<ChangePullRequest>,
     /// Every landing gate in `land`'s order; empty without a pull request.
     pub gates: Vec<Gate>,
-    /// The refusal `land` would give at this head: the first unmet gate, or a missing claim, reviewer or pull
-    /// request.
+    /// The refusal `land` would give at this head: the first unmet gate, or a missing claim or pull request.
     #[ts(optional = false)]
     pub refusal: Option<ChangeRefusal>,
     /// The stack in land order, the layers below first, then this one, then the layers cut from it.
@@ -143,22 +142,20 @@ pub fn change(
     let pr = world.pr(id.as_str()).or_else(|| world.merged(id.as_str()).filter(|_| claim.is_some()));
     let runs = runs(index, id.as_str())?;
     let head = head_words(pr, unread.is_some(), || Ok(runs.clone()))?;
-    let reviewer = reviewer(index, id.as_str())?;
     let top = clone.and_then(|c| crate::snapshot::clone_of(c, index, project).ok());
     let (base, named) = clone_reads(vault, index, &id, claim.as_ref(), pr, top.as_deref())?;
-    let (read, blocks) = (pr.map(|p| pull_request(p, &reviewer)), blocks(vault, id.as_str())?);
-    let g = read.as_ref().map(|r| gates(r, &base, &runs, &blocks, named));
-    // `land`'s order: the claim, the reviewer, the pull request, then the gates.
+    let issue =
+        Issue { base, blocks: blocks(vault, id.as_str())?, ..crate::inputs::reviewed(vault, index, id.as_str())? };
+    let read = pr.map(pull_request);
+    let g = read.as_ref().map(|r| gates(&issue, r, named));
+    // `land`'s order: the claim, the pull request, then the gates.
     let resolved = status.as_deref() == Some(IssueStatus::Resolved.as_str());
     let refused = match (&claim, pr, g.as_ref().and_then(|g| g.unmet.as_ref())) {
         _ if resolved => None,
         (None, ..) => Some(landing::unheld(&id, status.as_deref())),
-        _ if reviewer.is_empty() => Some(landing::reviewer_invalid(&id, "the project names no reviewer")),
         (_, None, _) => Some(landing::no_pull_request(&id)),
-        (Some(c), Some(p), Some(unmet)) => {
-            let from = field(c, "base");
-            let compare = top.as_deref().zip(from.as_deref());
-            let mut r = landing::refusal(unmet, &id, p, &reviewer, compare);
+        (Some(_), Some(p), Some(unmet)) => {
+            let mut r = landing::refusal(unmet, &id, p);
             if p.state.as_deref() == Some("MERGED") {
                 r.fix = landing::after_merge(p.number, &id);
             }
@@ -314,16 +311,17 @@ mod tests {
         (format!("{issue}/claims/s1.md"), text)
     }
 
-    /// A pull request of `slug` at `head` onto `base`, approved by `rev` and green when `approved`.
-    fn pr(n: u64, slug: &str, head: &str, base: &str, approved: bool) -> String {
-        let reviews = if approved {
-            format!(r#"[{{"author":{{"login":"rev"}},"state":"APPROVED","commit":{{"oid":"{head}"}}}}]"#)
-        } else {
-            "[]".into()
-        };
+    /// A green pull request of `slug` at `head` onto `base`.
+    fn pr(n: u64, slug: &str, head: &str, base: &str) -> String {
         format!(
-            r#"{{"number":{n},"url":"https://forge.test/o/bp/pull/{n}","headRefName":"bp/{slug}","headRefOid":"{head}","baseRefName":"{base}","reviews":{reviews},"statusCheckRollup":[{{"conclusion":"SUCCESS"}}]}}"#
+            r#"{{"number":{n},"url":"https://forge.test/o/bp/pull/{n}","headRefName":"bp/{slug}","headRefOid":"{head}","baseRefName":"{base}","statusCheckRollup":[{{"conclusion":"SUCCESS"}}]}}"#
         )
+    }
+
+    /// A review of `issue` at `head` by `lens`, round 1, with no findings.
+    fn review(issue: &str, head: &str, lens: &str) -> (String, String) {
+        let header = format!("kind: review\nunder: {issue}\nhead: {head}\nround: 1\nlens: {lens}\n");
+        (format!("{issue}/reviews/{lens}.md"), format!("---\n{header}---\n\nWhat holds:\n\n- all\n"))
     }
 
     struct Fx {
@@ -333,9 +331,9 @@ mod tests {
         head: String,
     }
 
-    /// A clone whose head adds a 300 KB file onto `master`, and a vault of project `bp` in git: `0001.land` approved,
-    /// green and run at the head; `0002.above` cut from it with no pull request; `0003.wait` depends on it; an
-    /// unclaimed, an unpushed, an unapproved and a no-base issue; and project `nr` with no reviewer.
+    /// A clone whose head adds a 300 KB file onto `master`, and a vault of project `bp` in git: `0001.land` reviewed by
+    /// each medium lens, green and run at the head; `0002.above` cut from it with no pull request; `0003.wait` depends
+    /// on it; an unclaimed, an unpushed, an unreviewed and a no-base issue; and project `nr` with no pull request.
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let (root, clone) = (dir.path().join("v"), dir.path().join("c"));
@@ -371,7 +369,7 @@ mod tests {
         let mut files = vec![
             (".gitignore".into(), ".bp/\n".into()),
             ("shared/.keep".into(), String::new()),
-            ("projects/bp/project.md".into(), project("reviewer: rev\n")),
+            ("projects/bp/project.md".into(), project("")),
             ("projects/bp/designs/system.md".into(), "---\nkind: design\ntitle: S\nstatus: active\n---\n".into()),
             (
                 "projects/bp/milestones/m.md".into(),
@@ -380,6 +378,8 @@ mod tests {
             issue("0001.land", "in-progress", ""),
             claim(&i("0001.land"), &on_master),
             run(&i("0001.land")),
+            review(&i("0001.land"), &head, "conformance"),
+            review(&i("0001.land"), &head, "failure-paths"),
             issue("0002.above", "in-progress", "depends:\n  - projects/bp/issues/0001.land\n"),
             claim(&i("0002.above"), "base_issue: projects/bp/issues/0001.land\nbase_branch: bp/0001.land\n"),
             issue("0003.wait", "open", "depends:\n  - projects/bp/issues/0001.land\n"),
@@ -388,17 +388,20 @@ mod tests {
             claim(&i("0005.unpushed"), &on_master),
             issue("0006.unapproved", "in-progress", ""),
             claim(&i("0006.unapproved"), &on_master),
+            run(&i("0006.unapproved")),
             issue("0007.nobase", "in-progress", ""),
             claim(&i("0007.nobase"), ""),
             run(&i("0007.nobase")),
+            review(&i("0007.nobase"), &head, "conformance"),
+            review(&i("0007.nobase"), &head, "failure-paths"),
             ("projects/nr/project.md".into(), project("")),
             ("projects/nr/issues/0001.x.md".into(), "---\nkind: issue\ntitle: X\nstatus: in-progress\n---\n".into()),
             claim("projects/nr/issues/0001.x", ""),
         ];
         let prs = [
-            pr(1, "0001.land", &head, "master", true),
-            pr(3, "0006.unapproved", &head, "master", false),
-            pr(4, "0007.nobase", &head, "release", true),
+            pr(1, "0001.land", &head, "master"),
+            pr(3, "0006.unapproved", &head, "master"),
+            pr(4, "0007.nobase", &head, "release"),
         ];
         files.push((".bp/forge/bp/open-prs.json".into(), format!("[{}]", prs.join(","))));
         for (rel, text) in &files {
@@ -428,8 +431,16 @@ mod tests {
         use GateState::Pass;
         let fx = fixture();
         let c = page(&fx, "bp", "0001.land", true, false);
-        let all =
-            [("base", Pass), ("approving review", Pass), ("forge checks", Pass), ("run a", Pass), ("check set", Pass)];
+        let all = [
+            ("base", Pass),
+            ("forge checks", Pass),
+            ("run a", Pass),
+            ("review", Pass),
+            ("dispositions", Pass),
+            ("error rows", Pass),
+            ("signed approval", Pass),
+            ("check set", Pass),
+        ];
         assert_eq!(states(&c), all);
         assert_eq!((c.command.as_deref(), c.wait.as_deref()), (Some("bp land projects/bp/issues/0001.land"), None));
         assert!(c.refusal.is_none());
@@ -504,18 +515,16 @@ mod tests {
         let unclaimed = page(&fx, "bp", "0004.open", true, false);
         assert_eq!(refusal(&unclaimed), ("illegal_transition", "bp cut projects/bp/issues/0004.open, then rerun"));
         assert!(unclaimed.gates.is_empty() && unclaimed.command.is_none());
-        let reviewer = page(&fx, "nr", "0001.x", true, false);
-        assert_eq!(refusal(&reviewer).0, "reviewer_invalid");
         let unpushed = page(&fx, "bp", "0005.unpushed", true, false);
-        let fix = "bp/0005.unpushed has no open pull request; bp pr projects/bp/issues/0005.unpushed, then the reviewer \
-                   approves it";
+        let fix = "bp/0005.unpushed has no open pull request; bp pr projects/bp/issues/0005.unpushed, then its review";
         assert_eq!(refusal(&unpushed), ("review_missing", fix));
-        let unapproved = page(&fx, "bp", "0006.unapproved", true, false);
-        assert_eq!(unapproved.gates[1].state, GateState::Pending);
-        let (code, fix) = refusal(&unapproved);
+        let unreviewed = page(&fx, "bp", "0006.unapproved", true, false);
+        let review = unreviewed.gates.iter().find(|g| g.name == "review").map(|g| g.state);
+        assert_eq!(review, Some(GateState::Pending));
+        let (code, fix) = refusal(&unreviewed);
         assert_eq!(code, "review_missing");
-        assert!(fix.starts_with("the human approves pull request 3 at"), "{fix}");
-        for c in [&unclaimed, &reviewer, &unpushed, &unapproved] {
+        assert!(fix.contains(": missing lenses: conformance, failure-paths;"), "{fix}");
+        for c in [&unclaimed, &unpushed, &unreviewed] {
             assert!(c.command.is_none() && c.wait.is_none(), "{}", c.id);
         }
     }

@@ -1,7 +1,7 @@
 //! The fake `gh` of `cargo xtask forge`, run as `xtask gh <T> <args>` from the shim `T/bin/gh` (26, issue 1). It
-//! answers the six calls of `bp-forge` and `pr review --approve`, and fails any other. Its login is `FAKE_GH_LOGIN`,
-//! default `quokka-agent`. The branches live in the bare copy `T/origin.git`; the pull requests live in `T/forge`, a
-//! snapshot directory of 24, so a block reads or edits them as files. It never reaches the network.
+//! answers the calls of `bp-forge` and `pr review --approve`, and fails any other. Its login is `FAKE_GH_LOGIN`,
+//! default `quokka-agent`. A review is stored as GitHub stores one; no merge needs it (37, design change 5). The
+//! branches live in the bare copy `T/origin.git`; the pull requests live in `T/forge`, a snapshot directory of 24, so a block reads or edits them as files. It never reaches the network.
 //!
 //! One call at a time holds `T/forge/lock`, as the forge serialises its own writes. Without it, six `pr create` calls
 //! at once made one pull request, and a reader saw half a file. Each file is written by a rename, and only when it
@@ -72,6 +72,13 @@ impl Fake {
         self.save(&prs)?;
         let out = match args {
             ["api", "user"] => format!("{}\n", json!({ "login": self.login })),
+            // `land` reads the default branch and its head from the forge (37, design change 4).
+            ["api", "graphql", ..] => {
+                let name = self.git(&["symbolic-ref", "--short", "HEAD"])?.trim().to_string();
+                let oid = heads.get(&name).with_context(|| format!("the default branch {name} has no commit"))?;
+                let target = json!({ "name": name, "target": { "oid": oid } });
+                format!("{}\n", json!({ "data": { "repository": { "defaultBranchRef": target } } }))
+            }
             ["pr", "list", rest @ ..] => {
                 // `--limit` caps rows the fake never has that many of.
                 let f = flags(rest, &["--head", "--state", "--limit", "--json"], &[])?;
@@ -104,14 +111,13 @@ impl Fake {
                 }
                 let number = prs.iter().filter_map(|p| p["number"].as_u64()).max().unwrap_or(0) + 1;
                 let url = format!("{}/pull/{number}", self.repository()?);
-                let mut pr = json!({
+                let pr = json!({
                     "number": number, "url": url, "state": "OPEN",
                     "title": need(&f, "--title")?, "body": need(&f, "--body")?,
                     "author": { "id": format!("U_{}", self.login), "is_bot": false, "login": self.login, "name": self.login },
                     "baseRefName": base, "headRefName": head, "headRefOid": oid,
-                    "reviews": [], "statusCheckRollup": self.rollup(oid)?, "pushes": [],
+                    "reviews": [], "statusCheckRollup": self.rollup(oid)?,
                 });
-                pushed(&mut pr)?;
                 prs.push(pr);
                 format!("{url}\n")
             }
@@ -151,7 +157,7 @@ impl Fake {
                 String::new()
             }
             _ => bail!(
-                "unknown command \"{}\": the fake gh answers `api user` and `pr list|view|create|edit|merge|review`",
+                "unknown command \"{}\": the fake gh answers `api user|graphql` and `pr list|view|create|edit|merge|review`",
                 args.join(" ")
             ),
         };
@@ -172,7 +178,6 @@ impl Fake {
                 && pr["headRefOid"] != head.as_str()
             {
                 pr["headRefOid"] = head.as_str().into();
-                pushed(pr)?;
             }
             pr["statusCheckRollup"] = self.rollup(pr["headRefOid"].as_str().unwrap_or_default())?;
         }
@@ -180,7 +185,8 @@ impl Fake {
     }
 
     /// Squashes the head onto the base in the bare copy. Like branch protection, it refuses a base that is not an
-    /// ancestor of the head and a rollup that is not green, and needs an approval of the latest push ([`approved`]).
+    /// ancestor of the head and a rollup that is not green. It needs no approval: the protection requires zero
+    /// approving reviews, and `land` holds the review (37, design change 5).
     fn merge(&self, pr: &mut Value, heads: &BTreeMap<String, String>, expect: Option<&str>) -> Result<()> {
         let n = &pr["number"];
         if pr["state"] != "OPEN" {
@@ -197,9 +203,6 @@ impl Fake {
         }
         if !green(&pr["statusCheckRollup"]) {
             bail!("Pull request #{n} is not mergeable: Required status check \"fake\" is expected.");
-        }
-        if !approved(pr) {
-            bail!("Pull request #{n} is not mergeable: the base branch policy prohibits the merge.");
         }
         let message = format!("{} (#{n})", pr["title"].as_str().unwrap_or_default());
         let squash = self.git(&["commit-tree", &format!("{head}^{{tree}}"), "-p", base, "-m", &message])?;
@@ -311,28 +314,6 @@ impl Fake {
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
     }
-}
-
-/// Records a push to the head: its pusher and the reviews before it. The fake cannot see who ran `git push`; the
-/// agent's token, the author's, makes every push of a pull request's head, `land`'s restack included.
-fn pushed(pr: &mut Value) -> Result<()> {
-    let reviews = pr["reviews"].as_array().map_or(0, Vec::len);
-    let by = pr["author"]["login"].clone();
-    pr["pushes"].as_array_mut().context("pushes is a list")?.push(json!({ "by": by, "reviews": reviews }));
-    Ok(())
-}
-
-/// A login other than the author and the latest push's pusher approved after that push. With "Require approval of
-/// the most recent reviewable push" and "Dismiss stale pull request approvals" on, an approval before a push counts
-/// for nothing, even when the push keeps the diff (15, Controls 1).
-fn approved(pr: &Value) -> bool {
-    let last = pr["pushes"].as_array().and_then(|p| p.last());
-    let since = last.and_then(|p| p["reviews"].as_u64()).and_then(|n| usize::try_from(n).ok()).unwrap_or(0);
-    let pusher = last.map(|p| &p["by"]);
-    pr["reviews"].as_array().into_iter().flatten().skip(since).any(|r| {
-        let login = &r["author"]["login"];
-        r["state"] == "APPROVED" && login.is_string() && *login != pr["author"]["login"] && Some(login) != pusher
-    })
 }
 
 /// Green as `bp-forge` reads it (15, Controls 3): at least one `SUCCESS`, and every check `SUCCESS`, `NEUTRAL` or
@@ -477,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn a_push_after_the_approval_needs_a_new_one() {
+    fn a_merge_needs_green_checks_at_the_head_and_no_approval() {
         let dir = tempfile::tempdir().unwrap();
         let t = dir.path().canonicalize().unwrap();
         crate::forge::make(&t, "bp", "https://github.invalid/o/r").unwrap();
@@ -491,23 +472,17 @@ mod tests {
         };
         crate::forge::git(&code, &["checkout", "-q", "-b", "bp/p"]).unwrap();
         let h1 = commit("one\n");
-        let call = |login: &str, args: &[&str]| Fake { t: t.clone(), login: login.into() }.call(args);
-        call("quokka-agent", &["pr", "create", "--head", "bp/p", "--base", "master", "--title", "t", "--body", "b"])
-            .unwrap();
-        let approve = || call("quokka-reviewer", &["pr", "review", "1", "--approve"]).unwrap();
-        approve();
+        let call = |args: &[&str]| Fake { t: t.clone(), login: "quokka-agent".into() }.call(args);
+        call(&["pr", "create", "--head", "bp/p", "--base", "master", "--title", "t", "--body", "b"]).unwrap();
+        std::fs::write(t.join(format!("forge/checks/{h1}.json")), r#"[{"conclusion":"SUCCESS"}]"#).unwrap();
         let h2 = commit("two\n");
-        for h in [&h1, &h2] {
-            std::fs::write(t.join(format!("forge/checks/{h}.json")), r#"[{"conclusion":"SUCCESS"}]"#).unwrap();
-        }
-        let merge = || call("quokka-agent", &["pr", "merge", "1", "--squash"]);
+        let merge = || call(&["pr", "merge", "1", "--squash"]);
         let refused = merge().unwrap_err().to_string();
-        assert!(refused.contains("base branch policy prohibits the merge"), "{refused}");
-        approve();
+        assert!(refused.contains("Required status check"), "the checks of the old head do not count: {refused}");
+        std::fs::write(t.join(format!("forge/checks/{h2}.json")), r#"[{"conclusion":"SUCCESS"}]"#).unwrap();
         merge().unwrap();
-        assert_eq!(
-            call("quokka-agent", &["pr", "view", "1", "--json", "state"]).unwrap().trim(),
-            r#"{"state":"MERGED"}"#
-        );
+        assert_eq!(call(&["pr", "view", "1", "--json", "state"]).unwrap().trim(), r#"{"state":"MERGED"}"#);
+        let head = call(&["api", "graphql", "-f", "query=x"]).unwrap();
+        assert!(head.contains(r#""defaultBranchRef":{"name":"master""#), "{head}");
     }
 }

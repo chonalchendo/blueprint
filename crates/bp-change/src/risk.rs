@@ -89,15 +89,20 @@ impl Pattern {
         }
     }
 
-    /// [`Self::matches`] with ASCII case folded on both sides, and a `Dir` that also holds its own name and each
-    /// parent's. A high pattern matches so: a case-folding volume, as macOS's default, checks `.Claude/x` out as
-    /// `.claude/x`, and a link named `infra` moves all of `infra/`, so a trick can only raise the level.
+    /// [`Self::matches`] with ASCII case folded on both sides, a `Dir` that also holds its own name and each
+    /// parent's, and an `Exact` that also holds each path under it. A high pattern matches so: a case-folding volume,
+    /// as macOS's default, checks `.Claude/x` out as `.claude/x`; a link named `infra` moves all of `infra/`; and a
+    /// branch that adds `makefile/x` under `high: [Makefile]` reads high, not a refusal (review of #95, row 26). So a
+    /// trick can only raise the level.
     pub fn matches_any_case(&self, path: &str) -> bool {
         let path = path.to_ascii_lowercase();
         match self {
             Self::Dir(p) => touches(&p.to_ascii_lowercase(), &path),
             Self::Ext(p) => Self::Ext(p.to_ascii_lowercase()).matches(&path),
-            Self::Exact(p) => p.to_ascii_lowercase() == path,
+            Self::Exact(p) => {
+                let p = p.to_ascii_lowercase();
+                path == p || path.strip_prefix(p.as_str()).is_some_and(|rest| rest.starts_with('/'))
+            }
         }
     }
 }

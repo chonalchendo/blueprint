@@ -3,18 +3,19 @@
 //! holds a `risk` row as first committed, and a pending delta the issue caused; then the round caps (design change 6).
 //! The diff is the higher of the local branch and the sha that origin's server names for the branch, against the sha
 //! it names for the base branch the pull request targets; each sha is fetched. The rules are `.bp/risk.yml` on that
-//! base commit, so a branch that edits them is judged by the base's rules, and its edit is high. The answer names each
-//! head it judged and the base. It writes nothing to the vault and calls no `gh`.
+//! base commit, so a branch that edits them is judged by the base's rules, and its edit is high. A lowering that the
+//! human signed for the one head judged sets the level there. The answer names each head it judged and the base. It
+//! writes nothing to the vault and calls no `gh`.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bp_change::intents::Base;
 use bp_change::risk::{self, Computed, Config, Level, Pattern, RISK_FILE};
 use bp_change::rounds;
 use bp_read::inputs::{field, held};
 use bp_read::snapshot::clone_of;
-use bp_vault::{Code, Id, Index, Refusal, Vault};
+use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
@@ -28,11 +29,12 @@ pub struct Risk {
     pub issue: String,
 }
 
-/// The computed level, the base commit whose rules judged it, and each head it judged.
+/// The computed level, the base commit whose rules judged it, each head it judged, and the clone it read.
 pub(crate) struct Judged {
     pub(crate) computed: Computed,
     pub(crate) base: String,
     pub(crate) heads: Vec<String>,
+    pub(crate) top: PathBuf,
 }
 
 pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
@@ -74,7 +76,15 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
     let computed = judged.as_ref().map(|j| j.computed.level);
     let base = risk::level(declared.unwrap_or(Level::Medium), computed, raised_by.len() + usize::from(delta));
     let (level, capped) = rounds::capped(base, &reviews);
+    let lowered = match &judged {
+        Some(j) => lowering(&index, &id, j)?.filter(|l| *l < level),
+        None => None,
+    };
+    let (level, capped) = lowered.map_or((level, capped), |l| (l, None));
     let mut reasons = Vec::new();
+    if let Some(l) = lowered {
+        reasons.push(format!("the human's signed lowering of this head sets {l}"));
+    }
     match declared {
         Some(d) if d == level => reasons.push(format!("the issue declares {d}")),
         None if level == Level::Medium => reasons.push("the issue declares no risk, which reads medium".into()),
@@ -113,12 +123,7 @@ fn judged(cwd: &Path, index: &Index, id: &Id) -> Result<Option<Judged>, Refusal>
         Err(e) if e.code == Code::NoClone => return Ok(None),
         Err(e) => return Err(e),
     };
-    // The base branch the pull request targets, as `land` finds it: a layer over an open dependency targets its branch.
-    let target = match bp_read::inputs::base(index, &claim)? {
-        Base::Branch(b) => b,
-        Base::Unknown => default_branch(&top)?,
-        Base::Unmerged(_) => field(&claim, "base_branch").unwrap_or_default(),
-    };
+    let target = target(index, &claim, &top)?;
     let name = branch(id);
     let local = git(&top, &["rev-parse", "--verify", "-q", &format!("refs/heads/{name}^{{commit}}")]).ok();
     let mut heads: Vec<String> = local.into_iter().chain(at_origin(&top, &name)?).collect();
@@ -129,13 +134,37 @@ fn judged(cwd: &Path, index: &Index, id: &Id) -> Result<Option<Judged>, Refusal>
     judge(&top, &target, heads).map(Some)
 }
 
+/// The branch the pull request of the held `claim` targets, as `land` finds it: its base branch, origin's default
+/// branch for a claim that records none, or a layer's own `base_branch` over an open dependency.
+pub(crate) fn target(index: &Index, claim: &Record, top: &Path) -> Result<String, Refusal> {
+    Ok(match bp_read::inputs::base(index, claim)? {
+        Base::Branch(b) => b,
+        Base::Unknown => default_branch(top)?,
+        Base::Unmerged(_) => field(claim, "base_branch").unwrap_or_default(),
+    })
+}
+
+/// The level of the human's signed lowering of the head judged (37, design change 2; review of #95, row 23). A lowering
+/// binds one head, so with a local branch past origin's two heads are judged and none counts. `bp risk` calls no `gh`,
+/// so it reads the record's own pull request and base; `land` holds them to the forge's. The signer is read only when
+/// a lowering record names the head.
+fn lowering(index: &Index, id: &Id, j: &Judged) -> Result<Option<Level>, Refusal> {
+    let [head] = j.heads.as_slice() else { return Ok(None) };
+    let at = |r: &Record| r.header.get("head").and_then(Value::as_str) == Some(head.as_str());
+    if !index.records(id.as_str(), Kind::Lowering)?.iter().any(at) {
+        return Ok(None);
+    }
+    let (signer, _) = crate::signed::signer(&j.top)?;
+    crate::approve::lowered(index, id, head, &signer, None)
+}
+
 /// The level of each head's diff against the base that origin names for `target`, by the rules on that base; the
 /// highest wins, and a tie keeps the first head's reasons. `pr` calls it with the head it pushes.
 pub(crate) fn judge(top: &Path, target: &str, heads: Vec<String>) -> Result<Judged, Refusal> {
     let Some(base) = at_origin(top, target)? else {
         return Err(Refusal::failed(format!("origin/{target}"), "origin holds no base branch of the claim"));
     };
-    let config = rules(top, &base, target, &heads)?;
+    let config = rules(top, &base, target)?;
     let mut best: Option<Computed> = None;
     for head in &heads {
         let range = format!("{base}...{head}");
@@ -146,7 +175,7 @@ pub(crate) fn judge(top: &Path, target: &str, heads: Vec<String>) -> Result<Judg
         }
     }
     let computed = best.expect("one head at least");
-    Ok(Judged { computed, base, heads })
+    Ok(Judged { computed, base, heads, top: top.to_path_buf() })
 }
 
 /// The sha origin's server names for `refs/heads/<branch>`, fetched; `None` when it holds no such branch. A failed
@@ -163,8 +192,10 @@ pub(crate) fn at_origin(top: &Path, branch: &str) -> Result<Option<String>, Refu
 }
 
 /// `.bp/risk.yml` on the base commit; the default when it holds none. An exact pattern that names a directory of the
-/// base tree or of a head's, in any ASCII case, matches no path under it, so it refuses as a parse failure does.
-fn rules(top: &Path, base: &str, target: &str, heads: &[String]) -> Result<Config, Refusal> {
+/// base tree, in any ASCII case, refuses as a parse failure does: the human wrote a directory without its `/`. A
+/// directory only a head adds is the branch's, not the file's: a high exact pattern also holds each path under it, so
+/// the head reads high and the refusal never blames the file on the base (review of #95, row 26).
+fn rules(top: &Path, base: &str, target: &str) -> Result<Config, Refusal> {
     let at = format!("{base}:{RISK_FILE}");
     let invalid = |why: String| {
         Refusal::new(
@@ -178,11 +209,8 @@ fn rules(top: &Path, base: &str, target: &str, heads: &[String]) -> Result<Confi
         return Ok(Config::default());
     }
     let config = Config::parse(&git(top, &["show", &at])?).map_err(invalid)?;
-    let mut dirs = BTreeSet::new();
-    for tree in std::iter::once(base).chain(heads.iter().map(String::as_str)) {
-        let listed = git(top, &["ls-tree", "-r", "-d", "-z", "--name-only", tree])?;
-        dirs.extend(listed.split('\0').map(str::to_ascii_lowercase));
-    }
+    let listed = git(top, &["ls-tree", "-r", "-d", "-z", "--name-only", base])?;
+    let dirs: BTreeSet<String> = listed.split('\0').map(str::to_ascii_lowercase).collect();
     let exact = config.high.iter().chain(&config.low).filter_map(|p| match p {
         Pattern::Exact(e) => Some(e.as_str()),
         _ => None,
