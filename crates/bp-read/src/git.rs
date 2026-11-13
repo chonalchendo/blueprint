@@ -8,6 +8,23 @@ use std::time::Duration;
 
 use bp_vault::Refusal;
 
+/// The variables that move where git reads: the repository, its index, its objects, its refs and its history.
+const LOCATION: [&str; 13] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_SHALLOW_FILE",
+    "GIT_GRAFT_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_PREFIX",
+];
+
 /// How long one git call may run once a verb sets it; unset, a call runs as long as git takes. One process runs one
 /// verb, so the verb's choice holds for each of its calls.
 static DEADLINE: OnceLock<Duration> = OnceLock::new();
@@ -27,9 +44,14 @@ pub fn command(dir: &Path) -> Command {
     // first-commit read of a review (review of #98, row 25). The transport variables (`GIT_ALLOW_PROTOCOL`,
     // `GIT_SSH_COMMAND`, `GIT_ASKPASS`, `GIT_SSL_*`, `GIT_CONFIG_*`) pass: a sandbox's protocol guard and a user's
     // key or token reach bp's fetch and push (row 31).
-    for name in bp_vault::git::LOCATION {
+    for name in LOCATION {
         git.env_remove(name);
     }
+    // A local `git replace` swaps an object under every read with no push: a base commit whose tree names another
+    // signer, or drops a high path (review of #100, row S1). A `.git/info/grafts` line gives a commit other parents,
+    // so a high head reads as the base's own tree (review of #99, row 55). bp reads the objects and the parents the
+    // shas name.
+    git.env("GIT_NO_REPLACE_OBJECTS", "1").env("GIT_GRAFT_FILE", "/dev/null");
     // A credential prompt would wait on a terminal no agent reads; the fetch fails instead.
     git.env("GIT_TERMINAL_PROMPT", "0");
     git

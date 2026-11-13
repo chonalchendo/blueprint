@@ -250,7 +250,7 @@ pub(crate) fn is_branch(name: &str) -> bool {
 }
 
 /// `<type> <base64>` of a public key line, or `None` when the line is not one.
-fn public_key(line: &str) -> Option<String> {
+pub(crate) fn public_key(line: &str) -> Option<String> {
     let mut words = line.split_whitespace();
     let (kind, key) = (words.next()?, words.next()?);
     let kind_ok = kind.bytes().all(|b| b.is_ascii_alphanumeric() || b"@.-".contains(&b));
@@ -277,6 +277,53 @@ pub(crate) fn in_agent(signer: &str) -> bool {
     })
 }
 
+/// The info string of the fenced block that carries a signed approval on the forge.
+const BLOCK: &str = "bp-approval";
+
+/// The pull request comment that carries a signed act to the forge check (37, design change 5): the message's
+/// `key: value` lines and the armoured signature, in one fenced block. `bp gate` reads it with [`blocks`].
+pub(crate) fn comment(message: &str, signature: &str) -> String {
+    format!(
+        "The human's signed approval of this head. The check `bp-gate` verifies it.\n\n```{BLOCK}\n{message}{}\n```\n",
+        signature.trim_end()
+    )
+}
+
+/// One signed block of a comment: its `key: value` lines in order, and its armoured signature, if any.
+#[derive(PartialEq)]
+pub(crate) struct Block {
+    pub(crate) fields: Vec<(String, String)>,
+    pub(crate) signature: Option<String>,
+}
+
+impl Block {
+    /// The value of the first line with `key`.
+    pub(crate) fn get(&self, key: &str) -> Option<&str> {
+        self.fields.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+}
+
+/// Each signed block of a comment's body. A forge that stores CRLF line ends gives the same block.
+pub(crate) fn blocks(body: &str) -> Vec<Block> {
+    let body = body.replace("\r\n", "\n");
+    let mut out = Vec::new();
+    let mut lines = body.lines();
+    while let Some(line) = lines.next() {
+        if line.trim_end() != format!("```{BLOCK}") {
+            continue;
+        }
+        let inner: Vec<&str> = lines.by_ref().take_while(|l| l.trim_end() != "```").collect();
+        let text = inner.join("\n");
+        let fields = inner
+            .iter()
+            .take_while(|l| !l.starts_with("-----BEGIN"))
+            .filter_map(|l| l.split_once(": ").map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect();
+        out.push(Block { fields, signature: armour(&text) });
+    }
+    out
+}
+
 /// The armoured signature a record's body holds, from its first line to its last.
 pub(crate) fn armour(body: &str) -> Option<String> {
     let start = body.find("-----BEGIN SSH SIGNATURE-----")?;
@@ -287,7 +334,7 @@ pub(crate) fn armour(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_branch, is_sha, signer_of};
+    use super::{cap, is_branch, is_sha, signer_of};
 
     const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey";
     const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther";
@@ -326,5 +373,15 @@ mod tests {
         for bad in ["", "a b", "master\nact: lower", "a\tb", "a\u{7f}"] {
             assert!(!is_branch(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn cap_cuts_at_200_bytes_on_a_character_boundary() {
+        assert_eq!(cap("short"), "short");
+        assert_eq!(cap(&"a".repeat(200)), "a".repeat(200));
+        assert_eq!(cap(&"a".repeat(201)), format!("{}…", "a".repeat(200)));
+        // A two-byte character that ends at byte 200 stays; one across the cut goes whole.
+        assert_eq!(cap(&format!("{}é", "a".repeat(198))), format!("{}é", "a".repeat(198)));
+        assert_eq!(cap(&format!("{}é", "a".repeat(199))), format!("{}…", "a".repeat(199)));
     }
 }

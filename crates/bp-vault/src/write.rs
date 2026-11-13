@@ -441,6 +441,7 @@ fn git(root: &Path, args: &[&str]) -> Result<String, Refusal> {
         .arg("--no-optional-locks")
         .env("LC_ALL", "C")
         .env("GIT_LITERAL_PATHSPECS", "1")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .args(args)
         .output()
         .map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;

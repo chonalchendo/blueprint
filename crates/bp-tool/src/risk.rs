@@ -2,11 +2,11 @@
 //! highest of the issue's declared level (its `risk` label, absent reads `medium`; a label lowered by hand once locked
 //! reads as the one it replaced), the level the claim's diff computes, each review that holds a `risk` row as first
 //! committed, and a pending delta the issue caused; then the round caps (design change 6).
-//! The diff is the higher of the local branch and the sha that origin's server names for the branch, against the sha
-//! it names for the base branch the pull request targets; each sha is fetched. The rules are `.bp/risk.yml` on that
-//! base commit, so a branch that edits them is judged by the base's rules, and its edit is high. A lowering that the
-//! human signed for the one head judged sets the level there. The answer names each head it judged and the base. It
-//! writes nothing to the vault and calls no `gh`.
+//! The diff is what a head lands: its test merge into the sha that origin's server names for the base branch the pull
+//! request targets, diffed from that sha. The head is the higher of the local branch and the sha origin names for it;
+//! each sha is fetched. The rules are `.bp/risk.yml` on that base commit, so a branch that edits them is judged by the
+//! base's rules, and its edit is high. A lowering that the human signed for the one head judged sets the level there.
+//! The answer names each head it judged and the base. It writes nothing to the vault and calls no `gh`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -30,12 +30,14 @@ pub struct Risk {
     pub issue: String,
 }
 
-/// The computed level, the base commit whose rules judged it, each head it judged, and the clone it read.
+/// The computed level, the base commit whose rules judged it, each head it judged, and the clone it read. `unmerged`
+/// when the level is that of a head with no test merge: the next step is then a rebase.
 pub(crate) struct Judged {
     pub(crate) computed: Computed,
     pub(crate) base: String,
     pub(crate) heads: Vec<String>,
     pub(crate) top: PathBuf,
+    pub(crate) unmerged: bool,
 }
 
 pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
@@ -169,8 +171,8 @@ fn lowering(index: &Index, id: &Id, j: &Judged) -> Result<Option<Level>, Refusal
     crate::approve::lowered(index, id, head, &signer, None)
 }
 
-/// The level of each head's diff against the base that origin names for `target`, by the rules on that base; the
-/// highest wins, and a tie keeps the first head's reasons. `pr` calls it with the head it pushes.
+/// The level of each head's diff against the base that origin names for `target`, by the rules on that base. `pr`
+/// calls it with the head it pushes.
 pub(crate) fn judge(top: &Path, target: &str, heads: Vec<String>) -> Result<Judged, Refusal> {
     let Some(base) = at_origin(top, target)? else {
         return Err(Refusal::failed(format!("origin/{target}"), "origin holds no base branch of the claim"));
@@ -180,18 +182,66 @@ pub(crate) fn judge(top: &Path, target: &str, heads: Vec<String>) -> Result<Judg
 
 /// [`judge`] against the fetched commit `base` of `target`: `land` passes the base that the forge names.
 pub(crate) fn judge_at(top: &Path, base: String, target: &str, heads: Vec<String>) -> Result<Judged, Refusal> {
-    let config = rules(top, &base, target)?;
-    let mut best: Option<Computed> = None;
+    let config = rules(top, &base, &format!("origin/{target}"))?;
+    judge_by(top, base, heads, &config)
+}
+
+/// The level of what each head lands on `base`, by `config`; the highest wins, and a tie keeps the first head's
+/// reasons. `bp gate` calls it with the base the forge names and that base's rules. What lands is the test merge of
+/// the head into the base, diffed from the base: `base...head` reads from one merge base, which a commit date picks
+/// among several, and it shows a path as the head's start held it, before a rename on the base (review rows 10, 11).
+/// A conflict, or a test merge that fails, reads high: what lands is then not known.
+pub(crate) fn judge_by(top: &Path, base: String, heads: Vec<String>, config: &Config) -> Result<Judged, Refusal> {
+    let mut best: Option<(Computed, bool)> = None;
     for head in &heads {
-        let range = format!("{base}...{head}");
-        let args = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--numstat", "-z", "--find-renames", &range];
-        let c = risk::computed(&risk::numstat(&git(top, &args)?), &config);
-        if best.as_ref().is_none_or(|b| c.level > b.level) {
-            best = Some(c);
+        let landed = landed(top, &base, head)?;
+        let unmerged = landed.is_err();
+        let c = match landed {
+            Ok(tree) => {
+                // Neither `.gitmodules` nor an attribute of the clone hides or shrinks a change: a gitlink always
+                // prints, no driver or text conversion runs, and a size git does not count reads high.
+                let args = [
+                    "-c",
+                    "core.quotePath=false",
+                    "-c",
+                    "core.attributesFile=/dev/null",
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--text",
+                    "--ignore-submodules=none",
+                    "--raw",
+                    "--numstat",
+                    "-z",
+                    "--find-renames",
+                    &base,
+                    &tree,
+                ];
+                risk::computed(&risk::changes(&git(top, &args)?), config)
+            }
+            // What lands is not known, so the security lens joins round one as for a high path.
+            Err(why) => Computed { level: Level::High, reasons: vec![format!("{head} {why}")], security: true },
+        };
+        if best.as_ref().is_none_or(|(b, _)| c.level > b.level) {
+            best = Some((c, unmerged));
         }
     }
-    let computed = best.expect("one head at least");
-    Ok(Judged { computed, base, heads, top: top.to_path_buf() })
+    let (computed, unmerged) = best.expect("one head at least");
+    Ok(Judged { computed, base, heads, top: top.to_path_buf(), unmerged })
+}
+
+/// The tree of the test merge of `head` into `base`, or why there is none: a conflict, or git's own words.
+fn landed(top: &Path, base: &str, head: &str) -> Result<Result<String, String>, Refusal> {
+    let out = bp_read::git::command(top)
+        .args(["merge-tree", "--write-tree", base, head])
+        .output()
+        .map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(match out.status.code() {
+        Some(0) => Ok(stdout.lines().next().unwrap_or_default().to_string()),
+        Some(1) => Err(format!("conflicts with {base}, so what lands is not known")),
+        _ => Err(format!("has no test merge with {base}: {}", String::from_utf8_lossy(&out.stderr).trim())),
+    })
 }
 
 /// The sha origin's server names for `refs/heads/<branch>`, fetched; `None` when it holds no such branch. A failed
@@ -211,17 +261,27 @@ pub(crate) fn at_origin(top: &Path, branch: &str) -> Result<Option<String>, Refu
 /// base tree, in any ASCII case, refuses as a parse failure does: the human wrote a directory without its `/`. A
 /// directory only a head adds is the branch's, not the file's: a high exact pattern also holds each path under it, so
 /// the head reads high and the refusal never blames the file on the base (review of #95, row 26).
-fn rules(top: &Path, base: &str, target: &str) -> Result<Config, Refusal> {
+/// `place` names the base in a refusal: `origin/<branch>`, or the sha `bp gate` was given.
+pub(crate) fn rules(top: &Path, base: &str, place: &str) -> Result<Config, Refusal> {
     let at = format!("{base}:{RISK_FILE}");
     let invalid = |why: String| {
+        let branch = place.strip_prefix("origin/").unwrap_or(place);
         Refusal::new(
             Code::RiskFileInvalid,
-            format!("origin/{target}:{RISK_FILE}"),
-            "the risk file holds `high` and `low` lists of path patterns, `limits` and `signer` (37, design change 1)",
-            format!("{why}; edit {RISK_FILE} on {target} by hand, then git commit it"),
+            format!("{place}:{RISK_FILE}"),
+            "the risk file holds `high` and `low` lists of path patterns, `limits`, `signer` and `gate` (37, design \
+             changes 1 and 5)",
+            format!("{why}; edit {RISK_FILE} on {branch} by hand, then git commit it"),
         )
     };
-    if git(top, &["cat-file", "-e", &at]).is_err() {
+    // A base the clone lacks, or a git that cannot run, is no missing risk file: the default rules would turn a clone
+    // fault into a lower level, and `bp gate` would send the human to `install` (review of #99, row 33). The commit is
+    // read first; then `ls-tree` lists the path, and no line is no file. git's words for a missing path change with
+    // the work tree: `install` writes the file there before the base holds it (row 51).
+    git(top, &["cat-file", "-e", &format!("{base}^{{commit}}")]).map_err(|e| {
+        Refusal::failed(place, format!("{}; git fetch origin {base} brings the base commit, then rerun", e.fix))
+    })?;
+    if git(top, &["ls-tree", "--full-tree", "--name-only", base, "--", RISK_FILE])?.is_empty() {
         return Ok(Config::default());
     }
     let config = Config::parse(&git(top, &["show", &at])?).map_err(invalid)?;
@@ -235,4 +295,56 @@ fn rules(top: &Path, base: &str, target: &str) -> Result<Config, Refusal> {
         return Err(invalid(format!("the pattern {path:?} names a directory, so it matches no path: write {path}/")));
     }
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use bp_change::risk::{Config, Level};
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("SSH_AUTH_SOCK")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn a_head_with_no_test_merge_reads_high_and_calls_the_security_lens() {
+        // An orphan head shares no history with the base: `git merge-tree` exits 128, which is no conflict.
+        let t = tempfile::tempdir().unwrap();
+        let top = t.path();
+        git(top, &["init", "-q", "-b", "master"]);
+        std::fs::create_dir_all(top.join("docs")).unwrap();
+        std::fs::write(top.join("docs/a.md"), "a\n").unwrap();
+        git(top, &["add", "-A"]);
+        git(top, &["commit", "-qm", "base"]);
+        let base = git(top, &["rev-parse", "HEAD"]);
+        git(top, &["checkout", "-q", "--orphan", "other"]);
+        std::fs::write(top.join("docs/a.md"), "b\n").unwrap();
+        git(top, &["add", "-A"]);
+        git(top, &["commit", "-qm", "orphan"]);
+        let head = git(top, &["rev-parse", "HEAD"]);
+        let config = Config::parse("low: [docs/]\n").unwrap();
+        let judged = super::judge_by(top, base.clone(), vec![head.clone()], &config).unwrap();
+        let c = &judged.computed;
+        assert_eq!((c.level, c.security, judged.unmerged), (Level::High, true, true), "{:?}", c.reasons);
+        assert!(c.reasons[0].starts_with(&format!("{head} has no test merge with {base}: ")), "{:?}", c.reasons);
+        // The same change from the base merges: low, and no rebase is the next step.
+        git(top, &["checkout", "-q", "-b", "child", &base]);
+        std::fs::write(top.join("docs/a.md"), "b\n").unwrap();
+        git(top, &["commit", "-qam", "child"]);
+        let judged = super::judge_by(top, base, vec![git(top, &["rev-parse", "HEAD"])], &config).unwrap();
+        assert_eq!((judged.computed.level, judged.unmerged), (Level::Low, false));
+    }
 }

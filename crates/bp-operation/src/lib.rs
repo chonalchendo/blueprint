@@ -110,7 +110,7 @@ impl Action {
 
 /// The read verbs, open to every role and to any subagent: a read writes nothing, and the role is a label, not a gate
 /// (27, design change 3), so a denied read would cost a turn and protect nothing.
-pub const READ_VERBS: [&str; 6] = ["where", "show", "list", "search", "walk", "risk"];
+pub const READ_VERBS: [&str; 7] = ["where", "show", "list", "search", "walk", "risk", "gate"];
 
 impl Action {
     /// The role whose label the row's write verbs run under. A reviewer returns its review and the session records

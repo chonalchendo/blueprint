@@ -88,6 +88,25 @@ impl Gh {
         self.json::<Body>(&["pr", "view", &number.to_string(), "--json", "body"]).map(|b| b.body)
     }
 
+    /// The bodies of the pull request's comments (`gh api --paginate`), which prints one JSON array per page.
+    pub fn comments(&self, number: u64) -> Result<Vec<String>, Refusal> {
+        #[derive(Deserialize)]
+        struct Comment {
+            body: Option<String>,
+        }
+        let path = format!("repos/{{owner}}/{{repo}}/issues/{number}/comments");
+        let args = ["api", "--paginate", path.as_str()];
+        let out = self.run(&args)?;
+        let mut bodies = Vec::new();
+        for page in serde_json::Deserializer::from_slice(&out).into_iter::<Vec<Comment>>() {
+            let page = page.map_err(|e| {
+                Refusal::failed(Self::subject(&args), format!("gh printed JSON this tool cannot read: {e}"))
+            })?;
+            bodies.extend(page.into_iter().filter_map(|c| c.body));
+        }
+        Ok(bodies)
+    }
+
     /// Rewrites the snapshot in `dir` (27, design change 9): `gh pr list --state open` into `open-prs.json`, and
     /// `gh pr view <n>` into `pr-<n>.json` for each pull request whose slug `held` names. The held set is read from the
     /// open list and from the last snapshot, so a pull request merged under a held claim stays in view. Every call
@@ -141,6 +160,13 @@ impl Gh {
     #[cfg(feature = "write")]
     pub fn describe(&self, number: u64, body: &str) -> Result<(), Refusal> {
         self.run(&["pr", "edit", &number.to_string(), "--body", body]).map(drop)
+    }
+
+    /// Posts one comment on the pull request (`gh pr comment --body`): the human's signed approval, for the forge
+    /// check.
+    #[cfg(feature = "write")]
+    pub fn comment(&self, number: u64, body: &str) -> Result<(), Refusal> {
+        self.run(&["pr", "comment", &number.to_string(), "--body", body]).map(drop)
     }
 
     /// Squash-merges the pull request, only while its head is `head`: a push after the reads makes the forge refuse.

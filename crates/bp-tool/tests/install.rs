@@ -110,10 +110,51 @@ fn install_refuses_outside_a_clone_and_a_repeat_exits_3() {
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("no_clone")), "{v}");
     assert!(v["fix"].as_str().unwrap().contains("projects/bp/project https://h.invalid/o/r"), "{v}");
     assert_eq!(common::commits(w.vault.path()), "1", "install writes nothing in the vault");
+    for bad in ["abc", "0123456789ABCDEF0123456789ABCDEF01234567", ""] {
+        let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude", "--gate", bad]);
+        assert_eq!((code, v["code"].as_str()), (Some(4), Some("usage")), "{bad:?}: {v}");
+    }
     let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude"]);
     assert_eq!((code, v["target"].as_str()), (Some(0), Some("claude")), "{v}");
+    // The pin defaults to the commit this binary is built from; a build outside a clone (a copy) writes none.
+    let risk = || std::fs::read_to_string(w.code().join(".bp/risk.yml")).ok();
+    let built = Some(bp_install::BUILT_FROM).filter(|s| !s.is_empty());
+    assert_eq!((v["gate"].as_str(), risk()), (built, built.map(|b| format!("gate: {b}\n"))), "{v}");
     assert_eq!(w.bp(&w.code(), &[], &["install", "--target", "claude"]).0, Some(3));
+    let pin = "0123456789abcdef0123456789abcdef01234567";
+    let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude", "--gate", pin]);
+    assert_eq!((code, v["gate"].as_str(), risk()), (Some(0), Some(pin), Some(format!("gate: {pin}\n"))), "{v}");
+    // A committed pin stays: an install with no `--gate` keeps it and names it.
+    let (code, v) = w.bp(&w.code(), &[], &["install", "--target", "claude"]);
+    assert_eq!((code, v["gate"].as_str(), risk()), (Some(3), Some(pin), Some(format!("gate: {pin}\n"))), "{v}");
     assert_eq!(std::fs::read_dir(w.home.path()).unwrap().count(), 0, "the install writes nothing in the home");
+}
+
+#[test]
+fn install_pins_a_build_only_on_blueprints_default_branch() {
+    // The build's check of its own commit runs in `bp-install`'s unit test, on repositories of its own. This holds the
+    // binary to the pin it embeds, whatever clone it is built in (review of #99, row 45).
+    let w = World::new();
+    let install = || {
+        let mut c = w.command(assert_cmd::cargo::cargo_bin("bp"), &w.code());
+        let out = c.args(["install", "--target", "claude", "--json"]).envs(common::ISOLATED).output().unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        (v, String::from_utf8_lossy(&out.stderr).to_string())
+    };
+    let note = "bp install wrote no pin: this bp is not built from a commit on Blueprint's default branch";
+    let (v, stderr) = install();
+    if let Some(built) = Some(bp_install::BUILT_FROM).filter(|s| !s.is_empty()) {
+        assert_eq!((v["gate"].as_str(), stderr.as_str()), (Some(built), ""), "{v}");
+    } else {
+        assert_eq!((&v["gate"], stderr.contains(note)), (&Value::Null, true), "{v} {stderr}");
+        assert!(!w.code().join(".bp/risk.yml").exists(), "no pin, no risk file");
+    }
+    // A pin the file holds stays, and names itself: no note, whatever the build.
+    let pin = "fedcba9876543210fedcba9876543210fedcba98";
+    std::fs::create_dir_all(w.code().join(".bp")).unwrap();
+    std::fs::write(w.code().join(".bp/risk.yml"), format!("gate: {pin}\n")).unwrap();
+    let (v, stderr) = install();
+    assert_eq!((v["gate"].as_str(), stderr.as_str()), (Some(pin), ""), "{v}");
 }
 
 #[test]
@@ -420,7 +461,7 @@ fn the_role_hook_names_the_role_and_denies_a_verb_outside_it() {
         ("bp show x; bp set x tags a", Some("Explore"), "agent type 'Explore' is no bp role, so its bp set"),
         ("bp stamp m", None, "bp stamp is outside the session role"),
         ("bp install --target claude", None, "ask the human to run it from a shell"),
-        ("bp set x tags a", Some("bp-reviewer"), "(where show list search walk risk), so"),
+        ("bp set x tags a", Some("bp-reviewer"), "(where show list search walk risk gate), so"),
         ("bp diagram --spec-file a.yaml --out a.html", Some("bp-worker"), "bp diagram is outside the worker role"),
         ("bp diagram --spec-file a.yaml --out a.html", Some("bp-reviewer"), "bp diagram is outside the reviewer role"),
         (

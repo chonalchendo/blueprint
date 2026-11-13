@@ -5,9 +5,14 @@ use std::process::Command as Std;
 
 use assert_cmd::Command;
 
+/// The developer's git configuration stays out of every test: a global `commit.gpgsign` would run their signing
+/// program with their key, and `SSH_AUTH_SOCK` would reach their agent (review of #99, row 50).
+pub const ISOLATED: [(&str, &str); 2] = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
+
 /// Runs git in `root`, asserts it succeeded, and returns its stdout.
 pub fn git(root: &Path, args: &[&str]) -> String {
-    let out = Std::new("git").arg("-C").arg(root).args(args).output().unwrap();
+    let out = Std::new("git").arg("-C").arg(root).envs(ISOLATED).env_remove("SSH_AUTH_SOCK").args(args).output();
+    let out = out.unwrap();
     assert!(out.status.success(), "git {args:?}");
     String::from_utf8(out.stdout).unwrap()
 }
@@ -41,6 +46,8 @@ pub fn bp_env(root: &Path, env: &[(&str, &str)], args: &[&str]) -> (Option<i32>,
         .env_remove("BP_VAULT")
         .env_remove("BP_ROLE")
         .env("BP_NOW", "2026-10-19T08:00:00Z")
+        .envs(ISOLATED)
+        .env_remove("SSH_AUTH_SOCK")
         .envs(env.iter().copied())
         .args(args)
         .arg("--json")

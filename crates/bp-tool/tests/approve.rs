@@ -32,7 +32,14 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
     let bin = t.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let t_ = t.path().display();
-    let gh = format!("#!/bin/sh\n[ \"$1 $2\" = 'pr list' ] || exit 9\ncat '{t_}/prs.json' 2>/dev/null || echo '[]'\n");
+    // `gh pr comment <n> --body <text>` adds the number and the text, so two posts show twice; it fails while the file
+    // `fail-post` exists. `gh api --paginate <path>` prints `comments.json`, the forge's comments, page by page.
+    let gh = format!(
+        "#!/bin/sh\n[ \"$1 $2 $4\" = 'pr comment --body' ] && [ -e '{t_}/fail-post' ] && {{ echo 'error connecting' >&2; exit 1; }}\n\
+         [ \"$1 $2 $4\" = 'pr comment --body' ] && {{ echo \"$3\" >> '{t_}/posted'; printf %s \"$5\" >> '{t_}/posted'; exit 0; }}\n\
+         [ \"$1 $2 $3\" = 'api --paginate repos/{{owner}}/{{repo}}/issues/4/comments' ] && {{ cat '{t_}/comments.json' 2>/dev/null || echo '[]'; exit 0; }}\n\
+         [ \"$1 $2\" = 'pr list' ] || exit 9\ncat '{t_}/prs.json' 2>/dev/null || echo '[]'\n"
+    );
     let ssh_add = format!("#!/bin/sh\n[ \"$1\" = -L ] && [ -s '{t_}/agent-keys' ] || exit 1\ncat '{t_}/agent-keys'\n");
     for (name, text) in [("gh", gh), ("ssh-add", ssh_add)] {
         std::fs::write(bin.join(name), text).unwrap();
@@ -124,18 +131,69 @@ fn approve_and_lower_sign_the_head_with_the_signers_key() {
     assert_eq!((out["head"].as_str(), &out["pull_request"]), (Some(HEAD), &json!(4)));
     let text = std::fs::read_to_string(v.join(format!("{ISSUE}/approvals/{HEAD}.md"))).unwrap();
     assert!(text.contains("kind: approval") && text.contains("-----BEGIN SSH SIGNATURE-----"), "{text}");
+    assert!(text.contains("\nbase: master\n"), "the record keeps the signed base branch: {text}");
     let message = git(v, &["log", "-1", "--format=%B"]);
     assert!(message.contains("Bp-Verb: approve") && message.contains("Bp-Role: human"), "{message}");
     assert_eq!(common::commits(v).parse::<u32>().unwrap(), before.parse::<u32>().unwrap() + 1);
+    // The comment for the forge check: the signed message's lines and the record's signature, in one block.
+    let comment = out["comment"].as_str().unwrap();
+    let block = format!(
+        "```bp-approval\nact: approve\nproject: bp\nnode: {ISSUE}\npull_request: 4\nbase: master\nhead: {HEAD}\n"
+    );
+    assert!(comment.contains(&format!("{block}-----BEGIN SSH SIGNATURE-----\n")), "{comment}");
+    let signature = &comment[comment.find("-----BEGIN").unwrap()..comment.rfind("\n```").unwrap()];
+    assert!(signature.ends_with("-----END SSH SIGNATURE-----") && text.contains(signature), "{comment}");
+    assert!(!t.join("posted").exists(), "no --post, no comment");
     assert_eq!(approve(&[], &human).0, Some(3), "a valid approval at this head is a repeat");
+    let post = || bp(v, t, &[], &["approve", ISSUE, "--key", &human, "--post"]);
+    // The human posted the comment by hand: the pull request holds the signature, so a repeat posts nothing.
+    std::fs::write(t.join("comments.json"), json!([{ "body": comment }]).to_string()).unwrap();
+    let (code, again) = post();
+    assert_eq!((code, &again["comment"]), (Some(3), &out["comment"]), "a repeat gives the same comment: {again}");
+    assert!(!t.join("posted").exists(), "the pull request holds this signature, so the repeat posts nothing");
+    // The signature under another pull request's line is a block `bp gate` does not count: the repeat posts (row 53).
+    let moved = comment.replace("pull_request: 4\n", "pull_request: 5\n");
+    assert_ne!(moved, comment);
+    std::fs::write(t.join("comments.json"), json!([{ "body": moved }]).to_string()).unwrap();
+    assert_eq!(post().0, Some(3));
+    assert_eq!(std::fs::read_to_string(t.join("posted")).unwrap(), format!("4\n{comment}"), "one post");
+    std::fs::remove_file(t.join("posted")).unwrap();
+    std::fs::remove_file(t.join("comments.json")).unwrap();
+
+    // A retarget changes the signed base: the old approval is no repeat. Its post fails, and the record stays.
+    let onto =
+        json!([{ "number": 4, "state": "OPEN", "headRefName": "bp/a", "headRefOid": HEAD, "baseRefName": "bp/b" }]);
+    std::fs::write(t.join("prs.json"), onto.to_string()).unwrap();
+    std::fs::write(t.join("fail-post"), "").unwrap();
+    let (code, out) = post();
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.ends_with(&format!("the approval is recorded: rerun bp approve {ISSUE} --post to post it")), "{out}");
+    assert!(!t.join("posted").exists(), "the post failed");
+    // The rerun is a repeat, and the pull request lacks the signature: it posts once.
+    std::fs::remove_file(t.join("fail-post")).unwrap();
+    let (code, out) = post();
+    assert_eq!(code, Some(3), "{out}");
+    let comment = out["comment"].as_str().unwrap();
+    assert!(comment.contains("pull_request: 4\nbase: bp/b\nhead: "), "{out}");
+    let posted = format!("4\n{comment}");
+    assert_eq!(std::fs::read_to_string(t.join("posted")).unwrap(), posted, "gh pr comment 4 --body <the comment>");
+    // The forge now holds it, on its second page and with CRLF line ends: the next rerun posts nothing.
+    let pages = format!("{}{}", json!([{ "body": "LGTM" }]), json!([{ "body": comment.replace('\n', "\r\n") }]));
+    std::fs::write(t.join("comments.json"), pages).unwrap();
+    assert_eq!(post().0, Some(3), "the post's repeat");
+    assert_eq!(std::fs::read_to_string(t.join("posted")).unwrap(), posted, "one post, not two");
+    std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
 
     let lower = |level: &str, k: &str| bp(v, t, &[], &["lower", ISSUE, level, "--reason", "docs only", "--key", k]);
     assert_eq!(lower("high", &human).0, Some(4), "a lowering names low or medium");
     assert_eq!(lower("low", &agent).1["code"], "signature_invalid");
     let (code, out) = lower("low", &human);
     assert_eq!((code, out["id"].as_str()), (Some(0), Some(format!("{ISSUE}/lowerings/{HEAD}").as_str())), "{out}");
+    assert!(out["comment"].is_null(), "a lowering has no forge comment: {out}");
     let text = std::fs::read_to_string(v.join(format!("{ISSUE}/lowerings/{HEAD}.md"))).unwrap();
     assert!(text.contains("level: low") && text.contains("reason: docs only"), "{text}");
+    assert!(text.contains("\nbase: master\n"), "{text}");
 
     let (code, out) = common::bp(v, &["record", "approval", ISSUE, "--field", format!("head={HEAD}").as_str()]);
     assert_eq!(code, Some(4), "record writes no approval: {out}");
@@ -174,6 +232,17 @@ fn approve_reads_the_signer_from_the_forge_not_a_local_ref() {
     let (code_, out) = approve();
     assert_eq!((code_, out["code"].as_str()), (Some(2), Some("signature_invalid")), "{out}");
     assert!(git(&code, &["show", "origin/master:.bp/risk.yml"]).contains(&public(t, "agent").trim().to_string()));
+
+    // Poison three: a local `git replace` swaps origin's true default-branch commit for one whose tree names the
+    // agent's key. ls-remote still names the true sha (review of #100, row S1).
+    git(&code, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    let true_sha = git(&code, &["ls-remote", "origin", "refs/heads/master"]).split('\t').next().unwrap().to_string();
+    git(&code, &["update-ref", "refs/remotes/origin/master", &true_sha]);
+    let forged = git(&code, &["commit-tree", "HEAD^{tree}", "-m", "forged"]).trim().to_string();
+    git(&code, &["replace", &true_sha, &forged]);
+    assert!(git(&code, &["show", &format!("{true_sha}:.bp/risk.yml")]).contains(public(t, "agent").trim()));
+    let (code_, out) = approve();
+    assert_eq!((code_, out["code"].as_str()), (Some(2), Some("signature_invalid")), "{out}");
     assert!(!v.join(ISSUE).join("approvals").exists(), "no approval is written");
 }
 
@@ -189,6 +258,15 @@ fn approve_refuses_a_head_that_is_not_a_full_sha() {
         let (code, out) = bp(v, t, &[], &["approve", ISSUE, "--key", &human]);
         assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{head:?}: {out}");
         assert!(!v.join(ISSUE).join("approvals").exists(), "{head:?}: no record is written");
+    }
+    // The base branch is a line of the signed message too.
+    for base in [json!(null), json!(""), json!("a b"), json!("master\nhead: x")] {
+        let pr =
+            json!([{ "number": 4, "state": "OPEN", "headRefName": "bp/a", "headRefOid": HEAD, "baseRefName": base }]);
+        std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
+        let (code, out) = bp(v, t, &[], &["approve", ISSUE, "--key", &human]);
+        assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{base}: {out}");
+        assert!(!v.join(ISSUE).join("approvals").exists(), "{base}: no record is written");
     }
 }
 
