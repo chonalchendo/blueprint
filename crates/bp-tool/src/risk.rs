@@ -1,8 +1,8 @@
 //! `bp risk <issue>`: the risk level in force and the rules that set it (37, design changes 1 and 2). The level is the
 //! highest of the issue's `risk` label (absent reads `medium`), the level the claim's diff computes, each review that
-//! holds a `risk` row, and a pending delta the issue caused. The diff is the higher of the local branch and the sha
-//! that origin's server names for the branch, against the sha it names for the base branch the pull request targets;
-//! each sha is fetched. The rules are `.bp/risk.yml` on that base commit, so a branch that edits them is judged by the
+//! holds a `risk` row, and a pending delta the issue caused. The diff is what a head lands: its test merge into the
+//! sha that origin's server names for the base branch the pull request targets, diffed from that sha. The head is the
+//! higher of the local branch and the sha origin names for it; each sha is fetched. The rules are `.bp/risk.yml` on that base commit, so a branch that edits them is judged by the
 //! base's rules, and its edit is high. The answer names each head it judged and the base. It writes nothing to the
 //! vault and calls no `gh`.
 
@@ -131,20 +131,59 @@ pub(crate) fn judge(top: &Path, target: &str, heads: Vec<String>) -> Result<Judg
     judge_by(top, base, heads, &config)
 }
 
-/// The level of each head's diff against `base`, by `config`; the highest wins, and a tie keeps the first head's
-/// reasons. `bp gate` calls it with the base the forge names and that base's rules.
+/// The level of what each head lands on `base`, by `config`; the highest wins, and a tie keeps the first head's
+/// reasons. `bp gate` calls it with the base the forge names and that base's rules. What lands is the test merge of
+/// the head into the base, diffed from the base: `base...head` reads from one merge base, which a commit date picks
+/// among several, and it shows a path as the head's start held it, before a rename on the base (review rows 10, 11).
+/// A conflict, or a test merge that fails, reads high: what lands is then not known.
 pub(crate) fn judge_by(top: &Path, base: String, heads: Vec<String>, config: &Config) -> Result<Judged, Refusal> {
     let mut best: Option<Computed> = None;
     for head in &heads {
-        let range = format!("{base}...{head}");
-        let args = ["-c", "core.quotePath=false", "diff", "--no-ext-diff", "--numstat", "-z", "--find-renames", &range];
-        let c = risk::computed(&risk::numstat(&git(top, &args)?), config);
+        let c = match landed(top, &base, head)? {
+            Ok(tree) => {
+                // Neither `.gitmodules` nor an attribute of the clone hides or shrinks a change: a gitlink always
+                // prints, no driver or text conversion runs, and a size git does not count reads high.
+                let args = [
+                    "-c",
+                    "core.quotePath=false",
+                    "-c",
+                    "core.attributesFile=/dev/null",
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--text",
+                    "--ignore-submodules=none",
+                    "--raw",
+                    "--numstat",
+                    "-z",
+                    "--find-renames",
+                    &base,
+                    &tree,
+                ];
+                risk::computed(&risk::changes(&git(top, &args)?), config)
+            }
+            Err(why) => Computed { level: Level::High, reasons: vec![format!("{head} {why}")] },
+        };
         if best.as_ref().is_none_or(|b| c.level > b.level) {
             best = Some(c);
         }
     }
     let computed = best.expect("one head at least");
     Ok(Judged { computed, base, heads })
+}
+
+/// The tree of the test merge of `head` into `base`, or why there is none: a conflict, or git's own words.
+fn landed(top: &Path, base: &str, head: &str) -> Result<Result<String, String>, Refusal> {
+    let out = bp_read::git::command(top)
+        .args(["merge-tree", "--write-tree", base, head])
+        .output()
+        .map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(match out.status.code() {
+        Some(0) => Ok(stdout.lines().next().unwrap_or_default().to_string()),
+        Some(1) => Err(format!("conflicts with {base}, so what lands is not known")),
+        _ => Err(format!("has no test merge with {base}: {}", String::from_utf8_lossy(&out.stderr).trim())),
+    })
 }
 
 /// The sha origin's server names for `refs/heads/<branch>`, fetched; `None` when it holds no such branch. A failed
