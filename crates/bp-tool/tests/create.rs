@@ -5,7 +5,7 @@ use std::path::Path;
 
 mod common;
 
-use common::{bp, commits, git};
+use common::{bp, bp_env, commits, git};
 
 const M: &str = "projects/bp/milestones/m";
 
@@ -404,4 +404,42 @@ fn create_refuses_low_under_an_approved_milestone() {
         let (code, v) = create(&format!("Approved {level}"), level);
         assert_eq!(code, Some(0), "{level}: {v}");
     }
+}
+
+/// A label lowers a level only before the milestone's first approval and before the issue's claim (37, design change
+/// 1). A session moves `approved -> abandoned -> planned` with no signature, so the history holds the approval
+/// (review of #98, row 29).
+#[test]
+fn a_lowering_after_approval_or_a_claim_names_bp_lower() {
+    let dir = vault();
+    let root = dir.path();
+    let (b, case) = ("projects/bp/issues/0002.b", "projects/bp/issues/0003.Case");
+    let session = [("BP_ROLE", "session")];
+    let refuses = |v: &serde_json::Value, id: &str| {
+        assert_eq!(v["code"], "not_a_label", "{v}");
+        assert!(v["fix"].as_str().unwrap().contains(&format!("bp lower {id} <level> --reason")), "{v}");
+    };
+    assert_eq!(bp_env(root, &session, &["set", case, "risk", "low"]).0, Some(0), "planned, never approved");
+    assert_eq!(bp_env(root, &session, &["set", case, "risk", "medium"]).0, Some(0));
+    // A claim record holds the level, while the milestone is still planned.
+    let claim = format!("---\nkind: claim\nunder: {b}\nowner: me\n---\n");
+    std::fs::create_dir_all(root.join(format!("{b}/claims"))).unwrap();
+    std::fs::write(root.join(format!("{b}/claims/s1.md")), claim).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "claim"]);
+    refuses(&bp_env(root, &session, &["set", b, "risk", "low"]).1, b);
+    // The human approves; a session abandons and replans. The milestone reads planned, and its history holds the
+    // approval.
+    assert_eq!(bp(root, &["transition", M, "approved"]).0, Some(0));
+    for to in ["abandoned", "planned"] {
+        let (code, v) = bp_env(root, &session, &["transition", M, to]);
+        assert_eq!(code, Some(0), "{to}: {v}");
+    }
+    assert_eq!(bp(root, &["show", M]).1["status"], "planned");
+    let before = commits(root);
+    refuses(&bp_env(root, &session, &["set", case, "risk", "low"]).1, case);
+    let create = ["create", "issue", "--project", "bp", "--title", "Late low", "--under", M, "--field", "risk=low"];
+    refuses(&bp_env(root, &session, &create).1, "projects/bp/issues/late-low");
+    assert_eq!(commits(root), before, "a refusal writes nothing");
+    assert_eq!(bp_env(root, &session, &["set", case, "risk", "high"]).0, Some(0), "a raise stays a label");
 }
