@@ -1939,6 +1939,10 @@ fn a_rerun_after_the_merge_keeps_a_tool_failure_s_own_fix() {
         (Some(1), Some("could_not_run"), Some("ssh-keygen -Y verify")),
         "{out}"
     );
+    assert_eq!(
+        out["fix"], "install OpenSSH 8.2 or later, then rerun",
+        "no leading semicolon when ssh-keygen is silent"
+    );
     std::fs::remove_file(&keygen).unwrap();
     // A test merge that cannot run reads as git's fault, not as a level that rose or a merge that was lost (V2).
     let git = t.join("bin/git");

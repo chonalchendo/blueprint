@@ -65,13 +65,11 @@ pub(crate) fn sign(message: &str, key: &Path) -> Result<String, Refusal> {
     let out = child.wait_with_output().map_err(|e| Refusal::failed("ssh-keygen", e.to_string()))?;
     let signature = String::from_utf8_lossy(&out.stdout).to_string();
     if fed.is_err() || !out.status.success() || !signature.contains("-----BEGIN SSH SIGNATURE-----") {
-        return Err(Refusal::failed(
-            format!("ssh-keygen -Y sign -f {}", key.display()),
-            format!(
-                "{}; name the private key with --key <path> and type its passphrase, then rerun",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        ));
+        return Err(Refusal::failed(format!("ssh-keygen -Y sign -f {}", key.display()), {
+            let said = String::from_utf8_lossy(&out.stderr);
+            let said = if said.trim().is_empty() { String::new() } else { format!("{}; ", said.trim()) };
+            format!("{said}name the private key with --key <path> and type its passphrase, then rerun")
+        }));
     }
     Ok(signature)
 }
@@ -98,7 +96,9 @@ rmky+tna0L01P4XFXTDQ==
 -----END SSH SIGNATURE-----
 ";
     keygen_verify(MESSAGE, SIGNATURE, KEY)?.map_err(|stderr| {
-        Refusal::failed("ssh-keygen -Y verify", format!("{}; install OpenSSH 8.2 or later, then rerun", cap(&stderr)))
+        let said = cap(stderr.trim());
+        let said = if said.is_empty() { said } else { format!("{said}; ") };
+        Refusal::failed("ssh-keygen -Y verify", format!("{said}install OpenSSH 8.2 or later, then rerun"))
     })
 }
 
