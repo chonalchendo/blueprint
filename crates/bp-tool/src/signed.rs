@@ -1,7 +1,7 @@
 //! The human's signature (37, design change 4). The role label is forgeable, so a human act that a gate trusts carries
 //! an SSH signature by a key whose passphrase only the human types. OpenSSH's `ssh-keygen -Y` signs and verifies, run
 //! as a process: no crate. The signed message is canonical text that names the act, the project, the node, the pull
-//! request and the full head, so a signature of one act never verifies as another.
+//! request, its base branch and the full head, so a signature of one act never verifies as another.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,9 @@ pub(crate) struct Act<'a> {
     pub(crate) node: &'a Id,
     /// The pull request number on the forge.
     pub(crate) pull_request: u64,
+    /// The branch the pull request merges into. A stacked pull request retargeted to the default branch then needs a
+    /// new signature: the human saw the diff against the lower layer only.
+    pub(crate) base: &'a str,
     /// The full head sha of the pull request.
     pub(crate) head: &'a str,
     /// The act's own fields, in the order the act fixes: a lowering's `level`, then `reason`.
@@ -38,8 +41,8 @@ impl Act<'_> {
     pub(crate) fn message(&self) -> String {
         let project = self.node.project().unwrap_or_default();
         let mut text = format!(
-            "act: {}\nproject: {project}\nnode: {}\npull_request: {}\nhead: {}\n",
-            self.verb, self.node, self.pull_request, self.head
+            "act: {}\nproject: {project}\nnode: {}\npull_request: {}\nbase: {}\nhead: {}\n",
+            self.verb, self.node, self.pull_request, self.base, self.head
         );
         text.extend(self.more.iter().map(|(k, v)| format!("{k}: {v}\n")));
         text
@@ -170,6 +173,12 @@ fn signer_of(text: &str) -> Option<String> {
 /// A full commit sha: 40 or 64 lower-case hex digits. A head that is not one never enters a message or a path.
 pub(crate) fn is_sha(text: &str) -> bool {
     matches!(text.len(), 40 | 64) && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A branch name that can be one line of a signed message: not empty, with no space or control character. Git refuses
+/// both in a ref name, so only a broken forge or a forged argument gives one.
+pub(crate) fn is_branch(name: &str) -> bool {
+    !name.is_empty() && !name.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// `<type> <base64>` of a public key line, or `None` when the line is not one.

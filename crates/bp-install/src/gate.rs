@@ -51,6 +51,8 @@ mod tests {
         // The base is the commit the run starts from; the head is named once, as data.
         assert_eq!(job["env"]["BP_BASE"].as_str(), Some("${{ github.sha }}"));
         assert_eq!(job["env"]["BP_HEAD"].as_str(), Some("${{ github.event.pull_request.head.sha }}"));
+        // A signature names the base branch, so a retarget reruns this check and needs a new signature.
+        assert_eq!(job["env"]["BP_BASE_REF"].as_str(), Some("${{ github.event.pull_request.base.ref }}"));
         assert_eq!(text.matches("github.event.pull_request.head").count(), 1, "only BP_HEAD names the head");
         assert_eq!(job["env"]["BP_PROJECT"].as_str(), Some("bp"));
         let steps = job["steps"].as_vec().unwrap();
@@ -67,7 +69,7 @@ mod tests {
             named,
             [
                 "git -C base fetch -q --no-tags origin \"$BP_HEAD\"",
-                "\"$GITHUB_WORKSPACE/bp-target/release/bp\" gate --base \"$BP_BASE\" --head \"$BP_HEAD\" --pr \"$BP_PR\" \\",
+                "\"$GITHUB_WORKSPACE/bp-target/release/bp\" gate --base \"$BP_BASE\" --base-ref \"$BP_BASE_REF\" --head \"$BP_HEAD\" --pr \"$BP_PR\" \\",
             ]
         );
         for word in ["checkout", "switch", "worktree", "reset", "restore", "merge", "pull "] {

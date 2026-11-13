@@ -14,7 +14,7 @@ use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::signed::{Act, armour, comment, in_agent, is_sha, sign, signer, verify};
+use crate::signed::{Act, armour, comment, in_agent, is_branch, is_sha, sign, signer, verify};
 use crate::{Wrote, node_id, subject};
 
 /// `bp approve <issue> [--key <path>] [--post]`.
@@ -102,6 +102,13 @@ fn act(
             format!("the forge gave head {head:?}, not a full commit sha; fix gh or the pull request, then rerun"),
         ));
     }
+    let base = pr.base_ref_name.as_deref().unwrap_or_default();
+    if !is_branch(base) {
+        return Err(Refusal::failed(
+            format!("gh pr list --head {branch}"),
+            format!("the forge gave base branch {base:?}, not a branch name; fix gh or the pull request, then rerun"),
+        ));
+    }
     let signer = signer(&top)?;
     if in_agent(&signer) {
         return Err(Refusal::new(
@@ -112,7 +119,7 @@ fn act(
             format!("ssh-add -d <the key's .pub file>, then rerun bp {verb} {id}"),
         ));
     }
-    let act = Act { verb, node: &id, pull_request: pr.number, head, more };
+    let act = Act { verb, node: &id, pull_request: pr.number, base, head, more };
     let message = act.message();
     if let Some(r) = index.records(id.as_str(), kind)?.iter().find(|r| holds(r, &message, &signer)) {
         let mut v = json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number });
@@ -143,7 +150,8 @@ fn act(
     // A record already at this head that does not verify stays; the valid one takes the next key.
     let record = crate::record::free(&vault.root, &format!("{id}/{}/{head}", kind.dir()));
     let at = crate::clock::instant(crate::clock::now()?);
-    let mut fields: Vec<(&str, Value)> = vec![("head", head.into()), ("pull_request", pr.number.into())];
+    let mut fields: Vec<(&str, Value)> =
+        vec![("head", head.into()), ("pull_request", pr.number.into()), ("base", base.into())];
     fields.extend(more.iter().map(|(k, v)| (*k, Value::from(*v))));
     fields.push(("at", at.into()));
     let text = record_text(kind, &id, fields, &signature);
@@ -187,9 +195,9 @@ fn holds(r: &Record, message: &str, signer: &str) -> bool {
     armour(&r.body).is_some_and(|sig| verify(message, &sig, signer).unwrap_or(false))
 }
 
-/// The record's pull request number, as its header holds it.
-fn number(r: &Record) -> Option<u64> {
-    r.header.get("pull_request")?.as_u64()
+/// The record's pull request number and base branch, as its header holds them.
+fn number(r: &Record) -> Option<(u64, &str)> {
+    Some((r.header.get("pull_request")?.as_u64()?, r.header.get("base")?.as_str()?))
 }
 
 /// `Ok` when an approval under `issue` carries a valid signature of the approval of `head` by `signer` (37, design
@@ -199,7 +207,8 @@ fn number(r: &Record) -> Option<u64> {
 #[cfg_attr(not(test), expect(dead_code, reason = "land calls it from milestone 12 issue 3"))]
 pub(crate) fn approved(index: &Index, issue: &Id, head: &str, signer: &str) -> Result<(), Refusal> {
     let records = index.records(issue.as_str(), Kind::Approval)?;
-    let message = |n: u64| Act { verb: "approve", node: issue, pull_request: n, head, more: &[] }.message();
+    let message =
+        |(n, base): (u64, &str)| Act { verb: "approve", node: issue, pull_request: n, base, head, more: &[] }.message();
     if records.iter().any(|r| number(r).is_some_and(|n| holds(r, &message(n), signer))) {
         return Ok(());
     }
@@ -232,9 +241,9 @@ pub(crate) fn lowered(index: &Index, issue: &Id, head: &str, signer: &str) -> Re
     let records = index.records(issue.as_str(), Kind::Lowering)?;
     let text = |r: &Record, f: &str| r.header.get(f).and_then(Value::as_str).map(str::to_string);
     Ok(records.iter().rev().find_map(|r| {
-        let (n, level, reason) = (number(r)?, text(r, "level")?, text(r, "reason")?);
+        let ((n, base), level, reason) = (number(r)?, text(r, "level")?, text(r, "reason")?);
         let more = [("level", level.as_str()), ("reason", reason.as_str())];
-        let message = Act { verb: "lower", node: issue, pull_request: n, head, more: &more }.message();
+        let message = Act { verb: "lower", node: issue, pull_request: n, base, head, more: &more }.message();
         holds(r, &message, signer).then_some(level)
     }))
 }
@@ -253,6 +262,7 @@ mod tests {
     const ISSUE: &str = "projects/bp/issues/a";
     const H1: &str = "1111111111111111111111111111111111111111";
     const H2: &str = "2222222222222222222222222222222222222222";
+    const B: &str = "master";
 
     fn run(dir: &Path, program: &str, args: &[&str]) -> String {
         let out = Command::new(program).current_dir(dir).env_remove("SSH_AUTH_SOCK").args(args).output().unwrap();
@@ -298,7 +308,7 @@ mod tests {
     }
 
     fn fields(head: &str, n: u64, at: &str, more: &[(&'static str, &str)]) -> Vec<(&'static str, Value)> {
-        let mut f: Vec<(&str, Value)> = vec![("head", head.into()), ("pull_request", n.into())];
+        let mut f: Vec<(&str, Value)> = vec![("head", head.into()), ("pull_request", n.into()), ("base", B.into())];
         f.extend(more.iter().map(|(k, v)| (*k, Value::from(*v))));
         f.push(("at", format!("2026-11-12T10:00:{at}Z").into()));
         f
@@ -311,8 +321,9 @@ mod tests {
         let (agent, agent_public) = key(keys.path(), "agent");
         let (_dir, v) = vault();
         let issue = Id::parse(ISSUE).unwrap();
-        let act =
-            |verb: &str, head: &str, n: u64| Act { verb, node: &issue, pull_request: n, head, more: &[] }.message();
+        let act = |verb: &str, head: &str, n: u64| {
+            Act { verb, node: &issue, pull_request: n, base: B, head, more: &[] }.message()
+        };
         let message = |head: &str, n: u64| act("approve", head, n);
         let gate = |head: &str, signer: &str| {
             approved(&Index::open(&v).unwrap(), &issue, head, signer).map_err(|r| (r.code, r.fix))
@@ -332,6 +343,8 @@ mod tests {
         let by_agent = sign(&message(H1, 1), &agent).unwrap();
         let other_act = sign(&act("lower", H1, 1), &human).unwrap();
         let other_pr = sign(&message(H1, 2), &human).unwrap();
+        let stacked = Act { verb: "approve", node: &issue, pull_request: 1, base: "bp/b", head: H1, more: &[] };
+        let other_base = sign(&stacked.message(), &human).unwrap();
         let namespace = {
             put(keys.path(), "m", &message(H1, 1));
             run(keys.path(), "ssh-keygen", &["-Y", "sign", "-n", "git", "-f", "human", "m"]);
@@ -344,6 +357,7 @@ mod tests {
             ("a signature of another head, copied", of_h2.as_str(), 1),
             ("a signature of another act", other_act.as_str(), 1),
             ("a changed field: the pull request", other_pr.as_str(), 1),
+            ("a changed field: the base branch", other_base.as_str(), 1),
             ("a signature in git's namespace", namespace.as_str(), 1),
         ]
         .into_iter()
@@ -373,7 +387,8 @@ mod tests {
         let level = || lowered(&Index::open(&v).unwrap(), &issue, H1, &signer).unwrap();
         let lowering = |key: &Path, head: &str, level: &str| {
             let more = [("level", level), ("reason", "docs only")];
-            sign(&Act { verb: "lower", node: &issue, pull_request: 1, head, more: &more }.message(), key).unwrap()
+            let act = Act { verb: "lower", node: &issue, pull_request: 1, base: B, head, more: &more };
+            sign(&act.message(), key).unwrap()
         };
         let low = [("level", "low"), ("reason", "docs only")];
         assert_eq!(level(), None, "no lowering");
@@ -425,7 +440,7 @@ mod tests {
 
         let (_dir, v) = vault();
         let issue = Id::parse(ISSUE).unwrap();
-        let message = Act { verb: "approve", node: &issue, pull_request: 1, head: H1, more: &[] }.message();
+        let message = Act { verb: "approve", node: &issue, pull_request: 1, base: B, head: H1, more: &[] }.message();
         forge(&v, Kind::Approval, H1, fields(H1, 1, "01", &[]), &sign(&message, &agent).unwrap());
         let gate = || approved(&Index::open(&v).unwrap(), &issue, H1, &signer(&code).unwrap()).unwrap_err().code;
         let local = |r: &str| run(&code, "git", &["show", &format!("{r}:.bp/risk.yml")]);

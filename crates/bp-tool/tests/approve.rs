@@ -133,7 +133,9 @@ fn approve_and_lower_sign_the_head_with_the_signers_key() {
     assert_eq!(common::commits(v).parse::<u32>().unwrap(), before.parse::<u32>().unwrap() + 1);
     // The comment for the forge check: the signed message's lines and the record's signature, in one block.
     let comment = out["comment"].as_str().unwrap();
-    let block = format!("```bp-approval\nact: approve\nproject: bp\nnode: {ISSUE}\npull_request: 4\nhead: {HEAD}\n");
+    let block = format!(
+        "```bp-approval\nact: approve\nproject: bp\nnode: {ISSUE}\npull_request: 4\nbase: master\nhead: {HEAD}\n"
+    );
     assert!(comment.contains(&format!("{block}-----BEGIN SSH SIGNATURE-----\n")), "{comment}");
     let signature = &comment[comment.find("-----BEGIN").unwrap()..comment.rfind("\n```").unwrap()];
     assert!(signature.ends_with("-----END SSH SIGNATURE-----") && text.contains(signature), "{comment}");
@@ -204,5 +206,14 @@ fn approve_refuses_a_head_that_is_not_a_full_sha() {
         let (code, out) = bp(v, t, &[], &["approve", ISSUE, "--key", &human]);
         assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{head:?}: {out}");
         assert!(!v.join(ISSUE).join("approvals").exists(), "{head:?}: no record is written");
+    }
+    // The base branch is a line of the signed message too.
+    for base in [json!(null), json!(""), json!("a b"), json!("master\nhead: x")] {
+        let pr =
+            json!([{ "number": 4, "state": "OPEN", "headRefName": "bp/a", "headRefOid": HEAD, "baseRefName": base }]);
+        std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
+        let (code, out) = bp(v, t, &[], &["approve", ISSUE, "--key", &human]);
+        assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{base}: {out}");
+        assert!(!v.join(ISSUE).join("approvals").exists(), "{base}: no record is written");
     }
 }
