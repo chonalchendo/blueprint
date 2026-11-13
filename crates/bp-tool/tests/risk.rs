@@ -442,6 +442,23 @@ fn git_s_location_variables_do_not_send_the_level_to_another_repository() {
     assert_eq!((exit, pick(&v), &v["head"]), (Some(0), pick(&want), &want["head"]), "{v}");
 }
 
+/// A transport variable reaches bp's own fetch: the sandbox's `GIT_ALLOW_PROTOCOL` guard holds (review of #98, row
+/// 31). Origin is a local path, so a guard without `file` refuses the fetch.
+#[test]
+fn git_s_transport_variables_reach_the_fetch() {
+    let mut w = world(Some("low"), Some("low: [docs/]\n"));
+    w.cut();
+    w.commit(&[("docs/a.md", "One.\n")]);
+    let vault = w.vault.path().display().to_string();
+    let run =
+        |allow: &str| common::bp_env(&w.code, &[("BP_VAULT", &vault), ("GIT_ALLOW_PROTOCOL", allow)], &["risk", ISSUE]);
+    let (exit, v) = run("file");
+    assert_eq!(exit, Some(0), "{v}");
+    let (exit, v) = run("ssh");
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("transport 'file' not allowed"), "{v}");
+}
+
 /// A `gh` first on `PATH` whose `pr list --head <project>/<slug>` prints `prs-<slug>.json`, else no pull request.
 fn fake_gh(t: &Path) -> String {
     let bin = t.join("bin");
@@ -523,7 +540,7 @@ fn a_risk_row_raises_the_level_and_needs_no_disposition() {
     let vault = w.vault.path().display().to_string();
     let (_, v) = common::bp_env(&w.code, &[("BP_VAULT", &vault), ("GIT_DIR", "/nonexistent")], &["risk", ISSUE]);
     assert_eq!(v["level"], "high", "{v}");
-    // Nor can a variable that hides history or moves the objects: the call clears every `GIT_*` (row 25).
+    // Nor can a variable that hides history or moves the objects: the call clears each one (rows 25 and 31).
     let tip = w.t.path().join("tip");
     std::fs::write(&tip, git(w.vault.path(), &["rev-parse", "HEAD"])).unwrap();
     let tip = tip.display().to_string();
