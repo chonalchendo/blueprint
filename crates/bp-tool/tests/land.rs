@@ -18,7 +18,7 @@ const M: &str = "projects/bp/milestones/m";
 const S: &str = "projects/bp/designs/system";
 
 /// The vault, and a directory holding `origin.git`, its clone `code` and the fake `bin/gh`. The fake answers
-/// `api graphql` with origin's master as the default branch, at the sha `default-oid` names if any, `pr list --head <project>/<slug>` from `prs-<slug>.json`
+/// `api graphql` with origin's master as the default branch, at the sha `default-oid` names if any, and logs it, `pr list --head <project>/<slug>` from `prs-<slug>.json`
 /// else `prs.json`, `pr view`
 /// with the one row of `prs.json`, `pr create` with a url, and logs `pr edit` and `pr merge`; it fails when a git
 /// location variable reaches it; a merge pushes the commit
@@ -45,7 +45,7 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
         r#"#!/bin/sh
 ! env | grep -q '^GIT_\(DIR\|WORK_TREE\|INDEX_FILE\)=' || {{ echo 'a git location variable reached gh' >&2; exit 7; }}
 case "$1 $2" in
-  "api graphql") printf '{{"data":{{"repository":{{"defaultBranchRef":{{"name":"master","target":{{"oid":"%s"}}}}}}}}}}' "$(cat '{t}/default-oid' 2>/dev/null || git -C '{t}/origin.git' rev-parse master)" ;;
+  "api graphql") echo "$*" >> '{t}/graphql'; printf '{{"data":{{"repository":{{"defaultBranchRef":{{"name":"master","target":{{"oid":"%s"}}}}}}}}}}' "$(cat '{t}/default-oid' 2>/dev/null || git -C '{t}/origin.git' rev-parse master)" ;;
   "pr list") cat "{t}/prs-$(basename "$4").json" 2>/dev/null || cat '{t}/prs.json' 2>/dev/null || echo '[]' ;;
   "pr create") echo "$*" > '{t}/created'; shift 9; printf '%s' "$1" > '{t}/body'; echo 'https://forge.invalid/o/r/pull/1' ;;
   "pr edit") if [ "$4" = --body ]; then printf '%s' "$5" > '{t}/body'; else echo "$*" > '{t}/edited'; fi ;;
@@ -1247,9 +1247,11 @@ fn land_low_and_medium_need_no_approval() {
     for (level, lens) in [("low", &["conformance"][..]), ("medium", &MEDIUM[..])] {
         let (v, t) = setup();
         let (v, t) = (v.path(), t.path());
-        if level == "low" {
-            rules(t, "low:\n  - hello.txt\n");
-        }
+        // A signer the forge confirms, so a land that read it would ask the forge's default head.
+        signer(t);
+        let public = std::fs::read_to_string(t.join("human.pub")).unwrap();
+        let low = if level == "low" { "low:\n  - hello.txt\n" } else { "" };
+        rules(t, &format!("{low}signer: {public}"));
         let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
         if level == "low" {
             label(v, "risk: low");
@@ -1264,6 +1266,7 @@ fn land_low_and_medium_need_no_approval() {
         let got = (code, out["status"].as_str(), out["level"].as_str());
         assert_eq!(got, (Some(0), Some("resolved"), Some(level)), "{out}");
         assert!(t.join("merged").exists() && !v.join(format!("{ISSUE}/approvals")).exists(), "{level}");
+        assert!(!t.join("graphql").exists(), "{level}: land reads no signer below high");
     }
 }
 
@@ -1334,9 +1337,16 @@ fn land_high_refuses_without_signed_review() {
     let fix = refused("signer_missing", "origin answers another sha than the forge");
     assert!(fix.starts_with(&format!("the forge's master is at {}", "0".repeat(40))), "{fix}");
     std::fs::remove_file(t.join("default-oid")).unwrap();
+    let dry = || bp(v, t, &[("SSH_AUTH_SOCK", "")], &["land", ISSUE, "--dry-run"]);
+    let (code, out) = dry();
+    assert_eq!((code, &out["level"]), (Some(0), &json!("high")), "{out}");
+    // The human's signed lowering of this head counts at land: the head lands at medium.
+    let (code, out) =
+        bp(v, t, &[("SSH_AUTH_SOCK", "")], &["lower", ISSUE, "medium", "--reason", "docs", "--key", &human]);
+    assert_eq!(code, Some(0), "{out}");
     let (code, out) = bp(v, t, &[("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")], &["land", ISSUE]);
     let got = (code, out["status"].as_str(), out["level"].as_str());
-    assert_eq!(got, (Some(0), Some("resolved"), Some("high")), "{out}");
+    assert_eq!(got, (Some(0), Some("resolved"), Some("medium")), "{out}");
 }
 
 /// `land` judges the level of the head after its own fetch, and refuses one above the level `pr` recorded there (37,
@@ -1372,6 +1382,30 @@ fn land_refuses_a_level_that_rose_after_pr() {
     let (code, out) = land();
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("evidence_stale")), "{out}");
     assert!(out["fix"].as_str().unwrap().contains("rose from medium to high"), "{out}");
+    assert!(!t.join("merged").exists(), "no refusal merges");
+}
+
+/// A head that `pr` recorded high with no high path refuses when its diff now touches one: round one never read the
+/// security lens (37, design change 8).
+#[test]
+fn land_refuses_a_high_path_that_pr_did_not_record() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let human = signer(t);
+    let public = std::fs::read_to_string(t.join("human.pub")).unwrap();
+    rules(t, &format!("signer: {public}"));
+    let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
+    label(v, "risk: high");
+    let w = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    let h = commit(&w, &["add", "hello.txt"], "hello");
+    pushed(v, t, &h);
+    lenses(v, t, &h, &HIGH[..3]);
+    assert_eq!(bp(v, t, &[("SSH_AUTH_SOCK", "")], &["approve", ISSUE, "--key", &human]).0, Some(0));
+    rules(t, &format!("high:\n  - hello.txt\nsigner: {public}"));
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")], &["land", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("evidence_stale")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains(&format!("the level at {h} touches a high path")), "{out}");
     assert!(!t.join("merged").exists(), "no refusal merges");
 }
 

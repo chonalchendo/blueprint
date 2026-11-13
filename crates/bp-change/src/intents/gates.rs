@@ -507,6 +507,20 @@ mod tests {
         assert_eq!(first, Some("run a"));
     }
 
+    /// A run of an old block hash is no evidence, a failed run of a gone block names it gone, and a lowering above
+    /// the level in force does not raise it.
+    #[test]
+    fn a_stale_run_a_gone_block_and_a_higher_lowering() {
+        let green = pr(true, false);
+        let stale = Issue { runs: vec![run("a", "#old", true)], ..medium() };
+        assert_eq!(evidence(&stale.runs, &green.head, &stale.blocks), Err(Unmet::Evidence("a")));
+        let gone = Issue { runs: vec![run("z", "#z", false)], ..medium() };
+        let g = gates(&gone, &green, Some(true));
+        assert_eq!(g.gates[2].detail, "fail at abcdef0; the block is gone");
+        let raised = Issue { lowerings: vec![(H.into(), Level::High)], ..medium() };
+        assert_eq!(super::super::review::level(&raised, H).0, Level::Medium);
+    }
+
     #[test]
     fn gates_name_the_head_the_rows_and_the_run() {
         let (green, i) = (pr(true, false), medium());

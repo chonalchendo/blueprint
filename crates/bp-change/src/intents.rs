@@ -755,6 +755,8 @@ mod tests {
         };
         i.reviews.push(review("h2", 2, Lens::Verify, vec![Row { error: true, ..answered(Answer::Fixed) }]));
         assert_eq!(level(&i, "h3"), (Level::High, Some((2, Level::Medium))));
+        let same = Issue { lowerings: vec![("h3".into(), Level::High)], ..i.clone() };
+        assert_eq!(level(&same, "h3"), level(&i, "h3"), "a lowering to the level in force changes nothing");
         let note = "round 3: missing lenses: verify, tests-and-checks";
         assert_eq!(issue(&i, NOW), Verdict::of(Intent::NeedsReview, note));
     }
