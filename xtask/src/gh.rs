@@ -1,7 +1,8 @@
 //! The fake `gh` of `cargo xtask forge`, run as `xtask gh <T> <args>` from the shim `T/bin/gh` (26, issue 1). It
 //! answers the calls of `bp-forge` and `pr review --approve`, and fails any other. Its login is `FAKE_GH_LOGIN`,
 //! default `quokka-agent`. A review is stored as GitHub stores one; no merge needs it (37, design change 5). The
-//! branches live in the bare copy `T/origin.git`; the pull requests live in `T/forge`, a snapshot directory of 24, so a block reads or edits them as files. It never reaches the network.
+//! branches live in the bare copy `T/origin.git`; the pull requests live in `T/forge`, a snapshot directory of 24, so
+//! a block reads or edits them as files. It never reaches the network.
 //!
 //! One call at a time holds `T/forge/lock`, as the forge serialises its own writes. Without it, six `pr create` calls
 //! at once made one pull request, and a reader saw half a file. Each file is written by a rename, and only when it
@@ -41,7 +42,7 @@ const OWN_APPROVAL: &str =
 const EPOCH: &str = "1970-01-01T00:00:00Z";
 
 /// The fields a pull request holds here, so `--json` fails an unknown field before it reads a row, as `gh` does.
-const STORED: [&str; 11] = [
+const STORED: [&str; 13] = [
     "number",
     "url",
     "state",
@@ -49,8 +50,10 @@ const STORED: [&str; 11] = [
     "body",
     "author",
     "baseRefName",
+    "baseRefOid",
     "headRefName",
     "headRefOid",
+    "mergeCommit",
     "reviews",
     "statusCheckRollup",
 ];
@@ -71,7 +74,6 @@ impl Fake {
         // Saved before the call too, so a block's snapshot read sees the refresh even when the call fails.
         self.save(&prs)?;
         let out = match args {
-            ["api", "user"] => format!("{}\n", json!({ "login": self.login })),
             // `land` reads the default branch and its head from the forge (37, design change 4).
             ["api", "graphql", ..] => {
                 let name = self.git(&["symbolic-ref", "--short", "HEAD"])?.trim().to_string();
@@ -115,8 +117,8 @@ impl Fake {
                     "number": number, "url": url, "state": "OPEN",
                     "title": need(&f, "--title")?, "body": need(&f, "--body")?,
                     "author": { "id": format!("U_{}", self.login), "is_bot": false, "login": self.login, "name": self.login },
-                    "baseRefName": base, "headRefName": head, "headRefOid": oid,
-                    "reviews": [], "statusCheckRollup": self.rollup(oid)?,
+                    "baseRefName": base, "baseRefOid": heads[base], "headRefName": head, "headRefOid": oid,
+                    "mergeCommit": null, "reviews": [], "statusCheckRollup": self.rollup(oid)?,
                 });
                 prs.push(pr);
                 format!("{url}\n")
@@ -157,7 +159,7 @@ impl Fake {
                 String::new()
             }
             _ => bail!(
-                "unknown command \"{}\": the fake gh answers `api user|graphql` and `pr list|view|create|edit|merge|review`",
+                "unknown command \"{}\": the fake gh answers `api graphql` and `pr list|view|create|edit|merge|review`",
                 args.join(" ")
             ),
         };
@@ -166,7 +168,7 @@ impl Fake {
     }
 
     /// Refreshes every open pull request from the bare copy and its rollup from `checks/<head>.json`, first on each
-    /// call, as the forge sees a push, a deleted branch and a finished check run without being told.
+    /// call, as the forge sees a push, a moved or deleted branch and a finished check run without being told.
     fn refresh(&self, prs: &mut [Value], heads: &BTreeMap<String, String>) -> Result<()> {
         for pr in prs.iter_mut().filter(|p| p["state"] == "OPEN") {
             // GitHub closes a pull request whose base branch is deleted, for good (15, E7).
@@ -174,6 +176,8 @@ impl Fake {
                 pr["state"] = "CLOSED".into();
                 continue;
             }
+            let base = pr["baseRefName"].as_str().and_then(|b| heads.get(b));
+            pr["baseRefOid"] = base.map_or(Value::Null, |o| o.as_str().into());
             if let Some(head) = pr["headRefName"].as_str().and_then(|b| heads.get(b))
                 && pr["headRefOid"] != head.as_str()
             {
@@ -208,6 +212,7 @@ impl Fake {
         let squash = self.git(&["commit-tree", &format!("{head}^{{tree}}"), "-p", base, "-m", &message])?;
         self.git(&["update-ref", &format!("refs/heads/{base_ref}"), &squash, base])?;
         pr["state"] = "MERGED".into();
+        pr["mergeCommit"] = json!({ "oid": squash });
         Ok(())
     }
 

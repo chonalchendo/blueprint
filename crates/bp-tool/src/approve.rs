@@ -14,7 +14,7 @@ use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::signed::{Act, armour, in_agent, is_branch, is_sha, sign, signer, verify};
+use crate::signed::{Act, armour, can_verify, in_agent, is_branch, is_sha, sign, signer, verify};
 use crate::{Wrote, node_id, subject};
 
 /// `bp approve <issue> [--key <path>]`.
@@ -109,10 +109,14 @@ fn act(cwd: &Path, issue: &str, key: Option<&Path>, kind: Kind, more: &[(&str, &
             format!("ssh-add -d <the key's .pub file>, then rerun bp {verb} {id}"),
         ));
     }
+    // A tool that cannot verify refuses here, not as a record or a key that does not verify (review of #100, F3).
+    can_verify()?;
     let act = Act { verb, node: &id, pull_request: pr.number, base, head, more };
     let message = act.message();
-    if let Some(r) = index.records(id.as_str(), kind)?.iter().find(|r| holds(r, &message, &signer)) {
-        return Ok(Wrote::Already(json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number })));
+    for r in index.records(id.as_str(), kind)? {
+        if holds(&r, &message, &signer)? {
+            return Ok(Wrote::Already(json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number })));
+        }
     }
     drop(index);
     let key = match key {
@@ -158,9 +162,10 @@ pub(crate) fn record_text(kind: Kind, issue: &Id, fields: Vec<(&str, Value)>, si
     format!("{header}\n## Signature\n\n```\n{}\n```\n", signature.trim_end())
 }
 
-/// The record's signature verifies `message` by `signer`.
-fn holds(r: &Record, message: &str, signer: &str) -> bool {
-    armour(&r.body).is_some_and(|sig| verify(message, &sig, signer).unwrap_or(false))
+/// The record's signature verifies `message` by `signer`. The caller ran [`can_verify`] first, so a `false` is the
+/// record's, never a tool that cannot verify.
+fn holds(r: &Record, message: &str, signer: &str) -> Result<bool, Refusal> {
+    armour(&r.body).map_or(Ok(false), |sig| verify(message, &sig, signer))
 }
 
 /// The record's pull request number and base branch, as its header holds them.
@@ -179,10 +184,15 @@ pub(crate) type Forge<'a> = (u64, &'a str);
 /// names the heads a stale approval signed.
 pub(crate) fn approved(index: &Index, issue: &Id, head: &str, signer: &str, forge: Forge) -> Result<(), Refusal> {
     let records = index.records(issue.as_str(), Kind::Approval)?;
+    if !records.is_empty() {
+        can_verify()?;
+    }
     let (n, base) = forge;
     let message = Act { verb: "approve", node: issue, pull_request: n, base, head, more: &[] }.message();
-    if records.iter().any(|r| number(r) == Some(forge) && holds(r, &message, signer)) {
-        return Ok(());
+    for r in records.iter().filter(|r| number(r) == Some(forge)) {
+        if holds(r, &message, signer)? {
+            return Ok(());
+        }
     }
     let fix = format!("the human runs bp approve {issue} from a shell, at head {head} of pull request {n} into {base}");
     let at = |r: &&Record| r.header.get("head").and_then(Value::as_str) == Some(head);
@@ -217,16 +227,26 @@ pub(crate) fn lowered(
     forge: Option<Forge>,
 ) -> Result<Option<Level>, Refusal> {
     let records = index.records(issue.as_str(), Kind::Lowering)?;
+    if !records.is_empty() {
+        can_verify()?;
+    }
     let text = |r: &Record, f: &str| r.header.get(f).and_then(Value::as_str).map(str::to_string);
-    Ok(records.iter().rev().find_map(|r| {
-        let ((n, base), level, reason) = (number(r)?, text(r, "level")?, text(r, "reason")?);
+    for r in records.iter().rev() {
+        let (Some((n, base)), Some(level), Some(reason)) = (number(r), text(r, "level"), text(r, "reason")) else {
+            continue;
+        };
         if forge.is_some_and(|f| f != (n, base)) {
-            return None;
+            continue;
         }
         let more = [("level", level.as_str()), ("reason", reason.as_str())];
         let message = Act { verb: "lower", node: issue, pull_request: n, base, head, more: &more }.message();
-        holds(r, &message, signer).then(|| level.parse().ok()).flatten()
-    }))
+        if let Ok(level) = level.parse()
+            && holds(r, &message, signer)?
+        {
+            return Ok(Some(level));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

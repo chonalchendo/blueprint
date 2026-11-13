@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-pub use gh::Gh;
+pub use gh::{Gh, output_within};
 
 /// One pull request as `gh pr view --json` writes it.
 #[derive(Debug, Clone, Deserialize)]
@@ -29,12 +29,26 @@ pub struct PullRequest {
     /// The branch it merges into; a snapshot written before milestone 3 lacks it.
     #[serde(default)]
     pub base_ref_name: Option<String>,
+    /// The commit of the base branch the forge holds the pull request against: `land` judges the level by its rules
+    /// once origin names the same sha (37, design change 1). A snapshot written before milestone 12 lacks it.
+    #[serde(default)]
+    pub base_ref_oid: Option<String>,
+    /// The commit the merge made; `None` until the pull request merges.
+    #[serde(default)]
+    pub merge_commit: Option<Commit>,
     /// `OPEN`, `MERGED` or `CLOSED`; `gh pr list` omits it for open pull requests.
     #[serde(default)]
     pub state: Option<String>,
     /// Check runs and status contexts at the head.
     #[serde(default)]
     pub status_check_rollup: Vec<CheckRun>,
+}
+
+/// A commit as `gh` names one: its sha.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Commit {
+    /// The full sha.
+    pub oid: String,
 }
 
 /// One check run (`conclusion`) or status context (`state`).

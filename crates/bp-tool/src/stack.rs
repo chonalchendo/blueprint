@@ -1,7 +1,7 @@
 //! The stack (15, a dependency chain to landed): `cut` puts a dependant on its dependency's open pull request head,
 //! `land` reads the base a layer lands on (`bp_read::inputs::base`), and `land` of the lower layer rebases, pushes
-//! and retargets each layer above before it deletes its branch. Each moved layer needs `pr` and a new approval, as
-//! the forge requires an approval of the latest push (15, Controls 1).
+//! and retargets each layer above before it deletes its branch. Each moved layer needs `pr` and the `verify` review of
+//! its new head, as `land` reads the reviews of the head's round (37, design change 3).
 
 use std::path::{Path, PathBuf};
 
@@ -87,7 +87,7 @@ pub(crate) fn below(
 pub(crate) struct Child {
     pub(crate) id: Id,
     /// The held claim, which takes a stranded layer's step.
-    claim: Id,
+    pub(crate) claim: Id,
     pub(crate) worktree: PathBuf,
     branch: String,
     /// The claim's `base`, the head below it was cut from: its own commits are those past it.
@@ -107,7 +107,10 @@ pub(crate) fn children(index: &Index, below: &Id) -> Result<Vec<Child>, Refusal>
         if !worktree.is_dir() {
             return Err(Refusal::failed(
                 worktree.display().to_string(),
-                format!("land {below} rebases {n} in its worktree, which is gone; bp cut {n} puts it back, then rerun"),
+                format!(
+                    "land {below} rebases {n} in its worktree, which is gone; dispatch a worker to run `bp cut {n}`, \
+                     which puts it back; then rerun"
+                ),
             ));
         }
         if !git(&worktree, &["status", "--porcelain"])?.is_empty() {
@@ -116,7 +119,10 @@ pub(crate) fn children(index: &Index, below: &Id) -> Result<Vec<Child>, Refusal>
                 worktree.display().to_string(),
                 "land rebases each layer above in its worktree, so it holds no uncommitted work (15, a dependency \
                  chain to landed)",
-                format!("commit and bp pr {n}, or stash, the changes in {}, then rerun", worktree.display()),
+                format!(
+                    "dispatch a worker to commit the changes in {} and run `bp pr {n}`, or to stash them; then rerun",
+                    worktree.display()
+                ),
             ));
         }
         let claim = Id::parse(&h.id).expect("the index holds ids");
@@ -136,14 +142,16 @@ pub(crate) struct Moved {
 }
 
 /// Moves each child onto `target` once the layer `below` has merged. It runs no blocks: a child's code runs where the
-/// agent runs it, at `pr`, which the next step names, and the push needs the reviewer's approval again.
+/// worker runs it, at `pr`, which the next step names, and the new head needs its `verify` review. Each step the
+/// session reads names the worker's dispatch; a stranded layer's claim takes the worker's own step (review of #100,
+/// C3).
 pub(crate) fn restack(gh: &Gh, children: &[Child], target: &str, below: &str) -> Result<Moved, Refusal> {
     let mut moved = Moved { restacked: Vec::new(), stranded: Vec::new(), next: Vec::new(), notes: Vec::new() };
     for child in children {
         let (id, w) = (&child.id, child.worktree.display());
         let step = match move_onto(gh, child, target)? {
             Onto::Moved => {
-                moved.next.push(format!("bp pr {id}; then the reviewer approves its new head"));
+                moved.next.push(format!("dispatch a worker to run `bp pr {id}`; then its verify review"));
                 moved.restacked.push(id.clone());
                 continue;
             }
@@ -156,7 +164,7 @@ pub(crate) fn restack(gh: &Gh, children: &[Child], target: &str, below: &str) ->
                 child.from
             ),
         };
-        moved.next.push(step.clone());
+        moved.next.push(format!("dispatch a worker for {id}: {step}"));
         moved.notes.push((id.clone(), child.claim.clone(), step));
         moved.stranded.push(id.clone());
     }

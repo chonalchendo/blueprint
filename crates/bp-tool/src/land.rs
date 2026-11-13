@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use bp_change::IssueStatus;
 use bp_change::intents::{self, Base, Issue, Unmet};
@@ -32,6 +33,9 @@ use crate::{Wrote, finish, node_id, subject};
 mod level;
 
 use level::{lander, risen, trusted};
+
+/// How long one `gh` or git call of `land` may run before it refuses `could_not_run` (review of #100, F11).
+const DEADLINE: Duration = Duration::from_secs(120);
 
 /// `bp pr <issue>`.
 #[derive(Args)]
@@ -110,7 +114,7 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     // The forge merges no head behind its base, so `pr` refuses one before the runs and the push (34, design change 5).
     git(&c.top, &["fetch", "-q", "origin"])?;
     let head = git(&c.worktree, &["rev-parse", "HEAD"])?;
-    holds_base(&c, &id, &head)?;
+    holds_base(&c, &id, &head, false)?;
     let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
     let carried = red_first(&vault, &index, &id, &c, &head, role.as_str(), &clock)?;
     let gh = Gh::new(&c.top);
@@ -187,16 +191,18 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
 pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let role = lander(&l.issue)?;
     node_id(&l.issue)?;
+    // The clock refuses before any forge call, dry run too, never after the merge (review of #100, F6).
+    let now = crate::clock::now()?;
+    bp_read::git::within(DEADLINE);
     let vault = Vault::discover(cwd)?;
-    let index = Index::open(&vault)?;
+    let mut index = Index::open(&vault)?;
     let id = subject(&index, &l.issue)?;
-    let resolved = IssueStatus::Resolved.as_str();
-    let status = index.header(id.as_str())?.and_then(|h| h.get("status")?.as_str().map(str::to_string));
-    if status.as_deref() == Some(resolved) {
-        return Ok(Wrote::Already(json!({ "id": id, "status": resolved })));
+    if let Some(done) = repeat(&vault, &mut index, &id, l.dry_run)? {
+        return Ok(done);
     }
+    let resolved = IssueStatus::Resolved.as_str();
     let c = claimed(cwd, &index, &id)?;
-    let gh = Gh::new(&c.top);
+    let gh = Gh::new(&c.top).within(DEADLINE);
     // The head's ancestry and its level are tested against the base as origin holds it now. The dry run fetches too,
     // so a dry run that passes is a land the forge accepts (34, design change 5).
     git(&c.top, &["fetch", "-q", "origin"])?;
@@ -206,6 +212,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         return Err(landing::no_pull_request(&id));
     };
     let n = pr.number;
+    let base = level::base(&c, &id, &pr)?;
     // The dry run takes no writer, so it runs the writer's commit precondition here (34, design change 7).
     vault.committed()?;
     vault.clean([&id, &c.claim])?;
@@ -214,7 +221,10 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
             Code::PathDirty,
             c.worktree.display().to_string(),
             "land removes the worktree, so it holds no uncommitted work (26, design change 2)",
-            format!("commit and bp pr {id}, or stash, the changes in {}, then rerun", c.worktree.display()),
+            format!(
+                "dispatch a worker to commit the changes in {} and run `bp pr {id}`, or to stash them; then rerun",
+                c.worktree.display()
+            ),
         ));
     }
     let blocks = bp_read::inputs::blocks(&vault, id.as_str())?;
@@ -230,33 +240,31 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let gate = match intents::gates(&issue, &read, named.as_ref().ok().copied()).unmet {
         Some(Unmet::Approval) => Err(level.1.unwrap_or_else(|| landing::refusal(&Unmet::Approval, &id, &pr))),
         Some(unmet) => Err(landing::refusal(&unmet, &id, &pr)),
-        None => named.and_then(|_| risen(&c, &id, &issue, &pr.head_ref_oid)).and_then(|()| {
+        None => named.and_then(|_| risen(&c, &id, &issue, &pr.head_ref_oid, base)).and_then(|()| {
             // A merged head is behind its base by its own merge.
-            if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid) }
+            if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid, true) }
         }),
     };
     if let Err(mut r) = gate {
-        if merged(&pr) {
+        // Only a gate that refuses a merged pull request makes the merge lost: a tool that could not run keeps its
+        // own fix, and the rerun finishes the land (review of #100, F2).
+        if merged(&pr) && r.exit == 2 {
             r.fix = landing::after_merge(n, &id);
         }
         return Err(r);
     }
     let level = level.0;
+    // Each layer above, its worktree and its claim are tested before the merge, and by the dry run, as the land
+    // after the merge would test them (review of #100, F7).
+    let children = crate::stack::children(&index, &id)?;
+    if !children.is_empty() {
+        vault.clean(children.iter().map(|child| &child.claim))?;
+    }
     if l.dry_run {
         return Ok(Wrote::Changed(json!({ "land": id, "head": pr.head_ref_oid, "level": level, "dry_run": true })));
     }
-    let children = crate::stack::children(&index, &id)?;
     if !merged(&pr) {
-        gh.merge(n, &pr.head_ref_oid).map_err(|e| match gh.pr(n) {
-            // The forge refuses a head that moved since the reads: no review has read that head yet.
-            Ok(now) if now.head_ref_oid != pr.head_ref_oid => Refusal::new(
-                Code::ReviewMissing,
-                id.as_str(),
-                "land merges only the head its reviews read (37, design change 3)",
-                format!("the head moved to {}; bp pr {id}, then its review, then bp land {id}", now.head_ref_oid),
-            ),
-            _ => e,
-        })?;
+        merge(&vault, &gh, &c, &id, &pr)?;
     }
     drop(index);
     // Each layer above moves onto the base before the branch below goes (15, a dependency chain to landed).
@@ -272,7 +280,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
             format!("pull request {} merged, but the claim closed meanwhile; bp show {id}", pr.number),
         ));
     }
-    let to = crate::clock::instant(crate::clock::now()?);
+    let to = crate::clock::instant(crate::clock::now().unwrap_or(now));
     let more = format!("pull_request: {}\n", pr.number);
     let mut changes = BTreeMap::from([
         (c.claim.clone(), crate::claim::released(&vault.text(&c.claim)?, &to, "landed", &more)),
@@ -298,13 +306,72 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     })))
 }
 
+/// The repeat of a land already done: the issue is `resolved` (exit 3). A land killed inside its vault commit leaves
+/// `resolved` on disk, uncommitted, beside its journal; a writer puts the pre-images back first, so the rerun lands
+/// again and writes the commit (review of #100, F9). The dry run writes nothing, so it reads the file as it stands.
+fn repeat(vault: &Vault, index: &mut Index, id: &Id, dry_run: bool) -> Result<Option<Wrote>, Refusal> {
+    let resolved = IssueStatus::Resolved.as_str();
+    let status = |index: &Index| -> Result<bool, Refusal> {
+        Ok(index.header(id.as_str())?.and_then(|h| h.get("status")?.as_str().map(str::to_string)).as_deref()
+            == Some(resolved))
+    };
+    if status(index)? && vault.clean([id]).is_err() && !dry_run {
+        drop(vault.writer()?);
+        *index = Index::open(vault)?;
+    }
+    Ok(status(index)?.then(|| Wrote::Already(json!({ "id": id, "status": resolved }))))
+}
+
+/// Merges `pr` at the head the gates read, once the claim is still the one `land` read (review of #100, F10), then
+/// reads the pull request again: `gh pr merge` exits 0 when a merge queue or auto-merge takes the pull request and
+/// merges nothing, so only the forge's `MERGED` at that head lets `land` remove the branch (F1). Else it refuses and
+/// changes nothing.
+fn merge(vault: &Vault, gh: &Gh, c: &Claimed, id: &Id, pr: &PullRequest) -> Result<(), Refusal> {
+    let (n, head) = (pr.number, pr.head_ref_oid.as_str());
+    if held(&Index::open(vault)?, id)?.is_none_or(|h| h.id != c.claim.as_str()) {
+        return Err(Refusal::new(
+            Code::ClaimLost,
+            c.claim.as_str(),
+            "land merges only under the claim it read; nothing merged (15, land)",
+            format!("bp show {id} names who closed it; to land it, dispatch a worker to run `bp cut {id}`, then rerun"),
+        ));
+    }
+    gh.merge(n, head).map_err(|e| match gh.pr(n) {
+        // The forge refuses a head that moved since the reads: no review has read that head yet.
+        Ok(now) if now.head_ref_oid != head => Refusal::new(
+            Code::ReviewMissing,
+            id.as_str(),
+            "land merges only the head its reviews read (37, design change 3)",
+            format!(
+                "the head moved to {}; dispatch a worker to run `bp pr {id}`; then its review, then bp land {id}",
+                now.head_ref_oid
+            ),
+        ),
+        _ => e,
+    })?;
+    let now = gh.pr(n)?;
+    if merged(&now) && now.head_ref_oid == head {
+        return Ok(());
+    }
+    Err(Refusal::failed(
+        format!("gh pr merge {n}"),
+        format!(
+            "gh exited 0, but the forge reads pull request {n} as {} at {}: a merge queue or auto-merge holds it, and \
+             land removed nothing; once the forge merges it, rerun bp land {id}",
+            now.state.as_deref().unwrap_or("OPEN"),
+            now.head_ref_oid
+        ),
+    ))
+}
+
 /// `head_behind_base` unless `head` holds origin's `target` as last fetched: the forge merges no head behind its base
 /// (34, design change 5). The fix rebases the branch's own commits: those past the claim's base while the head holds
 /// it, else, as for a layer `land` moved, those past the point where the head leaves the base. That point is too low
 /// when the layer below was rewritten twice after this head left the claim's base: the rebase then replays the lower
 /// layer's older commits too, which git drops when their patches match and which conflict when they do not. Recording
 /// the base at each restack and each passing `pr` would close it.
-fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
+/// `land` names the same rebase as the worker's act, which the session dispatches (review of #100, C3).
+fn holds_base(c: &Claimed, id: &Id, head: &str, land: bool) -> Result<(), Refusal> {
     let tip = git(&c.top, &["rev-parse", &format!("refs/remotes/origin/{}", c.target)])?;
     let fork = git(&c.top, &["merge-base", &tip, head])?;
     if fork == tip {
@@ -312,15 +379,18 @@ fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
     }
     let own = |from: &String| git(&c.top, &["merge-base", "--is-ancestor", from, head]).is_ok();
     let from = c.from.clone().filter(own).unwrap_or(fork);
+    let (t, w) = (&c.target, c.worktree.display());
+    let step = format!("git -C {w} rebase --onto origin/{t} {from}, resolve any conflict, then bp pr {id}");
+    let fix = if land {
+        format!("{head} lacks origin/{t} at {tip}; dispatch a worker to run {step}; then bp land {id}")
+    } else {
+        format!("{head} lacks origin/{t} at {tip}; {step}")
+    };
     Err(Refusal::new(
         Code::HeadBehindBase,
         id.as_str(),
         "a head lands only when it holds origin's base branch: the forge merges no head behind it (34, design change 5)",
-        format!(
-            "{head} lacks origin/{t} at {tip}; git -C {w} rebase --onto origin/{t} {from}, resolve any conflict, then bp pr {id}",
-            t = c.target,
-            w = c.worktree.display()
-        ),
+        fix,
     ))
 }
 

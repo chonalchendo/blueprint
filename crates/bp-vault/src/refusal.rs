@@ -58,6 +58,8 @@ crate::closed_enum! {
         RiskFileInvalid = "risk_file_invalid",
         CheckVacuous = "check_vacuous",
         FindingsOpen = "findings_open",
+        BaseUnconfirmed = "base_unconfirmed",
+        ClaimLost = "claim_lost",
     }
 }
 

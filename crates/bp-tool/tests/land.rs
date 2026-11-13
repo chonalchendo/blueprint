@@ -18,14 +18,23 @@ const M: &str = "projects/bp/milestones/m";
 const S: &str = "projects/bp/designs/system";
 
 /// The vault, and a directory holding `origin.git`, its clone `code` and the fake `bin/gh`. The fake answers
-/// `api graphql` with origin's master as the default branch, at the sha `default-oid` names if any, and logs it, `pr list --head <project>/<slug>` from `prs-<slug>.json`
-/// else `prs.json`, `pr view`
-/// with the one row of `prs.json`, `pr create` with a url, and logs `pr edit` and `pr merge`; it fails when a git
-/// location variable reaches it; a merge pushes the commit
-/// that `squash` names, if any, to origin's master, as the forge's squash merge does, then runs `on-merge`, if any. It keeps the body in `body` and prints it as JSON with CRLF line ends, as a forge may
+/// `api graphql` with origin's master as the default branch, at the sha `default-oid` names if any, and logs it, or
+/// fails while `graphql-fail` exists; `pr
+/// list --head <project>/<slug>` from `prs-<slug>.json`, else `prs.json`; `pr view <n>` with the row of either file
+/// that holds pull request `n`. A row with no `baseRefOid` reads origin's sha of its base branch now. It answers `pr
+/// create` with a url and logs `pr edit` and `pr merge`; it fails when a git location variable reaches it. A merge,
+/// unless `merge-noop` exists, pushes the commit that `squash` names, if any, else the head's tree on master, to
+/// origin's master, as the forge's squash merge does, marks the row `MERGED` with that commit as its merge commit,
+/// then runs `on-merge`, if any. `pr list`
+/// runs `on-list` first, if any. It keeps the body in `body` and prints it as JSON with CRLF line ends, as a forge may
 /// store it, escaping only those: a body holds no quote. The vault holds [`ISSUE`], with one block, under [`M`], with
 /// none, and [`BARE`], with none.
 fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
+    setup_under("approved")
+}
+
+/// [`setup`], with [`M`] at `status`.
+fn setup_under(status: &str) -> (tempfile::TempDir, tempfile::TempDir) {
     let t = tempfile::tempdir().unwrap();
     let origin = t.path().join("origin.git");
     git(t.path(), &["init", "-q", "--bare", "-b", "master", "origin.git"]);
@@ -44,13 +53,37 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
     let fake = format!(
         r#"#!/bin/sh
 ! env | grep -q '^GIT_\(DIR\|WORK_TREE\|INDEX_FILE\)=' || {{ echo 'a git location variable reached gh' >&2; exit 7; }}
+row() {{ grep -l "\"number\":$1[,}}]" '{t}'/prs*.json 2>/dev/null | head -1; }}
+show() {{
+  if grep -q '"baseRefOid"' "$1"; then cat "$1"; return; fi
+  b=$(sed -n 's/.*"baseRefName":"\([^"]*\)".*/\1/p' "$1")
+  sed "s/^\[{{/[{{\"baseRefOid\":\"$(git -C '{t}/origin.git' rev-parse -q --verify "refs/heads/$b")\",/" "$1"
+}}
 case "$1 $2" in
-  "api graphql") echo "$*" >> '{t}/graphql'; printf '{{"data":{{"repository":{{"defaultBranchRef":{{"name":"master","target":{{"oid":"%s"}}}}}}}}}}' "$(cat '{t}/default-oid' 2>/dev/null || git -C '{t}/origin.git' rev-parse master)" ;;
-  "pr list") cat "{t}/prs-$(basename "$4").json" 2>/dev/null || cat '{t}/prs.json' 2>/dev/null || echo '[]' ;;
+  "api graphql")
+    echo "$*" >> '{t}/graphql'; [ ! -f '{t}/graphql-fail' ] || {{ echo 'HTTP 502' >&2; exit 1; }}
+    oid=$(cat '{t}/default-oid' 2>/dev/null || git -C '{t}/origin.git' rev-parse master)
+    printf '{{"data":{{"repository":{{"defaultBranchRef":{{"name":"master","target":{{"oid":"%s"}}}}}}}}}}' "$oid" ;;
+  "pr list")
+    [ ! -f '{t}/on-list' ] || sh '{t}/on-list'
+    f="{t}/prs-$(basename "$4").json"; [ -f "$f" ] || f='{t}/prs.json'
+    if [ -f "$f" ]; then show "$f"; else echo '[]'; fi ;;
   "pr create") echo "$*" > '{t}/created'; shift 9; printf '%s' "$1" > '{t}/body'; echo 'https://forge.invalid/o/r/pull/1' ;;
   "pr edit") if [ "$4" = --body ]; then printf '%s' "$5" > '{t}/body'; else echo "$*" > '{t}/edited'; fi ;;
-  "pr view") if [ "$5" = body ]; then printf '{{"body":"'; awk 'BEGIN {{ ORS = "\\r\\n" }} {{ print }}' '{t}/body'; printf '"}}'; else sed 's/^\[//; s/\]$//' '{t}/prs.json'; fi ;;
-  "pr merge") echo "$*" > '{t}/merged'; [ ! -f '{t}/squash' ] || git -C '{t}/code' push -q origin "$(cat '{t}/squash')":refs/heads/master; [ ! -f '{t}/on-merge' ] || sh '{t}/on-merge' ;;
+  "pr view")
+    if [ "$5" != body ]; then show "$(row "$3")" | sed 's/^\[//; s/\]$//'; exit 0; fi
+    printf '{{"body":"'; awk 'BEGIN {{ ORS = "\\r\\n" }} {{ print }}' '{t}/body'; printf '"}}' ;;
+  "pr merge")
+    echo "$*" > '{t}/merged'; [ ! -f '{t}/merge-noop' ] || exit 0
+    if [ -f '{t}/squash' ]; then git -C '{t}/code' push -q origin "$(cat '{t}/squash')":refs/heads/master
+    else
+      squash=$(git -C '{t}/origin.git' -c user.name=f -c user.email=f@f commit-tree "$6^{{tree}}" -p master -m squash)
+      git -C '{t}/origin.git' update-ref refs/heads/master "$squash"
+    fi
+    f=$(row "$3"); m=$(git -C '{t}/origin.git' rev-parse master)
+    merged="s/\"state\":\"OPEN\"/\"state\":\"MERGED\"/; s/^\[{{/[{{\"mergeCommit\":{{\"oid\":\"$m\"}},/"
+    sed "$merged" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    [ ! -f '{t}/on-merge' ] || sh '{t}/on-merge' ;;
   *) exit 9 ;;
 esac
 "#,
@@ -65,18 +98,45 @@ esac
         ("projects/bp/project.md", &project),
         (&format!("{ISSUE}.md"), issue),
         (&format!("{BARE}.md"), "---\nkind: issue\ntitle: Bare\nstatus: open\n---\n\nNo block.\n"),
-        (&format!("{M}.md"), "---\nkind: milestone\ntitle: M\nstatus: approved\n---\n\n## Finish line\n"),
+        (&format!("{M}.md"), &format!("---\nkind: milestone\ntitle: M\nstatus: {status}\n---\n\n## Finish line\n")),
         (&format!("{S}.md"), "---\nkind: design\ntitle: S\nstatus: active\n---\n\n## One\n\nOld.\n"),
     ]);
     (v, t)
 }
 
-/// `bp <args> --json` from the clone, with the vault named and the fake first on `PATH`.
+/// `bp <args> --json` from the clone, with the vault named and the fake first on `PATH`. Each fix and next step of a
+/// `land` is one the session can follow ([`session_can_follow`]).
 fn bp(v: &Path, t: &Path, env: &[(&str, &str)], args: &[&str]) -> (Option<i32>, Value) {
     let path = format!("{}:{}", t.join("bin").display(), std::env::var("PATH").unwrap());
     let vault = v.display().to_string();
     let base = [("BP_VAULT", vault.as_str()), ("PATH", path.as_str())];
-    common::bp_env(&t.join("code"), &base.into_iter().chain(env.iter().copied()).collect::<Vec<_>>(), args)
+    let out = common::bp_env(&t.join("code"), &base.into_iter().chain(env.iter().copied()).collect::<Vec<_>>(), args);
+    if args.first() == Some(&"land") {
+        let next = out.1["next"].as_array().into_iter().flatten().filter_map(Value::as_str);
+        out.1["fix"].as_str().into_iter().chain(next).for_each(session_can_follow);
+    }
+    out
+}
+
+/// The session runs `land` (37, design change 3), so each `bp <verb>` that a fix of `land` names and the session's
+/// role refuses sits in a clause that dispatches a worker or names the human's act: a session that follows the fix
+/// never meets `verb_outside_role` (review of #100, C3).
+fn session_can_follow(fix: &str) {
+    let verbs = bp_operation::Role::Session.verbs().unwrap();
+    for (at, _) in fix.match_indices("bp ") {
+        if at > 0 && !matches!(fix.as_bytes()[at - 1], b' ' | b'`' | b'(') {
+            continue;
+        }
+        let verb = fix[at + 3..].split(|c: char| !c.is_ascii_alphanumeric() && c != '-').next().unwrap_or_default();
+        if verbs.contains(&verb) || bp_operation::READ_VERBS.contains(&verb) {
+            continue;
+        }
+        let clause = fix[..at].rsplit(';').next().unwrap_or_default();
+        assert!(
+            clause.contains("dispatch a worker") || clause.contains("the human"),
+            "the session cannot run bp {verb}, and the fix names no dispatch: {fix}"
+        );
+    }
 }
 
 /// Pull request 1 at `head`, with `checks` conclusions, as `gh pr list` prints it.
@@ -85,14 +145,32 @@ fn forge(t: &Path, head: &str, checks: &[&str]) {
 }
 
 /// [`forge`], with `over` replacing fields: a base, a number, a state or a forge review that `land` reads as nothing.
+/// A `MERGED` row with no merge commit gets one: the head's tree on origin's master, pushed there once.
 fn forge_as(t: &Path, head: &str, checks: &[&str], over: &Value) {
     let checks: Vec<Value> = checks.iter().map(|c| json!({ "conclusion": c })).collect();
     let mut pr = json!({
         "number": 1, "state": "OPEN", "baseRefName": "master",
         "headRefName": "bp/a", "headRefOid": head, "statusCheckRollup": checks,
     });
+    if over["state"] == "MERGED" {
+        pr["mergeCommit"] = json!({ "oid": merged_at(t, head) });
+    }
     pr.as_object_mut().unwrap().extend(over.as_object().unwrap().clone());
     std::fs::write(t.join("prs.json"), json!([pr]).to_string()).unwrap();
+}
+
+/// The forge's squash of `head` onto origin's master, pushed there the first time and read from `merge-oid` after.
+fn merged_at(t: &Path, head: &str) -> String {
+    if let Ok(oid) = std::fs::read_to_string(t.join("merge-oid")) {
+        return oid;
+    }
+    let code = t.join("code");
+    git(&code, &["fetch", "-q", "origin"]);
+    let tree = format!("{head}^{{tree}}");
+    let oid = git(&code, &["commit-tree", &tree, "-p", "origin/master", "-m", "squash"]).trim().to_string();
+    git(&code, &["push", "-q", "origin", &format!("{oid}:refs/heads/master")]);
+    std::fs::write(t.join("merge-oid"), &oid).unwrap();
+    oid
 }
 
 fn commit(w: &Path, args: &[&str], message: &str) -> String {
@@ -354,10 +432,11 @@ fn land_gates_a_merged_pull_request_and_keeps_a_branch_with_unmerged_commits() {
     let (v, t) = (v.path(), t.path());
     let (w, h) = opened(v, t, &[]);
     let land = || bp(v, t, &[], &["land", ISSUE]);
+    git(&t.join("code"), &["push", "-q", "origin", "master:refs/heads/side"]);
     forge_as(t, &h, &["SUCCESS"], &json!({ "baseRefName": "side" }));
     let (code, out) = land();
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("base_mismatch")), "{out}");
-    assert!(out["fix"].as_str().unwrap().contains(&format!("bp pr {ISSUE} retargets it to master")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains(&format!("`bp pr {ISSUE}`, which retargets it to master")), "{out}");
     // Merged outside `land` with no review: the gates hold on a merged head too, and nothing is recorded.
     forge_as(t, &h, &["SUCCESS"], &json!({ "state": "MERGED" }));
     assert_eq!(land().1["code"], "review_missing");
@@ -484,7 +563,7 @@ fn a_check_change_after_the_reviews_needs_a_new_head() {
     git(v, &["commit", "-qam", "more"]);
     let (code, out) = land();
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("checks_changed")), "{out}");
-    assert!(out["fix"].as_str().unwrap().contains(&format!("bp pr {ISSUE} pushes a commit")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains(&format!("`bp pr {ISSUE}`, which pushes a commit")), "{out}");
     // A delta the issue caused adds a block too.
     let body = v.join(".bp/body.md");
     std::fs::write(&body, "## One\n\nOld.\n\n~~~check shell {name=dz expect=0}\ntrue\n~~~\n").unwrap();
@@ -604,13 +683,15 @@ fn a_head_behind_its_base_refuses_until_the_rebase() {
     git(&code, &["push", "-q", "origin", "master"]);
     forge(t, &h, &["SUCCESS"]);
     lenses(v, t, &h, &MEDIUM);
-    let fix = format!(
-        "{h} lacks origin/master at {tip}; git -C {} rebase --onto origin/master {from}, resolve any conflict, then bp pr {ISSUE}",
-        w.display()
-    );
+    let step =
+        format!("git -C {} rebase --onto origin/master {from}, resolve any conflict, then bp pr {ISSUE}", w.display());
+    // The worker runs `pr` and takes the step; the session runs `land` and dispatches it (review of #100, C3).
+    let fix = format!("{h} lacks origin/master at {tip}; {step}");
+    let dispatched = format!("{h} lacks origin/master at {tip}; dispatch a worker to run {step}; then bp land {ISSUE}");
     for args in [&["pr", ISSUE][..], &["land", ISSUE, "--dry-run"], &["land", ISSUE]] {
         let (code, out) = bp(v, t, &[], args);
         let got = (code, out["code"].as_str(), out["fix"].as_str());
+        let fix = if args[0] == "pr" { &fix } else { &dispatched };
         assert_eq!(got, (Some(2), Some("head_behind_base"), Some(fix.as_str())), "{args:?}: {out}");
     }
     assert!(!t.join("merged").exists(), "no refusal merges");
@@ -681,7 +762,7 @@ fn a_stranded_layer_carries_its_rebase_on_its_claim_until_pr_passes() {
     assert_eq!((status, &out["stranded"]), (Some(0), &json!([B])), "{out}");
     let step =
         format!("in {}: git rebase --onto origin/master {ha}, resolve the conflict, then bp pr {B}", wb.display());
-    assert_eq!(out["next"][0], step.as_str(), "{out}");
+    assert_eq!(out["next"][0], format!("dispatch a worker for {B}: {step}").as_str(), "{out}");
     let text = || std::fs::read_to_string(v.join(format!("{claim}.md"))).unwrap();
     assert!(text().ends_with(&format!("\n\n## Next\n\n{step}\n")), "{}", text());
     for action in ["complete", "respond"] {
@@ -784,7 +865,8 @@ fn a_branch_reset_to_a_reviewed_head_needs_a_verify_review() {
     assert_eq!(review(v, t, &fixed, &["round=2", "lens=verify", "mode=verify"], &[]).0, Some(0));
     assert_eq!(intent(v), (json!("needs-landing"), json!("")), "the verify round cleared the error at the fix");
     git(&work, &["reset", "-q", "--hard", &first]);
-    // Until `pr` refreshes it, the forge's last view names the old head, and the refusal says so (review of #98, row 37).
+    // Until `pr` refreshes it, the forge's last view names the old head, and the refusal says so (review of #98, row
+    // 37).
     let (code, got) = review(v, t, &first, &["round=3", "lens=verify", "mode=verify"], &[]);
     assert_eq!((code, got["code"].as_str()), (Some(2), Some("schema_invalid")), "{got}");
     assert!(got["fix"].as_str().unwrap().contains(&format!("the forge's last view names {fixed}")), "{got}");
@@ -795,7 +877,8 @@ fn a_branch_reset_to_a_reviewed_head_needs_a_verify_review() {
         review(v, t, &first, &["round=3", "lens=verify", "mode=verify"], &["| error | hello.txt:1 | Still wrong. |"]);
     assert_eq!(code, Some(0), "{got}");
     // Round 3 is past medium's cap, so the error raises the issue to high, at its cap: the human decides.
-    assert_eq!(intent(v), (json!("blocked"), json!("round cap: the human decides")));
+    let cap = format!("round cap: the human abandons the issue, or accepts the open rows: bp approve {ISSUE}");
+    assert_eq!(intent(v), (json!("blocked"), json!(cap)));
     // The head that the reset left behind is no head of the work (row 33).
     let (code, got) = review(v, t, &fixed, &["round=3", "lens=verify", "mode=verify"], &[]);
     assert_eq!((code, got["code"].as_str()), (Some(2), Some("finding_invalid")), "{got}");
@@ -1207,6 +1290,8 @@ const HIGH: [&str; 4] = ["conformance", "failure-paths", "tests-and-checks", "se
 /// Commits `.bp/risk.yml` holding `text` on origin's master.
 fn rules(t: &Path, text: &str) {
     let code = t.join("code");
+    git(&code, &["fetch", "-q", "origin"]);
+    git(&code, &["reset", "-q", "--hard", "origin/master"]);
     std::fs::create_dir_all(code.join(".bp")).unwrap();
     std::fs::write(code.join(".bp/risk.yml"), text).unwrap();
     commit(&code, &["add", ".bp/risk.yml"], "risk");
@@ -1244,12 +1329,22 @@ fn label(v: &Path, line: &str) {
     git(v, &["commit", "-qam", "by hand"]);
 }
 
+/// [`setup`] with [`ISSUE`] declared low while [`M`] is planned, then [`M`] approved: the one way a label lowers
+/// (37, design change 1).
+fn setup_low() -> (tempfile::TempDir, tempfile::TempDir) {
+    let (v, t) = setup_under("planned");
+    assert_eq!(common::bp(v.path(), &["set", ISSUE, "risk", "low"]).0, Some(0));
+    let (code, out) = common::bp(v.path(), &["transition", M, "approved"]);
+    assert_eq!(code, Some(0), "{out}");
+    (v, t)
+}
+
 /// `land` gates by level (37, design change 3): a low or a medium head lands on green checks, a passing run of each
 /// block and the reviews of its round. The session runs it; no human act, and no key is read.
 #[test]
 fn land_low_and_medium_need_no_approval() {
     for (level, lens) in [("low", &["conformance"][..]), ("medium", &MEDIUM[..])] {
-        let (v, t) = setup();
+        let (v, t) = if level == "low" { setup_low() } else { setup() };
         let (v, t) = (v.path(), t.path());
         // A signer the forge confirms, so a land that read it would ask the forge's default head.
         signer(t);
@@ -1257,9 +1352,6 @@ fn land_low_and_medium_need_no_approval() {
         let low = if level == "low" { "low:\n  - hello.txt\n" } else { "" };
         rules(t, &format!("{low}signer: {public}"));
         let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
-        if level == "low" {
-            label(v, "risk: low");
-        }
         let w = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
         std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
         let h = commit(&w, &["add", "hello.txt"], "hello");
@@ -1272,6 +1364,48 @@ fn land_low_and_medium_need_no_approval() {
         assert!(t.join("merged").exists() && !v.join(format!("{ISSUE}/approvals")).exists(), "{level}");
         assert!(!t.join("graphql").exists(), "{level}: land reads no signer below high");
     }
+}
+
+/// A label written by hand after the milestone's approval and the claim lowers nothing (37, design change 1; review of
+/// #100, C6 and T1): `land`, the intents and `bp risk` read the higher label it replaced, so medium to low still needs
+/// both medium lenses, and high to medium still needs the third lens and the human's signed approval.
+#[test]
+fn a_label_lowered_by_hand_reads_as_the_one_it_replaced() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    rules(t, "low:\n  - hello.txt\n");
+    let (_, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &["conformance"]);
+    assert_eq!(common::bp(v, &["set", ISSUE, "risk", "low"]).1["code"], "not_a_label");
+    label(v, "risk: low");
+    let (_, risk) = bp(v, t, &[], &["risk", ISSUE]);
+    assert_eq!(
+        (&risk["level"], &risk["declared"], &risk["computed"]),
+        (&json!("medium"), &json!("medium"), &json!("low"))
+    );
+    assert_eq!(intent(v), (json!("needs-review"), json!("round 1: missing lenses: failure-paths")));
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("review_missing")), "{out}");
+
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    signer(t);
+    let public = std::fs::read_to_string(t.join("human.pub")).unwrap();
+    rules(t, &format!("signer: {public}"));
+    let (_, h) = opened(v, t, &[]);
+    assert_eq!(common::bp(v, &["set", ISSUE, "risk", "high"]).0, Some(0), "a label rises at any time");
+    pushed(v, t, &h);
+    lenses(v, t, &h, &MEDIUM);
+    let path = v.join(format!("{ISSUE}.md"));
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("risk: high\n", "")).unwrap();
+    git(v, &["commit", "-qam", "by hand"]);
+    assert_eq!(bp(v, t, &[], &["risk", ISSUE]).1["level"], "high");
+    assert_eq!(intent(v), (json!("needs-review"), json!("round 1: missing lenses: tests-and-checks")));
+    lenses(v, t, &h, &["tests-and-checks"]);
+    assert_eq!(intent(v), (json!("needs-approval"), json!(format!("the human runs bp approve {ISSUE} in a terminal"))));
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")], &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("approval_missing")), "{out}");
 }
 
 /// A high head lands only on the human's signed approval of that head, of that pull request, into that base (37,
@@ -1344,6 +1478,19 @@ fn land_high_refuses_without_signed_review() {
     let dry = || bp(v, t, &[("SSH_AUTH_SOCK", "")], &["land", ISSUE, "--dry-run"]);
     let (code, out) = dry();
     assert_eq!((code, &out["level"]), (Some(0), &json!("high")), "{out}");
+    // A lowering counts at land only for the forge's pull request and base, signed, by the signer the forge confirms
+    // (review of #100, T2). One signed for pull request 2 lowers nothing; edited to name 1, it no longer verifies.
+    let lower = || bp(v, t, &[("SSH_AUTH_SOCK", "")], &["lower", ISSUE, "medium", "--reason", "docs", "--key", &human]);
+    forge_as(t, &h2, &["SUCCESS"], &json!({ "number": 2 }));
+    assert_eq!(lower().0, Some(0));
+    forge(t, &h2, &["SUCCESS"]);
+    assert_eq!(bp(v, t, &[], &["risk", ISSUE]).1["level"], "medium", "bp risk reads the record's own pull request");
+    assert_eq!(dry().1["level"], "high", "a lowering of another pull request");
+    let lowering = std::fs::read_dir(v.join(format!("{ISSUE}/lowerings"))).unwrap().next().unwrap().unwrap().path();
+    let text = std::fs::read_to_string(&lowering).unwrap();
+    std::fs::write(&lowering, text.replace("pull_request: 2\n", "pull_request: 1\n")).unwrap();
+    git(v, &["commit", "-qam", "a forged lowering"]);
+    assert_eq!(dry().1["level"], "high", "a lowering edited to name the forge's pull request");
     // The human's signed lowering of this head counts at land: the head lands at medium.
     let (code, out) =
         bp(v, t, &[("SSH_AUTH_SOCK", "")], &["lower", ISSUE, "medium", "--reason", "docs", "--key", &human]);
@@ -1351,34 +1498,38 @@ fn land_high_refuses_without_signed_review() {
     let (_, out) = bp(v, t, &[], &["risk", ISSUE]);
     assert_eq!(out["level"], "medium", "bp risk reads the signed lowering of this head: {out}");
     assert!(out["reasons"].to_string().contains("the human's signed lowering of this head sets medium"), "{out}");
+    std::fs::write(t.join("default-oid"), "0".repeat(40)).unwrap();
+    assert_eq!(dry().1["code"], "signer_missing", "a lowering's signer counts only at the forge's default head");
+    std::fs::remove_file(t.join("default-oid")).unwrap();
     let (code, out) = bp(v, t, &[("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")], &["land", ISSUE]);
     let got = (code, out["status"].as_str(), out["level"].as_str());
     assert_eq!(got, (Some(0), Some("resolved"), Some("medium")), "{out}");
 }
 
 /// `land` judges the level of the head after its own fetch, and refuses one above the level `pr` recorded there (37,
-/// design change 1): a rule that changed on origin, or a run record edited by hand to read low.
+/// design change 1): a rule that changed on origin, or a run record edited by hand to read low. A merged pull request
+/// is judged by the rules at the base it merged into, its merge commit's first parent (review of #100, F8 and T4).
 #[test]
-fn land_refuses_a_level_that_rose_after_pr() {
-    let (v, t) = setup();
+fn land_refuses_a_level_that_rose() {
+    let (v, t) = setup_low();
     let (v, t) = (v.path(), t.path());
     let (_, h) = opened(v, t, &[]);
     pushed(v, t, &h);
-    // The agent edits each run and the label to read low: the intents read low and ask for one lens.
+    // The issue declares low; the agent edits each run to read low too: the intents read low and ask for one lens.
     let runs: Vec<_> = std::fs::read_dir(v.join(format!("{ISSUE}/runs"))).unwrap().map(|e| e.unwrap().path()).collect();
     let texts: Vec<String> = runs.iter().map(|r| std::fs::read_to_string(r).unwrap()).collect();
     for (run, text) in runs.iter().zip(&texts) {
         std::fs::write(run, text.replace("risk: medium\n", "risk: low\n")).unwrap();
     }
     git(v, &["commit", "-qam", "forged runs"]);
-    label(v, "risk: low");
     lenses(v, t, &h, &["conformance"]);
     assert_eq!(intent(v), (json!("needs-landing"), json!("")), "the intents read the records as they stand");
     let land = || bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
     let (code, out) = land();
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("evidence_stale")), "{out}");
     let fix = out["fix"].as_str().unwrap();
-    assert!(fix.starts_with(&format!("the level at {h} rose from low to medium since bp pr recorded it")), "{fix}");
+    assert!(fix.starts_with(&format!("the level at {h} rose from low to medium since pr recorded it")), "{fix}");
+
     // Origin's rules now read `hello.txt` high, after `pr` recorded medium.
     for (run, text) in runs.iter().zip(&texts) {
         std::fs::write(run, text).unwrap();
@@ -1390,6 +1541,17 @@ fn land_refuses_a_level_that_rose_after_pr() {
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("evidence_stale")), "{out}");
     assert!(out["fix"].as_str().unwrap().contains("rose from medium to high"), "{out}");
     assert!(!t.join("merged").exists(), "no refusal merges");
+    // Merged outside `land` onto those rules, the head is judged at the merge's base: a lost merge, not a landed one.
+    let before = commits(v);
+    forge_as(t, &h, &["SUCCESS"], &json!({ "state": "MERGED" }));
+    let (code, out) = land();
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("evidence_stale")), "{out}");
+    let lost = format!(
+        "pull request 1 is merged, so nothing can meet this now and nothing is recorded; the human reviews the merge, \
+         then bp release {ISSUE} --reason lost"
+    );
+    assert_eq!(out["fix"].as_str(), Some(lost.as_str()), "{out}");
+    assert_eq!(commits(v), before, "a merged head whose level rose is not recorded as landed");
 }
 
 /// A head that `pr` recorded high with no high path refuses when its diff now touches one: round one never read the
@@ -1419,7 +1581,7 @@ fn land_refuses_a_high_path_that_pr_did_not_record() {
 /// An open round holds the land: a finding with no disposition, then an error row that a decline does not clear (37,
 /// design changes 3 and 6).
 #[test]
-fn land_refuses_while_a_finding_is_open_or_an_error_row_holds() {
+fn land_refuses_an_open_round() {
     let (v, t) = setup();
     let (v, t) = (v.path(), t.path());
     let (_, h) = opened(v, t, &[]);
@@ -1443,9 +1605,249 @@ fn land_refuses_while_a_finding_is_open_or_an_error_row_holds() {
     assert_eq!(code, Some(0), "{answer}");
     let (code, out) = land();
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("findings_open")), "{out}");
-    assert!(out["fix"].as_str().unwrap().contains(" hold the land; fix each"), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains(" hold the land; dispatch a worker to fix each"), "{out}");
     let (intent, note) = intent(v);
     assert_eq!(intent, "blocked", "{note}");
     assert!(note.as_str().unwrap().ends_with("; the human decides"), "{note}");
     assert!(!t.join("merged").exists(), "no refusal merges");
+}
+
+/// Each refusal `land` can give, and each fix it names, is one the session can follow (review of #100, C3).
+#[test]
+fn every_land_fix_names_what_the_session_runs() {
+    use bp_change::intents::{Run, Unmet};
+    use bp_change::rounds::{Lens, Review, Row};
+    let id = bp_vault::Id::parse(ISSUE).unwrap();
+    let row = |state: &str| {
+        let pr = json!({ "number": 1, "headRefName": "bp/a", "headRefOid": "a".repeat(40), "baseRefName": "side",
+            "statusCheckRollup": [{ "conclusion": state }] });
+        serde_json::from_value::<bp_forge::PullRequest>(pr).unwrap()
+    };
+    let run = Run { id: format!("{ISSUE}/runs/r"), check: "hello".into(), ..Run::default() };
+    let review =
+        Review { id: "r".into(), head: "a".repeat(40), round: 1, lens: Lens::Conformance, rows: vec![Row::default()] };
+    for pr in [row("FAILURE"), row("")] {
+        for unmet in [
+            Unmet::Unmerged("projects/bp/issues/b"),
+            Unmet::Mismatch("master"),
+            Unmet::Checks,
+            Unmet::Failed(&run),
+            Unmet::Evidence("hello"),
+            Unmet::Lenses { round: 1, missing: vec![Lens::Verify] },
+            Unmet::Unanswered(vec![(&review, vec![1])]),
+            Unmet::Holding(vec![(&review, vec![1])]),
+            Unmet::Approval,
+            Unmet::ChecksChanged,
+        ] {
+            session_can_follow(&bp_read::landing::refusal(&unmet, &id, &pr).fix);
+        }
+    }
+    session_can_follow(&bp_read::landing::no_pull_request(&id).fix);
+    session_can_follow(&bp_read::landing::after_merge(1, &id));
+    for status in ["open", "abandoned", "in-progress", "resolved"] {
+        session_can_follow(&bp_read::landing::unclaimed(&id, Some(status)));
+    }
+}
+
+/// `land` judges the level by the base the forge names, once origin names the same sha (37, design change 1; review
+/// of #100, C2). A `url.<x>.insteadOf` rule that points origin at a copy whose master drops the high pattern makes
+/// `pr` record medium; `land` refuses at every level, before it judges one or reads a key.
+#[test]
+fn land_refuses_a_base_that_origin_and_the_forge_name_apart() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    rules(t, "high:\n  - hello.txt\n");
+    let code = t.join("code");
+    let copy = t.join("copy.git");
+    git(t, &["clone", "-q", "--bare", "origin.git", "copy.git"]);
+    std::fs::remove_file(code.join(".bp/risk.yml")).unwrap();
+    commit(&code, &["add", "-A"], "no rules");
+    git(&code, &["push", "-q", &copy.display().to_string(), "HEAD:refs/heads/master"]);
+    git(&code, &["reset", "-q", "--hard", "HEAD~1"]);
+    let rewrite = format!("url.{}.insteadOf", copy.display());
+    git(&code, &["config", &rewrite, &t.join("origin.git").display().to_string()]);
+    let (_, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &MEDIUM);
+    assert_eq!(bp(v, t, &[], &["risk", ISSUE]).1["computed"], "medium", "origin answers the copy");
+    assert_eq!(intent(v), (json!("needs-landing"), json!("")));
+    for args in [&["land", ISSUE, "--dry-run"][..], &["land", ISSUE]] {
+        let (code, out) = bp(v, t, &[("BP_ROLE", "session")], args);
+        assert_eq!((code, out["code"].as_str()), (Some(2), Some("base_unconfirmed")), "{out}");
+    }
+    assert!(!t.join("merged").exists() && !t.join("graphql").exists(), "no merge, and no key read");
+}
+
+/// A forge row `land` cannot trust refuses before any git call reads it (review of #100, F4 and F5): a head that is
+/// not a full sha, as one that starts with `-` would be a git option, and an open pull request with no base branch.
+#[test]
+fn land_refuses_a_forge_row_it_cannot_read() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &MEDIUM);
+    let pwn = t.join("pwn");
+    forge_as(t, &format!("--output={}", pwn.display()), &["SUCCESS"], &json!({}));
+    let (code, out) = bp(v, t, &[], &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    assert!(!pwn.exists(), "no git call read the head");
+    for base in [json!(null), json!("")] {
+        forge_as(t, &h, &["SUCCESS"], &json!({ "baseRefName": base }));
+        let (code, out) = bp(v, t, &[], &["land", ISSUE]);
+        assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{base}: {out}");
+        assert!(out["fix"].as_str().unwrap().contains("names no base branch"), "{out}");
+    }
+    assert!(!t.join("merged").exists());
+}
+
+/// `gh pr merge` exits 0 when a merge queue takes the pull request and merges nothing: `land` reads the forge again
+/// and removes nothing until it reads `MERGED` at the head (review of #100, F1). The clock refuses before the merge,
+/// dry run too (F6).
+#[test]
+fn land_removes_nothing_until_the_forge_reads_merged() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &MEDIUM);
+    for args in [&["land", ISSUE, "--dry-run"][..], &["land", ISSUE]] {
+        let (code, out) = bp(v, t, &[("BP_NOW", "never")], args);
+        assert_eq!((code, out["code"].as_str()), (Some(4), Some("usage")), "{out}");
+    }
+    assert!(!t.join("merged").exists(), "a clock that refuses refuses before the merge");
+    std::fs::write(t.join("merge-noop"), "").unwrap();
+    let before = commits(v);
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains("a merge queue or auto-merge holds it"), "{out}");
+    assert!(t.join("merged").exists() && w.is_dir(), "the worktree stays");
+    assert_eq!(git(&t.join("origin.git"), &["rev-parse", "bp/a"]).trim(), h, "origin's branch stays");
+    assert_eq!(commits(v), before);
+    std::fs::remove_file(t.join("merge-noop")).unwrap();
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!((code, out["status"].as_str()), (Some(0), Some("resolved")), "{out}");
+}
+
+/// The claim is read again just before the merge: one released while `land` read the gates refuses `claim_lost`, and
+/// nothing merges (review of #100, F10).
+#[test]
+fn land_refuses_a_claim_released_while_it_reads() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &MEDIUM);
+    let release = format!(
+        "rm '{}'; '{}' release {ISSUE} --reason lost --json > /dev/null\n",
+        t.join("on-list").display(),
+        env!("CARGO_BIN_EXE_bp")
+    );
+    std::fs::write(t.join("on-list"), release).unwrap();
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("claim_lost")), "{out}");
+    assert!(!t.join("merged").exists() && w.is_dir(), "nothing merged, nothing removed");
+}
+
+/// A rerun of a land that stopped after the merge: a tool that cannot run keeps its own code and fix, as the rerun
+/// finishes the land, and only a gate's refusal reads as a lost merge (review of #100, F2). A broken `ssh-keygen`
+/// refuses `could_not_run`, not as a signature that does not verify (F3).
+#[test]
+fn a_rerun_after_the_merge_keeps_a_tool_failure_s_own_fix() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let human = signer(t);
+    let (_, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &HIGH);
+    assert_eq!(bp(v, t, &[("SSH_AUTH_SOCK", "")], &["approve", ISSUE, "--key", &human]).0, Some(0));
+    forge_as(t, &h, &["SUCCESS"], &json!({ "state": "MERGED" }));
+    let land = || bp(v, t, &[("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")], &["land", ISSUE]);
+    std::fs::write(t.join("graphql-fail"), "").unwrap();
+    let (code, out) = land();
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    assert!(!out["fix"].as_str().unwrap().contains("--reason lost"), "a failed call is no lost merge: {out}");
+    std::fs::remove_file(t.join("graphql-fail")).unwrap();
+    let keygen = t.join("bin/ssh-keygen");
+    std::fs::write(&keygen, "#!/bin/sh\nexit 255\n").unwrap();
+    std::fs::set_permissions(&keygen, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let (code, out) = land();
+    assert_eq!(
+        (code, out["code"].as_str(), out["subject"].as_str()),
+        (Some(1), Some("could_not_run"), Some("ssh-keygen -Y verify")),
+        "{out}"
+    );
+    std::fs::remove_file(&keygen).unwrap();
+    let (code, out) = land();
+    assert_eq!(
+        (code, out["status"].as_str(), out["level"].as_str()),
+        (Some(0), Some("resolved"), Some("high")),
+        "{out}"
+    );
+    assert!(!t.join("merged").exists(), "a merged pull request is not merged again");
+}
+
+/// A land killed inside its vault commit leaves `resolved` on disk with the journal; the rerun puts the pre-images
+/// back and writes the land commit (review of #100, F9).
+#[test]
+fn a_rerun_after_a_kill_in_the_vault_commit_writes_the_land() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &MEDIUM);
+    let marker = t.join("kill");
+    let hook = format!(
+        "#!/bin/sh\n[ -f '{m}' ] || exit 0\nrm '{m}'\nkill -9 \"$(ps -o ppid= -p \"$PPID\" | tr -d ' ')\"\nexit 1\n",
+        m = marker.display()
+    );
+    let hooks = v.join(".git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(hooks.join("pre-commit"), hook).unwrap();
+    std::fs::set_permissions(hooks.join("pre-commit"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::write(&marker, "").unwrap();
+    let before = commits(v);
+    let (code, _) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!(code, None, "killed");
+    assert_eq!(commits(v), before);
+    assert!(std::fs::read_to_string(v.join(format!("{ISSUE}.md"))).unwrap().contains("status: resolved"));
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!((code, out["status"].as_str()), (Some(0), Some("resolved")), "{out}");
+    assert_eq!(git(v, &["log", "-1", "--format=%s"]).trim(), format!("land {ISSUE}"));
+    assert_eq!(git(v, &["status", "--porcelain"]), "");
+}
+
+/// The dry run tests a layer above as the land does before its merge: a stranded layer's claim with an edit not
+/// committed refuses, and nothing merges (review of #100, F7).
+#[test]
+fn a_dry_run_tests_the_claim_of_each_layer_above() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let Stack { claim, .. } = stacked(v, t);
+    let path = v.join(format!("{claim}.md"));
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap() + "\nmore\n").unwrap();
+    for args in [&["land", ISSUE, "--dry-run"][..], &["land", ISSUE]] {
+        let (code, out) = bp(v, t, &[], args);
+        assert_eq!((code, out["code"].as_str()), (Some(2), Some("path_dirty")), "{out}");
+    }
+    assert!(!t.join("merged").exists());
+}
+
+/// A merged head is judged by the rules at the base it merged into, its merge commit's first parent, so a rule pushed
+/// after the merge does not strand the rerun of a land that stopped there (review of #100, F8).
+#[test]
+fn a_merged_head_is_judged_by_the_rules_it_merged_onto() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &MEDIUM);
+    forge_as(t, &h, &["SUCCESS"], &json!({ "state": "MERGED" }));
+    rules(t, "high:\n  - hello.txt\n");
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!(
+        (code, out["status"].as_str(), out["level"].as_str()),
+        (Some(0), Some("resolved"), Some("medium")),
+        "{out}"
+    );
 }

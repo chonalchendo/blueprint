@@ -1,6 +1,7 @@
 //! `bp risk <issue>`: the risk level in force and the rules that set it (37, design changes 1 and 2). The level is the
-//! highest of the issue's `risk` label (absent reads `medium`), the level the claim's diff computes, each review that
-//! holds a `risk` row as first committed, and a pending delta the issue caused; then the round caps (design change 6).
+//! highest of the issue's declared level (its `risk` label, absent reads `medium`; a label lowered by hand once locked
+//! reads as the one it replaced), the level the claim's diff computes, each review that holds a `risk` row as first
+//! committed, and a pending delta the issue caused; then the round caps (design change 6).
 //! The diff is the higher of the local branch and the sha that origin's server names for the branch, against the sha
 //! it names for the base branch the pull request targets; each sha is fetched. The rules are `.bp/risk.yml` on that
 //! base commit, so a branch that edits them is judged by the base's rules, and its edit is high. A lowering that the
@@ -55,7 +56,7 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
             "bp list issue",
         ));
     }
-    let declared = match header.get("risk") {
+    let label = match header.get("risk") {
         None | Some(Value::Null) => None,
         Some(v) => Some(v.as_str().and_then(|s| s.parse().ok()).ok_or_else(|| {
             Refusal::new(
@@ -66,6 +67,8 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
             )
         })?),
     };
+    // A label lowered by hand once it was locked reads as the higher one it replaced (37, design change 1).
+    let declared = bp_read::inputs::declared(&vault, &index, id.as_str())?;
     // A pending delta is vault data: it raises the level with or without a clone in view (37, design change 1).
     let delta = !bp_read::carried_deltas(&index, &id)?.is_empty();
     // Each review counts as its first commit wrote it, so an edit cannot drop a raise or an error row (37, design
@@ -84,6 +87,14 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
     let mut reasons = Vec::new();
     if let Some(l) = lowered {
         reasons.push(format!("the human's signed lowering of this head sets {l}"));
+    }
+    if declared != label {
+        let label = label.map_or("no risk label".into(), |l| format!("risk: {l}"));
+        reasons.push(format!(
+            "the issue reads {label}, written after its milestone's approval or its claim: it declares the {} it \
+             held before",
+            declared.unwrap_or(Level::Medium)
+        ));
     }
     match declared {
         Some(d) if d == level => reasons.push(format!("the issue declares {d}")),
@@ -164,6 +175,11 @@ pub(crate) fn judge(top: &Path, target: &str, heads: Vec<String>) -> Result<Judg
     let Some(base) = at_origin(top, target)? else {
         return Err(Refusal::failed(format!("origin/{target}"), "origin holds no base branch of the claim"));
     };
+    judge_at(top, base, target, heads)
+}
+
+/// [`judge`] against the fetched commit `base` of `target`: `land` passes the base that the forge names.
+pub(crate) fn judge_at(top: &Path, base: String, target: &str, heads: Vec<String>) -> Result<Judged, Refusal> {
     let config = rules(top, &base, target)?;
     let mut best: Option<Computed> = None;
     for head in &heads {

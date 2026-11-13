@@ -16,8 +16,8 @@ pub fn branch(id: &Id) -> String {
 /// The fix for an issue at `status` with no active claim: the verb that moves it to where its next verb starts.
 pub fn unclaimed(id: &Id, status: Option<&str>) -> String {
     match status {
-        Some("open") => format!("bp cut {id}, then rerun"),
-        Some("abandoned") => format!("bp transition {id} open, then bp cut {id}"),
+        Some("open") => format!("dispatch a worker to run `bp cut {id}`, then rerun"),
+        Some("abandoned") => format!("bp transition {id} open, then dispatch a worker to run `bp cut {id}`"),
         Some("in-progress") => format!("{id} is in-progress with no active claim (21, check 2); no verb moves it yet"),
         Some(s) => format!("an issue at {s} is not claimed again; bp show {id}"),
         None => format!("cut claims an issue; bp show {id}"),
@@ -40,7 +40,7 @@ pub fn no_pull_request(id: &Id) -> Refusal {
         Code::ReviewMissing,
         id.as_str(),
         "land merges an open pull request whose head the review read (37, design change 3)",
-        format!("{} has no open pull request; bp pr {id}, then its review", branch(id)),
+        format!("{} has no open pull request; dispatch a worker to run `bp pr {id}`; then its review", branch(id)),
     )
 }
 
@@ -56,6 +56,8 @@ pub fn after_merge(number: u64, id: &Id) -> String {
 /// The first unmet part of needs landing as its refusal (26, design change 4; 37, design change 3).
 pub fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
     let (n, head) = (pr.number, &pr.head_ref_oid);
+    // The session lands, and `pr` is the worker's verb, so a fix that needs it names the dispatch (review of #100, C3).
+    let pr_step = format!("dispatch a worker to run `bp pr {id}`");
     match unmet {
         Unmet::Unmerged(below) => Refusal::new(
             Code::BaseUnmerged,
@@ -68,7 +70,7 @@ pub fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
             id.as_str(),
             "land merges into the claim's base branch only (26, design change 4)",
             format!(
-                "pull request {n} targets {}; bp pr {id} retargets it to {base}, then bp land {id}",
+                "pull request {n} targets {}; {pr_step}, which retargets it to {base}; then bp land {id}",
                 pr.base_ref_name.as_deref().unwrap_or_default()
             ),
         ),
@@ -77,7 +79,10 @@ pub fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
             id.as_str(),
             "the forge check at the head is green (15, Controls 3)",
             if pr.has_failed() {
-                format!("a check of pull request {n} failed at {head}; fix it, commit it, then bp pr {id}")
+                format!(
+                    "a check of pull request {n} failed at {head}; dispatch a worker to fix it, commit it and run \
+                     `bp pr {id}`"
+                )
             } else {
                 format!("wait for the checks of pull request {n} at {head} to pass, then bp land {id}")
             },
@@ -87,7 +92,8 @@ pub fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
             run.id.as_str(),
             "every error-severity check block passes at the head (26, design change 4)",
             format!(
-                "{} did not pass at {head}; read it with bp show {}, fix the cause, commit it, then bp pr {id}",
+                "{} did not pass at {head}; read it with bp show {}; dispatch a worker to fix the cause, commit it and \
+                 run `bp pr {id}`",
                 run.check, run.id
             ),
         ),
@@ -95,7 +101,7 @@ pub fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
             Code::EvidenceStale,
             id.as_str(),
             "land needs a passing run of each error block's current text at the head (26, design change 4)",
-            format!("{block} has no run of its current text at {head}; bp pr {id}, then bp land {id}"),
+            format!("{block} has no run of its current text at {head}; {pr_step}; then bp land {id}"),
         ),
         Unmet::Lenses { round, missing } => {
             let lenses: Vec<&str> = missing.iter().map(|l| l.as_str()).collect();
@@ -114,8 +120,7 @@ pub fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
         Unmet::Unanswered(open) => Refusal::new(
             Code::FindingsOpen,
             id.as_str(),
-            "land needs a disposition of each finding at the head and of each error row that holds (37, design change \
-             3)",
+            "land needs a disposition of each finding of each review, at any head (37, design change 3)",
             format!(
                 "no disposition: {}; dispatch bp-worker with its respond template, then bp land {id}",
                 rounds::named(open, head)
@@ -127,8 +132,8 @@ pub fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
             "an error row holds the land until a verify review at a later head does not report it again (37, design \
              change 6)",
             format!(
-                "{} hold the land; fix each, bp pr {id}, and record the next verify review; a decline or a round cap \
-                 goes to the human",
+                "{} hold the land; dispatch a worker to fix each and run `bp pr {id}`, then record its verify review; \
+                 a decline or a round cap goes to the human",
                 rounds::cited(rows)
             ),
         ),
@@ -144,8 +149,8 @@ pub fn refusal(unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
             id.as_str(),
             "land merges a head that names the error blocks the pull request carries now (27, design change 8)",
             format!(
-                "an error block of {id}, its milestone or a carried delta changed after {head} was pushed; bp pr {id} \
-                 pushes a commit that names them, then its verify review, then bp land {id}"
+                "an error block of {id}, its milestone or a carried delta changed after {head} was pushed; {pr_step}, \
+                 which pushes a commit that names them; then its verify review, then bp land {id}"
             ),
         ),
     }

@@ -2,9 +2,21 @@
 //! own words.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use bp_vault::Refusal;
+
+/// How long one git call may run once a verb sets it; unset, a call runs as long as git takes. One process runs one
+/// verb, so the verb's choice holds for each of its calls.
+static DEADLINE: OnceLock<Duration> = OnceLock::new();
+
+/// Kills each later git call of this process after `limit`, refused `could_not_run`: `land` sets it, so a fetch that
+/// hangs refuses before the merge and changes nothing (review of #100, F11).
+pub fn within(limit: Duration) {
+    let _ = DEADLINE.set(limit);
+}
 
 /// git in the code repository at `dir`, with no argument yet. Every git call on a code repository starts here.
 pub fn command(dir: &Path) -> Command {
@@ -25,7 +37,22 @@ pub fn command(dir: &Path) -> Command {
 
 /// Runs git in the code repository and returns its stdout, trimmed. A failure is `could_not_run` with git's own words.
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, Refusal> {
-    let out = command(dir).args(args).output().map_err(|e| Refusal::failed("git", format!("{e}; install git")))?;
+    run(dir, args, DEADLINE.get().copied())
+}
+
+fn run(dir: &Path, args: &[&str], limit: Option<Duration>) -> Result<String, Refusal> {
+    let mut cmd = command(dir);
+    cmd.args(args);
+    let out = match limit {
+        None => cmd.output(),
+        Some(limit) => bp_forge::output_within(cmd.stdin(Stdio::null()), limit),
+    }
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::TimedOut => {
+            Refusal::failed(format!("git {}", args.join(" ")), format!("{e}; check origin and the network, then rerun"))
+        }
+        _ => Refusal::failed("git", format!("{e}; install git")),
+    })?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
     }
@@ -42,4 +69,20 @@ pub fn default_branch(top: &Path) -> Result<String, Refusal> {
         Refusal::failed(e.subject, "origin has no default branch here: git remote set-head origin --auto")
     })?;
     Ok(head.strip_prefix("origin/").unwrap_or(&head).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deadline_kills_a_git_call_that_hangs() {
+        let dir = std::env::temp_dir();
+        let start = std::time::Instant::now();
+        let e = run(&dir, &["-c", "alias.hang=!sleep 5", "hang"], Some(Duration::from_millis(300))).unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(4), "{:?}", start.elapsed());
+        assert_eq!((e.exit, e.subject.as_str()), (1, "git -c alias.hang=!sleep 5 hang"));
+        assert!(e.fix.starts_with("git did not answer within 300ms"), "{}", e.fix);
+        assert!(run(&dir, &["--version"], Some(Duration::from_secs(60))).is_ok(), "a quick call is as it was");
+    }
 }

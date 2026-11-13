@@ -105,8 +105,8 @@ pub struct ChangeDelta {
 }
 
 /// The Change page of the issue `issue` in `project`. `clone` is the clone the view reads the forge from: when it
-/// holds the project's repository, the diff, the check set the head names, the default branch of a claim that records
-/// no base and the diff comparison of a stale approval come from it. Without it those gates read "not read" and the
+/// holds the project's repository, the diff, the check set the head names and the default branch of a claim that
+/// records no base come from it. Without it those gates read "not read" and the
 /// command is withheld. `text` asks for the diff text. An id that names no issue of the project refuses `no_node`.
 ///
 /// # Panics
@@ -313,9 +313,9 @@ mod tests {
 
     /// A green pull request of `slug` at `head` onto `base`.
     fn pr(n: u64, slug: &str, head: &str, base: &str) -> String {
-        format!(
-            r#"{{"number":{n},"url":"https://forge.test/o/bp/pull/{n}","headRefName":"bp/{slug}","headRefOid":"{head}","baseRefName":"{base}","statusCheckRollup":[{{"conclusion":"SUCCESS"}}]}}"#
-        )
+        let url = format!("https://forge.test/o/bp/pull/{n}");
+        format!(r#"{{"number":{n},"url":"{url}","headRefName":"bp/{slug}","headRefOid":"{head}","#)
+            + &format!(r#""baseRefName":"{base}","statusCheckRollup":[{{"conclusion":"SUCCESS"}}]}}"#)
     }
 
     /// A review of `issue` at `head` by `lens`, round 1, with no findings.
@@ -513,10 +513,12 @@ mod tests {
     fn each_refusal_is_land_s_in_its_order() {
         let fx = fixture();
         let unclaimed = page(&fx, "bp", "0004.open", true, false);
-        assert_eq!(refusal(&unclaimed), ("illegal_transition", "bp cut projects/bp/issues/0004.open, then rerun"));
+        let fix = "dispatch a worker to run `bp cut projects/bp/issues/0004.open`, then rerun";
+        assert_eq!(refusal(&unclaimed), ("illegal_transition", fix));
         assert!(unclaimed.gates.is_empty() && unclaimed.command.is_none());
         let unpushed = page(&fx, "bp", "0005.unpushed", true, false);
-        let fix = "bp/0005.unpushed has no open pull request; bp pr projects/bp/issues/0005.unpushed, then its review";
+        let fix = "bp/0005.unpushed has no open pull request; dispatch a worker to run `bp pr \
+                   projects/bp/issues/0005.unpushed`; then its review";
         assert_eq!(refusal(&unpushed), ("review_missing", fix));
         let unreviewed = page(&fx, "bp", "0006.unapproved", true, false);
         let review = unreviewed.gates.iter().find(|g| g.name == "review").map(|g| g.state);

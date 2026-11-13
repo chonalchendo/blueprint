@@ -18,7 +18,7 @@ use serde::Deserialize;
 use crate::{PullRequest, Snapshot};
 
 /// The fields every pull request read asks for, so a list row and a view parse into the same type.
-const FIELDS: &str = "number,url,state,baseRefName,headRefName,headRefOid,statusCheckRollup";
+const FIELDS: &str = "number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,mergeCommit,statusCheckRollup";
 
 /// How many open pull requests the snapshot lists; `gh pr list` stops at 30 unless told.
 const OPEN_LIMIT: &str = "1000";
@@ -207,8 +207,9 @@ impl Gh {
 }
 
 /// `cmd`'s output, or `TimedOut` once it has run `limit`: the child is killed then. Each pipe drains on its own
-/// thread, so a full pipe never stalls the child while the poll waits.
-fn output_within(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> {
+/// thread, so a full pipe never stalls the child while the poll waits. `bp-read` runs git through it too.
+pub fn output_within(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> {
+    let program = cmd.get_program().to_string_lossy().to_string();
     let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
     let start = Instant::now();
@@ -222,7 +223,7 @@ fn output_within(cmd: &mut Command, limit: Duration) -> std::io::Result<Output> 
             child.wait()?;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("gh did not answer within {limit:?}"),
+                format!("{program} did not answer within {limit:?}"),
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
