@@ -3,8 +3,9 @@
 # default branch holds it, the one checkout of this repository is the default branch's commit, and the head is
 # fetched as data for the test merge only. `bp` is built from the Blueprint commit that the line `gate:` of
 # `.bp/risk.yml` names on that commit, never from this repository's tree, and with no cache: a cache is not signed, and
-# the runs that write one run unsigned code. The pin must be on Blueprint's default branch, so it names reviewed code.
-# A change to this file or to the pin is high, as every path under `.github/workflows/` and `.bp/` is.
+# the runs that write one run unsigned code. The pin names a commit on Blueprint's default branch, which the human
+# reads before signing a move. A change to this file or to the pin is high, as every path under `.github/workflows/`
+# and `.bp/` is.
 name: bp-gate
 
 on:
