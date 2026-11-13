@@ -811,6 +811,25 @@ fn land_notes_no_step_on_a_layer_released_during_the_merge() {
     assert_eq!(git(v, &["status", "--porcelain"]), "");
 }
 
+/// A layer that moves onto the base needs a worker's `bp pr` and then its verify review. The session reads `next`, so
+/// it names the dispatch, not the old reviewer's approval (review of #100, C7, F12 and T5).
+#[test]
+fn a_restacked_layer_names_the_worker_s_pr_and_its_verify_review() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    stacked(v, t);
+    // A squash that writes `f.txt` as A did, so B's rebase onto it applies.
+    let code = t.join("code");
+    std::fs::write(code.join("hello.txt"), "hi\n").unwrap();
+    std::fs::write(code.join("f.txt"), "a\n").unwrap();
+    let squash = commit(&code, &["add", "."], "squash of a");
+    git(&code, &["reset", "-q", "--hard", "HEAD~1"]);
+    std::fs::write(t.join("squash"), &squash).unwrap();
+    let (status, out) = bp(v, t, &[], &["land", ISSUE]);
+    assert_eq!((status, &out["restacked"]), (Some(0), &json!([B])), "{out}");
+    assert_eq!(out["next"], json!([format!("dispatch a worker to run `bp pr {B}`; then its verify review")]), "{out}");
+}
+
 /// `bp record review` of [`ISSUE`] at `head` with `fields` and one row per item of `rows`.
 fn review(v: &Path, t: &Path, head: &str, fields: &[&str], rows: &[&str]) -> (Option<i32>, Value) {
     let file = t.join("review.md");
@@ -1678,8 +1697,9 @@ fn land_refuses_a_base_that_origin_and_the_forge_name_apart() {
     assert!(!t.join("merged").exists() && !t.join("graphql").exists(), "no merge, and no key read");
 }
 
-/// A forge row `land` cannot trust refuses before any git call reads it (review of #100, F4 and F5): a head that is
-/// not a full sha, as one that starts with `-` would be a git option, and an open pull request with no base branch.
+/// A forge row `land` cannot trust refuses before any git call reads it (review of #100, F4 and F5): a head or a base
+/// sha that is not a full sha, as one that starts with `-` would be a git option, and an open pull request with no
+/// base branch.
 #[test]
 fn land_refuses_a_forge_row_it_cannot_read() {
     let (v, t) = setup();
@@ -1692,6 +1712,11 @@ fn land_refuses_a_forge_row_it_cannot_read() {
     let (code, out) = bp(v, t, &[], &["land", ISSUE, "--dry-run"]);
     assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
     assert!(!pwn.exists(), "no git call read the head");
+    // The forge's base sha is held to the same shape before `ls-remote` is compared with it.
+    forge_as(t, &h, &["SUCCESS"], &json!({ "baseRefOid": format!("--output={}", pwn.display()) }));
+    let (code, out) = bp(v, t, &[], &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains("the forge gave base"), "{out}");
     for base in [json!(null), json!("")] {
         forge_as(t, &h, &["SUCCESS"], &json!({ "baseRefName": base }));
         let (code, out) = bp(v, t, &[], &["land", ISSUE]);
@@ -1833,21 +1858,31 @@ fn a_dry_run_tests_the_claim_of_each_layer_above() {
     assert!(!t.join("merged").exists());
 }
 
-/// A merged head is judged by the rules at the base it merged into, its merge commit's first parent, so a rule pushed
-/// after the merge does not strand the rerun of a land that stopped there (review of #100, F8).
+/// A merged head is judged by the rules at the base it merged into, its merge commit's first parent (review of #100,
+/// F8). A rule pushed after the merge does not strand the rerun of a land that stopped there. A rule the merge landed
+/// on still counts: the tip after the merge holds the head, so a diff against it is empty and would read low.
 #[test]
 fn a_merged_head_is_judged_by_the_rules_it_merged_onto() {
-    let (v, t) = setup();
-    let (v, t) = (v.path(), t.path());
-    let (_, h) = opened(v, t, &[]);
-    pushed(v, t, &h);
-    lenses(v, t, &h, &MEDIUM);
-    forge_as(t, &h, &["SUCCESS"], &json!({ "state": "MERGED" }));
-    rules(t, "high:\n  - hello.txt\n");
-    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
-    assert_eq!(
-        (code, out["status"].as_str(), out["level"].as_str()),
-        (Some(0), Some("resolved"), Some("medium")),
-        "{out}"
-    );
+    for before in [false, true] {
+        let (v, t) = setup();
+        let (v, t) = (v.path(), t.path());
+        let (_, h) = opened(v, t, &[]);
+        pushed(v, t, &h);
+        lenses(v, t, &h, &MEDIUM);
+        if before {
+            rules(t, "high:\n  - hello.txt\n");
+        }
+        forge_as(t, &h, &["SUCCESS"], &json!({ "state": "MERGED" }));
+        if !before {
+            rules(t, "high:\n  - hello.txt\n");
+        }
+        let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+        if before {
+            assert_eq!((code, out["code"].as_str()), (Some(2), Some("evidence_stale")), "{out}");
+            assert!(out["fix"].as_str().unwrap().contains("pull request 1 is merged"), "{out}");
+        } else {
+            let got = (code, out["status"].as_str(), out["level"].as_str());
+            assert_eq!(got, (Some(0), Some("resolved"), Some("medium")), "{out}");
+        }
+    }
 }

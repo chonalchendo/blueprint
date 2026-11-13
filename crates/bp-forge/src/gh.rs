@@ -56,8 +56,9 @@ impl Gh {
     }
 
     /// The forge's default branch and the commit at its head (`gh api graphql`). `land` trusts the signer of
-    /// `.bp/risk.yml` only at this commit: `git ls-remote` follows a clone's `url.<x>.insteadOf` rule, and the forge's
-    /// own answer does not (37, design change 4; review of #95, row 24).
+    /// `.bp/risk.yml` only at this commit (37, design change 4; review of #95, row 24). `gh` names the repository from
+    /// origin's url as git rewrites it, so a `url.<x>.insteadOf` rule onto another repository of the same host moves
+    /// this answer too: the url test of the signer read refuses that rule (review of #100, C10).
     pub fn default_head(&self) -> Result<(String, String), Refusal> {
         const QUERY: &str = "query=query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { \
                              defaultBranchRef { name target { oid } } } }";
