@@ -30,6 +30,6 @@ The three approved examples (`bp-containers`, `bp-lm-design`, `bp-seq-issue-to-l
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-diagram
 ~~~

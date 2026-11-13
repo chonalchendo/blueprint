@@ -26,6 +26,6 @@ No contract changes. The `bp` calls that a `$(...)` or a backtick substitution h
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p xtask
 ~~~

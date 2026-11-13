@@ -33,7 +33,7 @@ fn vault(extra: &[(&str, &str)]) -> tempfile::TempDir {
     let milestone = "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\n## Finish line\n\n\
                      ~~~check shell {name=p expect=0}\ntrue\n~~~\n";
     let issue = "---\nkind: issue\ntitle: I\nstatus: open\nunder: projects/bp/milestones/m\n---\n\nBody.\n\n## Check\n\n\
-                 ```check shell {name=hello expect=0}\ntrue\n```\n";
+                 ```check shell {name=hello expect=0 prior=pass}\ntrue\n```\n";
     let (keep, old, sys) =
         (format!("{FRONT}/diagrams/keep"), format!("{FRONT}/diagrams/old"), format!("{SYSTEM}/diagrams/containers"));
     let files = [

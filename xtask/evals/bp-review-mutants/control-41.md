@@ -26,6 +26,6 @@ A resolved issue and a done milestone have no intent that reads an integrity run
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-tool
 ~~~

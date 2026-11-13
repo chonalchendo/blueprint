@@ -44,6 +44,6 @@ A test checks each fixture against this repository's history: the commits exist,
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p xtask
 ~~~

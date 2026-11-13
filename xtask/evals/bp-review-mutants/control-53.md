@@ -22,6 +22,6 @@ This is not a contract change. The SVG, the index and the `size` field keep thei
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-diagram
 ~~~

@@ -18,6 +18,6 @@ A record row of `list` has no status. `bp-shape` and `bp-design` run one `bp sho
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-change -p bp-tool -p bp-vault
 ~~~

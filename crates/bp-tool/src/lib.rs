@@ -15,6 +15,7 @@ mod install;
 mod land;
 mod link;
 mod record;
+mod red_first;
 mod redraw;
 mod rename;
 mod review_rows;

@@ -41,6 +41,6 @@ In review eval run 2, 3 of the 8 `with` findings are false (`analysis/evals-skil
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-tool -p xtask
 ~~~

@@ -120,7 +120,7 @@ impl Sandbox {
         if let Some((head, title)) = &fx.stack {
             // The dependency holds an open pull request at its landed head and a check that needs no build, so the
             // worker's `cut` stacks on it (21, the complete row) and the trial pays for only its own issue.
-            let stub = "## Check\n\n~~~check shell {name=stub expect=0}\ntrue\n~~~\n";
+            let stub = "## Check\n\n~~~check shell {name=stub expect=0 prior=pass}\ntrue\n~~~\n";
             let dependency = sb.create_issue(&code, m, title, stub)?;
             sb.open_pr(&code, &dependency, head, None)?;
             sb.bp(&code, None, &["link", &sb.issue.clone(), "depends", &dependency])?;

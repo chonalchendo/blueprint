@@ -68,6 +68,6 @@ Design defects and choices (each decided from the designs; none edits a design):
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p xtask
 ~~~
