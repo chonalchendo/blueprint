@@ -109,8 +109,8 @@ mod tests {
         assert_eq!(lines.iter().filter(|l| l.contains("risk.yml")).count(), 2, "one read of the pin, one message");
         assert_eq!(
             lines[at("risk.yml")],
-            r"gate=$(sed -n -E 's/^gate: ([0-9a-f]{40})$/\1/p' base/.bp/risk.yml)",
-            "the pin is the base's"
+            r#"gate=$(git -C base show "$BP_BASE:.bp/risk.yml" | sed -n -E 's/^gate: ([0-9a-f]{40})$/\1/p')"#,
+            "the pin is the base commit's, never the work tree's"
         );
         assert_eq!(lines[at("-ne 40")], r#"if [ "${#gate}" -ne 40 ]; then"#, "no pin, no gate");
         let build = runs.iter().find(|r| r.contains("cargo build")).unwrap();
@@ -118,12 +118,16 @@ mod tests {
             build.lines().collect::<Vec<_>>(),
             [
                 "git init -q bp-source",
-                r#"git -C bp-source fetch -q --depth 1 --no-tags "$BP_SOURCE" "$BP_GATE""#,
+                r#"git -C bp-source fetch -q --no-tags "$BP_SOURCE" HEAD"#,
+                r#"if ! git -C bp-source merge-base --is-ancestor "$BP_GATE" FETCH_HEAD; then"#,
+                r#"  echo "::error::the pin $BP_GATE is not on the default branch of $BP_SOURCE""#,
+                "  exit 1",
+                "fi",
                 r#"git -C bp-source checkout -q --detach "$BP_GATE""#,
                 "cd bp-source",
                 "cargo build --locked --release -p bp-tool",
             ],
-            "the build reads Blueprint at the pin, never a path of this repository's tree"
+            "the build reads Blueprint at the pin, on its default branch, never a path of this repository's tree"
         );
         assert!(at("cargo build") < at("BP_HEAD"), "the build ends before the head is fetched");
         // Each line of a script that names the head fetches it or passes it to `bp gate`: none checks it out or runs
@@ -152,6 +156,12 @@ mod tests {
         // This repository runs the same file, for its own project.
         let ours = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github/workflows/bp-gate.yml"));
         assert_eq!(ours.unwrap(), text, "the committed workflow is the one install writes for project bp");
+        // CI runs the head's code, so its token reads only: else that code writes statuses, checks and runs.
+        let ci = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github/workflows/ci.yml"));
+        let ci = &YamlLoader::load_from_str(&ci.unwrap()).unwrap()[0];
+        assert_eq!(keys(&ci["permissions"]), ["contents"]);
+        assert_eq!(ci["permissions"]["contents"].as_str(), Some("read"));
+        assert!(ci["jobs"].as_hash().unwrap().values().all(|j| j["permissions"].is_badvalue()), "no job widens it");
     }
 
     #[test]

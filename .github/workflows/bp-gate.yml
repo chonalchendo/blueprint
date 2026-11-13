@@ -1,10 +1,10 @@
 # The forge check bp-gate (37, design change 5), written by `bp install`. Branch protection requires the job
 # `bp-gate` and CI. The run never holds code from the pull request: `pull_request_target` runs this file as the
 # default branch holds it, the one checkout of this repository is the default branch's commit, and the head is
-# fetched as data for `git diff` only. `bp` is built from the Blueprint commit that the line `gate:` of `.bp/risk.yml`
-# names on that commit, never from this repository's tree, and with no cache: a cache is not signed, and the runs that
-# write one run unsigned code. A change to this file or to the pin is high, as every path under `.github/workflows/`
-# and `.bp/` is.
+# fetched as data for the test merge only. `bp` is built from the Blueprint commit that the line `gate:` of
+# `.bp/risk.yml` names on that commit, never from this repository's tree, and with no cache: a cache is not signed, and
+# the runs that write one run unsigned code. The pin must be on Blueprint's default branch, so it names reviewed code.
+# A change to this file or to the pin is high, as every path under `.github/workflows/` and `.bp/` is.
 name: bp-gate
 
 on:
@@ -38,9 +38,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: read the pin at the base
-        # Exactly one line `gate: <40 hex digits>`, or the check fails: a base with no pin has no gate.
+        # Exactly one line `gate: <40 hex digits>`, or the check fails: a base with no pin has no gate. The pin is read
+        # from the commit, not the work tree, which an attribute line on the default branch can rewrite.
         run: |
-          gate=$(sed -n -E 's/^gate: ([0-9a-f]{40})$/\1/p' base/.bp/risk.yml)
+          gate=$(git -C base show "$BP_BASE:.bp/risk.yml" | sed -n -E 's/^gate: ([0-9a-f]{40})$/\1/p')
           if [ "${#gate}" -ne 40 ]; then
             echo "::error::.bp/risk.yml on the default branch holds no one line gate: <sha>; bp install writes it"
             exit 1
@@ -48,9 +49,15 @@ jobs:
           echo "BP_GATE=$gate" >> "$GITHUB_ENV"
       - name: build bp at the pin
         # The project's tree is a sibling of bp-source, so cargo and rustup read none of its config or toolchain files.
+        # The server serves a commit that no branch holds, or a fork's, by its sha: only the default branch's history
+        # is fetched, and the pin must be in it.
         run: |
           git init -q bp-source
-          git -C bp-source fetch -q --depth 1 --no-tags "$BP_SOURCE" "$BP_GATE"
+          git -C bp-source fetch -q --no-tags "$BP_SOURCE" HEAD
+          if ! git -C bp-source merge-base --is-ancestor "$BP_GATE" FETCH_HEAD; then
+            echo "::error::the pin $BP_GATE is not on the default branch of $BP_SOURCE"
+            exit 1
+          fi
           git -C bp-source checkout -q --detach "$BP_GATE"
           cd bp-source
           cargo build --locked --release -p bp-tool
