@@ -9,16 +9,17 @@ use bp_vault::Refusal;
 /// git in the code repository at `dir`, with no argument yet. Every git call on a code repository starts here.
 pub fn command(dir: &Path) -> Command {
     let mut git = Command::new("git");
-    git.arg("-C")
-        .arg(dir)
-        .env("LC_ALL", "C")
-        // A git hook that runs bp sets these; each would turn `-C <dir>` to another repository, index or worktree.
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR")
-        // A credential prompt would wait on a terminal no agent reads; the fetch fails instead.
-        .env("GIT_TERMINAL_PROMPT", "0");
+    git.arg("-C").arg(dir).env("LC_ALL", "C");
+    // A git hook that runs bp, or the caller's shell, may set any `GIT_*` variable. Each can turn `-C <dir>` to
+    // another repository, index or object store, or hide history (`GIT_SHALLOW_FILE`, `GIT_GRAFT_FILE`) from the
+    // first-commit read of a review (review of #98, row 25). The child keeps only the ones bp sets below.
+    for (name, _) in std::env::vars_os() {
+        if name.as_encoded_bytes().starts_with(b"GIT_") {
+            git.env_remove(name);
+        }
+    }
+    // A credential prompt would wait on a terminal no agent reads; the fetch fails instead.
+    git.env("GIT_TERMINAL_PROMPT", "0");
     git
 }
 

@@ -523,6 +523,32 @@ fn a_risk_row_raises_the_level_and_needs_no_disposition() {
     let vault = w.vault.path().display().to_string();
     let (_, v) = common::bp_env(&w.code, &[("BP_VAULT", &vault), ("GIT_DIR", "/nonexistent")], &["risk", ISSUE]);
     assert_eq!(v["level"], "high", "{v}");
+    // Nor can a variable that hides history or moves the objects: the call clears every `GIT_*` (row 25).
+    let tip = w.t.path().join("tip");
+    std::fs::write(&tip, git(w.vault.path(), &["rev-parse", "HEAD"])).unwrap();
+    let tip = tip.display().to_string();
+    for hide in ["GIT_SHALLOW_FILE", "GIT_GRAFT_FILE"]
+        .map(|n| (n, tip.as_str()))
+        .into_iter()
+        .chain([("GIT_OBJECT_DIRECTORY", "/nonexistent"), ("GIT_NAMESPACE", "x")])
+    {
+        let (_, v) = common::bp_env(&w.code, &[("BP_VAULT", &vault), hide], &["risk", ISSUE]);
+        assert_eq!(v["level"], "high", "{hide:?}: {v}");
+    }
+    // A first-commit `git log` that fails refuses; it never reads the present text (row 26).
+    let shim = w.t.path().join("shim");
+    std::fs::create_dir(&shim).unwrap();
+    let path = std::env::var("PATH").unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in *' --reverse --no-renames '*) echo 'no log here' >&2; exit 128;; esac\nPATH='{path}' \
+         exec git \"$@\"\n"
+    );
+    std::fs::write(shim.join("git"), script).unwrap();
+    std::fs::set_permissions(shim.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let shimmed = format!("{}:{path}", shim.display());
+    let (exit, v) = common::bp_env(&w.code, &[("BP_VAULT", &vault), ("PATH", &shimmed)], &["risk", ISSUE]);
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
+    assert!(v["subject"].as_str().unwrap().starts_with("git log"), "{v}");
     // A rename moves the record in a commit that adds it at the new path; the first add at the old path counts, so
     // the rename does not launder the edit (finding 7). The rename takes the claim's branch, so read with no clone.
     let root = w.vault.path();
