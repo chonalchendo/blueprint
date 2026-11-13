@@ -28,37 +28,51 @@ pub(super) fn lander(issue: &str) -> Result<Role, Refusal> {
     ))
 }
 
+/// `Ok` with `v` when the forge gave a full commit sha for `what`, else `could_not_run`, before a git call reads it
+/// (review of #100, F4 and V9).
+fn sha(c: &Claimed, pr: &PullRequest, what: &str, v: Option<&str>) -> Result<String, Refusal> {
+    match v.filter(|s| is_sha(s)) {
+        Some(s) => Ok(s.to_string()),
+        None => Err(Refusal::failed(
+            format!("gh pr list --head {}", c.branch),
+            format!(
+                "the forge gave {what} {} for pull request {}, not a full commit sha; fix gh, then rerun",
+                v.unwrap_or("nothing"),
+                pr.number
+            ),
+        )),
+    }
+}
+
+/// `Ok` when the forge names a full sha for the head, and a branch for the base of an open pull request: `land` reads
+/// them first, since every later git call and gate takes them (review of #100, F4 and F5).
+pub(super) fn shaped(c: &Claimed, pr: &PullRequest) -> Result<(), Refusal> {
+    sha(c, pr, "head", Some(&pr.head_ref_oid))?;
+    if !merged(pr) && !pr.base_ref_name.as_deref().is_some_and(is_branch) {
+        return Err(Refusal::failed(
+            format!("gh pr list --head {}", c.branch),
+            format!("the forge names no base branch of pull request {}; fix gh, then rerun", pr.number),
+        ));
+    }
+    Ok(())
+}
+
 /// The commit whose rules judge the head's level, from the forge's own shas (37, design change 1): for an open pull
 /// request its `baseRefOid`, once `git ls-remote` names the same sha for its base branch; for a merged one its
 /// `baseRefOid` alone, since the branch has moved on. The pull request's own diff is then judged, whatever the merge
 /// made: a rebase merge's commit holds the head's earlier commits in its first parent (review of #100, F8 and V4). A
 /// `url.<x>.insteadOf` rule that points origin at another repository so refuses at every level, before a level is
-/// judged (C2). Each sha the forge gives is
-/// a full sha before a git call reads it, and an open pull request names its base branch (F4, F5).
+/// judged (C2). Each sha the forge gives is a full sha before a git call reads it, and an open pull request names its
+/// base branch (F4, F5). `land` runs it after the gates that come before the base (V6), and [`shaped`] first.
 pub(super) fn base(c: &Claimed, id: &Id, pr: &PullRequest) -> Result<String, Refusal> {
-    let subject = format!("gh pr list --head {}", c.branch);
-    let sha = |what: &str, v: Option<&str>| match v.filter(|s| is_sha(s)) {
-        Some(s) => Ok(s.to_string()),
-        None => Err(Refusal::failed(
-            subject.clone(),
-            format!(
-                "the forge gave {what} {v:?} for pull request {}, not a full commit sha; fix gh, then rerun",
-                pr.number
-            ),
-        )),
-    };
-    let head = sha("head", Some(&pr.head_ref_oid))?;
+    let sha = |what: &str, v: Option<&str>| sha(c, pr, what, v);
     if merged(pr) {
         let base = sha("base", pr.base_ref_oid.as_deref())?;
         git(&c.top, &["fetch", "-q", "origin", &base])?;
         return git(&c.top, &["rev-parse", "--verify", "-q", &format!("{base}^{{commit}}")]);
     }
-    let Some(name) = pr.base_ref_name.as_deref().filter(|b| is_branch(b)) else {
-        return Err(Refusal::failed(
-            subject,
-            format!("the forge names no base branch of pull request {}; fix gh, then rerun", pr.number),
-        ));
-    };
+    // `shaped` ran: an open pull request names its base branch.
+    let name = pr.base_ref_name.as_deref().unwrap_or_default();
     let forge = sha("base", pr.base_ref_oid.as_deref())?;
     let origin = crate::risk::at_origin(&c.top, name)?;
     if origin.as_deref() == Some(forge.as_str()) {
@@ -66,7 +80,7 @@ pub(super) fn base(c: &Claimed, id: &Id, pr: &PullRequest) -> Result<String, Ref
     }
     // A head behind origin's base refuses as such: its rebase and push give the forge the new base too.
     if name == c.target {
-        holds_base(c, id, &head, true)?;
+        holds_base(c, id, &pr.head_ref_oid, true)?;
     }
     Err(Refusal::new(
         Code::BaseUnconfirmed,

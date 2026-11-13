@@ -212,7 +212,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         return Err(landing::no_pull_request(&id));
     };
     let n = pr.number;
-    let base = level::base(&c, &id, &pr)?;
+    level::shaped(&c, &pr)?;
     // The dry run takes no writer, so it runs the writer's commit precondition here (34, design change 7).
     vault.committed()?;
     vault.clean([&id, &c.claim])?;
@@ -240,10 +240,15 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let gate = match intents::gates(&issue, &read, named.as_ref().ok().copied()).unmet {
         Some(Unmet::Approval) => Err(level.1.unwrap_or_else(|| landing::refusal(&Unmet::Approval, &id, &pr))),
         Some(unmet) => Err(landing::refusal(&unmet, &id, &pr)),
-        None => named.and_then(|_| risen(&c, &id, &issue, &pr.head_ref_oid, base)).and_then(|()| {
-            // A merged head is behind its base by its own merge.
-            if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid, true) }
-        }),
+        // The base the forge names is read after the gates above it, so a layer whose base has not landed gets
+        // `base_unmerged` and not a refusal about a sha its own land replaces (review of #100, V6).
+        None => named
+            .and_then(|_| level::base(&c, &id, &pr))
+            .and_then(|base| risen(&c, &id, &issue, &pr.head_ref_oid, base))
+            .and_then(|()| {
+                // A merged head is behind its base by its own merge.
+                if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid, true) }
+            }),
     };
     if let Err(mut r) = gate {
         // Only a gate that refuses a merged pull request makes the merge lost: a tool that could not run keeps its

@@ -754,6 +754,28 @@ fn stacked(v: &Path, t: &Path) -> Stack {
     Stack { wb, ha, hb, squash, claim: b["claim"].as_str().unwrap().to_string() }
 }
 
+/// A layer whose base has not landed refuses `base_unmerged` before any refusal about the sha of that base: A's land
+/// replaces that base and restacks B, so a worker's rebase onto it is wasted (review of #100, V6).
+#[test]
+fn a_layer_above_an_unlanded_base_waits_for_it_before_its_base_sha() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let Stack { ha, hb, .. } = stacked(v, t);
+    let dry = || bp(v, t, &[], &["land", B, "--dry-run"]);
+    let (code, out) = dry();
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("base_unmerged")), "{out}");
+    // A's branch moves, and the forge keeps the base sha it recorded for B.
+    let code = t.join("code");
+    let moved = git(&code, &["commit-tree", &format!("{ha}^{{tree}}"), "-p", &ha, "-m", "a again"]);
+    git(&code, &["push", "-q", "origin", &format!("{}:refs/heads/bp/a", moved.trim())]);
+    let row = json!([{ "number": 2, "state": "OPEN", "baseRefName": "bp/a", "baseRefOid": ha, "headRefName": "bp/b",
+        "headRefOid": hb, "statusCheckRollup": [{ "conclusion": "SUCCESS" }] }]);
+    std::fs::write(t.join("prs-b.json"), row.to_string()).unwrap();
+    let (code, out) = dry();
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("base_unmerged")), "{out}");
+    assert!(out["fix"].as_str().unwrap().starts_with(&format!("bp land {ISSUE} first")), "{out}");
+}
+
 /// A layer `land` cannot move onto the base gets its step on its held claim as `## Next`, after the seed in the walks
 /// of complete and respond. Its `pr` refuses `head_behind_base` until the rebase; the passing `pr` drops the step
 /// (34, design change 5).
