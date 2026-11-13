@@ -15,7 +15,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use crate::risk::{judge_by, rules};
-use crate::signed::{Act, Block, blocks, can_verify, cap, is_branch, is_sha, public_key, verify};
+use crate::signed::{Act, Block, accepts, blocks, can_verify, cap, is_branch, is_sha, public_key, verify};
 
 /// `bp gate --base <sha> --base-ref <branch> --default-ref <branch> --head <sha> --pr <n> --project <name> [--comments <path>]`.
 #[derive(Args)]
@@ -158,7 +158,12 @@ fn signed(blocks: &[Block], g: &Gate, signer: &str, fix: String) -> Result<(), R
         if !Kind::Issue.fits(&node) || node.project() != Some(g.project.as_str()) {
             continue;
         }
-        let act = Act { verb: "approve", node: &node, pull_request: g.pr, base: &g.base_ref, head: &g.head, more: &[] };
+        // An approval at high's round cap signs the rows it accepts too: the block's own lines, as `bp approve` signs
+        // them (review of #100, W1). The gate reads no review, so the rows only rebuild the message.
+        let named: Vec<String> = b.fields.iter().filter(|(k, _)| k == "accepts").map(|(_, v)| v.clone()).collect();
+        let more = accepts(&named);
+        let act =
+            Act { verb: "approve", node: &node, pull_request: g.pr, base: &g.base_ref, head: &g.head, more: &more };
         let message = act.message();
         let Some(sig) = &b.signature else { continue };
         match verify(&message, sig, signer) {

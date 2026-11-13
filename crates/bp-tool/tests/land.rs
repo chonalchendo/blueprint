@@ -1713,18 +1713,13 @@ fn land_refuses_an_open_round() {
     assert!(!t.join("merged").exists(), "no refusal merges");
 }
 
-/// At high's round cap the human's signed approval of the head is the disposition `accepted` of the open rows it names
-/// (37, design change 6; review of #100, V1): the record names them, `land` proceeds, and no worker is dispatched, since
-/// a fix would push a head that voids the approval.
-#[test]
-fn land_at_high_s_round_cap_takes_the_human_s_approval_as_the_disposition() {
-    let (v, t) = setup();
-    let (v, t) = (v.path(), t.path());
+/// [`ISSUE`] at high's round cap (37, design change 6): three clean lenses at the first head; round 2 holds an error
+/// row, answered `fixed`; round 3, at the fixed head, holds another. The head, the round-3 review and the human's key.
+fn at_cap(v: &Path, t: &Path) -> (String, String, String) {
     let human = signer(t);
     let (w, h) = opened(v, t, &[]);
     pushed(v, t, &h);
     lenses(v, t, &h, &HIGH);
-    // Round 2 holds an error row, answered `fixed`; round 3, at the fixed head, holds another: high's cap.
     let verify = |head: &str, round: &str| {
         let (code, got) =
             review(v, t, head, &[round, "lens=verify", "mode=verify"], &["| error | hello.txt:1 | Wrong. |"]);
@@ -1745,6 +1740,17 @@ fn land_at_high_s_round_cap_takes_the_human_s_approval_as_the_disposition() {
     assert_eq!(bp(v, t, &[], &fixed).0, Some(0));
     let h3 = next("and again");
     let third = verify(&h3, "round=3");
+    (h3, third, human)
+}
+
+/// At high's round cap the human's signed approval of the head is the disposition `accepted` of the open rows it names
+/// (37, design change 6; review of #100, V1): the record names them, `land` proceeds, and no worker is dispatched, since
+/// a fix would push a head that voids the approval.
+#[test]
+fn land_at_high_s_round_cap_takes_the_human_s_approval_as_the_disposition() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (h3, third, human) = at_cap(v, t);
     let cap = format!("round cap: the human abandons the issue, or accepts the open rows: bp approve {ISSUE}");
     assert_eq!(intent(v), (json!("blocked"), json!(cap)));
     let session = [("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")];
@@ -1779,6 +1785,93 @@ fn land_at_high_s_round_cap_takes_the_human_s_approval_as_the_disposition() {
     assert_eq!((code, &out["level"]), (Some(0), &json!("high")), "{out}");
     let (code, out) = land(&[]);
     assert_eq!((code, out["status"].as_str()), (Some(0), Some("resolved")), "{out}");
+}
+
+/// The rows an approval accepts are signed with it (review of #100, W1). A row recorded after the approval is in no
+/// list; a name added to the record, or a copy of the record with a longer list, does not verify. Each leaves the land
+/// refused.
+#[test]
+fn an_approval_accepts_only_the_rows_the_human_signed() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (h3, third, human) = at_cap(v, t);
+    assert_eq!(bp(v, t, &[("SSH_AUTH_SOCK", "")], &["approve", ISSUE, "--key", &human]).0, Some(0));
+    let dry = || bp(v, t, &[("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")], &["land", ISSUE, "--dry-run"]);
+    assert_eq!(dry().0, Some(0), "the approval accepts the row it names");
+    let row = ["| error | hello.txt:1 | Also wrong. |"];
+    let (code, got) = review(v, t, &h3, &["round=3", "lens=verify", "mode=verify"], &row);
+    assert_eq!(code, Some(0), "{got}");
+    let fourth = got["id"].as_str().unwrap().to_string();
+    let refused = |why: &str| {
+        let (code, out) = dry();
+        assert_eq!((code, out["code"].as_str()), (Some(2), Some("findings_open")), "{why}: {out}");
+    };
+    refused("a row recorded after the approval");
+    let dir = v.join(format!("{ISSUE}/approvals"));
+    let signed = std::fs::read_to_string(dir.join(format!("{h3}.md"))).unwrap();
+    let one = format!("\"{third}#1\"]");
+    assert!(signed.contains(&one), "{signed}");
+    let longer = signed.replace(&one, &format!("\"{third}#1\", \"{fourth}#1\"]"));
+    std::fs::write(dir.join(format!("{h3}.md")), &longer).unwrap();
+    git(v, &["commit", "-qam", "the agent adds a name to the list"]);
+    refused("a name added to the record");
+    std::fs::write(dir.join(format!("{h3}.md")), &signed).unwrap();
+    std::fs::write(dir.join("copy.md"), &longer).unwrap();
+    git(v, &["add", "."]);
+    git(v, &["commit", "-qm", "the agent copies the record with a longer list"]);
+    refused("a copy of the record with a longer list");
+}
+
+/// Below high's round cap an approval names no row (37, design change 6; review of #100, W1): `bp approve` signs none,
+/// and `land` refuses a list added by hand, and a list the human's key signed.
+#[test]
+fn below_the_cap_an_approval_accepts_no_row() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let human = signer(t);
+    let (_, h) = opened(v, t, &[]);
+    pushed(v, t, &h);
+    lenses(v, t, &h, &["conformance", "failure-paths", "security"]);
+    let row = ["| error | hello.txt:1 | Wrong. |"];
+    let (code, got) = review(v, t, &h, &["round=1", "lens=tests-and-checks", "mode=full"], &row);
+    assert_eq!(code, Some(0), "{got}");
+    let name = format!("{}#1", got["id"].as_str().unwrap());
+    let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["approve", ISSUE, "--key", &human]);
+    assert_eq!((code, &out["accepts"]), (Some(0), &Value::Null), "below the cap the record names no row: {out}");
+    let dry = || bp(v, t, &[("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")], &["land", ISSUE, "--dry-run"]);
+    let refused = |why: &str| {
+        let (code, out) = dry();
+        assert_eq!((code, out["code"].as_str()), (Some(2), Some("findings_open")), "{why}: {out}");
+    };
+    refused("the row has no disposition");
+    let path = v.join(format!("{ISSUE}/approvals/{h}.md"));
+    let signed = std::fs::read_to_string(&path).unwrap();
+    let listed = signed.replacen("\nat: ", &format!("\naccepts: [\"{name}\"]\nat: "), 1);
+    assert_ne!(listed, signed);
+    std::fs::write(&path, &listed).unwrap();
+    git(v, &["commit", "-qam", "the agent adds a list"]);
+    refused("a list added by hand");
+    // The human's key signs the list outside `bp approve`: still no approval below the cap.
+    let message = format!(
+        "act: approve\nproject: bp\nnode: {ISSUE}\npull_request: 1\nbase: master\nhead: {h}\naccepts: {name}\n"
+    );
+    let mut child = std::process::Command::new("ssh-keygen")
+        .env_remove("SSH_AUTH_SOCK")
+        .args(["-Y", "sign", "-n", "bp", "-f", &human])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), message.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let begin = listed.find("-----BEGIN").unwrap();
+    let end = listed.find("-----END SSH SIGNATURE-----").unwrap() + "-----END SSH SIGNATURE-----\n".len();
+    let resigned = format!("{}{}{}", &listed[..begin], String::from_utf8(out.stdout).unwrap(), &listed[end..]);
+    std::fs::write(&path, resigned).unwrap();
+    git(v, &["commit", "-qam", "a list the human's key signed"]);
+    let (code, out) = dry();
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("findings_open")), "a signed list below the cap: {out}");
 }
 
 /// Each refusal `land` can give, and each fix it names, is one the session can follow (review of #100, C3).

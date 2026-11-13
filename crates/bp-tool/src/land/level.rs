@@ -134,6 +134,19 @@ pub(super) fn trusted(
     // order, so a high head with an open review still refuses on its review first.
     let approved = signer().and_then(|s| crate::approve::approved(index, id, head, &s, forge));
     let (approvals, refused) = match approved {
+        // A signed list names rows only at high's round cap, so a list outside it is no approval (review of #100, W1).
+        Ok(accepts) if !accepts.is_empty() && !intents::at_cap(issue, head) => (
+            Vec::new(),
+            Some(Refusal::new(
+                Code::SignatureInvalid,
+                id.as_str(),
+                "an approval names the rows it accepts only at high's round cap (37, design change 6)",
+                format!(
+                    "git rm the record under {id}/approvals that names rows at {head} and commit it; then the human \
+                     runs bp approve {id} from a shell"
+                ),
+            )),
+        ),
         Ok(accepts) => (vec![intents::Approval { head: head.to_string(), accepts }], None),
         Err(e) => (Vec::new(), Some(e)),
     };

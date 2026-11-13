@@ -1,7 +1,8 @@
 //! The human's signature (37, design change 4). The role label is forgeable, so a human act that a gate trusts carries
 //! an SSH signature by a key whose passphrase only the human types. OpenSSH's `ssh-keygen -Y` signs and verifies, run
 //! as a process: no crate. The signed message is canonical text that names the act, the project, the node, the pull
-//! request, its base branch and the full head, so a signature of one act never verifies as another.
+//! request, its base branch, the full head and the act's own fields, so a signature of one act never verifies as
+//! another.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,7 +32,7 @@ pub(crate) struct Act<'a> {
     pub(crate) base: &'a str,
     /// The full head sha of the pull request.
     pub(crate) head: &'a str,
-    /// The act's own fields, in the order the act fixes: a lowering's `level`, then `reason`.
+    /// The act's own fields, in the order the act fixes: a lowering's `level`, then `reason`; an approval's [`accepts`].
     pub(crate) more: &'a [(&'a str, &'a str)],
 }
 
@@ -47,6 +48,16 @@ impl Act<'_> {
         text.extend(self.more.iter().map(|(k, v)| format!("{k}: {v}\n")));
         text
     }
+}
+
+/// The lines an approval signs for the rows it accepts at high's round cap (37, design change 6): one
+/// `accepts: <review id>#<row>` line each, sorted, after the head. The human signs the list with the head, so a list
+/// edited in a record, or copied to another record with more names, does not verify (review of #100, W1). An empty
+/// list signs as no line.
+pub(crate) fn accepts(names: &[String]) -> Vec<(&'static str, &str)> {
+    let mut lines: Vec<(&str, &str)> = names.iter().map(|n| ("accepts", n.as_str())).collect();
+    lines.sort_unstable();
+    lines
 }
 
 /// The armoured signature of `message` by the private key at `key`. `SSH_AUTH_SOCK` is removed, so `ssh-keygen` reads

@@ -2,8 +2,9 @@
 //! change 4). Each reads the head from the forge, as `land` does, signs the act with the human's key and writes one
 //! record under the issue: `approvals/<head>` or `lowerings/<head>`. A gate reads a record only through [`approved`]
 //! or [`lowered`], which rebuild the message from the head they test and verify the signature against the signer that
-//! origin's `.bp/risk.yml` names. A hand-written record, a copied signature or a changed field does not verify. An
-//! approval also prints the comment that carries it to the forge check `bp-gate`, and `--post` posts it.
+//! origin's `.bp/risk.yml` names. A hand-written record, a copied signature or a changed field, the `accepts` list of
+//! an approval included, does not verify. An approval also prints the comment that carries it to the forge check
+//! `bp-gate`, and `--post` posts it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,9 @@ use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::signed::{Act, armour, blocks, can_verify, comment, in_agent, is_branch, is_sha, sign, signer, verify};
+use crate::signed::{
+    Act, accepts, armour, blocks, can_verify, comment, in_agent, is_branch, is_sha, sign, signer, verify,
+};
 use crate::{Wrote, node_id, subject};
 
 /// `bp approve <issue> [--key <path>] [--post]`.
@@ -107,18 +110,23 @@ fn act(
     }
     // A tool that cannot verify refuses here, not as a record or a key that does not verify (review of #100, F3).
     can_verify()?;
-    let act = Act { verb, node: &id, pull_request: pr.number, base, head, more };
-    let message = act.message();
-    // At high's round cap the approval names the open rows it accepts (37, design change 6). Rows an earlier record
-    // of this head accepted are not named again, so a repeat names none and finds its record.
-    let accepts = match kind {
+    // At high's round cap the approval names the open rows it accepts, as they stand when it signs (37, design change
+    // 6), and signs them. Rows an earlier record of this head accepted are not named again, so a repeat names none and
+    // finds its record. A row recorded later is in no list.
+    let named: Vec<String> = match kind {
         Kind::Approval => {
             let issue = bp_read::inputs::reviewed(&vault, &index, id.as_str())?;
-            bp_change::intents::accepting(&issue, head)
+            bp_change::intents::accepting(&issue, head).iter().map(|(review, n)| format!("{review}#{n}")).collect()
         }
         _ => Vec::new(),
     };
-    for r in index.records(id.as_str(), kind)?.into_iter().filter(|_| accepts.is_empty()) {
+    let signs =
+        |lines: &[(&str, &str)]| Act { verb, node: &id, pull_request: pr.number, base, head, more: lines }.message();
+    let message = if kind == Kind::Approval { signs(&accepts(&named)) } else { signs(more) };
+    for r in index.records(id.as_str(), kind)?.into_iter().filter(|_| named.is_empty()) {
+        // An approval signs its own list, so a repeat reads each record with the list it holds.
+        let Some(own) = names(&r) else { continue };
+        let message = if kind == Kind::Approval { signs(&accepts(&own)) } else { message.clone() };
         if holds(&r, &message, &signer)? {
             let mut v = json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number });
             if kind == Kind::Approval {
@@ -133,12 +141,8 @@ fn act(
         Some(k) => k.to_path_buf(),
         None => Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(".ssh/bp_human"),
     };
-    let named: Vec<String> = accepts.iter().map(|(review, n)| format!("{review}#{n}")).collect();
-    // The passphrase prompt names no act, so the human reads what the key signs first.
+    // The passphrase prompt names no act, so the human reads what the key signs first: the rows it accepts too.
     eprint!("bp {verb} signs:\n{message}");
-    if !named.is_empty() {
-        eprintln!("bp approve accepts these open rows as they stand: {}", named.join(", "));
-    }
     let signature = sign(&message, &key)?;
     if !verify(&message, &signature, &signer)? {
         return Err(Refusal::new(
@@ -156,7 +160,7 @@ fn act(
     let mut fields: Vec<(&str, Value)> =
         vec![("head", head.into()), ("pull_request", pr.number.into()), ("base", base.into())];
     fields.extend(more.iter().map(|(k, v)| (*k, Value::from(*v))));
-    if !accepts.is_empty() {
+    if !named.is_empty() {
         fields.push(("accepts", named.clone().into()));
     }
     fields.push(("at", at.into()));
@@ -171,7 +175,7 @@ fn act(
         "commit": written.commit,
         "findings": written.findings,
     });
-    if !accepts.is_empty() {
+    if !named.is_empty() {
         v["accepts"] = named.into();
     }
     if kind == Kind::Approval {
@@ -245,6 +249,12 @@ fn holds(r: &Record, message: &str, signer: &str) -> Result<bool, Refusal> {
     armour(&r.body).map_or(Ok(false), |sig| verify(message, &sig, signer))
 }
 
+/// The names of the record's `accepts` list as written, empty with no list; `None` when an item is not text.
+fn names(r: &Record) -> Option<Vec<String>> {
+    let Some(list) = r.header.get("accepts") else { return Some(Vec::new()) };
+    list.as_array()?.iter().map(|v| v.as_str().map(str::to_string)).collect()
+}
+
 /// The record's pull request number and base branch, as its header holds them.
 fn number(r: &Record) -> Option<(u64, &str)> {
     Some((r.header.get("pull_request")?.as_u64()?, r.header.get("base")?.as_str()?))
@@ -257,26 +267,30 @@ pub(crate) type Forge<'a> = (u64, &'a str);
 /// The rows an approval accepts, each as a review's id and the row's number.
 pub(crate) type Accepts = Vec<(String, u64)>;
 
-/// `Ok` with the rows it accepts when an approval under `issue` carries a valid signature of the approval of `head` by `signer`, and names the
-/// forge's pull request number and base branch (37, design changes 3 and 4). The message comes from `issue`, `head`
-/// and the forge, not from the record, so only a signature the human made for this head of this pull request on this
-/// base passes. Else `signature_invalid` for a record at this head that does not verify, or `approval_missing`, which
-/// names the heads a stale approval signed.
+/// `Ok` with the rows it accepts when an approval under `issue` carries a valid signature of the approval of `head` by
+/// `signer`, and names the forge's pull request number and base branch (37, design changes 3 and 4). The message comes
+/// from `issue`, `head` and the forge, not from the record, so only a signature the human made for this head of this
+/// pull request on this base passes. The record's own `accepts` list joins the message, so only the list the human
+/// signed verifies (review of #100, W1). Else `signature_invalid` for a record at this head that does not verify, or
+/// `approval_missing`, which names the heads a stale approval signed.
 pub(crate) fn approved(index: &Index, issue: &Id, head: &str, signer: &str, forge: Forge) -> Result<Accepts, Refusal> {
     let records = index.records(issue.as_str(), Kind::Approval)?;
     if !records.is_empty() {
         can_verify()?;
     }
     let (n, base) = forge;
-    let message = Act { verb: "approve", node: issue, pull_request: n, base, head, more: &[] }.message();
-    let mut accepts = None;
+    let mut accepted = None;
     for r in records.iter().filter(|r| number(r) == Some(forge)) {
+        // A list that is not all text is no list the human signed.
+        let Some(named) = names(r) else { continue };
+        let more = accepts(&named);
+        let message = Act { verb: "approve", node: issue, pull_request: n, base, head, more: &more }.message();
         if holds(r, &message, signer)? {
-            accepts.get_or_insert_with(Vec::new).extend(bp_read::inputs::accepted(r));
+            accepted.get_or_insert_with(Vec::new).extend(bp_read::inputs::accepted(r));
         }
     }
-    if let Some(accepts) = accepts {
-        return Ok(accepts);
+    if let Some(accepted) = accepted {
+        return Ok(accepted);
     }
     let fix = format!("the human runs bp approve {issue} from a shell, at head {head} of pull request {n} into {base}");
     let at = |r: &&Record| r.header.get("head").and_then(Value::as_str) == Some(head);

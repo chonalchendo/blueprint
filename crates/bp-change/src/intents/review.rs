@@ -99,15 +99,21 @@ pub fn holding<'a>(i: &'a Issue, head: &str) -> (Vec<(&'a Review, Vec<u64>)>, bo
     (rows, capped)
 }
 
+/// Whether an error row past high's round cap holds the land at `head`, whatever an approval accepts: the one state in
+/// which an approval names rows (37, design change 6). `land` refuses a signed list outside it (review of #100, W1).
+pub fn at_cap(i: &Issue, head: &str) -> bool {
+    let level = level(i, head).0;
+    level == Level::High && rounds::blocking(level, &i.reviews).iter().any(|(r, _)| r.round >= rounds::cap(level))
+}
+
 /// The rows the human's approval of `head` would accept now: every row that holds the land or needs a disposition,
-/// when an error row is past high's round cap, else none (37, design change 6). `bp approve` names them in the record.
+/// at high's round cap ([`at_cap`]), else none (37, design change 6). `bp approve` names them in the record.
 pub fn accepting(i: &Issue, head: &str) -> Vec<(String, u64)> {
-    let (holding, capped) = holding(i, head);
-    if !capped {
+    if !at_cap(i, head) {
         return Vec::new();
     }
     let mut rows = open(&i.reviews, &i.approvals, head);
-    rows.extend(holding);
+    rows.extend(holding(i, head).0);
     let mut named: Vec<(String, u64)> = rows.iter().flat_map(|(r, ns)| ns.iter().map(|n| (r.id.clone(), *n))).collect();
     named.sort();
     named.dedup();
