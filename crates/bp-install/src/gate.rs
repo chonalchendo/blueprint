@@ -410,6 +410,7 @@ mod tests {
             ("gate: abc\n".into(), "short"),
             ("gate:\n  - a\n".into(), "a list"),
             (format!("high:\n\t- : [\ngate: {PIN}\n"), "not YAML"),
+            ("gate: 0123456789012345678901234567890123456789\n".into(), "all digits, which YAML reads as a number"),
             (format!("a: 1\n---\ngate: {PIN}\n"), "in a second document"),
         ] {
             let e = in_force(&text).unwrap_err();

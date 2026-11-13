@@ -529,6 +529,20 @@ fn gate_fails_closed_on_a_tool_or_input_fault() {
     std::fs::create_dir(&empty).unwrap();
     let (exit, v) = run(&args(&w.base, "-"), &[("PATH", empty.to_str().unwrap())], &valid);
     assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "no git: {v}");
+    // A git that fails to read the risk file for another cause: not a missing file, so no default rules.
+    let real = std::process::Command::new("sh").args(["-c", "command -v git"]).output().unwrap().stdout;
+    let real = String::from_utf8(real).unwrap().trim().to_string();
+    let broken = w.dir.path().join("broken");
+    std::fs::create_dir(&broken).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *'cat-file -e '*':.bp/risk.yml'*) echo 'error: unable to read' >&2; exit 128;; esac\nexec '{real}' \"$@\"\n"
+    );
+    std::fs::write(broken.join("git"), script).unwrap();
+    std::fs::set_permissions(broken.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", broken.display(), std::env::var("PATH").unwrap());
+    let (exit, v) = run(&args(&w.base, "-"), &[("PATH", &path)], &valid);
+    assert_eq!((exit, v["code"].as_str()), (Some(1), Some("could_not_run")), "{v}");
+    assert!(v["fix"].as_str().unwrap().starts_with("error: unable to read"), "{v}");
 
     // Review row 32: an `ssh-keygen` that cannot verify is a tool fault; the valid signature is not called false.
     let fake = w.dir.path().join("fake");
