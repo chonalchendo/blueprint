@@ -7,18 +7,25 @@ use crate::risk::{self, Level};
 use crate::rounds;
 
 /// The level at `head` before the round caps: the highest of the declared level, the level `pr` recorded at the head
-/// (none reads medium, never low) and each raise (37, design changes 1 and 2). The intents fetch nothing, so `bp risk`
-/// alone judges the diff afresh.
+/// and each raise (37, design changes 1 and 2). A head that no `pr` run names reads the highest level recorded at an
+/// earlier head, so a plain `git push` cannot lower the level or the lenses; none at all reads medium, never low. The
+/// intents fetch nothing, so `bp risk` alone judges the diff afresh.
 fn uncapped(i: &Issue, head: &str) -> Level {
     let raises = i.reviews.iter().filter(|r| r.raises()).count() + usize::from(i.delta);
-    let computed = recorded_risk(&i.runs, head).unwrap_or(Level::Medium);
+    let computed = recorded_risk(&i.runs, head)
+        .or_else(|| i.runs.iter().filter_map(|r| Some(r.risk?.level)).max())
+        .unwrap_or(Level::Medium);
     risk::level(i.declared.unwrap_or(Level::Medium), Some(computed), raises)
 }
 
 /// A run at `head` records that the diff touches a high path outside the low patterns, so round one adds the
-/// security lens (37, design change 8).
+/// security lens (37, design change 8). A head that no `pr` run names reads each earlier head's record, as
+/// [`uncapped`] does.
 fn security(i: &Issue, head: &str) -> bool {
-    i.runs.iter().any(|r| r.commit == head && r.risk.is_some_and(|x| x.security))
+    let recorded = |r: &&super::Run| r.risk.is_some();
+    let at = i.runs.iter().filter(recorded).filter(|r| r.commit == head).collect::<Vec<_>>();
+    let runs = if at.is_empty() { i.runs.iter().filter(recorded).collect() } else { at };
+    runs.iter().any(|r| r.risk.is_some_and(|x| x.security))
 }
 
 /// The level in force at `head` as the intents read it, and the round whose cap raised it last with the level whose

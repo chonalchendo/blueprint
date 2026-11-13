@@ -933,6 +933,22 @@ mod tests {
     }
 
     #[test]
+    fn a_head_with_no_pr_run_keeps_the_earlier_level_and_lenses() {
+        // A plain push cannot close round one of a high issue with the medium lenses (review of #98, row 22).
+        let high = Run { risk: Some(Recorded { level: Level::High, security: true }), ..run("a", NOW, "h", false) };
+        let mut i = Issue {
+            status: "in-progress".into(),
+            claims: vec![Claim::default()],
+            runs: vec![high],
+            pr: Some(pr("h2", true, false)),
+            ..Issue::default()
+        };
+        i.reviews.extend([Lens::Conformance, Lens::FailurePaths].map(|l| review("h", 1, l, Vec::new())));
+        let want = "round 1: missing lenses: conformance, failure-paths, tests-and-checks, security";
+        assert_eq!(issue(&i, NOW), Verdict::of(Intent::NeedsReview, want));
+    }
+
+    #[test]
     fn needs_review_until_each_lens_recorded() {
         let held = Issue { status: "in-progress".into(), claims: vec![Claim::default()], ..Issue::default() };
         let at = |level: Option<Level>, security: bool| {
@@ -1005,8 +1021,16 @@ mod tests {
         partial.reviews[0].rows[0].answer = Some(Answer::Declined);
         let v = issue(&partial, NOW);
         assert_eq!(v.note, "error rows hold the land: r/h-conformance findings 1", "a decline holds at a new head");
-        // A later head waits for one verify review, whatever the level.
-        let fixed = |head: &str| Issue { pr: Some(pr(head, true, false)), ..i.clone() };
+        // A later head waits for one verify review, whatever the level. Its `pr` run records medium: the fix left
+        // the high path.
+        let fixed = |head: &str| {
+            let mut runs = i.runs.clone();
+            runs.push(Run {
+                risk: Some(Recorded { level: Level::Medium, security: false }),
+                ..run("a", NOW, head, false)
+            });
+            Issue { pr: Some(pr(head, true, false)), runs, ..i.clone() }
+        };
         assert_eq!(note(&fixed("h2")), "round 2: missing lenses: verify");
         let mut verified = fixed("h2");
         verified.reviews.push(review("h2", 2, Lens::Verify, Vec::new()));
