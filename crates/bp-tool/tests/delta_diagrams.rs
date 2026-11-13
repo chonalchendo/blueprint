@@ -33,7 +33,7 @@ fn vault(extra: &[(&str, &str)]) -> tempfile::TempDir {
     let milestone = "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\n## Finish line\n\n\
                      ~~~check shell {name=p expect=0}\ntrue\n~~~\n";
     let issue = "---\nkind: issue\ntitle: I\nstatus: open\nunder: projects/bp/milestones/m\n---\n\nBody.\n\n## Check\n\n\
-                 ```check shell {name=hello expect=0}\ntrue\n```\n";
+                 ```check shell {name=hello expect=0 prior=pass}\ntrue\n```\n";
     let (keep, old, sys) =
         (format!("{FRONT}/diagrams/keep"), format!("{FRONT}/diagrams/old"), format!("{SYSTEM}/diagrams/containers"));
     let files = [
@@ -119,8 +119,24 @@ fn a_delta_carries_its_diagrams_through_record_and_stamp() {
     ] {
         assert_eq!(record(root, body, &flags).1["code"], "usage", "{why}");
     }
-    let (exit, v) =
-        bp(root, &["record", "review", ISSUE, "--field", &format!("head={}", "a".repeat(40)), "--diagram", &new_flag]);
+    let (exit, v) = bp(
+        root,
+        &[
+            "record",
+            "review",
+            ISSUE,
+            "--field",
+            &format!("head={}", "a".repeat(40)),
+            "--field",
+            "round=1",
+            "--field",
+            "lens=conformance",
+            "--field",
+            "mode=full",
+            "--diagram",
+            &new_flag,
+        ],
+    );
     assert_eq!((exit, v["code"].as_str()), (Some(4), Some("usage")), "only a delta carries diagrams: {v}");
     assert_eq!(common::commits(root), before, "no refusal writes");
 

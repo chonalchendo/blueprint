@@ -4,10 +4,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use bp_change::MilestoneStatus;
 use bp_change::risk::Level;
 use bp_design::DesignStatus;
 use bp_operation::Role;
-use bp_vault::{Code, Header, Id, Kind, Refusal, Vault};
+use bp_vault::{Code, Header, Id, Index, Kind, Refusal, Vault};
 use clap::Args;
 use serde_json::Value;
 
@@ -77,7 +78,7 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
         if was.as_ref() == Some(&value) {
             return Ok(Wrote::Already(serde_json::json!({ "id": id })));
         }
-        lowers(header.kind, &id, field, was.as_ref(), &value)?;
+        lowers(header.kind, &id, field, was.as_ref(), &value, || lowerable(&vault, index, header.under.as_ref(), &id))?;
         let new = bp_vault::set_field(&text, field, &value);
         (new, serde_json::json!({ "id": id, "field": field, "value": value, "was": was }), field.as_str())
     };
@@ -98,20 +99,48 @@ pub(crate) fn set(cwd: &Path, set: &Set) -> Result<Wrote, Refusal> {
     Ok(Wrote::Changed(result))
 }
 
-/// `not_a_label` when the write lowers an issue's `risk`: only the human's signed record lowers a level (37, design
-/// change 2), so `set` writes a first level or a higher one only.
-fn lowers(kind: Kind, id: &Id, field: &str, was: Option<&Value>, value: &Value) -> Result<(), Refusal> {
+/// `not_a_label` when the write lowers an issue's `risk` and [`lowerable`] says no: the level is set at derive and
+/// approved with the milestone, so before the approval a level is a label; after it, only the human's signed record
+/// lowers a level (37, design changes 1 and 2). An issue with no label reads medium, so a first `low` is a lowering
+/// too, and so is a `low` at `create` (`create::create`). `lowerable` runs only for a lowering: it reads git.
+pub(crate) fn lowers(
+    kind: Kind,
+    id: &Id,
+    field: &str,
+    was: Option<&Value>,
+    value: &Value,
+    lowerable: impl FnOnce() -> Result<bool, Refusal>,
+) -> Result<(), Refusal> {
     let rank = |v: Option<&Value>| v.and_then(Value::as_str).and_then(|l| l.parse::<Level>().ok());
-    match (rank(was), rank(Some(value))) {
-        (Some(was), Some(now)) if kind == Kind::Issue && field == "risk" && now < was => Err(Refusal::new(
-            Code::NotALabel,
-            format!("{id} risk"),
-            "only a signed human record lowers a risk level; set writes a first level or a higher one (37, design \
-             change 2)",
-            format!("the human runs bp lower {id} <level> --reason <why> from a shell"),
-        )),
+    match (rank(was).or(Some(Level::Medium)), rank(Some(value))) {
+        (Some(was), Some(now)) if kind == Kind::Issue && field == "risk" && now < was && !lowerable()? => {
+            Err(Refusal::new(
+                Code::NotALabel,
+                format!("{id} risk"),
+                "a label lowers a risk level only while the issue's milestone is planned and was never approved, and \
+                 the issue holds no claim; else only a signed human record lowers it (37, design changes 1 and 2)",
+                format!("the human runs bp lower {id} <level> --reason <why> from a shell"),
+            ))
+        }
         _ => Ok(()),
     }
+}
+
+/// Whether a label may still lower the risk of `issue` under the milestone `under`: the milestone is `planned`, no
+/// commit of its file ever held `approved` or `done` as its status, and the issue holds no claim record (37, design
+/// change 1). So `approved -> abandoned -> planned` does not reopen the label (review of #98, row 29). A history git
+/// cannot read refuses.
+pub(crate) fn lowerable(vault: &Vault, index: &Index, under: Option<&Id>, issue: &Id) -> Result<bool, Refusal> {
+    let Some(m) = under else { return Ok(false) };
+    if bp_read::inputs::status(index, m.as_str())?.as_deref() != Some(MilestoneStatus::Planned.as_str())
+        || !index.records(issue.as_str(), Kind::Claim)?.is_empty()
+    {
+        return Ok(false);
+    }
+    let path = format!("./{m}.md");
+    let pattern = "^status: *[\"']?(approved|done)";
+    let args = ["log", "--follow", "--format=%H", "-G", pattern, "--", &path];
+    Ok(bp_read::git::git(&vault.root, &args)?.is_empty())
 }
 
 /// The file with its body replaced: the header's bytes as they were, then the body as `create` stores it. `None`

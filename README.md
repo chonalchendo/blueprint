@@ -18,7 +18,7 @@ The toolchain is pinned in `rust-toolchain.toml`. `cargo deny` and `cargo machet
 
 ## Pull requests
 
-The check `bp-gate` (`.github/workflows/bp-gate.yml`) requires the human's signed approval of a high pull request. It judges what the head lands: the test merge of the head into the default branch. A high head passes only on a pull request into the default branch. `bp install` writes the workflow, and the line `gate: <sha>` in `.bp/risk.yml` when the file holds no pin. The pin is the Blueprint commit that the check builds `bp` from, and it must be on Blueprint's default branch. Only `bp install --gate <sha>` replaces a pin.
+The check `bp-gate` (`.github/workflows/bp-gate.yml`) requires the human's signed approval of a high pull request. It judges what the head lands: the test merge of the head into the default branch. A high head passes only on a pull request into the default branch. `bp install` writes the workflow, and the line `gate: <sha>` in `.bp/risk.yml` when the file holds no pin and `bp` is built from a commit on Blueprint's default branch. The pin is the Blueprint commit that the check builds `bp` from, and it must be on Blueprint's default branch. Only `bp install --gate <sha>` replaces a pin.
 
 The check stops an agent only with these forge settings. Without them it stops mistakes only.
 

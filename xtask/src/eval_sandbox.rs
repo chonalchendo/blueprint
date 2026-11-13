@@ -120,7 +120,7 @@ impl Sandbox {
         if let Some((head, title)) = &fx.stack {
             // The dependency holds an open pull request at its landed head and a check that needs no build, so the
             // worker's `cut` stacks on it (21, the complete row) and the trial pays for only its own issue.
-            let stub = "## Check\n\n~~~check shell {name=stub expect=0}\ntrue\n~~~\n";
+            let stub = "## Check\n\n~~~check shell {name=stub expect=0 prior=pass}\ntrue\n~~~\n";
             let dependency = sb.create_issue(&code, m, title, stub)?;
             sb.open_pr(&code, &dependency, head, None)?;
             sb.bp(&code, None, &["link", &sb.issue.clone(), "depends", &dependency])?;
@@ -206,20 +206,9 @@ impl Sandbox {
         {
             install.env(key, cfg.join(dir));
         }
-        let risk = self.code().join(".bp/risk.yml");
-        let fixture = std::fs::read(&risk).ok();
-        capture(install.args(["install", "--target", "claude", "--json"]))?;
-        // The forge check's workflow and its pin are tracked files the human commits; an arm runs no forge check, and
-        // its clone stays as the fixture committed it.
-        std::fs::remove_file(self.code().join(".github/workflows/bp-gate.yml"))?;
-        std::fs::remove_dir(self.code().join(".github/workflows")).ok();
-        std::fs::remove_dir(self.code().join(".github")).ok();
-        match fixture {
-            Some(text) => std::fs::write(&risk, text)?,
-            // An empty `.bp/` stays: git holds no directory, so the clone's status is clean.
-            None if risk.exists() => std::fs::remove_file(&risk)?,
-            None => {}
-        }
+        crate::eval_install::as_committed(&self.code(), || {
+            capture(install.args(["install", "--target", "claude", "--json"])).map(drop)
+        })?;
         if let Some((arm, at)) = check_arm {
             self.assert_arm(skill, arm, at)?;
         }
@@ -362,7 +351,9 @@ impl Sandbox {
         let mut c = self.command("bp", &self.code());
         c.env("BP_ROLE", "session").env("BP_SESSION", "eval");
         let status = c
-            .args(["record", "review", &self.issue, "--field", &field, "--field", "role=reviewer", "--body-file"])
+            .args(["record", "review", &self.issue, "--field", &field, "--field", "role=reviewer"])
+            // An eval reads one head once: round one, the conformance lens (37, design change 8).
+            .args(["--field", "round=1", "--field", "lens=conformance", "--field", "mode=full", "--body-file"])
             .arg(&file)
             .arg("--json")
             .stdout(Stdio::null())

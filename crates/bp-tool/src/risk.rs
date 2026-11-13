@@ -1,8 +1,9 @@
 //! `bp risk <issue>`: the risk level in force and the rules that set it (37, design changes 1 and 2). The level is the
 //! highest of the issue's `risk` label (absent reads `medium`), the level the claim's diff computes, each review that
-//! holds a `risk` row, and a pending delta the issue caused. The diff is what a head lands: its test merge into the
-//! sha that origin's server names for the base branch the pull request targets, diffed from that sha. The head is the
-//! higher of the local branch and the sha origin names for it; each sha is fetched. The rules are `.bp/risk.yml` on that base commit, so a branch that edits them is judged by the
+//! holds a `risk` row as first committed, and a pending delta the issue caused; then the round caps (design change 6).
+//! The diff is what a head lands: its test merge into the sha that origin's server names for the base branch the pull
+//! request targets, diffed from that sha. The head is the higher of the local branch and the sha origin names for it;
+//! each sha is fetched. The rules are `.bp/risk.yml` on that base commit, so a branch that edits them is judged by the
 //! base's rules, and its edit is high. The answer names each head it judged and the base. It writes nothing to the
 //! vault and calls no `gh`.
 
@@ -11,6 +12,7 @@ use std::path::Path;
 
 use bp_change::intents::Base;
 use bp_change::risk::{self, Computed, Config, Level, Pattern, RISK_FILE};
+use bp_change::rounds;
 use bp_read::inputs::{field, held};
 use bp_read::snapshot::clone_of;
 use bp_vault::{Code, Id, Index, Refusal, Vault};
@@ -65,10 +67,14 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
     };
     // A pending delta is vault data: it raises the level with or without a clone in view (37, design change 1).
     let delta = !bp_read::carried_deltas(&index, &id)?.is_empty();
-    let raised_by = bp_read::inputs::raises(&index, id.as_str())?;
+    // Each review counts as its first commit wrote it, so an edit cannot drop a raise or an error row (37, design
+    // change 2).
+    let reviews = bp_read::inputs::reviews(&vault, &index, id.as_str())?;
+    let raised_by: Vec<&str> = reviews.iter().filter(|r| r.raises()).map(|r| r.id.as_str()).collect();
     let judged = judged(cwd, &index, &id)?;
     let computed = judged.as_ref().map(|j| j.computed.level);
-    let level = risk::level(declared.unwrap_or(Level::Medium), computed, raised_by.len() + usize::from(delta));
+    let base = risk::level(declared.unwrap_or(Level::Medium), computed, raised_by.len() + usize::from(delta));
+    let (level, capped) = rounds::capped(base, &reviews);
     let mut reasons = Vec::new();
     match declared {
         Some(d) if d == level => reasons.push(format!("the issue declares {d}")),
@@ -83,6 +89,9 @@ pub(crate) fn risk(cwd: &Path, r: &Risk) -> Result<Value, Refusal> {
             reasons.push("the issue caused a pending delta, and a design change is high".into());
         }
         reasons.extend(raised_by.iter().map(|r| format!("review {r} holds a risk row")));
+    }
+    if let Some((round, from)) = capped {
+        reasons.push(format!("round cap: the review of round {round} holds an error row at or past the cap of {from}"));
     }
     Ok(json!({
         "level": level,
@@ -162,7 +171,8 @@ pub(crate) fn judge_by(top: &Path, base: String, heads: Vec<String>, config: &Co
                 ];
                 risk::computed(&risk::changes(&git(top, &args)?), config)
             }
-            Err(why) => Computed { level: Level::High, reasons: vec![format!("{head} {why}")] },
+            // What lands is not known, so the security lens joins round one as for a high path.
+            Err(why) => Computed { level: Level::High, reasons: vec![format!("{head} {why}")], security: true },
         };
         if best.as_ref().is_none_or(|b| c.level > b.level) {
             best = Some(c);
@@ -189,12 +199,13 @@ fn landed(top: &Path, base: &str, head: &str) -> Result<Result<String, String>, 
 /// The sha origin's server names for `refs/heads/<branch>`, fetched; `None` when it holds no such branch. A failed
 /// call refuses: old refs would judge another head by stale rules. Nothing of the clone's own names the sha: a
 /// `remote.origin.fetch` refspec, `git update-ref` or `git remote set-head` moves each local ref with no push.
-fn at_origin(top: &Path, branch: &str) -> Result<Option<String>, Refusal> {
+pub(crate) fn at_origin(top: &Path, branch: &str) -> Result<Option<String>, Refusal> {
     let want = format!("refs/heads/{branch}");
     let listed = git(top, &["ls-remote", "origin", &want])?;
     let sha = listed.lines().find_map(|l| l.split_once('\t').filter(|(_, r)| *r == want).map(|(sha, _)| sha));
     let Some(sha) = sha.filter(|s| s.len() >= 40 && s.bytes().all(|b| b.is_ascii_hexdigit())) else { return Ok(None) };
-    git(top, &["fetch", "-q", "origin", sha])?;
+    git(top, &["fetch", "-q", "origin", sha])
+        .map_err(|e| Refusal::failed(e.subject, format!("git cannot fetch {sha}, origin's {branch}: {}", e.fix)))?;
     Ok(Some(sha.to_string()))
 }
 

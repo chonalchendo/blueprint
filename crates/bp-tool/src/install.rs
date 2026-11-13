@@ -17,7 +17,8 @@ pub struct Install {
     pub target: String,
     /// The Blueprint commit the forge check `bp-gate` builds `bp` from, written as `gate:` in `.bp/risk.yml`; it
     /// replaces a pin the file holds. Default: the commit this `bp` is built from, written only into a file with no
-    /// pin. A `bp` built outside a clone of Blueprint writes no pin, and the check fails until the human adds one.
+    /// pin. A `bp` built from a commit off Blueprint's default branch writes no pin, and the check fails until the
+    /// human adds one.
     #[arg(long)]
     pub gate: Option<String>,
 }
@@ -53,8 +54,12 @@ pub(crate) fn install(cwd: &Path, i: &Install) -> Result<Wrote, Refusal> {
         ));
     };
     let top = bp_read::snapshot::clone_of(cwd, &index, &project)?;
-    Ok(match bp_install::install(&top, target, &project, gate)? {
-        (true, v) => Wrote::Changed(v),
-        (false, v) => Wrote::Already(v),
-    })
+    let (wrote, v) = bp_install::install(&top, target, &project, gate)?;
+    if gate.is_none() && v["gate"].is_null() {
+        eprintln!(
+            "bp install wrote no pin: this bp is not built from a commit on Blueprint's default branch, so the \
+             bp-gate check fails; rerun with --gate <sha of a commit on Blueprint's default branch>"
+        );
+    }
+    Ok(if wrote { Wrote::Changed(v) } else { Wrote::Already(v) })
 }

@@ -37,6 +37,6 @@ A delta carries only a body. `record delta` takes no diagram, and `stamp` writes
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-check -p bp-tool
 ~~~

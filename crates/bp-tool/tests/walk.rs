@@ -254,16 +254,29 @@ fn review_and_respond_read_the_open_pull_request_head() {
     let table = "| severity | finding |\n|---|---|\n| major | one |\n| minor | two |\n";
     let review = format!("{SEED}/reviews/aaaa");
     write(d.path(), &format!("{review}.md"), &format!("---\nkind: review\nunder: {SEED}\nhead: aaaa\n---\n\n{table}"));
+    // The stop agrees with needs review: a medium head needs the failure-paths lens too (review of #98, finding 9).
+    assert_eq!(done(d.path(), Some(&one), SEED, "review"), false, "one lens of two");
+    let paths = format!("{SEED}/reviews/aaaa-2");
+    let text = format!(
+        "---\nkind: review\nunder: {SEED}\nhead: aaaa\nlens: failure-paths\n---\n\n| severity | finding |\n|---|---|\n| major | three |\n"
+    );
+    write(d.path(), &format!("{paths}.md"), &text);
     assert_eq!(done(d.path(), Some(&one), SEED, "review"), true);
-    assert_eq!(done(d.path(), Some(&two), SEED, "review"), false, "the review is at an older head");
-    let answer = |n: u64, how: &str| {
+    assert_eq!(done(d.path(), Some(&two), SEED, "review"), false, "the reviews are at an older head");
+    let answer = |review: &str, n: u64, how: &str| {
         let text = format!("---\nkind: disposition\nunder: {review}\nfinding: {n}\nas: {how}\n---\n");
         write(d.path(), &format!("{review}/dispositions/{n}.md"), &text);
     };
-    answer(1, "declined");
-    answer(99, "declined");
-    assert_eq!(done(d.path(), Some(&one), SEED, "respond"), false, "finding 2 has no disposition; 99 is no finding");
-    answer(2, "fixed");
+    // Respond reads each lens's review of the head: the stop waits for both, and the slice holds both.
+    answer(&review, 1, "declined");
+    answer(&review, 99, "declined");
+    answer(&paths, 1, "declined");
+    let why = "finding 2 of the first lens has no disposition, though the latest review has each; 99 is no finding";
+    assert_eq!(done(d.path(), Some(&one), SEED, "respond"), false, "{why}");
+    let (_, v) = walk(d.path(), &[SEED, "--for", "respond"]);
+    let reviews: Vec<&str> = ids(&v["bodies"]).into_iter().filter(|i| i.contains("/reviews/")).collect();
+    assert_eq!(reviews, [review.as_str(), paths.as_str()], "{v}");
+    answer(&review, 2, "fixed");
     assert_eq!(done(d.path(), Some(&one), SEED, "respond"), false, "a fix moves the head");
     assert_eq!(done(d.path(), Some(&two), SEED, "respond"), true);
 }
@@ -290,11 +303,10 @@ fn a_stop_reads_the_vault_snapshot_and_never_calls_gh() {
     let d = vault();
     let claim = format!("---\nkind: claim\nunder: {SEED}\nfrom: 2026-10-16T00:00:00Z\n---\n");
     write(d.path(), &format!("{SEED}/claims/c.md"), &claim);
-    write(
-        d.path(),
-        &format!("{SEED}/reviews/aaaa.md"),
-        &format!("---\nkind: review\nunder: {SEED}\nhead: aaaa\n---\n"),
-    );
+    for (name, lens) in [("aaaa", "conformance"), ("aaaa-2", "failure-paths")] {
+        let text = format!("---\nkind: review\nunder: {SEED}\nhead: aaaa\nlens: {lens}\n---\n");
+        write(d.path(), &format!("{SEED}/reviews/{name}.md"), &text);
+    }
     // A `gh` that leaves a mark and fails: no stop may call it.
     let guard = tempfile::tempdir().unwrap();
     let mark = guard.path().join("called");
@@ -447,6 +459,9 @@ fn respond_holds_the_latest_review_by_its_time_not_its_id() {
     };
     review("ffff", "2026-10-16T00:00:00Z", "older");
     review("aaaa", "2026-10-17T00:00:00Z", "newer");
+    // An answered row of an earlier head needs no response, so the slice leaves its review out.
+    let text = format!("---\nkind: disposition\nunder: {SEED}/reviews/ffff\nfinding: 1\nas: fixed\n---\n");
+    write(d.path(), &format!("{SEED}/reviews/ffff/dispositions/1.md"), &text);
     let (code, v) = walk(d.path(), &[SEED, "--for", "respond"]);
     assert_eq!(code, Some(0), "{v}");
     let first = &v["bodies"][0];
@@ -483,7 +498,13 @@ fn the_review_slice_carries_the_pull_request_head_that_its_stop_compares() {
         "---\nkind: review\nunder: {SEED}\nhead: cafe\n---\n\n| severity | location | finding |\n|---|---|---|\n"
     );
     write(d.path(), &format!("{SEED}/reviews/r.md"), &review);
-    assert_eq!(done(d.path(), Some(forge.path()), SEED, "review"), true, "a review at the slice's head ends the stop");
+    assert_eq!(done(d.path(), Some(forge.path()), SEED, "review"), false, "a medium head needs two lenses");
+    write(
+        d.path(),
+        &format!("{SEED}/reviews/r-2.md"),
+        &review.replace("head: cafe\n", "head: cafe\nlens: failure-paths\n"),
+    );
+    assert_eq!(done(d.path(), Some(forge.path()), SEED, "review"), true, "each lens at the slice's head ends the stop");
 }
 
 #[test]

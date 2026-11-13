@@ -32,9 +32,9 @@ fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
     let bin = t.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let t_ = t.path().display();
-    // `gh pr comment <n> --body <text>` keeps the number and the text.
+    // `gh pr comment <n> --body <text>` adds the number and the text, so two posts show twice.
     let gh = format!(
-        "#!/bin/sh\n[ \"$1 $2 $4\" = 'pr comment --body' ] && {{ echo \"$3\" > '{t_}/posted'; printf %s \"$5\" >> '{t_}/posted'; exit 0; }}\n\
+        "#!/bin/sh\n[ \"$1 $2 $4\" = 'pr comment --body' ] && {{ echo \"$3\" >> '{t_}/posted'; printf %s \"$5\" >> '{t_}/posted'; exit 0; }}\n\
          [ \"$1 $2\" = 'pr list' ] || exit 9\ncat '{t_}/prs.json' 2>/dev/null || echo '[]'\n"
     );
     let ssh_add = format!("#!/bin/sh\n[ \"$1\" = -L ] && [ -s '{t_}/agent-keys' ] || exit 1\ncat '{t_}/agent-keys'\n");
@@ -141,17 +141,22 @@ fn approve_and_lower_sign_the_head_with_the_signers_key() {
     assert!(signature.ends_with("-----END SSH SIGNATURE-----") && text.contains(signature), "{comment}");
     assert!(!t.join("posted").exists(), "no --post, no comment");
     assert_eq!(approve(&[], &human).0, Some(3), "a valid approval at this head is a repeat");
-    let (code, again) = bp(v, t, &[], &["approve", ISSUE, "--key", &human, "--post"]);
-    assert_eq!((code, &again["comment"]), (Some(3), &out["comment"]), "a repeat posts the same comment: {again}");
-    let posted = std::fs::read_to_string(t.join("posted")).unwrap();
-    assert_eq!(posted, format!("4\n{comment}"), "gh pr comment 4 --body <the comment>");
+    let post = || bp(v, t, &[], &["approve", ISSUE, "--key", &human, "--post"]);
+    let (code, again) = post();
+    assert_eq!((code, &again["comment"]), (Some(3), &out["comment"]), "a repeat gives the same comment: {again}");
+    assert!(!t.join("posted").exists(), "a repeat writes nothing, so it posts nothing");
     // A retarget changes the signed base: the old approval is no repeat, and the new comment names the new base.
     let onto =
         json!([{ "number": 4, "state": "OPEN", "headRefName": "bp/a", "headRefOid": HEAD, "baseRefName": "bp/b" }]);
     std::fs::write(t.join("prs.json"), onto.to_string()).unwrap();
-    let (code, out) = approve(&[], &human);
+    let (code, out) = post();
     assert_eq!(code, Some(0), "{out}");
-    assert!(out["comment"].as_str().unwrap().contains("pull_request: 4\nbase: bp/b\nhead: "), "{out}");
+    let comment = out["comment"].as_str().unwrap();
+    assert!(comment.contains("pull_request: 4\nbase: bp/b\nhead: "), "{out}");
+    let posted = format!("4\n{comment}");
+    assert_eq!(std::fs::read_to_string(t.join("posted")).unwrap(), posted, "gh pr comment 4 --body <the comment>");
+    assert_eq!(post().0, Some(3), "the post's repeat");
+    assert_eq!(std::fs::read_to_string(t.join("posted")).unwrap(), posted, "one post, not two");
     std::fs::write(t.join("prs.json"), pr.to_string()).unwrap();
 
     let lower = |level: &str, k: &str| bp(v, t, &[], &["lower", ISSUE, level, "--reason", "docs only", "--key", k]);

@@ -20,6 +20,6 @@ The review eval grades a row by its words. It cannot grade a planted defect, and
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p xtask
 ~~~

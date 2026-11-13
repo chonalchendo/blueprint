@@ -18,8 +18,8 @@ Pass `--json` to each `bp` call. On exit 1, 2 or 4, read `code` and run `fix` at
    - The first line says what to build.
    - `## Problem` gives a reproduction: the command, what it shows now, and what it must show.
    - `## Check` holds a block with the name of each finish-line block that the issue covers.
-9. A `## Check` block proves only the part that this issue builds. Give it the text of the milestone block, or a narrower text.
-10. Validate each issue first: `bp create issue --project <p> --title "<title>" --under <m> --body-file <file> --dry-run --json`.
+9. A `## Check` block proves only the part that this issue builds. Give it the text of the milestone block, or a narrower text. The block must fail before the change; give `prior=pass` only to a guard that holds before and after it.
+10. Validate each issue first: `bp create issue --project <p> --title "<title>" --under <m> --field risk=<level> --body-file <file> --dry-run --json`. The level is `medium` or `high`. `low` is allowed only while the milestone is `planned` and was never approved. After that, only the human lowers a level, with a signed record.
 11. Fix each item of `findings` in the file. Then run the same call without `--dry-run`.
 12. Link each design that the issue changes: `bp link <issue> cites <design> --json`. Link each convention that it obeys the same way.
 13. If an issue needs the code of another issue, run `bp link <issue> depends <other> --json`. Issues with no dependency run in parallel.

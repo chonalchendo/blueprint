@@ -20,6 +20,6 @@ The renderer and the `nodes` check need a `term` or `noun` on every diagram node
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-diagram
 ~~~

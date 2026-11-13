@@ -1,6 +1,7 @@
 //! Embeds `bundle/` (23): every file under it, by its path relative to `bundle/`, in path order. Cargo reruns this
 //! when any file under the directory changes, so the binary never ships a stale bundle. It also names the commit the
-//! build is from, as `BP_BUILT_FROM`: `install` pins the forge check's build of `bp` to it (37, design change 5).
+//! build is from, as `BP_BUILT_FROM`, when that commit is on Blueprint's default branch: `install` pins the forge
+//! check's build of `bp` to it (37, design change 5).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -29,22 +30,25 @@ fn main() {
     println!("cargo:rustc-env=BP_BUILT_FROM={}", built_from().unwrap_or_default());
 }
 
-/// The commit of the clone this crate sits in, or `None` outside a clone (a source archive). Cargo reruns this when
-/// `HEAD` or its branch moves. Only existing files are watched: cargo reruns a script that watches a missing one on
-/// every build.
+/// The commit of the clone this crate sits in, when `origin/master` holds it; `None` outside a clone (a source
+/// archive) or for a commit of a worktree or a pull request branch. The workflow refuses a pin off the default branch,
+/// and a squash merge never takes a branch commit there. The check reads local refs only, with no network. Cargo
+/// reruns this when `HEAD`, its branch or `origin/master` moves. Only existing files are watched: cargo reruns a
+/// script that watches a missing one on every build.
 fn built_from() -> Option<String> {
     let git = |args: &[&str]| {
         let out = Command::new("git").current_dir(env!("CARGO_MANIFEST_DIR")).args(args).output().ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-    let watched =
-        ["HEAD".to_string(), "packed-refs".to_string()].into_iter().chain(git(&["symbolic-ref", "-q", "HEAD"]));
+    let fixed = ["HEAD", "packed-refs", "refs/remotes/origin/master"].map(str::to_string);
+    let watched = fixed.into_iter().chain(git(&["symbolic-ref", "-q", "HEAD"]));
     for name in watched {
         let path = git(&["rev-parse", "--path-format=absolute", "--git-path", &name])?;
         if Path::new(&path).exists() {
             println!("cargo:rerun-if-changed={path}");
         }
     }
+    git(&["merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/master"])?;
     git(&["rev-parse", "--verify", "-q", "HEAD^{commit}"])
 }
 

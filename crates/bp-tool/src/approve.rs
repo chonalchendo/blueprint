@@ -125,7 +125,8 @@ fn act(
         let mut v = json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number });
         if kind == Kind::Approval {
             let signature = armour(&r.body).expect("a record that verifies holds a signature");
-            v["comment"] = share(&gh, pr.number, &message, &signature, post)?.into();
+            // A repeat writes nothing, so it posts nothing: each rerun would add one more copy to the pull request.
+            v["comment"] = share(&gh, pr.number, &message, &signature, false)?.into();
         }
         return Ok(Wrote::Already(v));
     }
@@ -172,7 +173,8 @@ fn act(
 }
 
 /// The forge comment of a signed approval, printed to stderr for the human to post, or posted with `gh pr comment`
-/// when `post`. The forge check reruns only on a new run: the fix names the rerun.
+/// when `post`. Only the run that writes the record posts. The forge check reruns only on a new run: the fix names
+/// the rerun.
 fn share(gh: &Gh, number: u64, message: &str, signature: &str, post: bool) -> Result<String, Refusal> {
     let text = comment(message, signature);
     if post {

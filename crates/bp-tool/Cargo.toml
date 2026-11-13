@@ -1,6 +1,6 @@
 [package]
 name = "bp-tool"
-description = "The tool: the 20 verbs, the write path composition, the envelope. Builds the bp binary."
+description = "The tool: the 23 verbs, the write path composition, the envelope. Builds the bp binary."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

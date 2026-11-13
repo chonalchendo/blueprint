@@ -131,6 +131,33 @@ fn install_refuses_outside_a_clone_and_a_repeat_exits_3() {
 }
 
 #[test]
+fn install_pins_a_build_only_on_blueprints_default_branch() {
+    // The commit of this clone when `origin/master` holds it, else none: a worktree or a pull request branch writes a
+    // pin that the workflow refuses, and a squash merge never takes it to the default branch.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let git_ = |args: &[&str]| Command::new("git").current_dir(root).args(args).output().unwrap();
+    let head = String::from_utf8(git_(&["rev-parse", "--verify", "-q", "HEAD^{commit}"]).stdout).unwrap();
+    let on = git_(&["merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/master"]).status.success();
+    assert_eq!(bp_install::BUILT_FROM, if on { head.trim() } else { "" }, "the default pin");
+
+    let w = World::new();
+    let out = w
+        .command(assert_cmd::cargo::cargo_bin("bp"), &w.code())
+        .args(["install", "--target", "claude", "--json"])
+        .output();
+    let out = out.unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let note = "bp install wrote no pin: this bp is not built from a commit on Blueprint's default branch";
+    if on {
+        assert_eq!((v["gate"].as_str(), stderr.contains(note)), (Some(head.trim()), false), "{v} {stderr}");
+    } else {
+        assert_eq!((&v["gate"], stderr.contains(note)), (&Value::Null, true), "{v} {stderr}");
+        assert!(!w.code().join(".bp/risk.yml").exists(), "no pin, no risk file");
+    }
+}
+
+#[test]
 fn walk_refuses_a_drifted_bundle_before_it_reads_the_vault() {
     let w = World::new();
     let walk = ["walk", MILESTONE, "--for", "derive", "--ids"];
@@ -342,14 +369,38 @@ fn the_role_hook_prefix_names_the_harness_for_a_later_walk() {
 #[test]
 fn a_handoff_seed_follows_a_record_to_its_node() {
     let w = World::new();
-    let head = "a".repeat(40);
+    // A held claim whose clone is the vault itself, so the vault's commit is a head `record review` accepts.
+    let v = w.vault.path();
+    let base = git(v, &["rev-parse", "HEAD"]).trim().to_string();
+    let claim = format!("---\nkind: claim\nunder: {ISSUE}\nworktree: {}\nbase: {base}\n---\n", v.display());
+    std::fs::create_dir_all(v.join(format!("{ISSUE}/claims"))).unwrap();
+    std::fs::write(v.join(format!("{ISSUE}/claims/c.md")), claim).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "claim"]);
+    let head = git(v, &["rev-parse", "HEAD"]).trim().to_string();
+    // The claim's branch holds the head: a review's head is the branch's tip or behind it.
+    git(v, &["branch", "bp/a"]);
     let body = tempfile::tempdir().unwrap();
     let file = body.path().join("review.md");
     std::fs::write(&file, format!("head: {head}\n| severity | location | finding |\n|---|---|---|\n")).unwrap();
     let (code, v) = w.bp(
         w.vault.path(),
         &[("BP_SESSION", "s-r")],
-        &["record", "review", ISSUE, "--field", &format!("head={head}"), "--body-file", file.to_str().unwrap()],
+        &[
+            "record",
+            "review",
+            ISSUE,
+            "--field",
+            &format!("head={head}"),
+            "--field",
+            "round=1",
+            "--field",
+            "lens=conformance",
+            "--field",
+            "mode=full",
+            "--body-file",
+            file.to_str().unwrap(),
+        ],
     );
     assert_eq!(code, Some(0), "{v}");
     let (code, v) = w.bp(w.vault.path(), &[], &["record", "handoff", "projects/bp/project", "--field", "session=s-r"]);

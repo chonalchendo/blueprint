@@ -1,4 +1,4 @@
-//! The tool: the 20 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
+//! The tool: the 23 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
 //! `--json`; diagnostics go to stderr.
 
 mod approve;
@@ -16,6 +16,7 @@ mod install;
 mod land;
 mod link;
 mod record;
+mod red_first;
 mod redraw;
 mod rename;
 mod review_rows;
@@ -108,7 +109,8 @@ pub enum Verb {
     /// the milestone at `done` in one commit, and a local tag. Or accept an editorial delta alone: no finish line,
     /// no version.
     Stamp(stamp::Stamp),
-    /// The bundle into a harness, at the clone's top, with its manifest; local, so it calls no forge.
+    /// The bundle into a harness, at the clone's top, with its manifest, the forge check's workflow and its pin; local,
+    /// so it calls no forge.
     Install(install::Install),
     /// The human's signed approval of the issue's pull request at its head; the key's passphrase is typed in a
     /// terminal, never in an agent.

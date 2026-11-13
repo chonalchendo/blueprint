@@ -23,6 +23,6 @@ A vault commit cannot name the agent role that made it. Today every commit from 
 
 ## Check
 
-~~~check shell {name=tests expect=0}
+~~~check shell {name=tests expect=0 prior=pass}
 cargo test -q -p bp-install -p bp-operation -p bp-tool -p bp-vault
 ~~~

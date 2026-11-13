@@ -8,7 +8,8 @@ pub const WORKFLOW: &str = ".github/workflows/bp-gate.yml";
 /// The risk file, as `bp_change::risk::RISK_FILE` names it; this crate does not depend on that one.
 pub const RISK_FILE: &str = ".bp/risk.yml";
 
-/// The commit this binary is built from, or `""` for a build outside a clone. `install` pins the gate to it by default.
+/// The commit this binary is built from when Blueprint's default branch holds it, else `""`. `install` pins the gate to
+/// it by default.
 pub const BUILT_FROM: &str = env!("BP_BUILT_FROM");
 
 /// The workflow for `project`, the slug a signed approval names. Every repository, Blueprint's too, builds `bp` from

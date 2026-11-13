@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use crate::risk::{judge_by, rules};
 use crate::signed::{Act, Block, blocks, is_branch, is_sha, public_key, verify};
 
-/// `bp gate --base <sha> --base-ref <branch> --head <sha> --pr <n> --project <name> [--comments <path>]`.
+/// `bp gate --base <sha> --base-ref <branch> --default-ref <branch> --head <sha> --pr <n> --project <name> [--comments <path>]`.
 #[derive(Args)]
 pub struct Gate {
     /// The commit whose rules judge the head: the default branch's head that the check runs from.

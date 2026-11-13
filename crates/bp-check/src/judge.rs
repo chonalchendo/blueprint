@@ -52,8 +52,9 @@ pub(crate) enum Test {
     Measure { max: f64, seconds: bool },
 }
 
-/// The attributes every kind accepts (15, the check grammar), with `timeout` (25, design change 4).
-const COMMON: [&str; 5] = ["name", "severity", "cwd", "when", "timeout"];
+/// The attributes every kind accepts (15, the check grammar), with `timeout` (25, design change 4) and `prior` (37,
+/// design change 10). The in-process kinds take the first two only.
+const COMMON: [&str; 6] = ["name", "severity", "cwd", "when", "timeout", "prior"];
 
 /// Reads one block's attributes. `today` is the clock's UTC date, `YYYY-MM-DD`.
 pub(crate) fn plan(check: &Check, today: &str) -> Plan {
@@ -87,6 +88,11 @@ pub(crate) fn plan(check: &Check, today: &str) -> Plan {
             check.runner,
             known.join(", ")
         ));
+    }
+    // `prior=pass` asks `pr` not to run the block at the claim's base; it asks nothing of the run itself.
+    match attr("prior") {
+        None | Some("pass") => {}
+        Some(p) => return Plan::Broken(format!("prior={p}: the one value is pass")),
     }
     match attr("when") {
         None | Some("pr") => {}
@@ -283,6 +289,8 @@ mod tests {
             ("shell", "name=a max=3"),
             ("scenario", "name=s max=3 expect=0"),
             ("shell", "name=a when=post-land colour=red"),
+            ("shell", "name=a prior=fail"),
+            ("shell", "name=a prior=PASS"),
         ] {
             assert!(matches!(plan(&block(runner, attrs), TODAY), Plan::Broken(_)), "{runner} {attrs}");
         }
@@ -290,13 +298,14 @@ mod tests {
         assert_eq!(plan(&block("nodes", "name=diagram"), TODAY), Plan::Nodes, "the nodes runner runs");
         for (runner, attr) in ["integrity", "nodes"]
             .into_iter()
-            .flat_map(|r| ["when=post-land", "when=pr", "cwd=x", "timeout=5", "expect=0"].map(|a| (r, a)))
+            .flat_map(|r| ["when=post-land", "when=pr", "cwd=x", "timeout=5", "expect=0", "prior=pass"].map(|a| (r, a)))
         {
             let broken = plan(&block(runner, &format!("name=i {attr}")), TODAY);
             assert!(matches!(&broken, Plan::Broken(w) if w.ends_with("it takes name, severity")), "{attr}: {broken:?}");
         }
         let Plan::Run(spec) = plan(&block("shell", "name=a timeout=5 cwd=crates/bp-vault"), TODAY) else { panic!() };
         assert_eq!((spec.timeout, spec.cwd), (Duration::from_secs(5), Some(PathBuf::from("crates/bp-vault"))));
+        assert!(matches!(plan(&block("scenario", "name=s measure=n max=1 prior=pass"), TODAY), Plan::Run(_)));
         let Plan::Run(spec) = plan(&block("shell", "name=a cwd=."), TODAY) else { panic!() };
         assert_eq!(spec.cwd, Some(PathBuf::from(".")), "the repository root");
         assert_eq!(

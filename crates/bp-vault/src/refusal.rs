@@ -58,6 +58,7 @@ crate::closed_enum! {
         ApprovalMissing = "approval_missing",
         KeyInAgent = "key_in_agent",
         RiskFileInvalid = "risk_file_invalid",
+        CheckVacuous = "check_vacuous",
     }
 }
 

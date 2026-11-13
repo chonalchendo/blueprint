@@ -30,7 +30,8 @@ esac
 printf '{"type":"assistant","message":{"model":"fake-model","content":[{"type":"text","text":"head: %s\\n| severity | location | finding |\\n|---|---|---|\\n%s"}]}}\n' "$H" "$ROW" >> "$T"
 "#;
 
-const CHECK: &str = "## Problem\n\nx\n\n## Check\n\n~~~check shell {name=sandbox expect=0}\ntest -f README.md\n~~~\n";
+const CHECK: &str =
+    "## Problem\n\nx\n\n## Check\n\n~~~check shell {name=sandbox expect=0 prior=pass}\ntest -f README.md\n~~~\n";
 
 struct Setup {
     dir: tempfile::TempDir,

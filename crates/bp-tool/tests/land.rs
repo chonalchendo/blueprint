@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use common::{commits, git};
@@ -264,6 +265,29 @@ fn pr_records_the_risk_level_of_its_head_on_each_run() {
     assert!(again.contains("\nrisk: medium\n"), "{again}");
 }
 
+/// A diff that touches a high path outside the low patterns records `security` on each run, and the intents read it
+/// there: round one asks for the security lens (37, design change 8; review of #98, finding 11 b and c).
+#[test]
+fn pr_records_security_and_round_one_asks_for_its_lens() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    std::fs::create_dir_all(w.join(".github/workflows")).unwrap();
+    std::fs::write(w.join(".github/workflows/x.yml"), "on: push\n").unwrap();
+    let h = commit(&w, &["add", "-A"], "hello");
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(0));
+    let run = std::fs::read_to_string(v.join(format!("{ISSUE}/runs/hello-{h}-1.md"))).unwrap();
+    assert!(run.contains("\nrisk: high\n") && run.contains("\nsecurity: true\n"), "{run}");
+    forge(t, &h, &[], &[]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "the repeat refreshes the snapshot");
+    let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "issue"]);
+    let row = list["rows"].as_array().unwrap().iter().find(|r| r["id"] == ISSUE).unwrap().clone();
+    let note = "round 1: missing lenses: conformance, failure-paths, tests-and-checks, security";
+    assert_eq!((&row["intent"], &row["note"]), (&json!("needs-review"), &json!(note)), "{row}");
+}
+
 /// `check` on an issue with a held claim runs at the claim's worktree head, as `pr` does, wherever the caller stands.
 #[test]
 fn check_runs_the_blocks_in_the_held_claims_worktree() {
@@ -412,8 +436,8 @@ fn pr_targets_the_claim_base_and_reruns_until_each_block_passes_as_written() {
     }
     assert_eq!(
         commits(v).parse::<u32>().unwrap(),
-        before.parse::<u32>().unwrap() + 6,
-        "two pr, two edits, two failed pr"
+        before.parse::<u32>().unwrap() + 8,
+        "two pr, two edits, the base run of each edit, two failed pr"
     );
 }
 
@@ -493,7 +517,8 @@ fn the_baseline_is_the_earliest_claim_through_a_release_and_a_rename() {
     let (v, t) = (v.path(), t.path());
     opened(v, t, &[]);
     let path = v.join(format!("{ISSUE}.md"));
-    let text = std::fs::read_to_string(&path).unwrap().replace("test -f hello.txt", "true");
+    // Still red without the change, so `pr` does not refuse it as vacuous (37, design change 10).
+    let text = std::fs::read_to_string(&path).unwrap().replace("test -f hello.txt", "test -e hello.txt");
     std::fs::write(&path, text).unwrap();
     git(v, &["commit", "-qam", "weaken"]);
     let later = [("BP_NOW", "2026-10-19T09:00:00Z")];
@@ -697,4 +722,470 @@ fn land_notes_no_step_on_a_layer_released_during_the_merge() {
     let text = std::fs::read_to_string(v.join(format!("{claim}.md"))).unwrap();
     assert!(text.ends_with("reason: escalated\n") && !text.contains("## Next"), "{text}");
     assert_eq!(git(v, &["status", "--porcelain"]), "");
+}
+
+/// `bp record review` of [`ISSUE`] at `head` with `fields` and one row per item of `rows`.
+fn review(v: &Path, t: &Path, head: &str, fields: &[&str], rows: &[&str]) -> (Option<i32>, Value) {
+    let file = t.join("review.md");
+    let table = format!("head: {head}\n\n| severity | location | finding |\n|---|---|---|\n{}\n", rows.join("\n"));
+    std::fs::write(&file, table).unwrap();
+    let head = format!("head={head}");
+    let mut args = vec!["record", "review", ISSUE, "--field", &head];
+    for f in fields {
+        args.extend(["--field", f]);
+    }
+    args.extend(["--body-file", file.to_str().unwrap()]);
+    bp(v, t, &[], &args)
+}
+
+/// The intent and note of [`ISSUE`] as `bp list issue` reads them.
+fn intent(v: &Path) -> (Value, Value) {
+    let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "issue"]);
+    let row = list["rows"].as_array().unwrap().iter().find(|r| r["id"] == ISSUE).unwrap().clone();
+    (row["intent"].clone(), row["note"].clone())
+}
+
+/// `pr` at the worktree's head, and the forge's pull request there, green; the repeat refreshes the snapshot.
+fn pushed(v: &Path, t: &Path, head: &str) {
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert!(matches!(code, Some(0 | 3)), "{out}");
+    forge(t, head, &[], &["SUCCESS"]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "the repeat refreshes the snapshot");
+}
+
+/// A branch reset to a reviewed head is a new head: its error row, cleared by a later round at another head, is read
+/// again, and the open pull request's head takes the review (review of #98, row 30).
+#[test]
+fn a_branch_reset_to_a_reviewed_head_needs_a_verify_review() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
+    let work = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(work.join("hello.txt"), "hi\n").unwrap();
+    let first = commit(&work, &["add", "hello.txt"], "hello");
+    pushed(v, t, &first);
+    let one = |lens: &str| ["round=1".to_string(), format!("lens={lens}"), "mode=full".into()];
+    let (code, got) =
+        review(v, t, &first, &one("conformance").each_ref().map(String::as_str), &["| error | hello.txt:1 | Wrong. |"]);
+    assert_eq!(code, Some(0), "{got}");
+    assert_eq!(review(v, t, &first, &one("failure-paths").each_ref().map(String::as_str), &[]).0, Some(0));
+    let id = got["id"].as_str().unwrap();
+    let (code, answer) = bp(v, t, &[], &["record", "disposition", id, "--field", "finding=1", "--field", "as=fixed"]);
+    assert_eq!(code, Some(0), "{answer}");
+    std::fs::write(work.join("hello.txt"), "hello\n").unwrap();
+    let fixed = commit(&work, &["add", "hello.txt"], "fix");
+    pushed(v, t, &fixed);
+    assert_eq!(review(v, t, &fixed, &["round=2", "lens=verify", "mode=verify"], &[]).0, Some(0));
+    assert_eq!(intent(v), (json!("needs-approval"), json!("")), "the verify round cleared the error at the fix");
+    git(&work, &["reset", "-q", "--hard", &first]);
+    pushed(v, t, &first);
+    assert_eq!(intent(v), (json!("needs-review"), json!("round 3: missing lenses: verify")));
+    // The open pull request's head takes the review whatever its history; the error is found again there.
+    let (code, got) =
+        review(v, t, &first, &["round=3", "lens=verify", "mode=verify"], &["| error | hello.txt:1 | Still wrong. |"]);
+    assert_eq!(code, Some(0), "{got}");
+    // Round 3 is past medium's cap, so the error raises the issue to high, at its cap: the human decides.
+    assert_eq!(intent(v), (json!("blocked"), json!("round cap: the human decides")));
+    // The head that the reset left behind is no head of the work (row 33).
+    let (code, got) = review(v, t, &fixed, &["round=3", "lens=verify", "mode=verify"], &[]);
+    assert_eq!((code, got["code"].as_str()), (Some(2), Some("finding_invalid")), "{got}");
+}
+
+/// A level that rises after round one adds the lenses of the new level that no review has read, beside the verify
+/// review, whatever the round (review of #98, row 32).
+#[test]
+fn a_level_rise_after_round_one_adds_its_missing_lenses() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
+    let work = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(work.join("hello.txt"), "hi\n").unwrap();
+    let first = commit(&work, &["add", "hello.txt"], "hello");
+    pushed(v, t, &first);
+    for lens in ["conformance", "failure-paths"] {
+        let field = format!("lens={lens}");
+        assert_eq!(review(v, t, &first, &["round=1", &field, "mode=full"], &[]).0, Some(0));
+    }
+    std::fs::write(work.join("hello.txt"), "hello\n").unwrap();
+    let fixed = commit(&work, &["add", "hello.txt"], "fix");
+    pushed(v, t, &fixed);
+    assert_eq!(review(v, t, &fixed, &["round=2", "lens=verify", "mode=verify"], &[]).0, Some(0));
+    assert_eq!(intent(v), (json!("needs-approval"), json!("")));
+    // Round three touches a high path: the verify review, and the two high lenses no review has read.
+    std::fs::create_dir_all(work.join(".github/workflows")).unwrap();
+    std::fs::write(work.join(".github/workflows/x.yml"), "on: push\n").unwrap();
+    let high = commit(&work, &["add", "-A"], "workflow");
+    pushed(v, t, &high);
+    let note = "round 3: missing lenses: verify, tests-and-checks, security";
+    assert_eq!(intent(v), (json!("needs-review"), json!(note)));
+    // Each missing lens records at the head in its round as a full review; a lens review in verify mode refuses.
+    let (code, got) = review(v, t, &high, &["round=3", "lens=security", "mode=verify"], &[]);
+    assert_eq!((code, got["code"].as_str()), (Some(2), Some("schema_invalid")), "{got}");
+    assert!(got["fix"].as_str().unwrap().ends_with("--field round=3 --field mode=full"), "{got}");
+    assert_eq!(review(v, t, &high, &["round=3", "lens=verify", "mode=verify"], &[]).0, Some(0));
+    assert_eq!(intent(v), (json!("needs-review"), json!("round 3: missing lenses: tests-and-checks, security")));
+    for lens in ["tests-and-checks", "security"] {
+        let field = format!("lens={lens}");
+        let (code, got) = review(v, t, &high, &["round=3", &field, "mode=full"], &[]);
+        assert_eq!(code, Some(0), "{lens}: {got}");
+    }
+    assert_eq!(intent(v), (json!("needs-approval"), json!("")));
+}
+
+/// Replaces the `## Check` section of [`ISSUE`] with `blocks` and commits the vault.
+fn checks(v: &Path, blocks: &str) {
+    let path = v.join(format!("{ISSUE}.md"));
+    let old = std::fs::read_to_string(&path).unwrap();
+    let (head, _) = old.split_once("## Check\n").unwrap();
+    std::fs::write(&path, format!("{head}## Check\n\n{blocks}")).unwrap();
+    git(v, &["commit", "-qam", "checks"]);
+}
+
+/// Red-first (37, design change 10): `pr` runs each error block at the claim's base, in a checkout it removes, and
+/// refuses `check_vacuous` before the push when one passes there. The base run is a run record at the base commit, so
+/// a second `pr` runs nothing there, and a failed base run blocks nothing: the intents read runs at the head.
+#[test]
+fn pr_refuses_check_that_passes_at_base() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    checks(v, "```check shell {name=hello expect=0}\ntest -f README.md\n```\n");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+    let before = commits(v).parse::<u32>().unwrap();
+    let worktrees = || git(&t.join("code"), &["worktree", "list", "--porcelain"]).matches("worktree ").count();
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_vacuous")), "{out}");
+    let run = format!("{ISSUE}/runs/hello-{base}-1");
+    assert_eq!(out["subject"], run.as_str(), "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.starts_with(&format!("hello passed at the base {base}")) && fix.contains("prior=pass"), "{fix}");
+    assert!(fix.contains(&format!("bp release {ISSUE} --reason escalated")), "the worker's way out: {fix}");
+    let (_, shown) = common::bp(v, &["show", &run]);
+    assert_eq!((shown["verdict"].as_str(), shown["commit"].as_str()), (Some("pass"), Some(base.as_str())), "{shown}");
+    assert!(shown["risk"].is_null(), "the level is of the head, not of a base run: {shown}");
+    assert_eq!(commits(v).parse::<u32>().unwrap(), before + 1, "the base runs, in one commit");
+    assert!(!t.join("created").exists(), "no pull request");
+    assert_eq!(git(&t.join("origin.git"), &["branch", "--list", "bp/a"]), "", "no push");
+    assert_eq!(worktrees(), 2, "the clone and the claim's worktree: the base checkout is gone");
+    assert_eq!(git(&w, &["status", "--porcelain"]), "", "the claim's worktree is untouched");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["subject"].as_str()), (Some(2), Some(run.as_str())), "{out}");
+    assert_eq!(commits(v).parse::<u32>().unwrap(), before + 1, "a known base run does not run again");
+
+    // The block now fails without the change: `pr` passes, and its failed base run blocks nothing.
+    checks(v, "```check shell {name=hello expect=0}\ntest -f hello.txt\n```\n");
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["runs"][0]["verdict"].as_str()), (Some(0), Some("pass")), "{out}");
+    let (_, red) = common::bp(v, &["show", &format!("{ISSUE}/runs/hello-{base}-2")]);
+    assert_eq!((red["verdict"].as_str(), red["commit"].as_str()), (Some("fail"), Some(base.as_str())), "{red}");
+    let (_, at_head) = common::bp(v, &["show", out["runs"][0]["id"].as_str().unwrap()]);
+    assert!(red["risk"].is_null() && at_head["risk"].is_string(), "{red} {at_head}");
+    let head = out["head"].as_str().unwrap().to_string();
+    assert_ne!(head, base);
+    forge(t, &head, &[("agent", &head)], &[]);
+    assert_eq!(bp(v, t, &[], &["pr", ISSUE]).0, Some(3), "the evidence at the head holds; nothing runs at the base");
+    let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "issue"]);
+    let row = list["rows"].as_array().unwrap().iter().find(|r| r["id"] == ISSUE).unwrap().clone();
+    assert_eq!(row["intent"], "needs-review", "a failed base run is not a failed run at the head: {row}");
+    assert_eq!(worktrees(), 2);
+}
+
+/// `prior=pass` marks a guard that holds before the change too: `pr` runs it at the head only, so it passes at the
+/// base and nothing refuses. Any other value is a `check_malformed` finding and no way out: the block cannot run.
+#[test]
+fn pr_accepts_prior_pass() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let hello = "```check shell {name=hello expect=0}\ntest -f hello.txt\n```\n";
+    checks(v, &format!("{hello}\n```check shell {{name=guard expect=0 prior=pass}}\ntest -f README.md\n```\n"));
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    let verdicts: Vec<(&str, &str)> = out["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap(), r["verdict"].as_str().unwrap()))
+        .collect();
+    assert_eq!((code, verdicts), (Some(0), vec![("hello", "pass"), ("guard", "pass")]), "{out}");
+    let (_, red) = common::bp(v, &["show", &format!("{ISSUE}/runs/hello-{base}-1")]);
+    assert_eq!(red["verdict"], "fail", "hello ran at the base: {red}");
+    assert!(!v.join(format!("{ISSUE}/runs/guard-{base}-1.md")).exists(), "a guard runs at the head only");
+
+    checks(v, &format!("{hello}\n```check shell {{name=guard expect=0 prior=yes}}\ntest -f README.md\n```\n"));
+    let (_, shown) = common::bp(v, &["show", ISSUE]);
+    assert!(shown.to_string().contains("prior=yes: the one value is pass"), "{shown}");
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_failed")), "{out}");
+    assert!(out["fix"].as_str().unwrap().starts_with("guard could-not-run: prior=yes"), "{out}");
+}
+
+/// The red-first base is where the head leaves origin's target, found at each `pr`, not the claim's `base`: after the
+/// rebase that `head_behind_base` orders, a block that the target's new commit makes pass refuses `check_vacuous`.
+#[test]
+fn pr_runs_red_first_where_the_rebased_head_leaves_the_target() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    checks(v, "```check shell {name=shared expect=0}\ntest -f shared.txt\n```\n");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let cut_at = cut["base"].as_str().unwrap().to_string();
+    let code = t.join("code");
+    std::fs::write(code.join("shared.txt"), "on master\n").unwrap();
+    let moved = commit(&code, &["add", "shared.txt"], "shared");
+    git(&code, &["push", "-q", "origin", "master"]);
+    std::fs::write(w.join("own.txt"), "mine\n").unwrap();
+    commit(&w, &["add", "own.txt"], "own");
+
+    let (code_, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code_, out["code"].as_str()), (Some(2), Some("head_behind_base")), "{out}");
+    git(&w, &["rebase", "-q", "--onto", "origin/master", &cut_at]);
+    let (code_, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code_, out["code"].as_str()), (Some(2), Some("check_vacuous")), "{out}");
+    assert_eq!(out["subject"], format!("{ISSUE}/runs/shared-{moved}-1"), "the base moved with the rebase: {out}");
+    assert!(!v.join(format!("{ISSUE}/runs/shared-{cut_at}-1.md")).exists(), "nothing ran at the cut's commit");
+}
+
+/// A claim's `base` field is not read: a claim with none runs red-first where the head leaves the target too.
+#[test]
+fn pr_finds_the_red_first_base_of_a_claim_with_no_base() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    checks(v, "```check shell {name=hello expect=0}\ntest -f README.md\n```\n");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    let claim = v.join(format!("{}.md", cut["claim"].as_str().unwrap()));
+    let text = std::fs::read_to_string(&claim).unwrap();
+    let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with("base:")).collect();
+    assert_eq!(kept.len() + 1, text.lines().count(), "the claim had one base line: {text}");
+    std::fs::write(&claim, kept.join("\n") + "\n").unwrap();
+    git(v, &["commit", "-qam", "a converted claim"]);
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_vacuous")), "{out}");
+    assert_eq!(out["subject"], format!("{ISSUE}/runs/hello-{base}-1"), "{out}");
+}
+
+/// Cargo judges an artifact fresh by file time, so a build directory that the base run shares with the head run hands
+/// the head the base's build. The base run builds into its own directory, whatever `CARGO_TARGET_DIR` says.
+#[test]
+fn the_base_run_never_shares_a_build_directory_with_the_head() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let code = t.join("code");
+    std::fs::write(code.join("src.txt"), "old\n").unwrap();
+    commit(&code, &["add", "src.txt"], "src");
+    git(&code, &["push", "-q", "origin", "master"]);
+    // A build cached by file time: the output is rebuilt only when the source is newer.
+    let build = r#"d=${CARGO_TARGET_DIR:-target}; mkdir -p "$d"; [ -f "$d/out" ] && [ ! src.txt -nt "$d/out" ] || cp src.txt "$d/out"; grep -q new "$d/out""#;
+    checks(v, &format!("```check shell {{name=built expect=0}}\n{build}\n```\n"));
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("src.txt"), "new\n").unwrap();
+    commit(&w, &["add", "src.txt"], "new");
+
+    let shared = t.join("shared");
+    let env = [("CARGO_TARGET_DIR", shared.to_str().unwrap())];
+    let (code_, out) = bp(v, t, &env, &["pr", ISSUE]);
+    assert_eq!((code_, out["runs"][0]["verdict"].as_str()), (Some(0), Some("pass")), "{out}");
+    assert_eq!(out["base_runs"][0]["verdict"], "fail", "{out}");
+    assert_eq!(out["base_runs"][0]["id"], format!("{ISSUE}/runs/built-{base}-1"), "{out}");
+    assert_eq!(std::fs::read_to_string(shared.join("out")).unwrap(), "new\n", "the shared directory holds the head's");
+}
+
+/// A base run that timed out or could not run is no proof that the block depends on the change, and no refusal: `pr`
+/// names it in `base_runs` and in the pull request body, beside the blocks that failed there.
+#[test]
+fn pr_names_each_base_run_that_did_not_fail() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let hello = "```check shell {name=hello expect=0}\ntest -f hello.txt\n```\n";
+    checks(v, &format!("{hello}\n```check shell {{name=inside expect=0 cwd=newdir}}\ntest -f x\n```\n"));
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::create_dir(w.join("newdir")).unwrap();
+    std::fs::write(w.join("newdir/x"), "x\n").unwrap();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt", "newdir/x"], "hello");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!(code, Some(0), "a base run that could not run refuses nothing: {out}");
+    let rows: Vec<(&str, &str)> = out["base_runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap(), r["verdict"].as_str().unwrap()))
+        .collect();
+    assert_eq!(rows, [("hello", "fail"), ("inside", "could-not-run")], "{out}");
+    let body = std::fs::read_to_string(t.join("body")).unwrap();
+    let listed = format!("- `inside`: could-not-run; `bp show {ISSUE}/runs/inside-{base}-1`");
+    assert!(body.contains("## Red-first runs that did not fail") && body.contains(&listed), "{body}");
+    assert!(!body.contains("`hello`"), "a block that failed at the base proves its change: {body}");
+}
+
+/// Red-first reads the latest attempt at the base: a block that failed there once and then passed refuses.
+#[test]
+fn pr_judges_the_latest_attempt_at_the_base() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    checks(v, "```check shell {name=hello expect=0}\ntest -n \"$FLAG\"\n```\n");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    // Before the first commit the worktree's head is the base, so `check` runs there.
+    assert_eq!(bp(v, t, &[], &["check", ISSUE]).1["runs"][0]["verdict"], "fail");
+    assert_eq!(bp(v, t, &[("FLAG", "1")], &["check", ISSUE]).1["runs"][0]["verdict"], "pass");
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code, out) = bp(v, t, &[], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_vacuous")), "{out}");
+    assert_eq!(out["subject"], format!("{ISSUE}/runs/hello-{base}-2"), "{out}");
+}
+
+/// A base checkout as `pr` makes one: detached, in `dir`, locked with the reason that names `pid`.
+fn base_checkout(code: &Path, dir: &Path, pid: u32, base: &str) {
+    let reason = format!("bp red-first base, pid {pid}");
+    git(code, &["worktree", "add", "-q", "--detach", "--lock", "--reason", &reason, dir.to_str().unwrap(), base]);
+}
+
+/// A pid that no process holds: a child's, after it exits.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
+}
+
+/// A signal runs no drop, so a killed `pr` leaves its base checkout. The next `pr` removes each one whose `pr` is dead
+/// and never touches one whose `pr` is alive, nor one that git does not hold locked as a base checkout.
+#[test]
+fn pr_sweeps_the_base_checkouts_of_a_killed_pr() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+    let tmp = t.join("tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    let pid = dead_pid();
+    let (dead, live, unlocked) = (
+        tmp.join(format!("bp-base-{pid}-1")),
+        tmp.join(format!("bp-base-{}-2", std::process::id())),
+        tmp.join(format!("bp-base-{pid}-3")),
+    );
+    let code = t.join("code");
+    base_checkout(&code, &dead, pid, &base);
+    base_checkout(&code, &live, std::process::id(), &base);
+    git(&code, &["worktree", "add", "-q", "--detach", unlocked.to_str().unwrap(), &base]);
+
+    let (code_, out) = bp(v, t, &[("TMPDIR", tmp.to_str().unwrap())], &["pr", ISSUE]);
+    assert_eq!(code_, Some(0), "{out}");
+    assert_eq!(out["base_checkouts_left"], json!([]), "{out}");
+    let listed = git(&code, &["worktree", "list", "--porcelain"]);
+    assert!(!dead.exists() && !listed.contains(dead.file_name().unwrap().to_str().unwrap()), "{listed}");
+    for kept in [&live, &unlocked] {
+        assert!(kept.is_dir() && listed.contains(kept.file_name().unwrap().to_str().unwrap()), "{listed}");
+    }
+    let left: BTreeSet<_> = std::fs::read_dir(&tmp).unwrap().map(|e| e.unwrap().file_name()).collect();
+    let kept = BTreeSet::from([live.file_name().unwrap().to_owned(), unlocked.file_name().unwrap().to_owned()]);
+    assert_eq!(left, kept, "this pr's own checkout is gone too");
+}
+
+/// A claim's worktree named like a base checkout, in the directory `pr` makes checkouts in and locked with a base
+/// checkout's reason and a dead pid, survives another issue's `pr` with its uncommitted work: it carries a branch.
+#[test]
+fn pr_keeps_a_claim_worktree_named_like_a_base_checkout() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let slug = "bp-base-99999999-quokka";
+    let quokka = format!("projects/bp/issues/{slug}");
+    let text = "---\nkind: issue\ntitle: Q\nstatus: open\nunder: projects/bp/milestones/m\n---\n\nBody.\n\n## Check\n\n```check shell {name=q expect=0}\ntest -f q.txt\n```\n";
+    std::fs::write(v.join(format!("{quokka}.md")), text).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "quokka"]);
+    let (code_, cut) = bp(v, t, &[], &["cut", &quokka]);
+    assert_eq!(code_, Some(0), "{cut}");
+    let q = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    assert_eq!(q.file_name().unwrap(), slug);
+    std::fs::write(q.join("work.txt"), "uncommitted\n").unwrap();
+    let reason = format!("bp red-first base, pid {}", dead_pid());
+    git(&t.join("code"), &["worktree", "lock", "--reason", &reason, q.to_str().unwrap()]);
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code_, out) = bp(v, t, &[("TMPDIR", q.parent().unwrap().to_str().unwrap())], &["pr", ISSUE]);
+    assert_eq!(code_, Some(0), "{out}");
+    assert_eq!(std::fs::read_to_string(q.join("work.txt")).unwrap(), "uncommitted\n");
+    let listed = git(&t.join("code"), &["worktree", "list", "--porcelain"]);
+    assert!(listed.contains(&format!("worktree {}\n", q.canonicalize().unwrap().display())), "{listed}");
+}
+
+/// A clone whose directory is named like a base checkout, in the directory `pr` makes checkouts in, survives its own
+/// `pr` with its uncommitted work: it is the first entry git lists, and git holds it unlocked.
+#[test]
+fn pr_keeps_a_clone_named_like_a_base_checkout() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let clone = t.join("bp-base-99999999-code");
+    std::fs::rename(t.join("code"), &clone).unwrap();
+    std::os::unix::fs::symlink(&clone, t.join("code")).unwrap();
+    std::fs::write(clone.join("work.txt"), "uncommitted\n").unwrap();
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+
+    let (code_, out) = bp(v, t, &[("TMPDIR", t.to_str().unwrap())], &["pr", ISSUE]);
+    assert_eq!(code_, Some(0), "{out}");
+    assert!(clone.join(".git").is_dir(), "the clone holds its git directory");
+    assert_eq!(std::fs::read_to_string(clone.join("work.txt")).unwrap(), "uncommitted\n");
+}
+
+/// A red-first base that git cannot fetch refuses `could_not_run`, and the fix names the commit.
+#[test]
+fn pr_names_a_base_it_cannot_fetch() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+    // A git that refuses a fetch by sha, as a server does for a commit it no longer holds.
+    let real = std::process::Command::new("sh").args(["-c", "command -v git"]).output().unwrap();
+    let real = String::from_utf8(real.stdout).unwrap();
+    let fake = t.join("fake");
+    std::fs::create_dir(&fake).unwrap();
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *\" fetch -q origin \"[0-9a-f]*) echo 'fatal: not our ref' >&2; exit 128 ;; esac\nexec {} \"$@\"\n",
+        real.trim()
+    );
+    std::fs::write(fake.join("git"), script).unwrap();
+    std::fs::set_permissions(fake.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}:{}", fake.display(), t.join("bin").display(), std::env::var("PATH").unwrap());
+
+    let (code, out) = bp(v, t, &[("PATH", &path)], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.starts_with(&format!("git cannot fetch {base}, origin's master")), "{fix}");
+    assert!(!t.join("created").exists(), "no pull request");
 }

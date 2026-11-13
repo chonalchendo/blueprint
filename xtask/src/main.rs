@@ -14,6 +14,7 @@ mod eval_arms;
 mod eval_end;
 mod eval_fixture;
 mod eval_grade;
+mod eval_install;
 mod eval_kills;
 mod eval_names;
 mod eval_plant;
