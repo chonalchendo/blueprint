@@ -1416,22 +1416,26 @@ fn land_low_and_medium_need_no_approval() {
 /// both medium lenses, and high to medium still needs the third lens and the human's signed approval.
 #[test]
 fn a_label_lowered_by_hand_reads_as_the_one_it_replaced() {
-    let (v, t) = setup();
-    let (v, t) = (v.path(), t.path());
-    rules(t, "low:\n  - hello.txt\n");
-    let (_, h) = opened(v, t, &[]);
-    pushed(v, t, &h);
-    lenses(v, t, &h, &["conformance"]);
-    assert_eq!(common::bp(v, &["set", ISSUE, "risk", "low"]).1["code"], "not_a_label");
-    label(v, "risk: low");
-    let (_, risk) = bp(v, t, &[], &["risk", ISSUE]);
-    assert_eq!(
-        (&risk["level"], &risk["declared"], &risk["computed"]),
-        (&json!("medium"), &json!("medium"), &json!("low"))
-    );
-    assert_eq!(intent(v), (json!("needs-review"), json!("round 1: missing lenses: failure-paths")));
-    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE, "--dry-run"]);
-    assert_eq!((code, out["code"].as_str()), (Some(2), Some("review_missing")), "{out}");
+    // A quoted or spaced key is the key the parser reads (review of #100, X1).
+    for line in ["risk: low", "\"risk\": low", "'risk': low", "risk : low"] {
+        let (v, t) = setup();
+        let (v, t) = (v.path(), t.path());
+        rules(t, "low:\n  - hello.txt\n");
+        let (_, h) = opened(v, t, &[]);
+        pushed(v, t, &h);
+        lenses(v, t, &h, &["conformance"]);
+        assert_eq!(common::bp(v, &["set", ISSUE, "risk", "low"]).1["code"], "not_a_label");
+        label(v, line);
+        let (_, risk) = bp(v, t, &[], &["risk", ISSUE]);
+        assert_eq!(
+            (&risk["level"], &risk["declared"], &risk["computed"]),
+            (&json!("medium"), &json!("medium"), &json!("low")),
+            "{line}"
+        );
+        assert_eq!(intent(v), (json!("needs-review"), json!("round 1: missing lenses: failure-paths")), "{line}");
+        let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE, "--dry-run"]);
+        assert_eq!((code, out["code"].as_str()), (Some(2), Some("review_missing")), "{line}: {out}");
+    }
 
     let (v, t) = setup();
     let (v, t) = (v.path(), t.path());

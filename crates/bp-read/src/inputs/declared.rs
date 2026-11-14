@@ -25,8 +25,8 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
     let path = format!("./{issue}.md");
     // Each patch holds the whole file, so the header of each version reads apart from its body (review of #100, W2).
     let args =
-        ["log", "--follow", "--text", "-p", "-U1000000", "--format=commit: %H", "-G", "^risk:", "--", path.as_str()];
-    let set = labels(&git(&vault.root, &args)?);
+        ["log", "--follow", "--text", "-p", "-U1000000", "--format=commit: %H", "-G", "risk", "--", path.as_str()];
+    let set = changes(&git(&vault.root, &args)?, label);
     // The label as the last commit left it: a line in the work tree that no commit holds is no evidence (review of
     // #100, V5), so `bp risk` and the intents agree with `land`, which refuses a vault that is not committed.
     let now = set.first().and_then(|(_, l)| *l);
@@ -54,16 +54,16 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
     Ok(if best > level(now) { Some(best) } else { now })
 }
 
-/// Each commit of the log `-p` that changed the `risk` label, newest first, and the label it left: the level of the
-/// `risk:` line in the header of the version it wrote, or `None` when that header holds none. Each patch holds the
-/// whole file, so the version before and after each commit reads in full, and a `risk:` line of the body is never the
-/// label. Each commit heads its patch as `commit: <sha>`, which no diff line starts with.
-fn labels(log: &str) -> Vec<(String, Option<Level>)> {
-    let mut out: Vec<(String, Option<Level>)> = Vec::new();
+/// Each commit of the log `-p` that changed what `read` reads from the file, newest first, and the value it left.
+/// Each patch holds the whole file, so the version before and after each commit reads in full. Each commit heads its
+/// patch as `commit: <sha>`, which no diff line starts with.
+fn changes<T: PartialEq>(log: &str, read: impl Fn(&str) -> T) -> Vec<(String, T)> {
+    let mut out: Vec<(String, T)> = Vec::new();
     let (mut commit, mut hunk, mut old, mut new) = (None::<&str>, false, String::new(), String::new());
     let mut close = |commit: Option<&str>, old: &str, new: &str| {
-        if let Some(c) = commit.filter(|_| label(new) != label(old)) {
-            out.push((c.to_string(), label(new)));
+        let value = read(new);
+        if let Some(c) = commit.filter(|_| value != read(old)) {
+            out.push((c.to_string(), value));
         }
     };
     for line in log.lines() {
@@ -92,12 +92,39 @@ fn labels(log: &str) -> Vec<(String, Option<Level>)> {
     out
 }
 
-/// The level of the `risk` key of `text`'s header, between its opening and closing `---` lines; `None` with no header,
-/// no key or a value that names no level.
+/// The header of `text` as the vault's parser reads it, so a quoted or spaced key reads as `bp show` shows it (review
+/// of #100, X1); `None` with no closed header or YAML the parser refuses.
+fn header(text: &str) -> Option<bp_vault::Header> {
+    let text = bp_vault::normalise(text);
+    let head = &text[..bp_vault::header_end(&text)?];
+    let yaml = head.strip_prefix("---")?.trim_end().strip_suffix("---")?;
+    bp_vault::Header::parse(yaml).ok()
+}
+
+/// The level of the `risk` key of `text`'s header; `None` with no header, no key or a value that names no level.
 fn label(text: &str) -> Option<Level> {
-    let header = &text[..bp_vault::header_end(text)?];
-    let value = header.lines().find_map(|l| l.strip_prefix("risk:"))?;
-    value.split('#').next().unwrap_or_default().trim().trim_matches(['"', '\'']).parse().ok()
+    header(text)?.fields.get("risk")?.as_str()?.parse().ok()
+}
+
+/// The `status` of `text`'s header.
+fn status(text: &str) -> Option<String> {
+    header(text)?.status
+}
+
+/// The first commit that held the milestone `m` at `approved` or `done`, through renames. The parser reads each
+/// version's status, so a quoted or spaced key counts (review of #100, L2). `--text`: a `-diff` attribute makes git skip
+/// a binary file under `-G` and exit 0, which would read as "never approved" (review of #98, row 35).
+pub fn approval(root: &std::path::Path, m: &str) -> Result<Option<String>, Refusal> {
+    let path = format!("./{m}.md");
+    let log = git(
+        root,
+        &["log", "--follow", "--text", "-p", "-U1000000", "--format=commit: %H", "-G", "status", "--", &path],
+    )?;
+    Ok(changes(&log, status)
+        .into_iter()
+        .filter(|(_, s)| matches!(s.as_deref(), Some("approved" | "done")))
+        .map(|(c, _)| c)
+        .next_back())
 }
 
 /// The commit from which a label no longer lowers the issue's level, or `None` while it still may (`bp set`'s rule,
@@ -110,9 +137,7 @@ fn locked(vault: &Vault, index: &Index, issue: &Id, under: Option<&str>) -> Resu
     let Some(m) = under else {
         return oldest(&["log", "--follow", "--format=%H", "--diff-filter=A", "--", &format!("./{issue}.md")]);
     };
-    let path = format!("./{m}.md");
-    let approved =
-        oldest(&["log", "--follow", "--text", "--format=%H", "-G", "^status: *[\"']?(approved|done)", "--", &path])?;
+    let approved = approval(root, m)?;
     let dirs: Vec<String> =
         std::iter::once(issue.clone()).chain(index.aliases_of(issue)?).map(|d| format!("./{d}/claims")).collect();
     let mut args = vec!["log", "--format=%H", "--diff-filter=A", "--"];
@@ -129,26 +154,54 @@ fn locked(vault: &Vault, index: &Index, issue: &Id, under: Option<&str>) -> Resu
 mod tests {
     use super::*;
 
+    fn read(log: &str) -> Vec<(String, Option<Level>)> {
+        changes(log, label)
+    }
+
+    fn set<const N: usize>(rows: [(&str, Option<Level>); N]) -> Vec<(String, Option<Level>)> {
+        rows.into_iter().map(|(c, l)| (c.to_owned(), l)).collect()
+    }
+
     #[test]
-    fn a_commit_sets_the_level_of_its_header_line_or_none() {
-        let log = "commit: c3\ndiff --git a/i.md b/i.md\n--- a/i.md\n+++ b/i.md\n@@ -1,3 +1,3 @@\n ---\n-risk: high\n\
-                   +risk: \"low\" # by hand\n ---\ncommit: c2\n@@ -1,3 +1,2 @@\n ---\n-risk: medium\n ---\n\
-                   commit: c1\n@@ -0,0 +1,4 @@\n+---\n+risk: medium\n+---\n+risk: the parser is slow\n\
-                   commit: c0\n@@ -1,2 +1,3 @@\n ---\n ---\n+body text\n";
-        let want = [("c3", Some(Level::Low)), ("c2", None), ("c1", Some(Level::Medium))];
-        let set = labels(log);
-        let got: Vec<(&str, Option<Level>)> = set.iter().map(|(c, l)| (c.as_str(), *l)).collect();
-        assert_eq!(got, want);
+    fn a_commit_sets_the_level_of_its_header_or_none() {
+        let log = "commit: c3\ndiff --git a/i.md b/i.md\n--- a/i.md\n+++ b/i.md\n@@ -1,4 +1,4 @@\n ---\n kind: issue\n title: t\n\
+                   -risk: high\n+risk: \"low\" # by hand\n ---\ncommit: c2\n@@ -1,4 +1,3 @@\n ---\n kind: issue\n title: t\n-risk: medium\n\
+                   \x20---\ncommit: c1\n@@ -0,0 +1,5 @@\n+---\n+kind: issue\n+title: t\n+risk: medium\n+---\n+risk: the parser is slow\n\
+                   commit: c0\n@@ -1,3 +1,4 @@\n ---\n kind: issue\n title: t\n ---\n+body text\n";
+        assert_eq!(read(log), set([("c3", Some(Level::Low)), ("c2", None), ("c1", Some(Level::Medium))]));
     }
 
     /// A `risk:` line of the body, as a YAML example holds, is not the label (review of #100, W2).
     #[test]
     fn a_body_line_is_never_the_label() {
-        let log = "commit: c2\n@@ -1,6 +1,9 @@\n ---\n kind: issue\n risk: high\n ---\n \n body\n+```yaml\n+risk: low\n\
-                   +```\ncommit: c1\n@@ -0,0 +1,6 @@\n+---\n+kind: issue\n+risk: high\n+---\n+\n+body\n\
+        let log = "commit: c2\n@@ -1,6 +1,9 @@\n ---\n kind: issue\n title: t\n risk: high\n ---\n \n body\n+```yaml\n+risk: low\n\
+                   +```\ncommit: c1\n@@ -0,0 +1,6 @@\n+---\n+kind: issue\n+title: t\n+risk: high\n+---\n+\n+body\n\
                    commit: c0\n@@ -0,0 +1,3 @@\n+body\n+\n+risk: low\n";
-        let set = labels(log);
-        let got: Vec<(&str, Option<Level>)> = set.iter().map(|(c, l)| (c.as_str(), *l)).collect();
-        assert_eq!(got, [("c1", Some(Level::High))]);
+        assert_eq!(read(log), set([("c1", Some(Level::High))]));
+    }
+
+    /// A quoted or spaced key is the key the parser reads, as `bp show` shows it (review of #100, X1).
+    #[test]
+    fn a_quoted_or_spaced_key_is_the_label() {
+        for key in ["\"risk\"", "'risk'", "risk "] {
+            let log = format!("commit: c1\n@@ -0,0 +1,4 @@\n+---\n+kind: issue\n+title: t\n+{key}: high\n+---\n");
+            let set = changes(&log, label);
+            assert_eq!(set, [("c1".to_string(), Some(Level::High))], "{key}");
+        }
+    }
+
+    /// A quoted or spaced `status` key is the milestone's status (review of #100, L2).
+    #[test]
+    fn a_quoted_status_is_the_status() {
+        for key in ["\"status\"", "status "] {
+            let log = format!(
+                "commit: c2\n@@ -1,4 +1,4 @@\n ---\n kind: milestone\n title: t\n-status: planned\n+{key}: approved\n ---\n\
+                 commit: c1\n@@ -0,0 +1,4 @@\n+---\n+kind: milestone\n+title: t\n+status: planned\n+---\n"
+            );
+            let set = changes(&log, status);
+            let want =
+                [("c2".to_string(), Some("approved".to_string())), ("c1".to_string(), Some("planned".to_string()))];
+            assert_eq!(set, want, "{key}");
+        }
     }
 }

@@ -368,7 +368,9 @@ fn set_lowers_risk_while_the_milestone_is_planned() {
         assert_eq!(code, Some(0), "{level}: {v}");
     }
     let path = root.join(format!("{milestone}.md"));
-    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("planned", "approved")).unwrap();
+    // A quoted key is the status the parser reads, so the lock reads it too (review of #100, L2).
+    let text = std::fs::read_to_string(&path).unwrap().replace("status: planned", "\"status\": approved");
+    std::fs::write(&path, text).unwrap();
     git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "approve"]);
     let (code, v) = bp(root, &["set", issue, "risk", "low"]);
     assert_eq!((code, v["code"].as_str()), (Some(2), Some("not_a_label")), "after approval: {v}");

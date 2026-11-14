@@ -153,12 +153,7 @@ pub(crate) fn lowerable(vault: &Vault, index: &Index, under: Option<&Id>, issue:
     {
         return Ok(false);
     }
-    let path = format!("./{m}.md");
-    let pattern = "^status: *[\"']?(approved|done)";
-    // `--text`: a `-diff` attribute makes git skip a binary file under `-G` and exit 0, which would read as "never
-    // approved" (review of #98, row 35).
-    let args = ["log", "--follow", "--text", "--format=%H", "-G", pattern, "--", &path];
-    Ok(bp_read::git::git(&vault.root, &args)?.is_empty())
+    Ok(bp_read::inputs::approval(&vault.root, m.as_str())?.is_none())
 }
 
 /// The file with its body replaced: the header's bytes as they were, then the body as `create` stores it. `None`

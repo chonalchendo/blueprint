@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 
 mod declared;
 mod reviews;
-pub use declared::declared;
+pub use declared::{approval, declared};
 pub use reviews::*;
 
 /// The issues under the milestone `id`, and while fewer than a batch are live, its finish line and the blocks the
