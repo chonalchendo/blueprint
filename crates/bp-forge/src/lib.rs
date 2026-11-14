@@ -1,4 +1,4 @@
-//! Forge adapter: pull request, reviews, check runs, branch base; the write calls sit behind the write feature.
+//! Forge adapter: pull request, check runs, branch base; the write calls sit behind the write feature.
 //!
 //! The snapshot is the forge state the `Intents` function reads, loaded from a directory of `gh` JSON
 //! (`open-prs.json` plus `pr-<n>.json`). [`Gh`] reads the live forge into the same types, and a repo verb writes the
@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 
-pub use gh::Gh;
+pub use gh::{Gh, output_within};
 
 /// One pull request as `gh pr view --json` writes it.
 #[derive(Debug, Clone, Deserialize)]
@@ -29,41 +29,22 @@ pub struct PullRequest {
     /// The branch it merges into; a snapshot written before milestone 3 lacks it.
     #[serde(default)]
     pub base_ref_name: Option<String>,
-    /// Who opened it: the agent's token, whose approval the forge refuses (15, E3).
+    /// The commit of the base branch the forge holds the pull request against: `land` judges the level by its rules
+    /// once origin names the same sha (37, design change 1). A snapshot written before milestone 12 lacks it.
     #[serde(default)]
-    pub author: Option<Author>,
+    pub base_ref_oid: Option<String>,
+    /// The commit the merge made; `None` until the pull request merges.
+    #[serde(default)]
+    pub merge_commit: Option<Commit>,
     /// `OPEN`, `MERGED` or `CLOSED`; `gh pr list` omits it for open pull requests.
     #[serde(default)]
     pub state: Option<String>,
-    /// Reviews at any head.
-    #[serde(default)]
-    pub reviews: Vec<Review>,
     /// Check runs and status contexts at the head.
     #[serde(default)]
     pub status_check_rollup: Vec<CheckRun>,
 }
 
-/// One review.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Review {
-    /// Who reviewed. `land` counts the reviewer identity's review only, so it reads the author, not only the state.
-    #[serde(default)]
-    pub author: Option<Author>,
-    /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`.
-    pub state: String,
-    /// The commit the review was left on.
-    #[serde(default)]
-    pub commit: Option<Commit>,
-}
-
-/// A forge account as `gh` writes it.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Author {
-    /// The login.
-    pub login: String,
-}
-
-/// A commit as `gh` writes it.
+/// A commit as `gh` names one: its sha.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Commit {
     /// The full sha.
@@ -107,19 +88,6 @@ impl PullRequest {
                 Some("FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "STALE")
             )
         })
-    }
-
-    /// The heads `reviewer` approved, in review order. No other login counts, so an empty `reviewer` approved nothing
-    /// (15, Controls 1). Logins ignore case, as GitHub's do.
-    pub fn approved_heads(&self, reviewer: &str) -> Vec<&str> {
-        self.reviews
-            .iter()
-            .filter(|r| {
-                r.state == "APPROVED"
-                    && r.author.as_ref().is_some_and(|a| !reviewer.is_empty() && a.login.eq_ignore_ascii_case(reviewer))
-            })
-            .filter_map(|r| Some(r.commit.as_ref()?.oid.as_str()))
-            .collect()
     }
 }
 
@@ -209,9 +177,7 @@ mod tests {
         assert!(s.open_for("0001.a").is_none(), "a merged pull request is not open");
         let pr = s.open_for("0002.b").unwrap();
         assert_eq!(pr.head_ref_oid, "h2");
-        assert!(pr.is_green() && pr.approved_heads("r") == ["h2", "old"]);
-        assert!(pr.approved_heads("a").is_empty() && pr.approved_heads("").is_empty(), "only the reviewer's counts");
-        assert_eq!(pr.approved_heads("R"), ["h2", "old"], "logins ignore case");
+        assert!(pr.is_green(), "a forge review is read as nothing (37, design change 3)");
         assert_eq!(s.merged_for("0001.a").map(|p| p.number), Some(1));
         assert!(s.merged_for("0002.b").is_none());
         let (path, _) = Snapshot::from_dir(&dir.path().join("none")).unwrap_err();
@@ -220,17 +186,13 @@ mod tests {
 
     #[test]
     fn parses_real_gh_pr_view_output() {
-        // `gh pr view 14722 --repo cli/cli --json` with `FIELDS`, 2026-10-20.
+        // `gh pr view 14722 --repo cli/cli --json` with the fields of 2026-10-20, a superset of `FIELDS` now.
         let pr: PullRequest = serde_json::from_str(include_str!("../testdata/pr-view.json")).unwrap();
         assert_eq!((pr.number, pr.head_ref_name.as_str()), (14722, "bdehamer-release-create-atomicity-help"));
         assert!(!pr.is_open(), "merged");
         let head = "9e1e1c929f882fd93e1c67ea520a4529352aab9a";
         assert_eq!(pr.head_ref_oid, head);
         assert_eq!(pr.base_ref_name.as_deref(), Some("trunk"));
-        assert_eq!(pr.author.as_ref().unwrap().login, "bdehamer");
-        let authors: Vec<_> = pr.reviews.iter().map(|r| r.author.as_ref().unwrap().login.as_str()).collect();
-        assert_eq!(authors, ["copilot-pull-request-reviewer", "babakks"]);
-        assert!(pr.reviews[1].state == "APPROVED" && pr.approved_heads("babakks") == [head]);
         assert!(pr.is_green(), "27 skipped and 12 successful checks are green, as on GitHub");
     }
 
@@ -268,6 +230,6 @@ mod tests {
         .unwrap();
         assert!(!pr.is_green());
         let pr: PullRequest = serde_json::from_str(r#"{"number":1,"headRefName":"x","headRefOid":"h"}"#).unwrap();
-        assert!(!pr.is_green() && pr.approved_heads("r").is_empty() && pr.is_open());
+        assert!(!pr.is_green() && pr.is_open());
     }
 }

@@ -22,7 +22,7 @@ printf '{"type":"user","isMeta":true,"message":{"content":"<skill-format>true</s
 case "$BP_EVAL_ARM-$BP_EVAL_FIXTURE" in
 with-mutant-*)
   printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cd /c && cargo test -p a | grep width"}}]}}\n' >> "$T"
-  ROW='| error | src/a.rs:3 | `cargo test -p a | grep width` fails: the width is 3, not 2 |' ;;
+  ROW='| error | src/a.rs:3 | `cargo test -p a \\| grep width` fails: the width is 3, not 2 |' ;;
 *-mutant-*) ROW='| error | src/a.rs:3 | The width divides where it should subtract. |' ;;
 with-control-*) ROW='| warn | src/a.rs:3 | The width is fixed at 3. |' ;;
 *) ROW='| warn | src/a.rs:9 | A taste. |' ;;
@@ -132,7 +132,7 @@ fn a_kill_needs_the_span_and_evidence_and_a_known_control_row_is_not_false() {
     for want in [
         "| with | 1 of 1 | 0.00 | 0 |",
         "| old | 0 of 1 | 1.00 | 0 |",
-        "match, truth item 1 `src/a.rs:3`: `cargo test -p a | grep width` fails",
+        r"match, truth item 1 `src/a.rs:3`: `cargo test -p a \| grep width` fails",
         "FALSE `src/a.rs:3`: The width divides",
         "known, entry 1 `src/a.rs:3`",
         "FALSE `src/a.rs:9`",

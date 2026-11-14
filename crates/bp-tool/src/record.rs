@@ -114,7 +114,6 @@ fn spec(kind: Kind) -> Option<Spec> {
                 ("round", Type::Int, true),
                 ("lens", closed(Lens::ALL, Lens::as_str), true),
                 ("mode", closed(Mode::ALL, Mode::as_str), true),
-                ("patch_id", Type::Sha, false),
                 ("pull_request", Type::Int, false),
                 ("role", closed(Role::ALL, Role::as_str), false),
             ],

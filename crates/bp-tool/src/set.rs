@@ -153,10 +153,7 @@ pub(crate) fn lowerable(vault: &Vault, index: &Index, under: Option<&Id>, issue:
     {
         return Ok(false);
     }
-    let path = format!("./{m}.md");
-    let pattern = "^status: *[\"']?(approved|done)";
-    let args = ["log", "--follow", "--format=%H", "-G", pattern, "--", &path];
-    Ok(bp_read::git::git(&vault.root, &args)?.is_empty())
+    Ok(bp_read::inputs::approval(&vault.root, m.as_str())?.is_none())
 }
 
 /// The file with its body replaced: the header's bytes as they were, then the body as `create` stores it. `None`
@@ -198,9 +195,10 @@ pub(crate) fn rebody(text: &str, body: &str) -> Option<String> {
     Some(if body.is_empty() { format!("{head}{eol}") } else { format!("{head}{eol}\n{body}\n") })
 }
 
-/// The role of a human act (`stamp`, `land`, `approve`, `lower`, a `transition` to `approved` or `active`), tested before any other: an agent
-/// role refuses `role_forbidden` (27, design change 3). An agent can forge the label, so this stops a slip, not an
-/// attack; the forge stays the gate. So a milestone's approval is its latest such commit with `Bp-Role: human` (13).
+/// The role of a human act (`stamp`, `approve`, `lower`, a `transition` to `approved` or `active`), tested before any
+/// other: an agent role refuses `role_forbidden` (27, design change 3). An agent can forge the label, so this stops a
+/// slip, not an attack; the forge stays the gate. So a milestone's approval is its latest such commit with `Bp-Role:
+/// human` (13).
 pub(crate) fn human(act: String) -> Result<Role, Refusal> {
     let role = role()?;
     if role == Role::Human {
@@ -210,8 +208,8 @@ pub(crate) fn human(act: String) -> Result<Role, Refusal> {
     Err(Refusal::new(
         Code::RoleForbidden,
         act,
-        "BP_ROLE names an agent role, and the verb is the human's: stamp, land, approve, lower, or transition to approved \
-         or active",
+        "BP_ROLE names an agent role, and the verb is the human's: stamp, approve, lower, or transition to approved or \
+         active",
         fix,
     ))
 }

@@ -3,19 +3,22 @@
 //! the red-first base (37, design change 10), runs the issue's blocks at the worktree's head with no lock held, pushes
 //! that head, opens or retargets the pull request, keeps its body current with what it carries (27, design change 8)
 //! and commits the runs, dropping the claim's `## Next`; a changed check set first gets a commit that names it. `land`
-//! reads the forge with no lock held and refuses on the reviewer, the base, the approval at the head, the forge check,
-//! the run evidence, the check set the head names and then a head behind its base, in that order, for a pull request
-//! already merged too, which skips the last. It merges at the head it read and moves each layer cut from it onto the
-//! base. Then it removes the worktree and a branch the merged head holds, and commits the claim's release and the issue
-//! at `resolved`; the result names each moved layer's next step, and a stranded layer's held claim takes its step as
-//! `## Next`.
+//! gates by the risk level (37, design change 3): it reads no forge approval. It reads the forge with no lock held and
+//! refuses on the base, the forge check, the run evidence, the reviews of the head's round, their dispositions, an
+//! error row that holds, for high the human's signed approval of the head, the check set the head names, a level
+//! that rose after `pr` and then a head behind its base, in that order, for a pull request already merged too, which
+//! skips the last. The session runs it; a low or medium head lands with no human act. It merges at the head it read
+//! and moves each layer cut from it onto the base. Then it removes the worktree and a branch the merged head holds, and
+//! commits the claim's release and the issue at `resolved`; the result names each moved layer's next step, and a
+//! stranded layer's held claim takes its step as `## Next`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use bp_change::IssueStatus;
-use bp_change::intents::{self, Base};
+use bp_change::intents::{self, Base, Issue, Unmet};
 use bp_forge::{Gh, PullRequest};
 use bp_read::inputs::{field, held};
 use bp_read::landing;
@@ -26,6 +29,15 @@ use serde_json::{Value, json};
 
 use crate::claim::{default_branch, git};
 use crate::{Wrote, finish, node_id, subject};
+
+mod level;
+mod merging;
+
+use level::{lander, risen, trusted};
+use merging::{kept, merge, remove, worktree_clean};
+
+/// How long one `gh` or git call of `land` may run before it refuses `could_not_run` (review of #100, F11).
+const DEADLINE: Duration = Duration::from_secs(120);
 
 /// `bp pr <issue>`.
 #[derive(Args)]
@@ -104,7 +116,7 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
     // The forge merges no head behind its base, so `pr` refuses one before the runs and the push (34, design change 5).
     git(&c.top, &["fetch", "-q", "origin"])?;
     let head = git(&c.worktree, &["rev-parse", "HEAD"])?;
-    holds_base(&c, &id, &head)?;
+    holds_base(&c, &id, &head, false)?;
     let clock = || crate::clock::instant(crate::clock::now().unwrap_or(now));
     let carried = red_first(&vault, &index, &id, &c, &head, role.as_str(), &clock)?;
     let gh = Gh::new(&c.top);
@@ -179,21 +191,22 @@ fn pr(cwd: &Path, p: &Pr) -> Result<Opened, Refusal> {
 }
 
 pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
-    let role = crate::set::human(format!("land {}", l.issue))?;
+    let role = lander(&l.issue)?;
     node_id(&l.issue)?;
+    // The clock refuses before any forge call, dry run too, never after the merge (review of #100, F6).
+    let now = crate::clock::now()?;
+    bp_read::git::within(DEADLINE);
     let vault = Vault::discover(cwd)?;
-    let index = Index::open(&vault)?;
+    let mut index = Index::open(&vault)?;
     let id = subject(&index, &l.issue)?;
-    let resolved = IssueStatus::Resolved.as_str();
-    let status = index.header(id.as_str())?.and_then(|h| h.get("status")?.as_str().map(str::to_string));
-    if status.as_deref() == Some(resolved) {
-        return Ok(Wrote::Already(json!({ "id": id, "status": resolved })));
+    if let Some(done) = repeat(&vault, &mut index, &id, l.dry_run)? {
+        return Ok(done);
     }
+    let resolved = IssueStatus::Resolved.as_str();
     let c = claimed(cwd, &index, &id)?;
-    let gh = Gh::new(&c.top);
-    let reviewer = reviewer(&index, &id, &gh.login()?)?;
-    // The diff an earlier approval saw, and the head's ancestry, are tested against the base as origin holds it now.
-    // The dry run fetches too, so a dry run that passes is a land the forge accepts (34, design change 5).
+    let gh = Gh::new(&c.top).within(DEADLINE);
+    // The head's ancestry and its level are tested against the base as origin holds it now. The dry run fetches too,
+    // so a dry run that passes is a land the forge accepts (34, design change 5).
     git(&c.top, &["fetch", "-q", "origin"])?;
     let Some(pr) =
         gh.prs_for_head(&c.branch)?.into_iter().filter(|p| p.is_open() || merged(p)).max_by_key(|p| p.number)
@@ -201,58 +214,55 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         return Err(landing::no_pull_request(&id));
     };
     let n = pr.number;
+    level::shaped(&c, &pr)?;
     // The dry run takes no writer, so it runs the writer's commit precondition here (34, design change 7).
     vault.committed()?;
     vault.clean([&id, &c.claim])?;
-    if c.worktree.is_dir() && !git(&c.worktree, &["status", "--porcelain"])?.is_empty() {
-        return Err(Refusal::new(
-            Code::PathDirty,
-            c.worktree.display().to_string(),
-            "land removes the worktree, so it holds no uncommitted work (26, design change 2)",
-            format!("commit and bp pr {id}, or stash, the changes in {}, then rerun", c.worktree.display()),
-        ));
-    }
-    let runs = bp_read::inputs::runs(&index, id.as_str())?;
+    worktree_clean(&c, &id)?;
     let blocks = bp_read::inputs::blocks(&vault, id.as_str())?;
-    let read = bp_read::inputs::pull_request(&pr, &reviewer);
+    let mut issue = Issue { base: c.base.clone(), blocks, ..bp_read::inputs::reviewed(&vault, &index, id.as_str())? };
+    let read = bp_read::inputs::pull_request(&pr);
     let carried = crate::carry::read(&vault, &index, &id, crate::red_first::Based::default())?;
+    let level = trusted(&c, &gh, &index, &id, &pr, &mut issue)?;
     // A merged pull request passes the same gates: a land that stopped before its commit passes them again, as the
-    // reviews and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
-    let compare = c.from.as_deref().map(|from| (c.top.as_path(), from));
-    // The check set and then the head's ancestry are the last gates, so a head the clone cannot read refuses only when
-    // every other gate holds.
+    // records and the rollup outlive the merge, and a merge made outside `land` is not recorded as landed.
+    // The check set, the level after this fetch and then the head's ancestry are the last gates, so a head the clone
+    // cannot read refuses only when every other gate holds.
     let named = carried.named_by(&c.top, &pr.head_ref_oid);
-    let gate = match intents::gates(&read, &c.base, &runs, &blocks, named.as_ref().ok().copied()).unmet {
-        Some(unmet) => Err(landing::refusal(&unmet, &id, &pr, &reviewer, compare)),
-        // A merged head is behind its base by its own merge.
-        None => named.and_then(|_| if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid) }),
+    let gate = match intents::gates(&issue, &read, named.as_ref().ok().copied()).unmet {
+        Some(Unmet::Approval) => Err(level.1.unwrap_or_else(|| landing::refusal(&Unmet::Approval, &id, &pr))),
+        Some(unmet) => Err(landing::refusal(&unmet, &id, &pr)),
+        // The base the forge names is read after the gates above it, so a layer whose base has not landed gets
+        // `base_unmerged` and not a refusal about a sha its own land replaces (review of #100, V6).
+        None => named
+            .and_then(|_| level::base(&c, &id, &pr))
+            .and_then(|base| risen(&c, &id, &issue, &pr.head_ref_oid, base))
+            .and_then(|()| {
+                // A merged head is behind its base by its own merge.
+                if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid, true) }
+            }),
     };
     if let Err(mut r) = gate {
-        if merged(&pr) {
+        // Only a gate that refuses a merged pull request makes the merge lost: a tool that could not run keeps its
+        // own fix, and the rerun finishes the land (review of #100, F2).
+        if merged(&pr) && r.exit == 2 {
             r.fix = landing::after_merge(n, &id);
         }
         return Err(r);
     }
-    if l.dry_run {
-        return Ok(Wrote::Changed(json!({ "land": id, "head": pr.head_ref_oid, "dry_run": true })));
-    }
+    let level = level.0;
+    // Each layer above, its worktree and its claim are tested before the merge, and by the dry run, as the land
+    // after the merge would test them (review of #100, F7).
     let children = crate::stack::children(&index, &id)?;
-    if !merged(&pr) {
-        gh.merge(n, &pr.head_ref_oid).map_err(|e| match gh.pr(n) {
-            // The forge refuses a head that moved since the reads: that head has no approval yet.
-            Ok(now) if now.head_ref_oid != pr.head_ref_oid => Refusal::new(
-                Code::ReviewMissing,
-                id.as_str(),
-                "land merges only the head the reviewer identity approved (15, Controls 1)",
-                format!(
-                    "the head moved to {}; bp pr {id}, then the reviewer approves it, then bp land {id}",
-                    now.head_ref_oid
-                ),
-            ),
-            _ => e,
-        })?;
+    if !children.is_empty() {
+        vault.clean(children.iter().map(|child| &child.claim))?;
     }
+    if l.dry_run {
+        return Ok(Wrote::Changed(json!({ "land": id, "head": pr.head_ref_oid, "level": level, "dry_run": true })));
+    }
+    let pr = if merged(&pr) { pr } else { merge(&vault, &gh, &c, &id, &pr)? };
     drop(index);
+    kept(&vault, &id, &c, &pr)?;
     // Each layer above moves onto the base before the branch below goes (15, a dependency chain to landed).
     git(&c.top, &["fetch", "-q", "origin"])?;
     let moved = crate::stack::restack(&gh, &children, &c.target, &c.branch)?;
@@ -266,7 +276,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
             format!("pull request {} merged, but the claim closed meanwhile; bp show {id}", pr.number),
         ));
     }
-    let to = crate::clock::instant(crate::clock::now()?);
+    let to = crate::clock::instant(crate::clock::now().unwrap_or(now));
     let more = format!("pull_request: {}\n", pr.number);
     let mut changes = BTreeMap::from([
         (c.claim.clone(), crate::claim::released(&vault.text(&c.claim)?, &to, "landed", &more)),
@@ -282,6 +292,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         "status": resolved,
         "pull_request": pr.number,
         "head": pr.head_ref_oid,
+        "level": level,
         "branch_kept": kept,
         "restacked": moved.restacked,
         "stranded": moved.stranded,
@@ -291,13 +302,30 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     })))
 }
 
+/// The repeat of a land already done: the issue is `resolved` (exit 3). A land killed inside its vault commit leaves
+/// `resolved` on disk, uncommitted, beside its journal; a writer puts the pre-images back first, so the rerun lands
+/// again and writes the commit (review of #100, F9). The dry run writes nothing, so it reads the file as it stands.
+fn repeat(vault: &Vault, index: &mut Index, id: &Id, dry_run: bool) -> Result<Option<Wrote>, Refusal> {
+    let resolved = IssueStatus::Resolved.as_str();
+    let status = |index: &Index| -> Result<bool, Refusal> {
+        Ok(index.header(id.as_str())?.and_then(|h| h.get("status")?.as_str().map(str::to_string)).as_deref()
+            == Some(resolved))
+    };
+    if status(index)? && vault.clean([id]).is_err() && !dry_run {
+        drop(vault.writer()?);
+        *index = Index::open(vault)?;
+    }
+    Ok(status(index)?.then(|| Wrote::Already(json!({ "id": id, "status": resolved }))))
+}
+
 /// `head_behind_base` unless `head` holds origin's `target` as last fetched: the forge merges no head behind its base
 /// (34, design change 5). The fix rebases the branch's own commits: those past the claim's base while the head holds
 /// it, else, as for a layer `land` moved, those past the point where the head leaves the base. That point is too low
 /// when the layer below was rewritten twice after this head left the claim's base: the rebase then replays the lower
 /// layer's older commits too, which git drops when their patches match and which conflict when they do not. Recording
 /// the base at each restack and each passing `pr` would close it.
-fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
+/// `land` names the same rebase as the worker's act, which the session dispatches (review of #100, C3).
+fn holds_base(c: &Claimed, id: &Id, head: &str, land: bool) -> Result<(), Refusal> {
     let tip = git(&c.top, &["rev-parse", &format!("refs/remotes/origin/{}", c.target)])?;
     let fork = git(&c.top, &["merge-base", &tip, head])?;
     if fork == tip {
@@ -305,15 +333,18 @@ fn holds_base(c: &Claimed, id: &Id, head: &str) -> Result<(), Refusal> {
     }
     let own = |from: &String| git(&c.top, &["merge-base", "--is-ancestor", from, head]).is_ok();
     let from = c.from.clone().filter(own).unwrap_or(fork);
+    let (t, w) = (&c.target, c.worktree.display());
+    let step = format!("git -C {w} rebase --onto origin/{t} {from}, resolve any conflict, then bp pr {id}");
+    let fix = if land {
+        format!("{head} lacks origin/{t} at {tip}; dispatch a worker to run {step}; then bp land {id}")
+    } else {
+        format!("{head} lacks origin/{t} at {tip}; {step}")
+    };
     Err(Refusal::new(
         Code::HeadBehindBase,
         id.as_str(),
         "a head lands only when it holds origin's base branch: the forge merges no head behind it (34, design change 5)",
-        format!(
-            "{head} lacks origin/{t} at {tip}; git -C {w} rebase --onto origin/{t} {from}, resolve any conflict, then bp pr {id}",
-            t = c.target,
-            w = c.worktree.display()
-        ),
+        fix,
     ))
 }
 
@@ -353,20 +384,6 @@ fn cleared(vault: &Vault, index: &Index, id: &Id, claim: &Id) -> Result<Option<(
     Ok(crate::claim::without_next(&vault.text(claim)?).map(|text| (claim.clone(), text)))
 }
 
-/// The project's reviewer identity, or `reviewer_invalid` when it is empty or the token's own `login`, case ignored.
-fn reviewer(index: &Index, id: &Id, login: &str) -> Result<String, Refusal> {
-    let reviewer = bp_read::inputs::reviewer(index, id.as_str())?;
-    if !reviewer.is_empty() && !reviewer.eq_ignore_ascii_case(login) {
-        return Ok(reviewer);
-    }
-    let why = if reviewer.is_empty() {
-        "the project names no reviewer".into()
-    } else {
-        format!("{login} is the token's own login")
-    };
-    Err(landing::reviewer_invalid(id, &why))
-}
-
 /// The issue's active claim, its clone, its branch and its base branch, or `illegal_transition`: the issue's status
 /// is not one where `pr` and `land` start, which is `in-progress` under a claim. The fix names the verb that moves it.
 fn claimed(cwd: &Path, index: &Index, id: &Id) -> Result<Claimed, Refusal> {
@@ -394,39 +411,6 @@ fn claimed(cwd: &Path, index: &Index, id: &Id) -> Result<Claimed, Refusal> {
         base,
         target,
     })
-}
-
-/// Removes what the claim added to the clone: the worktree, the branch and the forge's copy of it. Each step skips
-/// what is already gone, so a land that stopped part way finishes on its rerun. A branch with a commit the merged
-/// head lacks stays, so no work is lost, and so does one a `stranded` layer still targets; the result is `true` then.
-fn remove(c: &Claimed, merged: &str, stranded: bool) -> Result<bool, Refusal> {
-    if c.worktree.is_dir() {
-        git(&c.top, &["worktree", "remove", &c.worktree.display().to_string()])?;
-    }
-    if stranded {
-        return Ok(true);
-    }
-    git(&c.top, &["fetch", "-q", "--prune", "origin"])?;
-    let exists = |r: &str| git(&c.top, &["rev-parse", "--verify", "-q", r]).is_ok();
-    // A squash merge leaves the branch unmerged by ancestry, so the test is the merged head, not the base.
-    let held = |r: &str| git(&c.top, &["merge-base", "--is-ancestor", r, merged]).is_ok();
-    let (local, remote) = (format!("refs/heads/{}", c.branch), format!("refs/remotes/origin/{}", c.branch));
-    let mut kept = false;
-    if exists(&local) {
-        if held(&local) {
-            git(&c.top, &["branch", "-q", "-D", &c.branch])?;
-        } else {
-            kept = true;
-        }
-    }
-    if exists(&remote) {
-        if held(&remote) {
-            git(&c.top, &["push", "-q", "origin", "--delete", &c.branch])?;
-        } else {
-            kept = true;
-        }
-    }
-    Ok(kept)
 }
 
 fn merged(p: &PullRequest) -> bool {

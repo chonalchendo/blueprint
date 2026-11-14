@@ -3,9 +3,9 @@
 //! each named
 //! block of the issue, its milestone or such a delta whose `check_hash` changed since the claim. The body names a
 //! changed block and the `bp show` commands for its two texts, never the text, so a weakened block reaches the
-//! reviewer as a row to read, not as prose to trust (E3). The check set binds those blocks to the approval: the head
-//! names the set by a `Bp-Checks` trailer, and a changed set needs a push, which dismisses each approval (15,
-//! Controls 1).
+//! reviewer as a row to read, not as prose to trust (E3). The check set binds those blocks to the reviews: the head
+//! names the set by a `Bp-Checks` trailer, and a changed set needs a push, whose new head needs its `verify` review
+//! (37, design change 3).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -89,9 +89,8 @@ impl Carried {
         self.set.named_by(repo, commit)
     }
 
-    /// Puts an empty commit that names the set now on `head`, the worktree's branch, and returns it. Its push
-    /// dismisses each approval, so the reviewer approves again after reading the new rows. The index and the files
-    /// stay as they are.
+    /// Puts an empty commit that names the set now on `head`, the worktree's branch, and returns it. Its push is a new
+    /// head, so its `verify` review reads the new rows. The index and the files stay as they are.
     pub(crate) fn name_set(&self, worktree: &Path, head: &str) -> Result<String, Refusal> {
         let message = format!("bp: the check set changed\n\nBp-Checks: {}", self.set.set);
         let commit = git(worktree, &["commit-tree", &format!("{head}^{{tree}}"), "-p", head, "-m", &message])?;

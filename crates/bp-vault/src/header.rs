@@ -124,6 +124,11 @@ impl Header {
                         }
                     }));
                 }
+                // A run's level is the gate's input: a value outside the set would read as not recorded, with no
+                // finding (13, Run; review of #95, row 27).
+                "risk" if header.kind == Kind::Run && !matches!(value.as_str(), Some("low" | "medium" | "high")) => {
+                    return Err(Broken::rule("a run's `risk` is low, medium or high"));
+                }
                 "state" if header.kind == Kind::Delta => {
                     // A stored copy could contradict the closing append the state derives from (13, Delta).
                     return Err(Broken::rule("a delta's `state` derives from its closing append; delete the line"));
@@ -254,6 +259,9 @@ mod tests {
         assert_eq!(j["tags"][0], "domain/x");
         assert_eq!(j["unresolved"][0]["field"], "cites");
         assert!(!j.contains_key("design_kind"));
+        let run = Header::parse("kind: run\nrisk: high\n").unwrap();
+        assert_eq!(run.fields["risk"], "high", "a run's level in its set reads as any field");
+        assert!(Header::parse("kind: issue\ntitle: T\nrisk: bogus\n").is_ok(), "an issue's label is set's to check");
     }
 
     #[test]
@@ -285,6 +293,8 @@ mod tests {
             ("kind: issue\ntitle: T\nscope: system\n", "`scope` is not a field of an issue; delete the line"),
             ("kind: milestone\ntitle: T\ndesign_kind: system\n", "`design_kind` is not a field of a milestone"),
             ("kind: delta\nstate: accepted\n", "derives from its closing append"),
+            ("kind: run\nrisk: bogus\n", "a run's `risk` is low, medium or high"),
+            ("kind: run\nrisk: 1\n", "a run's `risk` is low, medium or high"),
         ] {
             let e = Header::parse(yaml).unwrap_err();
             assert!(e.why.contains(why), "{yaml}: {}", e.why);

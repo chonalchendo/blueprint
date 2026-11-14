@@ -37,12 +37,14 @@ pub fn designs(dir: Option<&Path>) -> BTreeMap<String, String> {
 /// command, or it with trailing arguments trimmed. So a command the reviewer only advises is no reproduction, and nor
 /// is the tail of one. The span matches as written, or with the assignments and keywords the trace reader skips
 /// ([`crate::eval_trace::program_at`]) dropped from both sides, so `CARGO_TARGET_DIR=$T cargo test -p a` and
-/// `cargo test -p a` open each other; the assignments themselves are not compared. A read ([`READS`]) reproduces
-/// nothing. An id is a vault path under `projects/…/designs/` or
+/// `cargo test -p a` open each other; the assignments themselves are not compared. An escaped pipe `\|` reads as `|`.
+/// A read ([`READS`]) reproduces nothing. An id is a vault path under `projects/…/designs/` or
 /// `shared/conventions/`, or a numbered cite ([`numbered`]).
 pub fn evidence(text: &str, proof: &Proof) -> bool {
     let ran = |span: &str| {
-        let whole = span.trim();
+        // `bp-review` writes a pipe inside a cell as `\|`, and `record` refuses one unescaped (review of #98, row 34).
+        let unescaped = span.replace("\\|", "|");
+        let whole = unescaped.trim();
         let span = &whole[crate::eval_trace::program_at(whole)..];
         let words: Vec<&str> = span.split_whitespace().take(2).collect();
         let read = READS.iter().any(|r| r.split(' ').eq(words.iter().copied().take(r.split(' ').count())));
@@ -222,6 +224,7 @@ mod tests {
         for yes in [
             "`cargo test -p xtask -- eval_trace` fails: 0 calls",
             "`T=$(mktemp -d) && git archive HEAD | tar -x -C $T` then the probe",
+            r"`T=$(mktemp -d) && git archive HEAD \| tar -x -C $T`, a pipe escaped as a cell holds it",
             "`./target/debug/bp walk x --json` exits 2",
             "`cargo xtask sandbox claim` exits 1 with the inverted check",
             "`CARGO_TARGET_DIR=$T cargo xtask sandbox claim` exits 1",

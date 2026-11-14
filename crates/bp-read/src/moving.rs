@@ -21,8 +21,9 @@ fn fresh(age: i64) -> bool {
     u64::try_from(age).is_ok_and(|a| a < MAX_AGE.as_secs())
 }
 
-/// The five groups in page order: id, words, and the intents each holds (32, design change 7). The first two owe the
-/// human a decision. Every intent sits in exactly one group.
+/// The five groups in page order: id, words, and the intents each holds (32, design change 7). The first two end a
+/// change: a land, which the session runs below high (37, design change 3), or the human's acceptance. Every intent
+/// sits in exactly one group.
 const GROUPS: [(&str, &str, &[Intent]); 5] = [
     ("needs-landing", "needs landing", &[Intent::NeedsLanding]),
     (
@@ -274,10 +275,8 @@ pub(crate) fn next(id: &str, intent: Intent, note: &str, f: &Facts) -> Next {
         Intent::Waiting => Next::Wait(note.to_string()),
         Intent::NeedsReview => Next::Wait(with("review dispatch")),
         Intent::NeedsResponse => Next::Wait(with("response dispatch")),
-        Intent::NeedsApproval => Next::Wait(match &f.sha {
-            Some(sha) => format!("awaits the reviewer's approval at {}", &sha[..sha.len().min(7)]),
-            None => "awaits the reviewer's approval".to_string(),
-        }),
+        // The one act the human owes a high head: the signed approval (37, design change 3).
+        Intent::NeedsApproval => Next::Command(format!("bp approve {id}")),
         Intent::NeedsDerivation => Next::Wait(with("session derives")),
         Intent::NeedsShaping => Next::Wait(with("session shapes")),
     }
@@ -383,7 +382,7 @@ mod tests {
                 &at,
                 wait("response dispatch: no disposition: findings 2, 3"),
             ),
-            (Intent::NeedsApproval, "", &at, wait("awaits the reviewer's approval at cc8a400")),
+            (Intent::NeedsApproval, "", &at, cmd("bp approve projects/bp/issues/0411.x")),
             (
                 Intent::NeedsDerivation,
                 "a uncovered; bp walk m --for derive",

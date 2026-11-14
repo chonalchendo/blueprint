@@ -6,7 +6,8 @@ import type { GateState } from "./GateState";
  */
 export type Gate = { 
 /**
- * What it tests: `base`, `approving review`, `forge checks`, `run <block>`, or `check set`.
+ * What it tests: `base`, `forge checks`, `run <block>`, `review`, `dispositions`, `error rows`, `signed approval`
+ * or `check set`.
  */
 name: string, 
 /**
@@ -14,6 +15,6 @@ name: string,
  */
 state: GateState, 
 /**
- * What it read: the sha, the reviewer, the run.
+ * What it read: the sha, the run, the rows.
  */
 detail: string, };

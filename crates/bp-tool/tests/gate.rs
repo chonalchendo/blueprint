@@ -68,10 +68,11 @@ impl World {
 
     /// The comment `bp approve` posts: the message `bp approve` signs for these fields, signed by `key`.
     fn comment(&self, key: &str, fields: [&str; 6], signed: [&str; 6]) -> String {
-        let text = |f: [&str; 6]| {
-            let names = ["act", "project", "node", "pull_request", "base", "head"];
-            names.iter().zip(f).flat_map(|(k, v)| [k, ": ", v, "\n"]).collect::<String>()
-        };
+        self.block(key, &text(fields), &text(signed))
+    }
+
+    /// A comment that shows the message `shown` with a signature of `signed` by `key`.
+    fn block(&self, key: &str, shown: &str, signed: &str) -> String {
         // A message on stdin signs to stdout, so no `.sig` file of an earlier call is kept.
         let mut child = std::process::Command::new("ssh-keygen")
             .env_remove("SSH_AUTH_SOCK")
@@ -81,11 +82,11 @@ impl World {
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(text(signed).as_bytes()).unwrap();
+        child.stdin.take().unwrap().write_all(signed.as_bytes()).unwrap();
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success());
         let sig = String::from_utf8(out.stdout).unwrap();
-        format!("Signed.\n\n```bp-approval\n{}{}\n```\n", text(fields), sig.trim_end())
+        format!("Signed.\n\n```bp-approval\n{shown}{}\n```\n", sig.trim_end())
     }
 
     /// `bp gate` for `head` onto `master` from the clone, with `comments` written to a file when given.
@@ -124,6 +125,12 @@ impl World {
         let f = ["approve", "bp", ISSUE, &pr, "master", head];
         json!([self.comment("human", f, f)])
     }
+}
+
+/// The message `bp approve` signs for these fields, one `key: value` line each.
+fn text(f: [&str; 6]) -> String {
+    let names = ["act", "project", "node", "pull_request", "base", "head"];
+    names.iter().zip(f).flat_map(|(k, v)| [k, ": ", v, "\n"]).collect::<String>()
 }
 
 const RULES: &str = "high: [infra/]\nlow: [docs/]\nsigner: {human}\ngate: 0123456789abcdef0123456789abcdef01234567\n";
@@ -262,6 +269,22 @@ fn gate_skips_a_block_that_does_not_verify_for_any_cause() {
     let (exit, v) = w.gate(&head, Some(&json!([crafted, valid])));
     assert_eq!((exit, v["approval"].as_str()), (Some(0), Some("signed")), "{v}");
     assert_eq!(code(&w.gate(&head, Some(&json!([crafted])))), (Some(2), "signature_invalid".into()));
+}
+
+/// An approval at high's round cap signs the rows it accepts, one `accepts` line each. The gate rebuilds them from the
+/// block's own lines, so the human's comment verifies, and a line added to it does not (review of #100, W1).
+#[test]
+fn gate_reads_the_accepts_lines_an_approval_signs() {
+    let w = World::new(RULES);
+    let head = w.commit(&[("infra/b.tf", "b\n")]);
+    let pr = PR.to_string();
+    let fields = text(["approve", "bp", ISSUE, &pr, "master", &head]);
+    let one = format!("{fields}accepts: {ISSUE}/reviews/r#1\n");
+    let two = format!("{one}accepts: {ISSUE}/reviews/r#2\n");
+    let (exit, v) = w.gate(&head, Some(&json!([w.block("human", &one, &one)])));
+    assert_eq!((exit, v["approval"].as_str()), (Some(0), Some("signed")), "{v}");
+    let widened = w.block("human", &two, &one);
+    assert_eq!(code(&w.gate(&head, Some(&json!([widened])))), (Some(2), "signature_invalid".into()));
 }
 
 #[test]
@@ -490,6 +513,22 @@ fn gate_reads_the_base_commit_not_a_local_replace_of_it() {
     let fields = ["approve", "bp", ISSUE, &pr, "master", &head];
     let (exit, v) = w.gate(&head, Some(&json!([w.comment("agent", fields, fields)])));
     assert_eq!((exit, v["code"].as_str()), (Some(2), Some("signature_invalid")), "the base's signer: {v}");
+}
+
+#[test]
+fn gate_reads_the_parents_the_commits_name_not_a_local_graft() {
+    // Review of #99, row 55: `.git/info/grafts` makes the head a root and the parent of the base, so the test merge is
+    // the base's own tree and a high head reads low.
+    let w = World::new(RULES);
+    let top = w.code();
+    let head = w.commit(&[("infra/b.tf", "b\n")]);
+    let grafts = top.join(git(&top, &["rev-parse", "--git-path", "info/grafts"]).trim());
+    std::fs::create_dir_all(grafts.parent().unwrap()).unwrap();
+    std::fs::write(&grafts, format!("{} {head}\n{head}\n", w.base)).unwrap();
+    assert_eq!(git(&top, &["merge-base", &w.base, &head]).trim(), head, "the graft is in force");
+    let (exit, v) = w.gate(&head, None);
+    assert_eq!((exit, v["code"].as_str()), (Some(2), Some("approval_missing")), "{v}");
+    assert!(v["fix"].as_str().unwrap().contains("infra/b.tf matches the high pattern infra/"), "{v}");
 }
 
 #[test]

@@ -25,9 +25,9 @@ const change: ChangeObject = {
   pull_request: { number: 1, url: "http://forge/pull/1", base: "master", head: "e2d442907160db2ad3811967019c58a2a5b9130a", state: "OPEN" },
   gates: [
     { name: "base", state: "pass", detail: probe },
-    { name: "approving review", state: "pass", detail: "approved at e2d4429 by quokka-reviewer" },
     { name: "forge checks", state: "pass", detail: "green at e2d4429" },
     { name: "run staged", state: "pass", detail: "pass at e2d4429, attempt 1" },
+    { name: "review", state: "pass", detail: "round 1 at e2d4429: each review of medium recorded" },
   ],
   refusal: null,
   stack: [],
@@ -79,9 +79,12 @@ test("change: the staged needs-landing issue reads its gates, its diff and the l
   const gates = Array.from(document.querySelectorAll(".gates .g")).map((g) => Array.from(g.children).map((s) => s.textContent));
   expect(gates.map(([name, state]) => [name, state])).toEqual([
     ["base", "pass"],
-    ["approving review", "pass"],
     ["forge checks", "pass"],
     ["run staged", "pass"],
+    ["review", "pass"],
+    ["dispositions", "pass"],
+    ["error rows", "pass"],
+    ["signed approval", "pass"],
     ["check set", "pass"],
   ]);
   expect(document.querySelector(".diff p")?.textContent).toMatch(/^\+1 \/ −0 across 1 file in pull request 1$/);

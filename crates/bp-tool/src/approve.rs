@@ -2,19 +2,23 @@
 //! change 4). Each reads the head from the forge, as `land` does, signs the act with the human's key and writes one
 //! record under the issue: `approvals/<head>` or `lowerings/<head>`. A gate reads a record only through [`approved`]
 //! or [`lowered`], which rebuild the message from the head they test and verify the signature against the signer that
-//! origin's `.bp/risk.yml` names. A hand-written record, a copied signature or a changed field does not verify. An
-//! approval also prints the comment that carries it to the forge check `bp-gate`, and `--post` posts it.
+//! origin's `.bp/risk.yml` names. A hand-written record, a copied signature or a changed field, the `accepts` list of
+//! an approval included, does not verify. An approval also prints the comment that carries it to the forge check
+//! `bp-gate`, and `--post` posts it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use bp_change::risk::Level;
 use bp_forge::{Gh, PullRequest};
 use bp_read::snapshot::clone_of;
 use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::signed::{Act, armour, blocks, comment, in_agent, is_branch, is_sha, sign, signer, verify};
+use crate::signed::{
+    Act, accepts, armour, blocks, can_verify, comment, in_agent, is_branch, is_sha, sign, signer, verify,
+};
 use crate::{Wrote, node_id, subject};
 
 /// `bp approve <issue> [--key <path>] [--post]`.
@@ -93,23 +97,8 @@ fn act(
             format!("{branch} has no open pull request; the worker runs bp pr {id}, then rerun"),
         ));
     };
-    let head = pr.head_ref_oid.as_str();
-    // The head names the record's file and a line of the signed message, so a slash or a newline from the forge
-    // would move the one and add a field to the other.
-    if !is_sha(head) {
-        return Err(Refusal::failed(
-            format!("gh pr list --head {branch}"),
-            format!("the forge gave head {head:?}, not a full commit sha; fix gh or the pull request, then rerun"),
-        ));
-    }
-    let base = pr.base_ref_name.as_deref().unwrap_or_default();
-    if !is_branch(base) {
-        return Err(Refusal::failed(
-            format!("gh pr list --head {branch}"),
-            format!("the forge gave base branch {base:?}, not a branch name; fix gh or the pull request, then rerun"),
-        ));
-    }
-    let signer = signer(&top)?;
+    let (head, base) = forge_shas(&branch, &pr)?;
+    let (signer, _) = signer(&top)?;
     if in_agent(&signer) {
         return Err(Refusal::new(
             Code::KeyInAgent,
@@ -119,22 +108,40 @@ fn act(
             format!("ssh-add -d <the key's .pub file>, then rerun bp {verb} {id}"),
         ));
     }
-    let act = Act { verb, node: &id, pull_request: pr.number, base, head, more };
-    let message = act.message();
-    if let Some(r) = index.records(id.as_str(), kind)?.iter().find(|r| holds(r, &message, &signer)) {
-        let mut v = json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number });
-        if kind == Kind::Approval {
-            let signature = armour(&r.body).expect("a record that verifies holds a signature");
-            v["comment"] = again(&gh, &id, pr.number, &message, &signature, post)?.into();
+    // A tool that cannot verify refuses here, not as a record or a key that does not verify (review of #100, F3).
+    can_verify()?;
+    // At high's round cap the approval names the open rows it accepts, as they stand when it signs (37, design change
+    // 6), and signs them. Rows an earlier record of this head accepted are not named again, so a repeat names none and
+    // finds its record. A row recorded later is in no list.
+    let named: Vec<String> = match kind {
+        Kind::Approval => {
+            let issue = bp_read::inputs::reviewed(&vault, &index, id.as_str())?;
+            bp_change::intents::accepting(&issue, head).iter().map(|(review, n)| format!("{review}#{n}")).collect()
         }
-        return Ok(Wrote::Already(v));
+        _ => Vec::new(),
+    };
+    let signs =
+        |lines: &[(&str, &str)]| Act { verb, node: &id, pull_request: pr.number, base, head, more: lines }.message();
+    let message = if kind == Kind::Approval { signs(&accepts(&named)) } else { signs(more) };
+    for r in index.records(id.as_str(), kind)?.into_iter().filter(|_| named.is_empty()) {
+        // An approval signs its own list, so a repeat reads each record with the list it holds.
+        let Some(own) = names(&r) else { continue };
+        let message = if kind == Kind::Approval { signs(&accepts(&own)) } else { message.clone() };
+        if holds(&r, &message, &signer)? {
+            let mut v = json!({ "id": r.id, "issue": id, "head": head, "pull_request": pr.number });
+            if kind == Kind::Approval {
+                let signature = armour(&r.body).expect("a record that verifies holds a signature");
+                v["comment"] = again(&gh, &id, pr.number, &message, &signature, post)?.into();
+            }
+            return Ok(Wrote::Already(v));
+        }
     }
     drop(index);
     let key = match key {
         Some(k) => k.to_path_buf(),
         None => Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(".ssh/bp_human"),
     };
-    // The passphrase prompt names no act, so the human reads what the key signs first.
+    // The passphrase prompt names no act, so the human reads what the key signs first: the rows it accepts too.
     eprint!("bp {verb} signs:\n{message}");
     let signature = sign(&message, &key)?;
     if !verify(&message, &signature, &signer)? {
@@ -153,6 +160,9 @@ fn act(
     let mut fields: Vec<(&str, Value)> =
         vec![("head", head.into()), ("pull_request", pr.number.into()), ("base", base.into())];
     fields.extend(more.iter().map(|(k, v)| (*k, Value::from(*v))));
+    if !named.is_empty() {
+        fields.push(("accepts", named.clone().into()));
+    }
     fields.push(("at", at.into()));
     let text = record_text(kind, &id, fields, &signature);
     let changes = BTreeMap::from([(record.clone(), text)]);
@@ -165,10 +175,37 @@ fn act(
         "commit": written.commit,
         "findings": written.findings,
     });
+    if !named.is_empty() {
+        v["accepts"] = named.into();
+    }
     if kind == Kind::Approval {
         v["comment"] = share(&gh, &id, pr.number, &message, &signature, post)?.into();
     }
     Ok(Wrote::Changed(v))
+}
+
+/// The head and the base branch the forge names, each a shape a record and a signed line can hold. The head names the
+/// record's file and a line of the signed message, so a slash or a newline from the forge would move the one and add a
+/// field to the other.
+fn forge_shas<'a>(branch: &str, pr: &'a PullRequest) -> Result<(&'a str, &'a str), Refusal> {
+    let head = pr.head_ref_oid.as_str();
+    if !is_sha(head) {
+        return Err(Refusal::failed(
+            format!("gh pr list --head {branch}"),
+            format!("the forge gave head {head}, not a full commit sha; fix gh or the pull request, then rerun"),
+        ));
+    }
+    let base = pr.base_ref_name.as_deref().unwrap_or_default();
+    if !is_branch(base) {
+        return Err(Refusal::failed(
+            format!("gh pr list --head {branch}"),
+            format!(
+                "the forge gave base branch {}, not a branch name; fix gh or the pull request, then rerun",
+                if base.is_empty() { "nothing" } else { base }
+            ),
+        ));
+    }
+    Ok((head, base))
 }
 
 /// The forge comment of a signed approval, printed to stderr for the human to post, or posted with `gh pr comment`
@@ -209,9 +246,16 @@ pub(crate) fn record_text(kind: Kind, issue: &Id, fields: Vec<(&str, Value)>, si
     format!("{header}\n## Signature\n\n```\n{}\n```\n", signature.trim_end())
 }
 
-/// The record's signature verifies `message` by `signer`.
-fn holds(r: &Record, message: &str, signer: &str) -> bool {
-    armour(&r.body).is_some_and(|sig| verify(message, &sig, signer).unwrap_or(false))
+/// The record's signature verifies `message` by `signer`. The caller ran [`can_verify`] first, so a `false` is the
+/// record's, never a tool that cannot verify.
+fn holds(r: &Record, message: &str, signer: &str) -> Result<bool, Refusal> {
+    armour(&r.body).map_or(Ok(false), |sig| verify(message, &sig, signer))
+}
+
+/// The names of the record's `accepts` list as written, empty with no list; `None` when an item is not text.
+fn names(r: &Record) -> Option<Vec<String>> {
+    let Some(list) = r.header.get("accepts") else { return Some(Vec::new()) };
+    list.as_array()?.iter().map(|v| v.as_str().map(str::to_string)).collect()
 }
 
 /// The record's pull request number and base branch, as its header holds them.
@@ -219,26 +263,46 @@ fn number(r: &Record) -> Option<(u64, &str)> {
     Some((r.header.get("pull_request")?.as_u64()?, r.header.get("base")?.as_str()?))
 }
 
-/// `Ok` when an approval under `issue` carries a valid signature of the approval of `head` by `signer` (37, design
-/// changes 3 and 4). The message comes from `issue` and `head`, not from the record, so only a signature the human
-/// made for this head passes. Else `signature_invalid` for a record at this head that does not verify, or
+/// The forge's pull request as a signed act names it: its number and its base branch. A record of another pull
+/// request or base never counts, even with a valid signature (37, design changes 3 and 4).
+pub(crate) type Forge<'a> = (u64, &'a str);
+
+/// The rows an approval accepts, each as a review's id and the row's number.
+pub(crate) type Accepts = Vec<(String, u64)>;
+
+/// `Ok` with the rows it accepts when an approval under `issue` carries a valid signature of the approval of `head` by
+/// `signer`, and names the forge's pull request number and base branch (37, design changes 3 and 4). The message comes
+/// from `issue`, `head` and the forge, not from the record, so only a signature the human made for this head of this
+/// pull request on this base passes. The record's own `accepts` list joins the message, so only the list the human
+/// signed verifies (review of #100, W1). Else `signature_invalid` for a record at this head that does not verify, or
 /// `approval_missing`, which names the heads a stale approval signed.
-#[cfg_attr(not(test), expect(dead_code, reason = "land calls it from milestone 12 issue 3"))]
-pub(crate) fn approved(index: &Index, issue: &Id, head: &str, signer: &str) -> Result<(), Refusal> {
+pub(crate) fn approved(index: &Index, issue: &Id, head: &str, signer: &str, forge: Forge) -> Result<Accepts, Refusal> {
     let records = index.records(issue.as_str(), Kind::Approval)?;
-    let message =
-        |(n, base): (u64, &str)| Act { verb: "approve", node: issue, pull_request: n, base, head, more: &[] }.message();
-    if records.iter().any(|r| number(r).is_some_and(|n| holds(r, &message(n), signer))) {
-        return Ok(());
+    if !records.is_empty() {
+        can_verify()?;
     }
-    let fix = format!("the human runs bp approve {issue} from a shell, at head {head}");
+    let (n, base) = forge;
+    let mut accepted = None;
+    for r in records.iter().filter(|r| number(r) == Some(forge)) {
+        // A list that is not all text is no list the human signed.
+        let Some(named) = names(r) else { continue };
+        let more = accepts(&named);
+        let message = Act { verb: "approve", node: issue, pull_request: n, base, head, more: &more }.message();
+        if holds(r, &message, signer)? {
+            accepted.get_or_insert_with(Vec::new).extend(bp_read::inputs::accepted(r));
+        }
+    }
+    if let Some(accepted) = accepted {
+        return Ok(accepted);
+    }
+    let fix = format!("the human runs bp approve {issue} from a shell, at head {head} of pull request {n} into {base}");
     let at = |r: &&Record| r.header.get("head").and_then(Value::as_str) == Some(head);
     if let Some(r) = records.iter().find(at) {
         return Err(Refusal::new(
             Code::SignatureInvalid,
             r.id.as_str(),
             "an approval counts only with a signature, by the signer that .bp/risk.yml names, of this act at this \
-             head (37, design change 4)",
+             head of this pull request and base (37, design change 4)",
             fix,
         ));
     }
@@ -252,19 +316,38 @@ pub(crate) fn approved(index: &Index, issue: &Id, head: &str, signer: &str) -> R
     ))
 }
 
-/// The level of the latest lowering under `issue` whose signature by `signer` verifies at `head`, or `None`. A
-/// lowering whose signature does not verify, or that signed another head, is ignored: only a signed human record
-/// lowers a level (37, design change 2).
-#[cfg_attr(not(test), expect(dead_code, reason = "the level in force reads it from milestone 12 issue 0"))]
-pub(crate) fn lowered(index: &Index, issue: &Id, head: &str, signer: &str) -> Result<Option<String>, Refusal> {
+/// The level of the latest lowering under `issue` whose signature by `signer` verifies at `head`, or `None`. With
+/// `forge`, a lowering counts only when it names the forge's pull request and base; `land` passes it. `bp risk` calls
+/// no `gh`, so it passes `None` and reads the record's own. A lowering whose signature does not verify, or that signed
+/// another head, is ignored: only a signed human record lowers a level (37, design change 2).
+pub(crate) fn lowered(
+    index: &Index,
+    issue: &Id,
+    head: &str,
+    signer: &str,
+    forge: Option<Forge>,
+) -> Result<Option<Level>, Refusal> {
     let records = index.records(issue.as_str(), Kind::Lowering)?;
+    if !records.is_empty() {
+        can_verify()?;
+    }
     let text = |r: &Record, f: &str| r.header.get(f).and_then(Value::as_str).map(str::to_string);
-    Ok(records.iter().rev().find_map(|r| {
-        let ((n, base), level, reason) = (number(r)?, text(r, "level")?, text(r, "reason")?);
+    for r in records.iter().rev() {
+        let (Some((n, base)), Some(level), Some(reason)) = (number(r), text(r, "level"), text(r, "reason")) else {
+            continue;
+        };
+        if forge.is_some_and(|f| f != (n, base)) {
+            continue;
+        }
         let more = [("level", level.as_str()), ("reason", reason.as_str())];
         let message = Act { verb: "lower", node: issue, pull_request: n, base, head, more: &more }.message();
-        holds(r, &message, signer).then_some(level)
-    }))
+        if let Ok(level) = level.parse()
+            && holds(r, &message, signer)?
+        {
+            return Ok(Some(level));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -272,6 +355,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    use bp_change::risk::Level;
     use bp_vault::{Code, Id, Index, Kind, Vault};
     use serde_json::Value;
 
@@ -330,7 +414,18 @@ mod tests {
     }
 
     fn fields(head: &str, n: u64, at: &str, more: &[(&'static str, &str)]) -> Vec<(&'static str, Value)> {
-        let mut f: Vec<(&str, Value)> = vec![("head", head.into()), ("pull_request", n.into()), ("base", B.into())];
+        fields_on(head, n, B, at, more)
+    }
+
+    /// [`fields`] of a pull request into `base`.
+    fn fields_on(
+        head: &str,
+        n: u64,
+        base: &str,
+        at: &str,
+        more: &[(&'static str, &str)],
+    ) -> Vec<(&'static str, Value)> {
+        let mut f: Vec<(&str, Value)> = vec![("head", head.into()), ("pull_request", n.into()), ("base", base.into())];
         f.extend(more.iter().map(|(k, v)| (*k, Value::from(*v))));
         f.push(("at", format!("2026-11-12T10:00:{at}Z").into()));
         f
@@ -343,12 +438,13 @@ mod tests {
         let (agent, agent_public) = key(keys.path(), "agent");
         let (_dir, v) = vault();
         let issue = Id::parse(ISSUE).unwrap();
-        let act = |verb: &str, head: &str, n: u64| {
-            Act { verb, node: &issue, pull_request: n, base: B, head, more: &[] }.message()
+        let on = |verb: &str, head: &str, n: u64, base: &str| {
+            Act { verb, node: &issue, pull_request: n, base, head, more: &[] }.message()
         };
+        let act = |verb: &str, head: &str, n: u64| on(verb, head, n, B);
         let message = |head: &str, n: u64| act("approve", head, n);
         let gate = |head: &str, signer: &str| {
-            approved(&Index::open(&v).unwrap(), &issue, head, signer).map_err(|r| (r.code, r.fix))
+            approved(&Index::open(&v).unwrap(), &issue, head, signer, (1, B)).map_err(|r| (r.code, r.fix))
         };
         assert_eq!(gate(H1, &signer).unwrap_err().0, Code::ApprovalMissing, "no approval");
 
@@ -357,7 +453,7 @@ mod tests {
         forge(&v, Kind::Approval, H2, fields(H2, 1, "01", &[]), &of_h2);
         let (code, fix) = gate(H1, &signer).unwrap_err();
         assert!(code == Code::ApprovalMissing && fix.contains(&format!("the approvals sign {H2}")), "{fix}");
-        assert_eq!(gate(H2, &signer), Ok(()), "it does approve the head it signed");
+        assert_eq!(gate(H2, &signer), Ok(Vec::new()), "it does approve the head it signed");
         assert_eq!(gate(H2, &agent_public).unwrap_err().0, Code::SignatureInvalid, "only the signer's key counts");
 
         // Each record at this head that an agent can make without the human's key refuses.
@@ -365,8 +461,7 @@ mod tests {
         let by_agent = sign(&message(H1, 1), &agent).unwrap();
         let other_act = sign(&act("lower", H1, 1), &human).unwrap();
         let other_pr = sign(&message(H1, 2), &human).unwrap();
-        let stacked = Act { verb: "approve", node: &issue, pull_request: 1, base: "bp/b", head: H1, more: &[] };
-        let other_base = sign(&stacked.message(), &human).unwrap();
+        let other_base = sign(&on("approve", H1, 1, "bp/b"), &human).unwrap();
         let namespace = {
             put(keys.path(), "m", &message(H1, 1));
             run(keys.path(), "ssh-keygen", &["-Y", "sign", "-n", "git", "-f", "human", "m"]);
@@ -381,6 +476,7 @@ mod tests {
             ("a changed field: the pull request", other_pr.as_str(), 1),
             ("a changed field: the base branch", other_base.as_str(), 1),
             ("a signature in git's namespace", namespace.as_str(), 1),
+            ("a valid approval of another pull request", other_pr.as_str(), 2),
         ]
         .into_iter()
         .enumerate()
@@ -389,6 +485,13 @@ mod tests {
             forge(&v, Kind::Approval, &key, fields(H1, pr, &format!("{:02}", n + 2), &[]), signature);
             assert_eq!(gate(H1, &signer).unwrap_err().0, Code::SignatureInvalid, "{why}");
         }
+        // A valid approval of this head into another base: a stacked pull request, retargeted since.
+        forge(&v, Kind::Approval, &format!("{H1}-10"), fields_on(H1, 1, "bp/b", "10", &[]), &other_base);
+        assert_eq!(gate(H1, &signer).unwrap_err().0, Code::SignatureInvalid, "an approval into another base");
+        let into = |base| approved(&Index::open(&v).unwrap(), &issue, H1, &signer, (1, base)).map_err(|r| r.code);
+        assert_eq!(into("bp/b"), Ok(Vec::new()), "it approves the base it signed");
+        let of_pr2 = |n| approved(&Index::open(&v).unwrap(), &issue, H1, &signer, (n, B)).map_err(|r| r.code);
+        assert_eq!(of_pr2(2), Ok(Vec::new()), "and the record of pull request 2 approves that one");
         assert!(gate(H1, &signer).unwrap_err().1.contains("bp approve projects/bp/issues/a"));
 
         // The human's valid signature in a record with no `base` refuses: the gate rebuilds the message from the record's
@@ -401,9 +504,9 @@ mod tests {
         // The human's signature of this act at this head passes, whatever forged records sit beside it.
         let good = sign(&message(H1, 1), &human).unwrap();
         forge(&v, Kind::Approval, &format!("{H1}-9"), fields(H1, 1, "20", &[]), &good);
-        assert_eq!(gate(H1, &signer), Ok(()));
+        assert_eq!(gate(H1, &signer), Ok(Vec::new()));
         // The gate trusts the signer it is given, so `signer` reads it from origin's protected branch only.
-        assert_eq!(gate(H1, &agent_public), Ok(()), "the agent's record verifies against the agent's own key");
+        assert_eq!(gate(H1, &agent_public), Ok(Vec::new()), "the agent's record verifies against the agent's own key");
     }
 
     #[test]
@@ -413,7 +516,7 @@ mod tests {
         let (agent, _) = key(keys.path(), "agent");
         let (_dir, v) = vault();
         let issue = Id::parse(ISSUE).unwrap();
-        let level = || lowered(&Index::open(&v).unwrap(), &issue, H1, &signer).unwrap();
+        let level = || lowered(&Index::open(&v).unwrap(), &issue, H1, &signer, None).unwrap();
         let lowering = |key: &Path, head: &str, level: &str| {
             let more = [("level", level), ("reason", "docs only")];
             let act = Act { verb: "lower", node: &issue, pull_request: 1, base: B, head, more: &more };
@@ -433,7 +536,11 @@ mod tests {
         forge(&v, Kind::Lowering, H2, fields(H2, 1, "05", &low), &lowering(&human, H2, "low"));
         assert_eq!(level(), None, "a lowering of another head does not count at this one");
         forge(&v, Kind::Lowering, &format!("{H1}-5"), fields(H1, 1, "06", &low), &lowering(&human, H1, "low"));
-        assert_eq!(level().as_deref(), Some("low"), "the human's signed lowering counts");
+        assert_eq!(level(), Some(Level::Low), "the human's signed lowering counts");
+        let at = |forge| lowered(&Index::open(&v).unwrap(), &issue, H1, &signer, Some(forge)).unwrap();
+        assert_eq!(at((1, B)), Some(Level::Low), "it names the forge's pull request and base");
+        assert_eq!(at((2, B)), None, "another pull request at the same head");
+        assert_eq!(at((1, "bp/b")), None, "another base at the same head");
         forge(
             &v,
             Kind::Lowering,
@@ -441,7 +548,7 @@ mod tests {
             fields(H1, 1, "07", &[("level", "medium"), ("reason", "x")]),
             forged,
         );
-        assert_eq!(level().as_deref(), Some("low"), "a later forged lowering changes nothing");
+        assert_eq!(level(), Some(Level::Low), "a later forged lowering changes nothing");
     }
 
     #[test]
@@ -471,13 +578,14 @@ mod tests {
         let issue = Id::parse(ISSUE).unwrap();
         let message = Act { verb: "approve", node: &issue, pull_request: 1, base: B, head: H1, more: &[] }.message();
         forge(&v, Kind::Approval, H1, fields(H1, 1, "01", &[]), &sign(&message, &agent).unwrap());
-        let gate = || approved(&Index::open(&v).unwrap(), &issue, H1, &signer(&code).unwrap()).unwrap_err().code;
+        let signer = |code: &Path| signer(code).unwrap().0;
+        let gate = || approved(&Index::open(&v).unwrap(), &issue, H1, &signer(&code), (1, B)).unwrap_err().code;
         let local = |r: &str| run(&code, "git", &["show", &format!("{r}:.bp/risk.yml")]);
 
         // Poison one: origin/HEAD names the agent's pushed branch, with no push.
         run(&code, "git", &["remote", "set-head", "origin", "bp/x"]);
         assert!(local("origin/HEAD").contains(&agent_public), "the local ref names the agent's key");
-        assert_eq!(signer(&code).unwrap(), human, "the signer is the server's default branch's");
+        assert_eq!(signer(&code), human, "the signer is the server's default branch's");
         assert_eq!(gate(), Code::SignatureInvalid, "the agent's approval does not verify");
 
         // Poison two: origin/master is a local commit that names the agent's key.
@@ -485,7 +593,7 @@ mod tests {
         commit(&format!("signer: {agent_public}\n"));
         run(&code, "git", &["update-ref", "refs/remotes/origin/master", "HEAD"]);
         assert!(local("origin/master").contains(&agent_public), "the local ref names the agent's key");
-        assert_eq!(signer(&code).unwrap(), human, "the signer is the server's default branch's");
+        assert_eq!(signer(&code), human, "the signer is the server's default branch's");
         assert_eq!(gate(), Code::SignatureInvalid, "the agent's approval does not verify");
     }
 }

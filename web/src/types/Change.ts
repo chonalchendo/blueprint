@@ -42,8 +42,7 @@ pull_request?: ChangePullRequest,
  */
 gates: Array<Gate>, 
 /**
- * The refusal `land` would give at this head: the first unmet gate, or a missing claim, reviewer or pull
- * request.
+ * The refusal `land` would give at this head: the first unmet gate, or a missing claim or pull request.
  */
 refusal: ChangeRefusal | null, 
 /**
