@@ -4,12 +4,14 @@
 //! `clears/<red>` under the project. A gate reads a clear only through [`cleared`], which rebuilds the message from the
 //! master-red record it tests and the clear's `tip`, and verifies the signature against the signer that origin's
 //! `.bp/risk.yml` names. An unsigned or wrongly signed clear, a clear of another red or another project, and a copied
-//! record change nothing. `bp clear` reads no forge: the human sees the failed checks the record names.
+//! record change nothing. The human sees the failed checks the record names; `bp clear` asks the forge only which red
+//! `land` holds, by the test `land` uses, and judges each red at the head `land` reads: origin's default branch.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bp_change::intents::Red;
+use bp_forge::Gh;
 use bp_read::inputs::{Reds, clear_message};
 use bp_read::snapshot::clone_of;
 use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
@@ -17,7 +19,7 @@ use clap::Args;
 use serde_json::{Value, json};
 
 use crate::Wrote;
-use crate::signed::{armour, can_verify, in_agent, is_branch, is_sha, sign, signer, verify};
+use crate::signed::{armour, can_verify, in_agent, sign, signer, verify};
 
 /// `bp clear <project> [--key <path>]`.
 #[derive(Args)]
@@ -45,7 +47,7 @@ pub(crate) fn clear(cwd: &Path, c: &Clear) -> Result<Wrote, Refusal> {
     }
     let top = clone_of(cwd, &index, &c.project)?;
     crate::claim::git(&top, &["fetch", "-q", "origin"])?;
-    let (signer, _) = signer(&top)?;
+    let (signer, tip) = signer(&top)?;
     if in_agent(&signer) {
         return Err(Refusal::new(
             Code::KeyInAgent,
@@ -56,22 +58,26 @@ pub(crate) fn clear(cwd: &Path, c: &Clear) -> Result<Wrote, Refusal> {
         ));
     }
     can_verify()?;
-    // The red to clear is the earliest that `land` or the intents read as holding. `land` ends a red only on git's
-    // exact revert or a clear that verifies, so an end record, which a hand can write, never stops a clear (review of
-    // #102, V1). A red that git shows reverted and no end record names yet holds for the intents, so it is signed too:
-    // a red always has a legal exit.
+    // The red to clear is the earliest that `land` holds: the forge confirms it, and git shows no exact revert of it at
+    // the head of the default branch, the tip `land` reads (review of #102, L1). An end record, which a hand can write,
+    // never stops it (V1). With none, it is the earliest that the intents hold, which no end record names: a red always
+    // has a legal exit (W1).
     let Reds { reds, ended } = bp_read::inputs::reds(&vault, &index, &c.project)?;
+    let gh = Gh::new(&top);
     let mut open = None;
     for r in &reds {
-        let tip = crate::risk::at_origin(&top, &r.base)?;
-        let reverted = tip.as_deref().is_some_and(|tip| reverted(&top, r, tip).is_some());
-        let done = reverted && ended.contains(&r.sha);
-        if !done && !cleared(&index, &node, r, &signer)? {
-            open = Some((r.clone(), tip));
+        if cleared(&index, &node, r, &signer)? {
+            continue;
+        }
+        if reverted(&top, r, &tip).is_none() && crate::land::confirmed(&top, &gh, r)? {
+            open = Some(r.clone());
             break;
         }
+        if open.is_none() && !ended.contains(&r.sha) {
+            open = Some(r.clone());
+        }
     }
-    let Some((red, tip)) = open else {
+    let Some(red) = open else {
         if let Some(r) = reds.last() {
             return Ok(Wrote::Already(json!({ "project": c.project, "red": r.sha, "id": r.id })));
         }
@@ -80,22 +86,6 @@ pub(crate) fn clear(cwd: &Path, c: &Clear) -> Result<Wrote, Refusal> {
             node.as_str(),
             "bp clear ends a master-red record of the project, which only land writes (37, design change 11)",
             format!("no master-red record of {} exists, so nothing waits on a clear; bp list issue", c.project),
-        ));
-    };
-    // A record names the fields that join the signed message, so each must be one line of it.
-    let lines = red.checks.iter().all(|n| !n.chars().any(char::is_control));
-    if !is_sha(&red.sha) || !is_branch(&red.base) || !lines {
-        return Err(Refusal::new(
-            Code::SchemaInvalid,
-            red.id.as_str(),
-            "a master-red record names a full sha, a branch and one line per check (37, design change 11)",
-            format!("{} is not a record land wrote; the human clears it by hand: git rm it and commit it", red.id),
-        ));
-    }
-    let Some(tip) = tip else {
-        return Err(Refusal::failed(
-            red.base.as_str(),
-            format!("origin has no branch {}; git fetch, then rerun", red.base),
         ));
     };
     drop(index);

@@ -1,6 +1,8 @@
-//! What `land` reads of a red master (37, design change 11), before every other gate: the checks at the base branch's
-//! head, the forge's merge of that commit and the land record that names it, the project's master-red records from
-//! the vault's history, the human's clears and the revert on the branch. The intents never call the forge (22,
+//! What `land` reads of a red master (37, design change 11), before every other gate: the checks at the head of the
+//! default branch that origin names, the forge's merge of that commit and the land record that names it, the
+//! project's master-red records from the vault's history and the forge's merge each one names, the human's clears and
+//! the revert on the branch. A stacked layer reads the same head, so `land` and `bp clear` judge one tip (review of
+//! #102, L1). The intents never call the forge (22,
 //! constraint 8), and `land` already fetches, so `land` alone reads the checks at the base.
 
 use std::collections::BTreeMap;
@@ -87,9 +89,9 @@ pub(super) fn end(vault: &Vault, project: &str, sha: &str, at: &str) -> Result<(
 }
 
 /// The red read of `land` for the pull request `pr` of `id`, in the clone of `c`, and the records it found missing. A
-/// failed check at the head of the base branch, on a commit that the forge merged as a pull request a land record of
-/// the project names, is a red; so is a master-red record that no exact revert on the branch and no valid clear by
-/// the human has ended. With a red, only its exact revert lands ([`intents::landable`]); a merged pull request whose
+/// failed check at the head of the default branch, on a commit that the forge merged as a pull request a land record
+/// of the project names, is a red; so is a master-red record that the forge confirms ([`confirmed`]) and that no exact
+/// revert on the branch and no valid clear by the human has ended. With a red, only its exact revert lands ([`intents::landable`]); a merged pull request whose
 /// merge commit is that revert finishes as one.
 fn read(
     c: &Claimed,
@@ -102,13 +104,13 @@ fn read(
     let project = id.project().unwrap_or_default();
     let node = Id::parse(&format!("projects/{project}/project")).expect("a project names its node");
     let mut writes = BTreeMap::new();
-    let Some(tip) = crate::risk::at_origin(&c.top, &c.target)? else { return Ok((Read::Green, writes)) };
+    let Some((main, tip)) = crate::signed::origin_head(&c.top)? else { return Ok((Read::Green, writes)) };
     let Reds { mut reds, ended } = bp_read::inputs::reds(vault, index, project)?;
     let checks = gh.checks(&tip)?;
     let record =
         if checks.failed.is_empty() && checks.pending.is_empty() { None } else { landed(index, gh, project, &tip)? };
     if record.is_some() && checks.failed.is_empty() {
-        return Ok((Read::Refused(Box::new(pending(id, &c.target, &tip, &checks.pending))), writes));
+        return Ok((Read::Refused(Box::new(pending(id, &main, &tip, &checks.pending))), writes));
     }
     // A red record names the checks it saw fail; a new failed check at the same sha is a new red, which a new clear
     // must sign.
@@ -120,7 +122,7 @@ fn read(
             id: crate::record::free(&vault.root, &path).to_string(),
             sha: tip.clone(),
             pull_request: l.pull_request,
-            base: c.target.clone(),
+            base: main.clone(),
             checks: checks.failed.clone(),
             issue: l.issue.clone(),
             revert: l.revert,
@@ -133,6 +135,10 @@ fn read(
     let mut key: Option<String> = None;
     let (mut open, mut ends) = (None, Vec::new());
     for r in &reds {
+        // A record the forge does not confirm holds nothing, so it never needs a clear (review of #102, W1).
+        if !confirmed(&c.top, gh, r)? {
+            continue;
+        }
         if let Some(at) = crate::clear::reverted(&c.top, r, &tip) {
             // A merged pull request whose merge commit is the revert finishes its land as the revert.
             if merged(pr) && pr.merge_commit.as_ref().is_some_and(|m| m.oid == at) {
@@ -171,7 +177,7 @@ fn read(
     Ok((
         match intents::landable(Some(&red), &candidate) {
             Ok(_) => Read::Revert(red.sha.clone()),
-            Err(red) => Read::Refused(Box::new(refusal(id, red, pr, &candidate))),
+            Err(red) => Read::Refused(Box::new(refusal(id, red, pr, &main, &candidate))),
         },
         writes,
     ))
@@ -212,7 +218,7 @@ fn pending(id: &Id, base: &str, tip: &str, names: &[String]) -> Refusal {
 /// `master_red`, with one fix for each case. When no revert can skip its review (the base branch moved past the red,
 /// the forge shows no failed check there now, or the red is itself a revert), only the human's clear ends it. Else the
 /// revert issue's exact revert lands first.
-fn refusal(id: &Id, red: &Red, pr: &PullRequest, c: &Candidate) -> Refusal {
+fn refusal(id: &Id, red: &Red, pr: &PullRequest, main: &str, c: &Candidate) -> Refusal {
     let project = id.project().unwrap_or_default();
     let checks = if red.checks.is_empty() { "a check".to_string() } else { red.checks.join(", ") };
     let at = format!("{} is red at {}: {checks} failed after pull request {}", red.base, red.sha, red.pull_request);
@@ -231,7 +237,7 @@ fn refusal(id: &Id, red: &Red, pr: &PullRequest, c: &Candidate) -> Refusal {
         )
     } else {
         let why = if c.tip != red.sha {
-            format!("{} moved past it to {}", red.base, c.tip)
+            format!("{main} moved past it to {}", c.tip)
         } else if red.revert {
             "it is itself the land of a revert".to_string()
         } else {
@@ -261,16 +267,32 @@ fn landed(index: &Index, gh: &Gh, project: &str, sha: &str) -> Result<Option<Lan
             {
                 continue;
             }
-            let p = gh.pr(n)?;
-            if merged(&p)
-                && p.merge_commit.as_ref().is_some_and(|m| m.oid == sha)
-                && p.head_ref_name == landing::branch(&issue_id)
-            {
+            if merged_as(&gh.pr(n)?, sha, &issue_id) {
                 return Ok(Some(Landed { pull_request: n, issue, revert: release.contains_key("reverts") }));
             }
         }
     }
     Ok(None)
+}
+
+/// Whether the forge reads `p` `MERGED` from the branch of `issue`, with `sha` as its merge commit: the one test of a
+/// land's merge, for a land record and for a master-red record alike.
+fn merged_as(p: &PullRequest, sha: &str, issue: &Id) -> bool {
+    merged(p) && p.merge_commit.as_ref().is_some_and(|m| m.oid == sha) && p.head_ref_name == landing::branch(issue)
+}
+
+/// Whether the forge confirms the master-red record `red` (review of #102, W1): origin has its base branch, and the
+/// forge reads its pull request merged from the branch of its issue into that base, with the red commit as the merge
+/// commit ([`merged_as`]). A hand can write a record, but not the forge's merge. The pull requests are listed by head,
+/// so a number the forge never had reads as none, not as a refusal on every land.
+pub(crate) fn confirmed(top: &std::path::Path, gh: &Gh, red: &Red) -> Result<bool, Refusal> {
+    let Ok(issue) = Id::parse(&red.issue) else { return Ok(false) };
+    if crate::risk::at_origin(top, &red.base)?.is_none() {
+        return Ok(false);
+    }
+    let into = |p: &PullRequest| p.base_ref_name.as_deref() == Some(red.base.as_str());
+    let prs = gh.prs_for_head(&landing::branch(&issue))?;
+    Ok(prs.iter().any(|p| p.number == red.pull_request && into(p) && merged_as(p, &red.sha, &issue)))
 }
 
 /// A land of the project that the forge confirms merged a commit.

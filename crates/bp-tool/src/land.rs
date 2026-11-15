@@ -36,6 +36,7 @@ mod red;
 
 use level::{lander, risen, trusted};
 use merging::{kept, merge, remove, worktree_clean};
+pub(crate) use red::confirmed;
 
 /// How long one `gh` or git call of `land` may run before it refuses `could_not_run` (review of #100, F11).
 const DEADLINE: Duration = Duration::from_secs(120);

@@ -48,7 +48,7 @@ fn sha(c: &Claimed, pr: &PullRequest, what: &str, v: Option<&str>) -> Result<Str
 /// them first, since every later git call and gate takes them (review of #100, F4 and F5).
 pub(super) fn shaped(c: &Claimed, pr: &PullRequest) -> Result<(), Refusal> {
     sha(c, pr, "head", Some(&pr.head_ref_oid))?;
-    if !merged(pr) && !pr.base_ref_name.as_deref().is_some_and(is_branch) {
+    if !merged(pr) && !is_branch(pr.base_ref_name.as_deref().unwrap_or_default())? {
         return Err(Refusal::failed(
             format!("gh pr list --head {}", c.branch),
             format!("the forge names no base branch of pull request {}; fix gh, then rerun", pr.number),

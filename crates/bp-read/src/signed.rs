@@ -174,9 +174,32 @@ pub fn armour(body: &str) -> Option<String> {
     Some(format!("{}\n", &body[start..stop]))
 }
 
+/// A full commit sha: 40 or 64 lower-case hex digits. A head that is not one never enters a message or a path.
+pub fn is_sha(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A name git takes for a branch, as `git check-ref-format --branch` judges it, so it is one line of a signed message
+/// too. `a..b` and the other names git refuses fail, so no record names a base that no push can make (review of #102,
+/// W1). The check runs outside any repository, and its output must be the name itself, so no `@{-1}` expands. A git
+/// that does not run is a tool fault, `could_not_run`, not a bad name.
+pub fn is_branch(name: &str) -> Result<bool, Refusal> {
+    if name.is_empty() || name.starts_with('-') || name.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Ok(false);
+    }
+    let out = Command::new("git")
+        .args(["check-ref-format", "--branch", name])
+        .current_dir(std::env::temp_dir())
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| Refusal::failed("git check-ref-format", format!("{e}; install git and put it on PATH")))?;
+    Ok(out.status.success() && out.stdout.strip_suffix(b"\n") == Some(name.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::cap;
+    use super::{cap, is_branch};
 
     #[test]
     fn cap_cuts_at_200_bytes_on_a_character_boundary() {
@@ -186,5 +209,14 @@ mod tests {
         // A two-byte character that ends at byte 200 stays; one across the cut goes whole.
         assert_eq!(cap(&format!("{}é", "a".repeat(198))), format!("{}é", "a".repeat(198)));
         assert_eq!(cap(&format!("{}é", "a".repeat(199))), format!("{}…", "a".repeat(199)));
+    }
+
+    #[test]
+    fn a_base_is_a_name_git_takes_for_a_branch() {
+        let ok = |name: &str| is_branch(name).unwrap();
+        assert!(ok("master") && ok("bp/a-b_c.1") && ok("nope"));
+        for bad in ["", "a b", "master\nact: lower", "a\tb", "a\u{7f}", "a..b", "-x", "@{-1}", "a.lock", "HEAD", "a/"] {
+            assert!(!ok(bad), "{bad:?}");
+        }
     }
 }

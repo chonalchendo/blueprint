@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use bp_change::risk::{Config, RISK_FILE};
-pub(crate) use bp_read::signed::{Act, NAMESPACE, armour, can_verify, cap, public_key, verify};
+pub(crate) use bp_read::signed::{Act, NAMESPACE, armour, can_verify, cap, is_branch, is_sha, public_key, verify};
 use bp_vault::{Code, Refusal};
 
 use crate::claim::git;
@@ -75,10 +75,7 @@ pub(crate) fn signer(top: &Path) -> Result<(String, String), Refusal> {
             ),
         ));
     }
-    let listed = git(top, &["ls-remote", "--symref", "origin", "HEAD"])?;
-    let branch = listed.lines().find_map(|l| l.strip_prefix("ref: refs/heads/")?.strip_suffix("\tHEAD"));
-    let sha = listed.lines().find_map(|l| l.strip_suffix("\tHEAD").filter(|s| is_sha(s)));
-    let (Some(branch), Some(sha)) = (branch, sha) else {
+    let Some((branch, sha)) = origin_head(top)? else {
         return Err(Refusal::new(
             Code::SignerMissing,
             "git ls-remote --symref origin HEAD",
@@ -86,7 +83,6 @@ pub(crate) fn signer(top: &Path) -> Result<(String, String), Refusal> {
             "origin names no default branch; set it on the forge, then rerun",
         ));
     };
-    git(top, &["fetch", "-q", "origin", sha])?;
     let text = git(top, &["show", &format!("{sha}:{RISK_FILE}")]).unwrap_or_default();
     let key = signer_of(&text).map_err(|why| {
         Refusal::new(
@@ -108,7 +104,19 @@ pub(crate) fn signer(top: &Path) -> Result<(String, String), Refusal> {
             ),
         )
     })?;
-    Ok((key, sha.to_string()))
+    Ok((key, sha))
+}
+
+/// Origin's default branch and the sha at its head, read from the server by `git ls-remote --symref origin HEAD` and
+/// fetched; `None` when origin names none. No local ref moves it. The signer is read there, and `land` and `bp clear`
+/// judge a red there (review of #102, L1).
+pub(crate) fn origin_head(top: &Path) -> Result<Option<(String, String)>, Refusal> {
+    let listed = git(top, &["ls-remote", "--symref", "origin", "HEAD"])?;
+    let branch = listed.lines().find_map(|l| l.strip_prefix("ref: refs/heads/")?.strip_suffix("\tHEAD"));
+    let sha = listed.lines().find_map(|l| l.strip_suffix("\tHEAD").filter(|s| is_sha(s)));
+    let Some((branch, sha)) = branch.zip(sha) else { return Ok(None) };
+    git(top, &["fetch", "-q", "origin", sha])?;
+    Ok(Some((branch.to_string(), sha.to_string())))
 }
 
 /// The `signer` key of a risk file, as [`Config::parse`] reads it for the level: one reader of `.bp/risk.yml`. A file
@@ -116,17 +124,6 @@ pub(crate) fn signer(top: &Path) -> Result<(String, String), Refusal> {
 /// no second `signer` line can shadow the first.
 fn signer_of(text: &str) -> Result<Option<String>, String> {
     Ok(Config::parse(text)?.signer.as_deref().and_then(public_key))
-}
-
-/// A full commit sha: 40 or 64 lower-case hex digits. A head that is not one never enters a message or a path.
-pub(crate) fn is_sha(text: &str) -> bool {
-    matches!(text.len(), 40 | 64) && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// A branch name that can be one line of a signed message: not empty, with no space or control character. Git refuses
-/// both in a ref name, so only a broken forge or a forged argument gives one.
-pub(crate) fn is_branch(name: &str) -> bool {
-    !name.is_empty() && !name.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// Whether a running ssh-agent holds `signer`, as `ssh-add -L` lists it. With no agent, or no `ssh-add`, it holds
@@ -197,7 +194,7 @@ pub(crate) fn blocks(body: &str) -> Vec<Block> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_branch, is_sha, signer_of};
+    use super::{is_sha, signer_of};
 
     const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey";
     const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther";
@@ -228,13 +225,5 @@ mod tests {
             assert!(!is_sha(&bad), "{bad}");
         }
         assert!(!is_sha(&format!("{}\nact", "a".repeat(36))));
-    }
-
-    #[test]
-    fn a_base_is_one_line_of_a_message() {
-        assert!(is_branch("master") && is_branch("bp/a-b_c.1"));
-        for bad in ["", "a b", "master\nact: lower", "a\tb", "a\u{7f}"] {
-            assert!(!is_branch(bad), "{bad:?}");
-        }
     }
 }

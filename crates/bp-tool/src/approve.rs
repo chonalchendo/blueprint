@@ -213,7 +213,7 @@ fn forge_shas<'a>(branch: &str, pr: &'a PullRequest) -> Result<(&'a str, &'a str
         ));
     }
     let base = pr.base_ref_name.as_deref().unwrap_or_default();
-    if !is_branch(base) {
+    if !is_branch(base)? {
         return Err(Refusal::failed(
             format!("gh pr list --head {branch}"),
             format!(

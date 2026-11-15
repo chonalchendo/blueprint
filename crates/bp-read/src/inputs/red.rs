@@ -1,16 +1,16 @@
 //! A project's master-red records as `land`, `bp clear`, the intents and the view read them (37, design change 11).
 //! A red denies, so it is read from the vault's history: each record any commit added under `projects/<p>/reds`, as
 //! that commit wrote it, so a `git rm` or an edit ends nothing. An end record, which `land` writes when git shows the
-//! red reverted, sits beside them and names the red it ends. The intents end a red on an end record, or on a clear
-//! whose signature is a valid signature of this red's clear; `land` judges the revert from git and verifies the
-//! clear against the forge's signer.
+//! red reverted, sits beside them and names the red it ends. A record no clear could sign is no red. The intents end
+//! a red on an end record, or on a clear whose signature is a valid signature of this red's clear; `land` judges the
+//! revert from git, verifies the clear against the forge's signer and holds only a red the forge confirms.
 
 use bp_change::intents::{self, Red};
 use bp_vault::{Filter, Id, Index, Kind, Record, Refusal, Vault};
 use serde_json::{Map, Value};
 
 use super::text;
-use crate::signed::{Act, armour, signs};
+use crate::signed::{Act, armour, is_branch, is_sha, signs};
 
 /// Each master-red and end record of `project` ever added, in commit order.
 pub struct Reds {
@@ -68,7 +68,21 @@ pub fn reds(vault: &Vault, index: &Index, project: &str) -> Result<Reds, Refusal
         index.records(&format!("projects/{project}/project"), Kind::MasterRed)?
     };
     let ended = records.iter().filter(|r| r.header.contains_key("reverted")).filter_map(|r| full(&r.header, "red"));
-    Ok(Reds { ended: ended.collect(), reds: records.iter().filter_map(red_of).collect() })
+    let mut reds = Vec::new();
+    for red in records.iter().filter_map(red_of) {
+        if signable(&red)? {
+            reds.push(red);
+        }
+    }
+    Ok(Reds { ended: ended.collect(), reds })
+}
+
+/// Whether each field of `red` that a clear signs is one line of the message: a full sha, a name git takes for a
+/// branch, one line per check. `land` writes no other record, and a red that no clear could sign is no red: no gate,
+/// no intent and no clear reads it (review of #102, W1).
+fn signable(red: &Red) -> Result<bool, Refusal> {
+    let lines = red.checks.iter().all(|n| !n.chars().any(char::is_control));
+    Ok(is_sha(&red.sha) && lines && is_branch(&red.base)?)
 }
 
 /// The message a clear of `red` signs: the act `clear`, the project node, the pull request whose merge made the red,

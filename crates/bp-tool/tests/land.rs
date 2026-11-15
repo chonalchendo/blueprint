@@ -2333,11 +2333,29 @@ fn landed_at(v: &Path, t: &Path, sha: &str, reverts: Option<&str>) {
     std::fs::write(v.join(format!("{BARE}/claims/landed.md")), claim).unwrap();
     git(v, &["add", "-A"]);
     git(v, &["commit", "-qm", "land bare"]);
+    merged_bare(t, sha);
+}
+
+/// The forge's row of pull request 7, `MERGED` from `bp/bare` into `master` with `sha` as its merge commit.
+fn merged_bare(t: &Path, sha: &str) {
     let row = json!([{
         "number": 7, "state": "MERGED", "baseRefName": "master", "headRefName": "bp/bare", "headRefOid": sha,
         "mergeCommit": { "oid": sha }, "statusCheckRollup": [],
     }]);
     std::fs::write(t.join("prs-bare.json"), row.to_string()).unwrap();
+}
+
+/// A master-red record of `red` by hand under the project, at `base` and pull request 7 of [`BARE`], committed as
+/// `name`.
+fn hand_red(v: &Path, name: &str, red: &str, base: &str) {
+    let record = format!(
+        "---\nkind: master-red\nunder: projects/bp/project\nred: \"{red}\"\npull_request: 7\nbase: \"{base}\"\nchecks: \
+         [ci]\nissue: {BARE}\nrevert: false\nat: \"2026-10-19T08:00:00Z\"\n---\n"
+    );
+    std::fs::create_dir_all(v.join("projects/bp/reds")).unwrap();
+    std::fs::write(v.join(format!("projects/bp/reds/{name}.md")), record).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "a red by hand"]);
 }
 
 /// The intent and note of `id` as `bp list issue` reads them.
@@ -2497,8 +2515,8 @@ fn a_forged_land_record_makes_no_red_and_the_revert_needs_review() {
 
 /// `land`'s own reads decide the exact revert (review of #102, T1): with a red recorded, a pull request whose
 /// `baseRefOid` is not the red commit refuses, and so does one whose head has the tree of `P` but does not descend
-/// from `R`. A hand-written master-red record with no failed check on the forge grants no exemption: its exact revert
-/// refuses too, and only the human's clear ends it.
+/// from `R`. A hand-written master-red record of a merge the forge confirms, with no failed check on the forge, grants
+/// no exemption: its exact revert refuses too, and only the human's clear ends it.
 #[test]
 fn land_reads_the_exact_revert_from_the_forge_and_git() {
     let (v, t) = setup();
@@ -2523,14 +2541,8 @@ fn land_reads_the_exact_revert_from_the_forge_and_git() {
     let (v2, t2) = setup();
     let (v, t) = (v2.path(), t2.path());
     let (_, _, red) = red_master(v, t);
-    let record = format!(
-        "---\nkind: master-red\nunder: projects/bp/project\nred: \"{red}\"\npull_request: 7\nbase: master\nchecks: \
-         [ci]\nissue: {BARE}\nrevert: false\nat: \"2026-10-19T08:00:00Z\"\n---\n"
-    );
-    std::fs::create_dir_all(v.join("projects/bp/reds")).unwrap();
-    std::fs::write(v.join(format!("projects/bp/reds/{red}.md")), record).unwrap();
-    git(v, &["add", "-A"]);
-    git(v, &["commit", "-qm", "a red by hand"]);
+    merged_bare(t, &red);
+    hand_red(v, &red, &red, "master");
     let exact = tree_on(t, &format!("{red}^"), &red);
     forge(t, &exact, &["SUCCESS"]);
     let (_, out) = bp(v, t, &session, &["land", ISSUE, "--dry-run"]);
@@ -2556,6 +2568,17 @@ fn the_revert_of_a_revert_takes_no_exemption() {
     let undo = tree_on(t, &format!("{red}^"), &red);
     git(&code, &["push", "-q", "origin", &format!("{undo}:refs/heads/master")]);
     landed_at(v, t, &undo, Some(&red));
+    // The revert landed as its own pull request 8, so the forge still reads pull request 7 merged at `R`.
+    let claim = v.join(format!("{BARE}/claims/landed.md"));
+    std::fs::write(&claim, std::fs::read_to_string(&claim).unwrap().replace("pull_request: 7", "pull_request: 8"))
+        .unwrap();
+    git(v, &["commit", "-qam", "the revert is pull request 8"]);
+    let row = |n: u64, sha: &str| {
+        json!({ "number": n, "state": "MERGED", "baseRefName": "master", "headRefName": "bp/bare", "headRefOid": sha,
+            "mergeCommit": { "oid": sha }, "statusCheckRollup": [] })
+    };
+    std::fs::write(t.join("prs-bare.json"), json!([row(7, &red), row(8, &undo)]).to_string()).unwrap();
+    std::fs::write(t.join("prs-8.json"), json!([row(8, &undo)]).to_string()).unwrap();
     checks_at(t, &undo, Some("failure"));
     git(&w, &["reset", "-q", "--hard", &undo]);
     std::fs::write(w.join("break.txt"), "x\n").unwrap();
@@ -2652,6 +2675,87 @@ fn a_red_reverted_outside_land_has_an_end() {
         }
         assert_ne!(intent_of(v, BARE).0, "master-red", "the red ended (clear: {by_clear})");
     }
+}
+
+/// `land` holds a red only when the forge confirms it (review of #102, W1): a hand-written red record whose base
+/// origin does not have, whose base git refuses as a branch, or whose commit the forge never merged holds nothing, so
+/// `land` stays open and needs no clear. A record git can name but `land` does not hold still shows in the intents,
+/// and the human's `bp clear` signs it, so it has an exit too. The same record with the forge's merge holds.
+#[test]
+fn a_hand_red_the_forge_does_not_confirm_leaves_land_open() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let human = signer(t);
+    let (_, _, red) = red_master(v, t);
+    let p = git(&t.join("code"), &["rev-parse", &format!("{red}^")]).trim().to_string();
+    merged_bare(t, &red);
+    let session = [("BP_ROLE", "session")];
+    let dry = || bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1;
+    let clear = || bp(v, t, &[("SSH_AUTH_SOCK", "")], &["clear", "bp", "--key", &human]);
+    for (why, name, sha, base, shown) in [
+        ("a base origin does not have", "nope", red.as_str(), "nope", true),
+        ("a base git refuses as a branch", "dots", red.as_str(), "a..b", false),
+        ("a commit the forge never merged", "never", p.as_str(), "master", true),
+    ] {
+        hand_red(v, name, sha, base);
+        let out = dry();
+        assert_eq!(out["code"], "check_failed", "{why}: land is open past the red gate: {out}");
+        assert_eq!(intent_of(v, BARE).0 == "master-red", shown, "{why}");
+        if shown {
+            let (code, out) = clear();
+            assert_eq!((code, out["red"].as_str()), (Some(0), Some(sha)), "{why}: the clear signs it: {out}");
+        }
+        assert_ne!(intent_of(v, BARE).0, "master-red", "{why}: no red holds the intents");
+    }
+    hand_red(v, "held", &red, "master");
+    let out = dry();
+    assert_eq!(out["code"], "master_red", "the forge's merge makes the hand record hold: {out}");
+    let (code, out) = clear();
+    assert_eq!((code, out["red"].as_str()), (Some(0), Some(red.as_str())), "the clear signs the red land holds: {out}");
+    assert_eq!(dry()["code"], "check_failed", "cleared");
+}
+
+/// `land` and `bp clear` judge a red at one tip: the head of origin's default branch (review of #102, L1). A stacked
+/// layer cut before the red's revert reads no `master_red` once the default branch holds the revert, and `bp clear`
+/// then has nothing to sign. Before the revert, the fix names the default branch's head, not the layer's.
+#[test]
+fn a_stacked_layer_reads_the_red_at_the_default_branch_s_head() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let human = signer(t);
+    let code = t.join("code");
+    git(&code, &["fetch", "-q", "origin"]);
+    git(&code, &["reset", "-q", "--hard", "origin/master"]);
+    std::fs::write(code.join("p.txt"), "p\n").unwrap();
+    commit(&code, &["add", "p.txt"], "p");
+    std::fs::write(code.join("break.txt"), "x\n").unwrap();
+    let red = commit(&code, &["add", "break.txt"], "r");
+    git(&code, &["push", "-q", "origin", "master"]);
+    merged_bare(t, &red);
+    hand_red(v, &red, &red, "master");
+    let Stack { ha, .. } = stacked(v, t);
+    let dry = |id: &str| bp(v, t, &[], &["land", id, "--dry-run"]).1;
+    let near = tree_on(t, &red, &red);
+    git(&code, &["push", "-q", "origin", &format!("{near}:refs/heads/master")]);
+    let out = dry(B);
+    assert_eq!(out["code"], "master_red", "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.contains(&format!("master moved past it to {near}")) && !fix.contains(&ha), "{fix}");
+    let undo = tree_on(t, &format!("{red}^"), &red);
+    git(&code, &["push", "-q", "-f", "origin", &format!("{undo}:refs/heads/master")]);
+    for id in [ISSUE, B] {
+        assert_ne!(dry(id)["code"], "master_red", "{id}: the default branch holds the revert");
+    }
+    assert_eq!(dry(B)["code"], "base_unmerged", "the layer's own refusal shows");
+    let end = format!(
+        "---\nkind: master-red\nunder: projects/bp/project\nred: \"{red}\"\nreverted: \"{undo}\"\nat: \
+         \"2026-10-19T08:00:00Z\"\n---\n"
+    );
+    std::fs::write(v.join(format!("projects/bp/reds/{red}-end.md")), end).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "the end record land writes"]);
+    let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["clear", "bp", "--key", &human]);
+    assert_eq!(code, Some(3), "nothing to sign: {out}");
 }
 
 /// The human's signed clear ends a red (37, design change 11): a hand-written clear changes nothing for `land` or the
