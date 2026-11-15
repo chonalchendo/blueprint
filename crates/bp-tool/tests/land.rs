@@ -2567,6 +2567,32 @@ fn the_revert_of_a_revert_takes_no_exemption() {
     assert!(note.as_str().unwrap().contains("only the human runs bp clear bp"), "{note}");
 }
 
+/// A claim makes a red only through the forge's merge of the claim's own branch at that commit (review of #102, V3):
+/// a pull request the forge merged from another branch, or merged at another commit, leaves a failed check at `R` no
+/// red of the project. The forge's row of `bp/bare` merged at `R` makes it red.
+#[test]
+fn a_claim_makes_a_red_only_through_the_forge_s_merge_of_its_branch() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, _, red) = red_master(v, t);
+    landed_at(v, t, &red, None);
+    checks_at(t, &red, Some("failure"));
+    let p = git(&t.join("code"), &["rev-parse", &format!("{red}^")]).trim().to_string();
+    let session = [("BP_ROLE", "session")];
+    for (why, branch, merge, want) in [
+        ("merged from another branch", "human/fix", red.as_str(), "check_failed"),
+        ("merged at another commit", "bp/bare", p.as_str(), "check_failed"),
+        ("the claim's own merge", "bp/bare", red.as_str(), "master_red"),
+    ] {
+        let row = json!([{
+            "number": 7, "state": "MERGED", "baseRefName": "master", "headRefName": branch, "headRefOid": red,
+            "mergeCommit": { "oid": merge }, "statusCheckRollup": [],
+        }]);
+        std::fs::write(t.join("prs-bare.json"), row.to_string()).unwrap();
+        assert_eq!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], want, "{why}");
+    }
+}
+
 /// An end record never stops a clear (review of #102, V1). A red that no revert can skip review for (the check reran
 /// green) and that a hand-written end record names: `land` refuses `master_red` and names the clear, and `bp clear`
 /// signs it. After the clear, `land` passes its red gate. `land` and `bp clear` judge a red ended alike.
