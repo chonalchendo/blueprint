@@ -72,10 +72,7 @@ impl<'a> Intents<'a> {
                         "a live issue's intent reads the clock and the forge; pass the issue's project to Intents::new",
                     ));
                 };
-                let red = match project(id) {
-                    Some(p) => once(&self.red, &p, || crate::inputs::red(self.index, &p))?,
-                    None => None,
-                };
+                let red = self.red(id)?;
                 of(self.vault, self.index, world, id, status, self.integrity(id)?, red)
             }
             Kind::Milestone => self.milestone(id, status),
@@ -160,7 +157,18 @@ impl<'a> Intents<'a> {
             _ => {}
         }
         m.status = status.into();
+        if m.status == MilestoneStatus::Approved.as_str() {
+            m.red = self.red(id)?;
+        }
         Ok(intents::milestone(id, &m))
+    }
+
+    /// The master-red that holds for the project of `id`, read once per project (37, design change 11).
+    pub fn red(&self, id: &str) -> Result<Option<Red>, Refusal> {
+        match project(id) {
+            Some(p) => once(&self.red, &p, || crate::inputs::red(self.vault, self.index, &p)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -317,6 +325,8 @@ fn of(
     // review path reads, the label from the vault's history included, so a delta the issue caused or an earlier
     // review's `risk` row raises it, and a label lowered by hand does not lower it (37, design changes 1 and 9).
     let reviewed = crate::inputs::reviewed(vault, index, id)?;
+    // The revert issue of a red reads its own intents, as `land` reads its pull request (37, design change 11).
+    let revert = crate::inputs::revert_of(&header, red.as_ref());
     let issue = Issue {
         id: id.to_string(),
         status: status.into(),
@@ -329,6 +339,7 @@ fn of(
         answered,
         integrity,
         red,
+        revert,
         ..reviewed
     };
     Ok(intents::issue(&issue, world.now))

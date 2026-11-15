@@ -61,6 +61,8 @@ crate::closed_enum! {
         BaseUnconfirmed = "base_unconfirmed",
         ClaimLost = "claim_lost",
         MasterRed = "master_red",
+        BasePending = "base_pending",
+        NoRed = "no_red",
     }
 }
 

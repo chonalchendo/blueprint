@@ -1,11 +1,10 @@
 //! What `land` reads by the risk level (37, design changes 1 to 4): who lands, the base whose rules judge the level,
 //! which signed acts count, and whether the level rose after `pr`.
 
-use bp_change::intents::{self, Issue, Unmet};
+use bp_change::intents::{self, Issue};
 use bp_change::risk::Level;
 use bp_forge::{Gh, PullRequest};
 use bp_operation::Role;
-use bp_read::landing;
 use bp_vault::{Code, Id, Index, Refusal};
 
 use super::{Claimed, holds_base, merged};
@@ -162,21 +161,6 @@ pub(super) fn trusted(
     };
     issue.approvals = approvals;
     Ok((level, refused))
-}
-
-/// The refusal of the gate `unmet`. At high's round cap a row with no disposition, or an error row that holds, goes to
-/// the human, as the blocked intent's note says: a worker's fix would push a head that voids the approval (37, design
-/// change 6; review of #100, X3).
-pub(super) fn refusal(issue: &Issue, unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
-    let mut r = landing::refusal(unmet, id, pr);
-    if matches!(unmet, Unmet::Unanswered(_) | Unmet::Holding(_)) && intents::at_cap(issue, &pr.head_ref_oid) {
-        r.fix = format!(
-            "round cap at {}: the human abandons the issue, or accepts the open rows: the human runs bp approve {id} \
-             from a shell; then bp land {id}",
-            pr.head_ref_oid
-        );
-    }
-    r
 }
 
 /// The signer of `.bp/risk.yml` at the sha `git ls-remote` names for origin's default branch, once that sha is the

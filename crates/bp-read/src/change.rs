@@ -144,18 +144,24 @@ pub fn change(
     let head = head_words(pr, unread.is_some(), || Ok(runs.clone()))?;
     let top = clone.and_then(|c| crate::snapshot::clone_of(c, index, project).ok());
     let (base, named) = clone_reads(vault, index, &id, claim.as_ref(), pr, top.as_deref())?;
-    let issue =
-        Issue { base, blocks: blocks(vault, id.as_str())?, ..crate::inputs::reviewed(vault, index, id.as_str())? };
+    // A red master is `land`'s first gate: only the revert issue's pull request meets the gates, with no review (37,
+    // design change 11).
+    let master = intents.red(id.as_str())?;
+    let revert = crate::inputs::revert_of(&header, master.as_ref());
+    let reds = master.filter(|_| revert.is_none()).map(|r| landing::master_red(&r, bp_change::intents::note(&r)));
+    let reviewed = crate::inputs::reviewed(vault, index, id.as_str())?;
+    let issue = Issue { base, blocks: blocks(vault, id.as_str())?, revert, ..reviewed };
     let read = pr.map(pull_request);
     let g = read.as_ref().map(|r| gates(&issue, r, named));
-    // `land`'s order: the claim, the pull request, then the gates.
+    // `land`'s order: the claim, the pull request, the red, then the gates.
     let resolved = status.as_deref() == Some(IssueStatus::Resolved.as_str());
     let refused = match (&claim, pr, g.as_ref().and_then(|g| g.unmet.as_ref())) {
         _ if resolved => None,
         (None, ..) => Some(landing::unheld(&id, status.as_deref())),
         (_, None, _) => Some(landing::no_pull_request(&id)),
+        (_, Some(_), _) if reds.is_some() => reds,
         (Some(_), Some(p), Some(unmet)) => {
-            let mut r = landing::refusal(unmet, &id, p);
+            let mut r = landing::gated(&issue, unmet, &id, p);
             if p.state.as_deref() == Some("MERGED") {
                 r.fix = landing::after_merge(p.number, &id);
             }

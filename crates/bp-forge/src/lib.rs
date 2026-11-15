@@ -13,6 +13,15 @@ use serde::Deserialize;
 
 pub use gh::{Gh, output_within};
 
+/// What the forge shows at one commit ([`Gh::checks`]): the names of the checks that failed and of those still pending.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Checks {
+    /// The checks that ended failed.
+    pub failed: Vec<String>,
+    /// The checks not yet done.
+    pub pending: Vec<String>,
+}
+
 /// One pull request as `gh pr view --json` writes it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

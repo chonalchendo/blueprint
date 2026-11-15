@@ -5,50 +5,14 @@
 //! another.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use bp_change::risk::{Config, RISK_FILE};
-use bp_vault::{Code, Id, Refusal};
+pub(crate) use bp_read::signed::{Act, NAMESPACE, armour, can_verify, cap, public_key, verify};
+use bp_vault::{Code, Refusal};
 
 use crate::claim::git;
-
-/// The signature namespace: a signature made for git commits or for another tool never verifies here.
-const NAMESPACE: &str = "bp";
-
-/// The one principal of the allowed-signers file that `verify` writes.
-const PRINCIPAL: &str = "bp-human";
-
-/// One signed act: the canonical message that `sign` signs and `verify` checks.
-pub(crate) struct Act<'a> {
-    /// The verb: `approve` or `lower`.
-    pub(crate) verb: &'a str,
-    /// The issue.
-    pub(crate) node: &'a Id,
-    /// The pull request number on the forge.
-    pub(crate) pull_request: u64,
-    /// The branch the pull request merges into. A stacked pull request retargeted to the default branch then needs a
-    /// new signature: the human saw the diff against the lower layer only.
-    pub(crate) base: &'a str,
-    /// The full head sha of the pull request.
-    pub(crate) head: &'a str,
-    /// The act's own fields, in the order the act fixes: a lowering's `level`, then `reason`; an approval's [`accepts`].
-    pub(crate) more: &'a [(&'a str, &'a str)],
-}
-
-impl Act<'_> {
-    /// One `key: value` line per field, in a fixed order. A gate rebuilds this text from the values it expects, never
-    /// from a record's own text, so a changed field fails the signature.
-    pub(crate) fn message(&self) -> String {
-        let project = self.node.project().unwrap_or_default();
-        let mut text = format!(
-            "act: {}\nproject: {project}\nnode: {}\npull_request: {}\nbase: {}\nhead: {}\n",
-            self.verb, self.node, self.pull_request, self.base, self.head
-        );
-        text.extend(self.more.iter().map(|(k, v)| format!("{k}: {v}\n")));
-        text
-    }
-}
 
 /// The lines an approval signs for the rows it accepts at high's round cap (37, design change 6): one
 /// `accepts: <review id>#<row>` line each, sorted, after the head. The human signs the list with the head, so a list
@@ -83,101 +47,6 @@ pub(crate) fn sign(message: &str, key: &Path) -> Result<String, Refusal> {
         }));
     }
     Ok(signature)
-}
-
-/// Whether `signature` is a valid signature of `message` by `signer`, a public key line. Any failure of `ssh-keygen`
-/// reads false: its stderr can echo a field of the signature, so its words name no tool fault (review of #99, row 52).
-/// [`can_verify`] tells a tool that cannot verify at all. `Err` only when `ssh-keygen` or a scratch file cannot start.
-pub(crate) fn verify(message: &str, signature: &str, signer: &str) -> Result<bool, Refusal> {
-    let Some(signer) = public_key(signer) else { return Ok(false) };
-    Ok(keygen_verify(message, signature, &signer)?.is_ok())
-}
-
-/// `Ok` when `ssh-keygen -Y verify` here verifies a fixed good signature, made once by a key of its own; else
-/// `could_not_run`. A gate runs it once before it reads the comments, so a usage error or an old OpenSSH is a tool
-/// fault, and no comment's text can raise one (review of #99, rows 32 and 52).
-pub(crate) fn can_verify() -> Result<(), Refusal> {
-    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINjbOecrh5eedysW/3Z2kX1jWgwtcIkLbT1lYY+0Q4Im";
-    const MESSAGE: &str = "bp checks that ssh-keygen verifies\n";
-    const SIGNATURE: &str = "-----BEGIN SSH SIGNATURE-----
-U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAg2Ns55yuHl553Kxb/dnaRfWNaDC
-1wiQttPWVhj7RDgiYAAAACYnAAAAAAAAAABnNoYTUxMgAAAFMAAAALc3NoLWVkMjU1MTkA
-AABAr8NIAhaojSZ3/7EC9lleKMNj0m9NneVCJX09NdGXID8aR6oDkSgCsaNMmUtmmuLTti
-rmky+tna0L01P4XFXTDQ==
------END SSH SIGNATURE-----
-";
-    keygen_verify(MESSAGE, SIGNATURE, KEY)?.map_err(|stderr| {
-        let said = cap(stderr.trim());
-        let said = if said.is_empty() { said } else { format!("{said}; ") };
-        Refusal::failed("ssh-keygen -Y verify", format!("{said}install OpenSSH 8.2 or later, then rerun"))
-    })
-}
-
-/// One `ssh-keygen -Y verify` of `message` against `signer`, `<type> <base64>`: `Ok(Err(stderr))` when it does not
-/// verify. OpenSSH exits 255 with "Could not verify signature." for a false one.
-fn keygen_verify(message: &str, signature: &str, signer: &str) -> Result<Result<(), String>, Refusal> {
-    let dir = Scratch::new()?;
-    // Only the key's type and base64 go in the allowed-signers line, so no option or second line can ride in.
-    let allowed = dir.0.join("allowed");
-    let sig = dir.0.join("sig");
-    let failed = |e: std::io::Error| Refusal::failed(dir.0.display().to_string(), e.to_string());
-    std::fs::write(&allowed, format!("{PRINCIPAL} namespaces=\"{NAMESPACE}\" {signer}\n")).map_err(failed)?;
-    std::fs::write(&sig, signature).map_err(failed)?;
-    let mut child = Command::new("ssh-keygen")
-        .args(["-Y", "verify", "-n", NAMESPACE, "-I", PRINCIPAL, "-f"])
-        .arg(&allowed)
-        .arg("-s")
-        .arg(&sig)
-        .env_remove("SSH_AUTH_SOCK")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Refusal::failed("ssh-keygen", format!("{e}; install OpenSSH 8.2 or later")))?;
-    let fed = child.stdin.take().expect("stdin is piped").write_all(message.as_bytes());
-    let out = child.wait_with_output().map_err(|e| Refusal::failed("ssh-keygen", e.to_string()))?;
-    if fed.is_ok() && out.status.success() {
-        return Ok(Ok(()));
-    }
-    Ok(Err(String::from_utf8_lossy(&out.stderr).trim().to_string()))
-}
-
-/// `text` cut to its first 200 bytes, at a character boundary, with a mark when cut: a value echoed in an envelope
-/// never carries a whole page of input.
-pub(crate) fn cap(text: &str) -> String {
-    const MAX: usize = 200;
-    if text.len() <= MAX {
-        return text.to_string();
-    }
-    let mut end = MAX;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &text[..end])
-}
-
-/// A directory of this process's own under the system temp directory, removed on drop.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Result<Self, Refusal> {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        loop {
-            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("bp-verify-{}-{n}", std::process::id()));
-            match std::fs::create_dir(&dir) {
-                Ok(()) => return Ok(Self(dir)),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(Refusal::failed(dir.display().to_string(), e.to_string())),
-            }
-        }
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 /// The signer: the public key of the `signer` key of `.bp/risk.yml` on the forge's default branch, as `<type>
@@ -260,15 +129,6 @@ pub(crate) fn is_branch(name: &str) -> bool {
     !name.is_empty() && !name.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-/// `<type> <base64>` of a public key line, or `None` when the line is not one.
-pub(crate) fn public_key(line: &str) -> Option<String> {
-    let mut words = line.split_whitespace();
-    let (kind, key) = (words.next()?, words.next()?);
-    let kind_ok = kind.bytes().all(|b| b.is_ascii_alphanumeric() || b"@.-".contains(&b));
-    let key_ok = key.bytes().all(|b| b.is_ascii_alphanumeric() || b"+/=".contains(&b));
-    (kind_ok && key_ok).then(|| format!("{kind} {key}"))
-}
-
 /// Whether a running ssh-agent holds `signer`, as `ssh-add -L` lists it. With no agent, or no `ssh-add`, it holds
 /// nothing.
 ///
@@ -335,17 +195,9 @@ pub(crate) fn blocks(body: &str) -> Vec<Block> {
     out
 }
 
-/// The armoured signature a record's body holds, from its first line to its last.
-pub(crate) fn armour(body: &str) -> Option<String> {
-    let start = body.find("-----BEGIN SSH SIGNATURE-----")?;
-    let end = "-----END SSH SIGNATURE-----";
-    let stop = start + body[start..].find(end)? + end.len();
-    Some(format!("{}\n", &body[start..stop]))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{cap, is_branch, is_sha, signer_of};
+    use super::{is_branch, is_sha, signer_of};
 
     const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKey";
     const OTHER: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOther";
@@ -384,15 +236,5 @@ mod tests {
         for bad in ["", "a b", "master\nact: lower", "a\tb", "a\u{7f}"] {
             assert!(!is_branch(bad), "{bad:?}");
         }
-    }
-
-    #[test]
-    fn cap_cuts_at_200_bytes_on_a_character_boundary() {
-        assert_eq!(cap("short"), "short");
-        assert_eq!(cap(&"a".repeat(200)), "a".repeat(200));
-        assert_eq!(cap(&"a".repeat(201)), format!("{}…", "a".repeat(200)));
-        // A two-byte character that ends at byte 200 stays; one across the cut goes whole.
-        assert_eq!(cap(&format!("{}é", "a".repeat(198))), format!("{}é", "a".repeat(198)));
-        assert_eq!(cap(&format!("{}é", "a".repeat(199))), format!("{}…", "a".repeat(199)));
     }
 }

@@ -17,6 +17,7 @@ mod milestone;
 mod moving;
 mod objects;
 mod pages;
+pub mod signed;
 pub mod snapshot;
 mod stack;
 mod version;

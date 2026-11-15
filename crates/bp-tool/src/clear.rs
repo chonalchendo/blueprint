@@ -1,21 +1,23 @@
 //! `bp clear <project>`: the human's signed clear of the project's red master (37, design change 11). It signs the act
-//! `clear`, the project, the red commit, the pull request whose merge made it and its base branch, in the shape of `bp
-//! approve` (37, design change 4), and writes one record `clears/<red>` under the project. A gate reads a clear only
-//! through [`cleared`], which rebuilds the message from the master-red record it tests and verifies the signature
-//! against the signer that origin's `.bp/risk.yml` names. An unsigned or wrongly signed clear, a clear of another red
-//! or another project, and a copied record change nothing.
+//! `clear`, the project, the red commit, the pull request whose merge made it, its base branch, the checks that failed
+//! there and the base branch's head now, in the shape of `bp approve` (37, design change 4), and writes one record
+//! `clears/<red>` under the project. A gate reads a clear only through [`cleared`], which rebuilds the message from the
+//! master-red record it tests and the clear's `tip`, and verifies the signature against the signer that origin's
+//! `.bp/risk.yml` names. An unsigned or wrongly signed clear, a clear of another red or another project, and a copied
+//! record change nothing. `bp clear` reads no forge: the human sees the failed checks the record names.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bp_change::intents::Red;
+use bp_read::inputs::{Reds, clear_message};
 use bp_read::snapshot::clone_of;
 use bp_vault::{Code, Id, Index, Kind, Record, Refusal, Vault};
 use clap::Args;
 use serde_json::{Value, json};
 
 use crate::Wrote;
-use crate::signed::{Act, armour, can_verify, in_agent, is_branch, is_sha, sign, signer, verify};
+use crate::signed::{armour, can_verify, in_agent, is_branch, is_sha, sign, signer, verify};
 
 /// `bp clear <project> [--key <path>]`.
 #[derive(Args)]
@@ -25,13 +27,6 @@ pub struct Clear {
     /// The private key that signs; you type its passphrase at the prompt. Default `~/.ssh/bp_human`.
     #[arg(long)]
     pub key: Option<PathBuf>,
-}
-
-/// The message a clear of `red` signs: the act `clear`, the project node, the pull request whose merge made the red, its
-/// base branch and the red commit as the head of that branch. A gate rebuilds it from the master-red record, never from
-/// the clear's own fields.
-fn message(node: &Id, red: &Red) -> String {
-    Act { verb: "clear", node, pull_request: red.pull_request, base: &red.base, head: &red.sha, more: &[] }.message()
 }
 
 /// The project's own node, where its records sit.
@@ -61,12 +56,12 @@ pub(crate) fn clear(cwd: &Path, c: &Clear) -> Result<Wrote, Refusal> {
         ));
     }
     can_verify()?;
-    // The red to clear is the one `land` refuses on: the earliest that no valid clear and no revert on origin ends.
-    let reds = bp_read::inputs::reds(&index, &c.project)?;
+    // The red to clear is the one the intents show: the earliest that no end record and no valid clear ends. One that
+    // git shows reverted outside `land` is cleared too, so a red always has a legal exit.
+    let Reds { reds, ended } = bp_read::inputs::reds(&vault, &index, &c.project)?;
     let mut open = None;
     for r in &reds {
-        let tip = crate::risk::at_origin(&top, &r.base)?;
-        if !cleared(&index, &node, r, &signer)? && tip.and_then(|t| reverted(&top, r, &t)).is_none() {
+        if !ended.contains(&r.sha) && !cleared(&index, &node, r, &signer)? {
             open = Some(r.clone());
             break;
         }
@@ -76,27 +71,34 @@ pub(crate) fn clear(cwd: &Path, c: &Clear) -> Result<Wrote, Refusal> {
             return Ok(Wrote::Already(json!({ "project": c.project, "red": r.sha, "id": r.id })));
         }
         return Err(Refusal::new(
-            Code::IllegalTransition,
+            Code::NoRed,
             node.as_str(),
             "bp clear ends a master-red record of the project, which only land writes (37, design change 11)",
-            format!("no master-red record of {} holds; nothing to clear", c.project),
+            format!("no master-red record of {} exists, so nothing waits on a clear; bp list issue", c.project),
         ));
     };
     // A record names the fields that join the signed message, so each must be one line of it.
-    if !is_sha(&red.sha) || !is_branch(&red.base) {
+    let lines = red.checks.iter().all(|n| !n.chars().any(char::is_control));
+    if !is_sha(&red.sha) || !is_branch(&red.base) || !lines {
         return Err(Refusal::new(
             Code::SchemaInvalid,
             red.id.as_str(),
-            "a master-red record names a full sha and a branch (37, design change 11)",
-            format!("{} is not a record land wrote; git rm it, commit it and rerun", red.id),
+            "a master-red record names a full sha, a branch and one line per check (37, design change 11)",
+            format!("{} is not a record land wrote; the human clears it by hand: git rm it and commit it", red.id),
         ));
     }
+    let Some(tip) = crate::risk::at_origin(&top, &red.base)? else {
+        return Err(Refusal::failed(
+            red.base.as_str(),
+            format!("origin has no branch {}; git fetch, then rerun", red.base),
+        ));
+    };
     drop(index);
     let key = match &c.key {
         Some(k) => k.clone(),
         None => Path::new(&std::env::var_os("HOME").unwrap_or_default()).join(".ssh/bp_human"),
     };
-    let message = message(&node, &red);
+    let message = clear_message(&node, &red, &tip);
     eprint!("bp clear signs:\n{message}");
     let signature = sign(&message, &key)?;
     if !verify(&message, &signature, &signer)? {
@@ -114,6 +116,8 @@ pub(crate) fn clear(cwd: &Path, c: &Clear) -> Result<Wrote, Refusal> {
         ("red", red.sha.clone().into()),
         ("pull_request", red.pull_request.into()),
         ("base", red.base.clone().into()),
+        ("checks", red.checks.clone().into()),
+        ("tip", tip.into()),
         ("at", at.into()),
     ];
     let text = crate::approve::record_text(Kind::Clear, &node, fields, &signature);
@@ -129,8 +133,9 @@ pub(crate) fn clear(cwd: &Path, c: &Clear) -> Result<Wrote, Refusal> {
 }
 
 /// Whether a clear record under the project `node` carries a valid signature by `signer` of the clear of `red` (37,
-/// design change 11). The message comes from `red`, not from the record, so only the signature the human made for this
-/// red commit of this project passes. `can_verify` runs first when a record names the red.
+/// design change 11). The message comes from `red` and the clear's `tip`, not from the record's other fields, so only
+/// the signature the human made for this red commit of this project, with these failed checks, passes. `can_verify`
+/// runs first when a record names the red.
 pub(crate) fn cleared(index: &Index, node: &Id, red: &Red, signer: &str) -> Result<bool, Refusal> {
     let names = |r: &Record| r.header.get("red").and_then(Value::as_str) == Some(red.sha.as_str());
     let records: Vec<Record> = index.records(node.as_str(), Kind::Clear)?.into_iter().filter(names).collect();
@@ -138,9 +143,9 @@ pub(crate) fn cleared(index: &Index, node: &Id, red: &Red, signer: &str) -> Resu
         return Ok(false);
     }
     can_verify()?;
-    let message = message(node, red);
     for r in &records {
-        if armour(&r.body).map_or(Ok(false), |sig| verify(&message, &sig, signer))? {
+        let tip = r.header.get("tip").and_then(Value::as_str).unwrap_or_default();
+        if armour(&r.body).map_or(Ok(false), |sig| verify(&clear_message(node, red, tip), &sig, signer))? {
             return Ok(true);
         }
     }
@@ -149,8 +154,8 @@ pub(crate) fn cleared(index: &Index, node: &Id, red: &Red, signer: &str) -> Resu
 
 /// The commit that reverts `red` exactly on the base branch at `tip`, the sha `git ls-remote` names (never a local
 /// ref, which `git update-ref` moves with no push): the commit after `red` on the branch's first-parent line, when its
-/// tree is the tree of `red`'s first parent. Git alone judges it, so no record ends a red by naming a revert. `None`
-/// when `red` is not on that line or the next commit is no exact revert.
+/// tree is the tree of `red`'s first parent. Git alone judges it, so no record ends a red for `land` by naming a
+/// revert. `None` when `red` is not on that line or the next commit is no exact revert.
 pub(crate) fn reverted(top: &Path, red: &Red, tip: &str) -> Option<String> {
     let git = |args: &[&str]| crate::claim::git(top, args).ok();
     let line = git(&["rev-list", "--first-parent", &format!("{}..{tip}", red.sha)])?;
@@ -169,13 +174,20 @@ mod tests {
     use bp_vault::{Id, Index, Kind, Vault};
     use serde_json::Value;
 
-    use super::{cleared, message};
+    use bp_read::inputs::clear_message;
+
+    use super::cleared;
     use crate::approve::record_text;
     use crate::signed::sign;
 
     const NODE: &str = "projects/bp/project";
     const R1: &str = "1111111111111111111111111111111111111111";
     const R2: &str = "2222222222222222222222222222222222222222";
+    const TIP: &str = "3333333333333333333333333333333333333333";
+
+    fn message(node: &Id, red: &Red) -> String {
+        clear_message(node, red, TIP)
+    }
 
     fn run(dir: &Path, program: &str, args: &[&str]) {
         let isolated = [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")];
@@ -201,7 +213,8 @@ mod tests {
             sha: sha.into(),
             pull_request: 7,
             base: "master".into(),
-            checks: vec![],
+            checks: vec!["ci".into()],
+            ..Red::default()
         }
     }
 
@@ -212,6 +225,8 @@ mod tests {
             ("red", sha.into()),
             ("pull_request", n.into()),
             ("base", "master".into()),
+            ("checks", vec!["ci"].into()),
+            ("tip", TIP.into()),
             ("at", format!("2026-11-14T10:00:{:02}Z", key.len()).into()),
         ];
         put(&v.root, &format!("projects/bp/clears/{key}.md"), &record_text(Kind::Clear, &node, fields, signature));
@@ -241,6 +256,10 @@ mod tests {
         let mentat = Id::parse("projects/mentat/project").unwrap();
         let of_mentat = sign(&message(&mentat, &r1), &human).unwrap();
         let of_pr8 = sign(&message(&node, &Red { pull_request: 8, ..r1.clone() }), &human).unwrap();
+        // A clear names the failed checks it accepts: one signed before a new check failed does not clear it.
+        let of_fewer = sign(&message(&node, &Red { checks: vec![], ..r1.clone() }), &human).unwrap();
+        let other_tip = sign(&clear_message(&node, &r1, R2), &human).unwrap();
+        let of_base = sign(&message(&node, &Red { base: "release".into(), ..r1.clone() }), &human).unwrap();
         let namespace = {
             put(keys.path(), "m", &message(&node, &r1));
             run(keys.path(), "ssh-keygen", &["-Y", "sign", "-n", "git", "-f", "human", "m"]);
@@ -253,6 +272,9 @@ mod tests {
             ("the human's clear of another red, its sha edited", of_r2.as_str()),
             ("the human's clear of the same red in another project, copied", of_mentat.as_str()),
             ("the human's clear of another pull request's red", of_pr8.as_str()),
+            ("the human's clear of fewer failed checks", of_fewer.as_str()),
+            ("the human's clear signed at another tip than the record names", other_tip.as_str()),
+            ("the human's clear of the red on another base branch", of_base.as_str()),
             ("a signature in git's namespace", namespace.as_str()),
         ]
         .into_iter()

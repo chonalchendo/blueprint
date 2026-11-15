@@ -27,7 +27,8 @@ const S: &str = "projects/bp/designs/system";
 /// origin's master, as the forge's squash merge does, marks the row `MERGED` with that commit as its merge commit,
 /// then runs `on-merge`, if any. `pr list`
 /// runs `on-list` first, if any. `api --paginate .../commits/<sha>/check-runs` prints `runs-<sha>.json`, else no run,
-/// and logs the sha in `check-runs`. It keeps the body in `body` and prints it as JSON with CRLF line ends, as a forge may
+/// and logs the sha in `check-runs`; `.../commits/<sha>/status` prints `status-<sha>.json`, else no status. It keeps
+/// the body in `body` and prints it as JSON with CRLF line ends, as a forge may
 /// store it, escaping only those: a body holds no quote. The vault holds [`ISSUE`], with one block, under [`M`], with
 /// none, and [`BARE`], with none.
 fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -87,9 +88,12 @@ case "$1 $2" in
     sed "$merged" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     [ ! -f '{t}/on-merge' ] || sh '{t}/on-merge' ;;
   "api --paginate")
-    sha=$(printf '%s' "$3" | sed -n 's|.*/commits/\([0-9a-f]*\)/check-runs.*|\1|p')
-    echo "$sha" >> '{t}/check-runs'
-    if [ -f "{t}/runs-$sha.json" ]; then cat "{t}/runs-$sha.json"; else echo '{{"check_runs":[]}}'; fi ;;
+    sha=$(printf '%s' "$3" | sed -n 's|.*/commits/\([0-9a-f]*\)/.*|\1|p')
+    case "$3" in
+      */status*) if [ -f "{t}/status-$sha.json" ]; then cat "{t}/status-$sha.json"; else echo '{{"statuses":[]}}'; fi ;;
+      *) echo "$sha" >> '{t}/check-runs'
+        if [ -f "{t}/runs-$sha.json" ]; then cat "{t}/runs-$sha.json"; else echo '{{"check_runs":[]}}'; fi ;;
+    esac ;;
   *) exit 9 ;;
 esac
 "#,
@@ -1253,6 +1257,30 @@ fn pr_sweeps_the_base_checkouts_of_a_killed_pr() {
     assert_eq!(left, kept, "this pr's own checkout is gone too");
 }
 
+/// A `check_vacuous` refusal names each base checkout the sweep could not remove, as a passing `pr` does (review of
+/// #97, row 17; review of #102, T10): the refusal does not drop the list.
+#[test]
+fn a_vacuous_pr_names_the_base_checkouts_git_left() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    checks(v, "```check shell {name=hello expect=0}\ntest -f README.md\n```\n");
+    let (_, cut) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(cut["worktree"].as_str().unwrap()).to_path_buf();
+    let base = cut["base"].as_str().unwrap().to_string();
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    commit(&w, &["add", "hello.txt"], "hello");
+    let tmp = t.join("tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    let stuck = tmp.join(format!("bp-base-{}-1", dead_pid()));
+    let pid = stuck.file_name().unwrap().to_str().unwrap().split('-').nth(2).unwrap().parse().unwrap();
+    base_checkout(&t.join("code"), &stuck, pid, &base);
+    // With no `.git` file in it, git refuses to remove the checkout.
+    std::fs::remove_file(stuck.join(".git")).unwrap();
+    let (code, out) = bp(v, t, &[("TMPDIR", tmp.to_str().unwrap())], &["pr", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("check_vacuous")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains(stuck.to_str().unwrap()), "{out}");
+}
+
 /// A claim's worktree named like a base checkout, in the directory `pr` makes checkouts in and locked with a base
 /// checkout's reason and a dead pid, survives another issue's `pr` with its uncommitted work: it carries a branch.
 #[test]
@@ -1846,6 +1874,11 @@ fn an_approval_accepts_only_the_rows_the_human_signed() {
     git(v, &["add", "."]);
     git(v, &["commit", "-qm", "the agent copies the record with a longer list"]);
     refused("findings_open", "a copy of the record with a longer list");
+    // A declined error row holds at the cap too, and goes to the human (review of #102, T11).
+    let declined = ["record", "disposition", &fourth, "--field", "finding=1", "--field", "as=declined"];
+    let (code, out) = bp(v, t, &[], &[&declined[..], &["--field", "reason=the human decides"]].concat());
+    assert_eq!(code, Some(0), "{out}");
+    refused("findings_open", "a declined error row at the cap");
 }
 
 /// At high's round cap a missing approval refuses as itself and names the human, as the blocked intent does (review of
@@ -2287,16 +2320,24 @@ fn checks_at(t: &Path, sha: &str, conclusion: Option<&str>) {
     std::fs::write(t.join(format!("runs-{sha}.json")), runs.to_string()).unwrap();
 }
 
-/// A land record of [`BARE`] that merged `sha` as pull request 7, as `land` writes one: a claim released `landed`.
-fn landed_at(v: &Path, sha: &str) {
+/// A land record of [`BARE`] that merged `sha` as pull request 7, as `land` writes one: a claim released `landed`, and
+/// the forge's row of pull request 7, `MERGED` from `bp/bare` with `sha` as its merge commit. `reverts` names the red
+/// the land reverted, when it was a revert.
+fn landed_at(v: &Path, t: &Path, sha: &str, reverts: Option<&str>) {
+    let reverts = reverts.map(|r| format!("reverts: {r}\n")).unwrap_or_default();
     let claim = format!(
         "---\nkind: claim\nunder: {BARE}\nfrom: \"2026-10-18T08:00:00Z\"\nowner: worker\n---\n\n## Released\n\nto: \
-         2026-10-18T09:00:00Z\nreason: landed\npull_request: 7\nmerged: {sha}\n"
+         2026-10-18T09:00:00Z\nreason: landed\npull_request: 7\nmerged: {sha}\n{reverts}"
     );
     std::fs::create_dir_all(v.join(format!("{BARE}/claims"))).unwrap();
     std::fs::write(v.join(format!("{BARE}/claims/landed.md")), claim).unwrap();
     git(v, &["add", "-A"]);
     git(v, &["commit", "-qm", "land bare"]);
+    let row = json!([{
+        "number": 7, "state": "MERGED", "baseRefName": "master", "headRefName": "bp/bare", "headRefOid": sha,
+        "mergeCommit": { "oid": sha }, "statusCheckRollup": [],
+    }]);
+    std::fs::write(t.join("prs-bare.json"), row.to_string()).unwrap();
 }
 
 /// The intent and note of `id` as `bp list issue` reads them.
@@ -2306,11 +2347,37 @@ fn intent_of(v: &Path, id: &str) -> (Value, Value) {
     (row["intent"].clone(), row["note"].clone())
 }
 
-/// `land` reads the check runs at the base branch's head (37, design change 11). A failed run there, on a commit that a
-/// land record of the project merged, makes the project red: `land` records it and refuses `master_red`, and every
-/// live issue of the project reads `master-red` first. A pending run is not red, and a red commit with no land record
-/// is no red of this project. Only the exact revert lands, with no review: a tree that differs by one byte refuses.
-/// The landed revert names the red it ends, and the red ends.
+/// The red scenario of [`red_master`] with the red recorded by a `land` of [`ISSUE`]: a land record of `R` and a
+/// failed check `ci` there. The worktree, the head and `R`.
+fn recorded(v: &Path, t: &Path) -> (std::path::PathBuf, String, String) {
+    let (w, h, red) = red_master(v, t);
+    landed_at(v, t, &red, None);
+    checks_at(t, &red, Some("failure"));
+    assert_eq!(bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]).1["code"], "master_red");
+    (w, h, red)
+}
+
+/// A commit in the clone with the tree of `tree` and the one parent `parent`, as a revert or a near revert is made.
+fn tree_on(t: &Path, tree: &str, parent: &str) -> String {
+    let code = t.join("code");
+    git(&code, &["commit-tree", &format!("{tree}^{{tree}}"), "-p", parent, "-m", "made"]).trim().to_string()
+}
+
+/// The files under `projects/bp/reds` of the vault, sorted.
+fn reds(v: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(v.join("projects/bp/reds"))
+        .map(|d| d.map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap()).collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// `land` reads the checks at the base branch's head (37, design change 11). A failed check there, on a commit the
+/// forge merged as a pull request that a land record of the project names, makes the project red: `land` records it
+/// and refuses `master_red`, and every live issue of the project reads `master-red` first. A check still pending at a
+/// commit `land` merged refuses `base_pending`, and a red commit with no land record is no red of this project. Only
+/// the exact revert lands, with no review: a tree that differs by one byte refuses. The landed revert names the red it
+/// ends and writes its end record, and the red ends.
 #[test]
 fn master_red_holds_until_its_exact_revert_lands() {
     let (v, t) = setup();
@@ -2323,9 +2390,18 @@ fn master_red_holds_until_its_exact_revert_lands() {
     assert!(std::fs::read_to_string(t.join("check-runs")).unwrap().contains(&red), "land read the runs at R");
     checks_at(t, &red, Some("failure"));
     assert_eq!(dry(v), "check_failed", "a red commit with no land record is no red of this project");
-    landed_at(v, &red);
+    landed_at(v, t, &red, None);
     checks_at(t, &red, None);
-    assert_eq!(dry(v), "check_failed", "a pending check is not red");
+    let (code, out) = bp(v, t, &session, &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("base_pending")), "a check still runs at R: {out}");
+    // A commit status, the older API, fails as a check run does.
+    std::fs::remove_file(t.join(format!("runs-{red}.json"))).unwrap();
+    let status = json!({ "statuses": [{ "context": "legacy-ci", "state": "error" }] });
+    std::fs::write(t.join(format!("status-{red}.json")), status.to_string()).unwrap();
+    let (code, out) = bp(v, t, &session, &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("master_red")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains("legacy-ci failed"), "{out}");
+    std::fs::remove_file(t.join(format!("status-{red}.json"))).unwrap();
     checks_at(t, &red, Some("failure"));
     let (code, out) = bp(v, t, &session, &["land", ISSUE, "--dry-run"]);
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("master_red")), "{out}");
@@ -2336,7 +2412,12 @@ fn master_red_holds_until_its_exact_revert_lands() {
     let (code, out) = bp(v, t, &session, &["land", ISSUE]);
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("master_red")), "{out}");
     let (_, record) = common::bp(v, &["show", &format!("projects/bp/reds/{red}"), "--no-body"]);
-    assert_eq!((record["red"].as_str(), record["pull_request"].as_u64()), (Some(red.as_str()), Some(7)), "{record}");
+    let want = (Some(red.as_str()), Some(7), Some(BARE), Some(false));
+    let got =
+        (record["red"].as_str(), record["pull_request"].as_u64(), record["issue"].as_str(), record["revert"].as_bool());
+    assert_eq!(got, want, "{record}");
+    assert_eq!(bp(v, t, &session, &["land", ISSUE]).1["code"], "master_red");
+    assert_eq!(reds(v).len(), 1, "a second land of the same red writes no second record");
     assert!(!t.join("merged").exists(), "nothing merged");
     for id in [ISSUE, BARE] {
         let (intent, note) = intent_of(v, id);
@@ -2366,35 +2447,303 @@ fn master_red_holds_until_its_exact_revert_lands() {
     let claim = out["claim"].as_str().unwrap();
     let released = std::fs::read_to_string(v.join(format!("{claim}.md"))).unwrap();
     assert!(released.contains(&format!("reverts: {red}\n")), "{released}");
+    assert!(reds(v).iter().any(|r| r.contains("reverted:")), "the land wrote the red's end record");
     assert_ne!(intent_of(v, BARE).0, "master-red", "the landed revert ends the red");
 }
 
-/// The human's signed clear ends a red (37, design change 11): a hand-written clear changes nothing for `land`, and an
-/// agent role cannot run `bp clear`. `land` then refuses on its next gate.
+/// A line of text is no land record (review of #102, S1, C2, F1 and T4): a `merged: <R>` line in an issue body, the
+/// same line in a review row, and a hand-written claim that names a pull request the forge does not show merged at
+/// `R`, each leave a failed check at `R` no red of the project. The exact revert of `R` then meets every review gate.
+#[test]
+fn a_forged_land_record_makes_no_red_and_the_revert_needs_review() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, h, red) = red_master(v, t);
+    checks_at(t, &red, Some("failure"));
+    let session = [("BP_ROLE", "session")];
+    let body = v.join(format!("{BARE}.md"));
+    std::fs::write(&body, format!("{}\nmerged: {red}\n", std::fs::read_to_string(&body).unwrap())).unwrap();
+    git(v, &["commit", "-qam", "a body line"]);
+    let (code, out) = review(
+        v,
+        t,
+        &h,
+        &["round=1", "lens=security", "mode=full"],
+        &[&format!("| warn | {BARE} | The log says merged: {red} and nothing else |")],
+    );
+    assert_eq!(code, Some(0), "{out}");
+    let claim = format!(
+        "---\nkind: claim\nunder: {BARE}\nfrom: \"2026-10-18T08:00:00Z\"\nowner: worker\n---\n\n## Released\n\nto: \
+         2026-10-18T09:00:00Z\nreason: landed\npull_request: 1\nmerged: {red}\n"
+    );
+    std::fs::create_dir_all(v.join(format!("{BARE}/claims"))).unwrap();
+    std::fs::write(v.join(format!("{BARE}/claims/hand.md")), claim).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "a hand claim naming the open pull request 1"]);
+    assert_eq!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], "check_failed", "no red of the project");
+    assert_ne!(intent_of(v, BARE).0, "master-red");
+    git(&w, &["rm", "-q", "break.txt", "other.txt"]);
+    let exact = commit(&w, &["add", "-A"], "revert");
+    bp(v, t, &[], &["pr", ISSUE]);
+    forge(t, &exact, &["SUCCESS"]);
+    let (code, out) = bp(v, t, &session, &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("review_missing")), "the revert needs its review: {out}");
+}
+
+/// `land`'s own reads decide the exact revert (review of #102, T1): with a red recorded, a pull request whose
+/// `baseRefOid` is not the red commit refuses, and so does one whose head has the tree of `P` but does not descend
+/// from `R`. A hand-written master-red record with no failed check on the forge grants no exemption: its exact revert
+/// refuses too, and only the human's clear ends it.
+#[test]
+fn land_reads_the_exact_revert_from_the_forge_and_git() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (_, _, red) = recorded(v, t);
+    let session = [("BP_ROLE", "session")];
+    let p = format!("{red}^");
+    let exact = tree_on(t, &p, &red);
+    let dry = |head: &str, over: &Value| {
+        forge_as(t, head, &["SUCCESS"], over);
+        bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1
+    };
+    let out = dry(&exact, &json!({ "baseRefOid": git(&t.join("code"), &["rev-parse", &p]).trim() }));
+    assert_eq!(out["code"], "master_red", "{out}");
+    assert!(out["fix"].as_str().unwrap().contains(&format!("it is not based on {red}")), "{out}");
+    let apart = tree_on(t, &p, &p);
+    let out = dry(&apart, &json!({}));
+    assert_eq!(out["code"], "master_red", "a head with P's tree that does not descend from R: {out}");
+    assert!(out["fix"].as_str().unwrap().contains(&format!("it is not based on {red}")), "{out}");
+    assert_ne!(dry(&exact, &json!({}))["code"], "master_red", "the exact revert passes the red gate");
+
+    let (v2, t2) = setup();
+    let (v, t) = (v2.path(), t2.path());
+    let (_, _, red) = red_master(v, t);
+    let record = format!(
+        "---\nkind: master-red\nunder: projects/bp/project\nred: \"{red}\"\npull_request: 7\nbase: master\nchecks: \
+         [ci]\nissue: {BARE}\nrevert: false\nat: \"2026-10-19T08:00:00Z\"\n---\n"
+    );
+    std::fs::create_dir_all(v.join("projects/bp/reds")).unwrap();
+    std::fs::write(v.join(format!("projects/bp/reds/{red}.md")), record).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "a red by hand"]);
+    let exact = tree_on(t, &format!("{red}^"), &red);
+    forge(t, &exact, &["SUCCESS"]);
+    let (_, out) = bp(v, t, &session, &["land", ISSUE, "--dry-run"]);
+    assert_eq!(out["code"], "master_red", "a hand record alone grants no exemption: {out}");
+    assert!(out["fix"].as_str().unwrap().contains("no failed check"), "{out}");
+    assert!(!out["fix"].as_str().unwrap().contains("dispatch a worker"), "only the clear ends it: {out}");
+    // A `git rm` of the record ends nothing: the red is read from history.
+    git(v, &["rm", "-q", &format!("projects/bp/reds/{red}.md")]);
+    git(v, &["commit", "-qm", "rm the red"]);
+    assert_eq!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], "master_red");
+    assert_eq!(intent_of(v, BARE).0, "master-red", "the intents read the red from history too");
+}
+
+/// A red whose commit `land` merged as a revert takes no revert exception (review of #102, F3): the revert of the
+/// revert would put the red merge back with no review, and the loop would not stop. Only the human's clear ends it.
+/// The red the revert ended gets its end record when `land` reads it reverted on the branch.
+#[test]
+fn the_revert_of_a_revert_takes_no_exemption() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, _, red) = recorded(v, t);
+    let code = t.join("code");
+    let undo = tree_on(t, &format!("{red}^"), &red);
+    git(&code, &["push", "-q", "origin", &format!("{undo}:refs/heads/master")]);
+    landed_at(v, t, &undo, Some(&red));
+    checks_at(t, &undo, Some("failure"));
+    git(&w, &["reset", "-q", "--hard", &undo]);
+    std::fs::write(w.join("break.txt"), "x\n").unwrap();
+    let again = commit(&w, &["add", "break.txt"], "the red merge again");
+    forge(t, &again, &["SUCCESS"]);
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("master_red")), "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.contains("itself the land of a revert") && !fix.contains("dispatch a worker"), "{fix}");
+    assert!(reds(v).iter().any(|r| r.contains("revert: true")), "the red of the revert names itself one");
+    assert!(reds(v).iter().any(|r| r.contains("reverted:")), "R, reverted on the branch, has its end record");
+    let (intent, note) = intent_of(v, BARE);
+    assert_eq!(intent, "master-red");
+    assert!(note.as_str().unwrap().contains("only the human runs bp clear bp"), "{note}");
+}
+
+/// A red always has a legal exit (review of #102, C3, F2 and T2). After a revert merged outside `land`, `land` reads
+/// the red reverted from git and writes its end record, so the intents end it too; with no `land` run, the human's
+/// `bp clear` signs it. A commit after the red that is no exact revert ends nothing.
+#[test]
+fn a_red_reverted_outside_land_has_an_end() {
+    for by_clear in [false, true] {
+        let (v, t) = setup();
+        let (v, t) = (v.path(), t.path());
+        let human = signer(t);
+        let (_, _, red) = recorded(v, t);
+        let code = t.join("code");
+        let session = [("BP_ROLE", "session")];
+        let near = tree_on(t, &red, &red);
+        git(&code, &["push", "-q", "origin", &format!("{near}:refs/heads/master")]);
+        assert_eq!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], "master_red", "no exact revert");
+        let undo = tree_on(t, &format!("{red}^"), &red);
+        git(&code, &["push", "-q", "-f", "origin", &format!("{undo}:refs/heads/master")]);
+        assert_ne!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], "master_red", "git shows it reverted");
+        assert_eq!(intent_of(v, BARE).0, "master-red", "the dry run writes no end record");
+        if by_clear {
+            let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["clear", "bp", "--key", &human]);
+            assert_eq!((code, out["red"].as_str()), (Some(0), Some(red.as_str())), "{out}");
+        } else {
+            assert_ne!(bp(v, t, &session, &["land", ISSUE]).1["code"], "master_red");
+            assert!(reds(v).iter().any(|r| r.contains("reverted:")), "{:?}", reds(v));
+        }
+        assert_ne!(intent_of(v, BARE).0, "master-red", "the red ended (clear: {by_clear})");
+    }
+}
+
+/// The human's signed clear ends a red (37, design change 11): a hand-written clear changes nothing for `land` or the
+/// intents (review of #102, S2, C5 and F6), and an agent role cannot run `bp clear`. After the signed clear the
+/// intents read the red ended (T5), and `land` refuses on its next gate. `bp clear` refuses a key an ssh-agent holds,
+/// a key that is not the signer, and a project with no red (T6).
 #[test]
 fn a_signed_clear_ends_master_red_and_a_forged_one_does_not() {
     let (v, t) = setup();
     let (v, t) = (v.path(), t.path());
     let human = signer(t);
-    let (_, _, red) = red_master(v, t);
-    landed_at(v, &red);
-    checks_at(t, &red, Some("failure"));
+    let human_ = [("SSH_AUTH_SOCK", "")];
+    let (code, out) = bp(v, t, &human_, &["clear", "bp", "--key", &human]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("no_red")), "nothing to clear: {out}");
+    let (_, _, red) = recorded(v, t);
     let session = [("BP_ROLE", "session")];
-    assert_eq!(bp(v, t, &session, &["land", ISSUE]).1["code"], "master_red");
     let forged = format!(
-        "---\nkind: clear\nunder: projects/bp/project\nred: {red}\npull_request: 7\nbase: master\nat: \
-         \"2026-10-19T08:00:00Z\"\n---\n\n## Signature\n\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQ==\n-----END \
-         SSH SIGNATURE-----\n```\n"
+        "---\nkind: clear\nunder: projects/bp/project\nred: \"{red}\"\npull_request: 7\nbase: master\ntip: \
+         \"{red}\"\nat: \"2026-10-19T08:00:00Z\"\n---\n\n## Signature\n\n```\n-----BEGIN SSH SIGNATURE-----\n\
+         U1NIU0lHAAAAAQ==\n-----END SSH SIGNATURE-----\n```\n"
     );
     std::fs::create_dir_all(v.join("projects/bp/clears")).unwrap();
     std::fs::write(v.join(format!("projects/bp/clears/{red}.md")), forged).unwrap();
     git(v, &["add", "-A"]);
     git(v, &["commit", "-qm", "clear by hand"]);
     assert_eq!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], "master_red", "a forged clear");
+    assert_eq!(intent_of(v, BARE).0, "master-red", "a forged clear hides nothing from the intents");
     let (code, out) = bp(v, t, &session, &["clear", "bp", "--key", &human]);
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("role_forbidden")), "{out}");
-    let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["clear", "bp", "--key", &human]);
+    let agent = t.join("agent").display().to_string();
+    let (code, out) = bp(v, t, &human_, &["clear", "bp", "--key", &agent]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("signature_invalid")), "not the signer: {out}");
+    let ssh_add = t.join("bin/ssh-add");
+    let public = std::fs::read_to_string(t.join("human.pub")).unwrap();
+    std::fs::write(&ssh_add, format!("#!/bin/sh\necho '{}'\n", public.trim())).unwrap();
+    let (code, out) = bp(v, t, &human_, &["clear", "bp", "--key", &human]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("key_in_agent")), "{out}");
+    std::fs::write(&ssh_add, "#!/bin/sh\nexit 1\n").unwrap();
+    assert!(!v.join(format!("projects/bp/clears/{red}-2.md")).exists(), "no refused clear wrote a record");
+    let (code, out) = bp(v, t, &human_, &["clear", "bp", "--key", &human]);
     assert_eq!((code, out["red"].as_str()), (Some(0), Some(red.as_str())), "{out}");
-    assert_eq!(bp(v, t, &[("SSH_AUTH_SOCK", "")], &["clear", "bp", "--key", &human]).0, Some(3), "a repeat");
+    assert_eq!(bp(v, t, &human_, &["clear", "bp", "--key", &human]).0, Some(3), "a repeat");
     assert_eq!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], "check_failed", "cleared: the next gate");
+    assert_ne!(intent_of(v, BARE).0, "master-red", "the intents read the signed clear");
+}
+
+/// The first `land` that sees the red is its exact revert: it writes the red's record first, then lands (review of
+/// #102, F8). A merged pull request whose merge commit is the exact revert finishes its land as the revert (T7). A
+/// merged pull request that is no revert takes the after-merge fix.
+#[test]
+fn a_merged_revert_finishes_as_the_revert_and_records_its_red() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, _, red) = red_master(v, t);
+    landed_at(v, t, &red, None);
+    checks_at(t, &red, Some("failure"));
+    git(&w, &["rm", "-q", "break.txt", "other.txt"]);
+    let exact = commit(&w, &["add", "-A"], "revert");
+    bp(v, t, &[], &["pr", ISSUE]);
+    forge(t, &exact, &["SUCCESS"]);
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!((code, out["reverts"].as_str()), (Some(0), Some(red.as_str())), "{out}");
+    assert!(reds(v).iter().any(|r| r.contains("pull_request: 7")), "the red was recorded: {:?}", reds(v));
+    assert!(reds(v).iter().any(|r| r.contains("reverted:")), "and ended");
+
+    let (v2, t2) = setup();
+    let (v, t) = (v2.path(), t2.path());
+    let (w, _, red) = recorded(v, t);
+    git(&w, &["rm", "-q", "break.txt", "other.txt"]);
+    let exact = commit(&w, &["add", "-A"], "revert");
+    bp(v, t, &[], &["pr", ISSUE]);
+    forge_as(t, &exact, &["SUCCESS"], &json!({ "state": "MERGED" }));
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!((code, out["reverts"].as_str()), (Some(0), Some(red.as_str())), "a merged revert: {out}");
+
+    let (v3, t3) = setup();
+    let (v, t) = (v3.path(), t3.path());
+    let (_, h, _) = recorded(v, t);
+    forge_as(t, &h, &["SUCCESS"], &json!({ "state": "MERGED" }));
+    let (_, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE, "--dry-run"]);
+    assert_eq!(out["code"], "master_red", "{out}");
+    assert!(out["fix"].as_str().unwrap().contains("pull request 1 is merged"), "{out}");
+}
+
+/// The exact revert of a red lands at high with no signer and no review: it reads no key (review of #102, T9).
+#[test]
+fn a_high_exact_revert_lands_with_no_signer() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, _, red) = red_master(v, t);
+    label(v, "risk: high");
+    landed_at(v, t, &red, None);
+    checks_at(t, &red, Some("failure"));
+    git(&w, &["rm", "-q", "break.txt", "other.txt"]);
+    let exact = commit(&w, &["add", "-A"], "revert");
+    bp(v, t, &[], &["pr", ISSUE]);
+    forge(t, &exact, &["SUCCESS"]);
+    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+    assert_eq!(
+        (code, out["level"].as_str(), out["reverts"].as_str()),
+        (Some(0), Some("high"), Some(red.as_str())),
+        "{out}"
+    );
+}
+
+/// The view and the session read the red as `land` does (review of #102, T3 and C1). While red, the Change page of a
+/// pull request that is no revert shows `land`'s `master_red`, never `bp land`. The issue whose label `reverts` names
+/// the red is the revert issue: the note of every other issue names it, and once its pull request is the exact revert,
+/// open, green and with passing runs, it reads `needs-landing` and the Change page offers `bp land`, as `land` agrees.
+#[test]
+fn the_view_and_the_intents_read_the_red_as_land_does() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, _, red) = recorded(v, t);
+    let session = [("BP_ROLE", "session")];
+    let page = |v: &Path| -> String {
+        let vault = bp_vault::Vault { root: v.to_path_buf() };
+        let index = bp_vault::Index::open(&vault).unwrap();
+        let c = bp_read::change(&vault, &index, "bp", ISSUE, Some(&t.join("code")), false).unwrap();
+        let c = serde_json::to_value(c).unwrap();
+        if c["command"].is_string() { "land".into() } else { c["refusal"]["code"].as_str().unwrap_or("wait").into() }
+    };
+    let land =
+        |v: &Path| bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"].as_str().unwrap_or("land").to_string();
+    assert_eq!((page(v), land(v)), ("master_red".to_string(), "master_red".to_string()));
+
+    assert_eq!(common::bp(v, &["set", ISSUE, "reverts", &red]).0, Some(0));
+    assert_eq!(common::bp(v, &["set", ISSUE, "reverts", "f00"]).1["code"], "unknown_value", "a full sha only");
+    let (_, note) = intent_of(v, BARE);
+    assert!(note.as_str().unwrap().contains(&format!("its revert issue {ISSUE}")), "{note}");
+    git(&w, &["rm", "-q", "break.txt", "other.txt"]);
+    let exact = commit(&w, &["add", "-A"], "revert");
+    pushed(v, t, &exact);
+    assert_eq!(intent_of(v, ISSUE).0, "needs-landing", "the revert issue needs no review");
+    assert_eq!((page(v), land(v)), ("land".to_string(), "land".to_string()));
+}
+
+/// A red with no live issue shows on the milestone (review of #102, C4): it reads `master-red`, never
+/// `needs-acceptance` with `bp stamp`.
+#[test]
+fn a_red_with_no_live_issue_holds_the_milestone() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    recorded(v, t);
+    let path = v.join(format!("{ISSUE}.md"));
+    std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("status: in-progress", "status: resolved"))
+        .unwrap();
+    git(v, &["commit", "-qam", "resolved by hand"]);
+    let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "milestone"]);
+    let row = list["rows"].as_array().unwrap().iter().find(|r| r["id"] == M).unwrap().clone();
+    assert_eq!(row["intent"], "master-red", "{row}");
 }

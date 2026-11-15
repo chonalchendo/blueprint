@@ -36,7 +36,8 @@ pub struct Create {
     /// Validate and print what would be written; write nothing.
     #[arg(long)]
     pub dry_run: bool,
-    /// An issue's risk level at derive, as `risk=<low|medium|high>` (37, design change 1).
+    /// An issue's label at derive: `risk=<low|medium|high>` (37, design change 1), `complex=<true|false>`, or
+    /// `reverts=<red sha>` for the revert issue of a red master (37, design change 11).
     #[arg(long, value_name = "NAME=VALUE")]
     pub field: Vec<String>,
     /// Print the kind's body template, a file of the bundle, as `{kind, template}`; write nothing.
@@ -70,13 +71,14 @@ pub(crate) fn create(cwd: &Path, create: &Create) -> Result<Wrote, Refusal> {
     let mut fields = BTreeMap::new();
     for given in &create.field {
         match given.split_once('=') {
-            Some((field @ ("risk" | "complex"), value)) if kind == Kind::Issue => {
+            Some((field @ ("risk" | "complex" | "reverts"), value)) if kind == Kind::Issue => {
                 fields.insert(field.to_string(), schema::label(kind, &id, field, value)?);
             }
             _ => {
                 return Err(Refusal::usage(
                     format!("create {kind} --field {given}"),
-                    "create takes --field risk=<low|medium|high> and --field complex=<true|false> on an issue; bp set writes any other label",
+                    "create takes --field risk=<low|medium|high>, --field complex=<true|false> and --field \
+                     reverts=<red sha> on an issue; bp set writes any other label",
                 ));
             }
         }

@@ -240,7 +240,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let named = carried.named_by(&c.top, &pr.head_ref_oid);
     let gate = match intents::gates(&issue, &read, named.as_ref().ok().copied()).unmet {
         Some(Unmet::Approval) => Err(level.1.unwrap_or_else(|| landing::refusal(&Unmet::Approval, &id, &pr))),
-        Some(unmet) => Err(level::refusal(&issue, &unmet, &id, &pr)),
+        Some(unmet) => Err(landing::gated(&issue, &unmet, &id, &pr)),
         // The base the forge names is read after the gates above it, so a layer whose base has not landed gets
         // `base_unmerged` and not a refusal about a sha its own land replaces (review of #100, V6).
         None => named
@@ -286,11 +286,12 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         ));
     }
     let to = crate::clock::instant(crate::clock::now().unwrap_or(now));
-    let more = red::lines(&pr, revert.as_deref());
+    let (more, ended) = red::lines(&vault, &id, &pr, revert.as_deref())?;
     let mut changes = BTreeMap::from([
         (c.claim.clone(), crate::claim::released(&vault.text(&c.claim)?, &to, "landed", &more)),
         (id.clone(), bp_vault::set_field(&vault.text(&id)?, "status", &resolved.into())),
     ]);
+    changes.extend(ended);
     // A stranded layer's step goes on its claim too, so its walk carries it to the next session (34, design change 5).
     changes.extend(noted(&vault, writer.index(), &moved)?);
     writer.trailer(format!("Bp-Claim: {}", c.claim));

@@ -7,8 +7,9 @@ use bp_vault::{Code, Refusal};
 use crate::Verb;
 
 /// `Ok` for a read verb, the human, a verb in the role's row, or one of the human's acts: `stamp`, `land`, `approve`,
-/// `lower` and a `transition` to `approved` or `active` keep `role_forbidden`, which a code never stops meaning (15).
-/// Their own check names the act, and no row holds them. `BP_ROLE` is a label an agent can forge, so this stops a slip, not an attack.
+/// `lower`, `clear` and a `transition` to `approved` or `active` keep `role_forbidden`, which a code never stops
+/// meaning (15). Their own check names the act, and no row holds them. `BP_ROLE` is a label an agent can forge, so
+/// this stops a slip, not an attack.
 pub(crate) fn check(verb: &Verb) -> Result<(), Refusal> {
     let name = match verb {
         Verb::Where => "where",

@@ -9,7 +9,10 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 
 ### Intent to action
 
-- `master-red`: the base branch is red after a land, so no pull request of the project lands but the revert. Its note names the red commit. Create one issue for the revert, with a block that fails at the red commit. Dispatch `bp-worker` with its `complete` template and the intent's `model` and `effort`. Give the human `bp clear <project>` too.
+- `master-red`: the base branch is red after a land. No pull request of the project lands but the exact revert of the red commit. The note names the red commit, the issue whose land made it and the one act that ends it:
+  - "its revert issue <id>": do nothing for the other issues. The revert issue reads its own intents: dispatch its build at `ready`, then run `bp land <id> --json` at `needs-landing`. It needs no review.
+  - "no revert issue names it": no live issue has the label `reverts` with this sha, so create one revert issue for the red: `bp create issue --project <p> --under <milestone> --title "Revert <sha>" --field reverts=<sha> --body-file <file> --json`, under the milestone of the issue the note names. Its body holds one error check block that fails at the red commit and passes at its first parent, for example a test of a file the red merge added. Link it to the design that issue cites: `bp link <issue> cites <design> --json`.
+  - "only the human runs bp clear": give the human `bp clear <project>`. Dispatch no one.
 - A design is missing: run the skill `bp-design`.
 - `needs-shaping`: an active design has an unproven concern, and no milestone is `planned` or `approved`. A concern is unproven when its latest answer is `open`, or `designed` with no milestone stamped after it. Run the skill `bp-shape`.
 - `needs-derivation`: an approved milestone has fewer than three live issues, and a finish-line block that no issue covers. Run the skill `bp-derive`.
@@ -48,7 +51,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 Give the human these commands. Only the human runs `bp approve <issue>`, `bp lower <issue> low --reason <why>` and `bp clear <project>`, in a terminal. The signing key never goes into an agent.
 
 - `needs-approval`: `bp approve <issue>`, in a terminal. It signs the head of a high pull request.
-- `master-red`: `bp clear <project>`, in a terminal, when the human accepts the red base branch. It signs the red commit.
+- `master-red`: `bp clear <project>`, in a terminal, when the human accepts the red base branch. It signs the red commit and its failed checks.
 - `needs-milestone-approval`: `bp transition <milestone> approved --json`.
 - To activate a design draft: `bp transition <design> active --json`.
 - `needs-acceptance`: `bp stamp <milestone> --json`.

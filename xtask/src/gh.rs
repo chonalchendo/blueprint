@@ -84,6 +84,7 @@ impl Fake {
             // `land` reads the check runs at the base branch's head (37, design change 11), from the same files as
             // the rollup, in REST's lower-case words.
             ["api", "--paginate", path] if path.contains("/check-runs") => self.check_runs(path)?,
+            ["api", "--paginate", path] if path.contains("/status") => self.statuses(path)?,
             ["pr", "list", rest @ ..] => {
                 // `--limit` caps rows the fake never has that many of.
                 let f = flags(rest, &["--head", "--state", "--limit", "--json"], &[])?;
@@ -162,8 +163,8 @@ impl Fake {
                 String::new()
             }
             _ => bail!(
-                "unknown command \"{}\": the fake gh answers `api graphql`, `api --paginate <check-runs>` and \
-                 `pr list|view|create|edit|merge|review`",
+                "unknown command \"{}\": the fake gh answers `api graphql`, `api --paginate <check-runs|status>` \
+                 and `pr list|view|create|edit|merge|review`",
                 args.join(" ")
             ),
         };
@@ -174,18 +175,32 @@ impl Fake {
     /// The check runs of the commit a `commits/<sha>/check-runs` path names, from the same files as the rollup, in
     /// REST's lower-case words.
     fn check_runs(&self, path: &str) -> Result<String> {
-        let sha = path.split('/').nth_back(1).context("a check-runs path names its commit")?;
-        let rollup = self.rollup(sha)?;
-        let runs: Vec<Value> = rollup
-            .as_array()
-            .into_iter()
-            .flatten()
+        let runs: Vec<Value> = self
+            .rest(path, "CheckRun")?
+            .iter()
             .map(|c| {
                 let lower = |k: &str| c[k].as_str().unwrap_or_default().to_ascii_lowercase();
                 json!({ "name": c["name"], "status": lower("status"), "conclusion": lower("conclusion") })
             })
             .collect();
         Ok(format!("{}\n", json!({ "total_count": runs.len(), "check_runs": runs })))
+    }
+
+    /// The commit statuses of the commit a `commits/<sha>/status` path names: the rollup's status contexts.
+    fn statuses(&self, path: &str) -> Result<String> {
+        let statuses: Vec<Value> = self
+            .rest(path, "StatusContext")?
+            .iter()
+            .map(|c| json!({ "context": c["context"], "state": c["state"].as_str().unwrap_or_default().to_ascii_lowercase() }))
+            .collect();
+        Ok(format!("{}\n", json!({ "statuses": statuses })))
+    }
+
+    /// The rollup entries of type `kind` at the commit a `commits/<sha>/<what>` path names.
+    fn rest(&self, path: &str, kind: &str) -> Result<Vec<Value>> {
+        let sha = path.split('/').nth_back(1).context("the path names its commit")?;
+        let rollup = self.rollup(sha)?;
+        Ok(rollup.as_array().into_iter().flatten().filter(|c| c["__typename"] == kind).cloned().collect())
     }
 
     /// Refreshes every open pull request from the bare copy and its rollup from `checks/<head>.json`, first on each
@@ -510,5 +525,17 @@ mod tests {
         assert_eq!(call(&["pr", "view", "1", "--json", "state"]).unwrap().trim(), r#"{"state":"MERGED"}"#);
         let head = call(&["api", "graphql", "-f", "query=x"]).unwrap();
         assert!(head.contains(r#""defaultBranchRef":{"name":"master""#), "{head}");
+        // `land` reads the runs and the statuses at the base branch's head from the same file (37, design change 11).
+        let checks = r#"[{"name":"ci","conclusion":"FAILURE"},{"context":"lint","state":"PENDING"}]"#;
+        std::fs::write(t.join(format!("forge/checks/{h2}.json")), checks).unwrap();
+        let api = |what: &str| -> Value {
+            serde_json::from_str(&call(&["api", "--paginate", &format!("repos/o/r/commits/{h2}/{what}")]).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            api("check-runs?per_page=100")["check_runs"],
+            json!([{ "name": "ci", "status": "completed", "conclusion": "failure" }])
+        );
+        assert_eq!(api("status?per_page=100")["statuses"], json!([{ "context": "lint", "state": "pending" }]));
     }
 }
