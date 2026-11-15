@@ -2394,6 +2394,11 @@ fn master_red_holds_until_its_exact_revert_lands() {
     checks_at(t, &red, None);
     let (code, out) = bp(v, t, &session, &["land", ISSUE, "--dry-run"]);
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("base_pending")), "a check still runs at R: {out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(
+        fix.contains("reruns or cancels it at") && fix.contains("bp clear does not apply"),
+        "the forge's exit: {fix}"
+    );
     // A commit status, the older API, fails as a check run does.
     std::fs::remove_file(t.join(format!("runs-{red}.json"))).unwrap();
     let status = json!({ "statuses": [{ "context": "legacy-ci", "state": "error" }] });

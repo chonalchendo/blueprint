@@ -193,13 +193,19 @@ fn text(node: &Id, red: &Red) -> Result<String, Refusal> {
 }
 
 /// `base_pending`: a check still runs at the base branch's head, a commit `land` merged. A red found later would
-/// fall on the next merge, and its revert would undo the wrong one, so `land` waits.
+/// fall on the next merge, and its revert would undo the wrong one, so `land` waits. No red record exists, so `bp
+/// clear` does not apply: a check that never finishes ends only on the forge (review of #102, V6).
 fn pending(id: &Id, base: &str, tip: &str, names: &[String]) -> Refusal {
     Refusal::new(
         Code::BasePending,
         id.as_str(),
         "land merges onto a base branch only when the checks of the last land there are done (37, design change 11)",
-        format!("{} still run at {base}'s head {tip}; wait for them, then rerun bp land {id}", names.join(", ")),
+        format!(
+            "{} still run at {base}'s head {tip}; wait for them, then rerun bp land {id}. A check that never finishes \
+             ends only on the forge: the human reruns or cancels it at {tip}. bp clear does not apply, as no red is \
+             recorded",
+            names.join(", ")
+        ),
     )
 }
 
