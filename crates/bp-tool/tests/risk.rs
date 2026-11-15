@@ -792,3 +792,82 @@ fn a_hand_move_past_the_rename_threshold_keeps_the_label_it_replaced() {
         from = to.to_string();
     }
 }
+
+/// The vault of the L1 tests: [`ISSUE`] under the approved milestone `m` at `risk`, with a body of `lines` lines.
+fn moved_vault(risk: &str, under: bool) -> tempfile::TempDir {
+    let v = common::vault(&[
+        ("shared/.gitkeep", ""),
+        ("projects/bp/project.md", "---\nkind: project\ntitle: Bp\nstatus: active\n---\n"),
+        ("projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\n## Finish line\n"),
+        (&format!("{ISSUE}.md"), &moved_issue(risk, "The first body, line by line.", under)),
+    ]);
+    let m = v.path().join("projects/bp/milestones/m.md");
+    std::fs::write(&m, std::fs::read_to_string(&m).unwrap().replace("planned", "approved")).unwrap();
+    git(v.path(), &["commit", "-qam", "approve m"]);
+    v
+}
+
+/// An issue file at `risk` whose 20 body lines all hold `line`, with or without `under: m`.
+fn moved_issue(risk: &str, line: &str, under: bool) -> String {
+    let under = if under { "under: projects/bp/milestones/m\n" } else { "" };
+    let body = (0..20).map(|n| format!("{line} {n}.")).collect::<Vec<_>>().join("\n");
+    format!("---\nkind: issue\ntitle: A\nstatus: open\n{under}risk: {risk}\n---\n\n{body}\n")
+}
+
+/// A hand move's deleted labels only raise (review of #102, S5, F7 and T12). A commit that adds a new low issue and
+/// deletes a low one reads medium, as the new issue alone does: the deleted label is never the one in force at the
+/// lock. A move that drops `under:` keeps the label it replaced. Eleven hand moves read high: past the cap the read
+/// does not lower.
+#[test]
+fn a_hand_move_s_deleted_labels_only_raise() {
+    let v = moved_vault("low", true);
+    let root = v.path();
+    let declared = |id: &str| common::bp(root, &["risk", id]).1["declared"].clone();
+    // The issue was low before the approval, so it stays low; a new issue after the approval reads medium.
+    assert_eq!(declared(ISSUE), "low");
+    write(root, "projects/bp/issues/control.md", &moved_issue("low", "A control body, unlike the first.", true));
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "control"]);
+    assert_eq!(declared("projects/bp/issues/control"), "medium", "written after its milestone's approval");
+    git(root, &["rm", "-q", &format!("{ISSUE}.md")]);
+    write(root, "projects/bp/issues/attack.md", &moved_issue("low", "An attack body, unlike the others.", true));
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "delete a low issue beside the new one"]);
+    assert_eq!(declared("projects/bp/issues/attack"), "medium", "a decoy delete does not lower the new issue");
+
+    let v = moved_vault("high", true);
+    let root = v.path();
+    let declared = |id: &str| common::bp(root, &["risk", id]).1["declared"].clone();
+    git(root, &["mv", &format!("{ISSUE}.md"), "projects/bp/issues/b.md"]);
+    write(root, "projects/bp/issues/b.md", &moved_issue("low", "The body of b, with no milestone.", false));
+    git(root, &["commit", "-qam", "a hand move that drops under"]);
+    assert_eq!(declared("projects/bp/issues/b"), "high", "a dropped under keeps the moved label");
+
+    let v = moved_vault("high", true);
+    let root = v.path();
+    let declared = |id: &str| common::bp(root, &["risk", id]).1["declared"].clone();
+    let mut from = ISSUE.to_string();
+    for n in 0..11 {
+        let to = format!("projects/bp/issues/m{n}");
+        git(root, &["mv", &format!("{from}.md"), &format!("{to}.md")]);
+        write(root, &format!("{to}.md"), &moved_issue("low", &format!("Move {n}, a body all its own"), true));
+        git(root, &["commit", "-qam", "a hand move"]);
+        from = to;
+    }
+    assert_eq!(declared(&from), "high", "eleven moves: past the cap the read is high");
+}
+
+/// `git log --follow` follows a copy too (review of #102, S6): a new issue close to a low one written before the
+/// approval does not take its history, so it reads medium.
+#[test]
+fn a_copy_of_a_low_issue_does_not_take_its_label() {
+    let v = moved_vault("low", true);
+    let root = v.path();
+    let text = std::fs::read_to_string(root.join(format!("{ISSUE}.md"))).unwrap();
+    write(root, "projects/bp/issues/copy.md", &text.replace("title: A", "title: Copy"));
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "a copy"]);
+    let log = git(root, &["log", "--follow", "--format=%h", "--", "projects/bp/issues/copy.md"]);
+    assert_eq!(log.lines().count(), 2, "git follows the copy into the first file's history: {log}");
+    assert_eq!(common::bp(root, &["risk", "projects/bp/issues/copy"]).1["declared"], "medium");
+}

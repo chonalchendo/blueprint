@@ -22,16 +22,32 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
     if bp_vault::git::Repo::find(&vault.root).is_none() {
         return Ok(now);
     }
-    let mut set = labels(vault, &format!("./{issue}.md"), None)?;
+    let set = labels(vault, &format!("./{issue}.md"), None)?;
     // The label as the last commit left it: a line in the work tree that no commit holds is no evidence (review of
     // #100, V5), so `bp risk` and the intents agree with `land`, which refuses a vault that is not committed.
     let now = set.first().and_then(|(_, l)| *l);
+    let level = |l: Option<Level>| l.unwrap_or(Level::Medium);
     // A hand `git mv` that rewrites the file past git's rename threshold starts a new history, so the labels of each
-    // issue file that the move's commit deleted are this issue's older labels (review of #100, L1). Read only below
-    // high, the one level a move could lower.
-    if now != Some(Level::High) {
-        set.extend(moved(vault, issue)?);
-    }
+    // issue file that the move's commit deleted only raise this issue's level: with or without a milestone, and never
+    // as the label in force at the lock (review of #100, L1; review of #102, S5 and F7). Read only below high.
+    let floor = if now == Some(Level::High) { None } else { moved(vault, issue)? };
+    let own = own(vault, index, issue, &header, &set, now)?;
+    Ok(match floor {
+        Some(f) if f > level(own) => Some(f),
+        _ => own,
+    })
+}
+
+/// The level the issue's own history declares: the label as it stands, or past the lock the highest label any
+/// commit set from the lock on, or the one it held at the lock.
+fn own(
+    vault: &Vault,
+    index: &Index,
+    issue: &str,
+    header: &serde_json::Map<String, serde_json::Value>,
+    set: &[(String, Option<Level>)],
+    now: Option<Level>,
+) -> Result<Option<Level>, Refusal> {
     let level = |l: Option<Level>| l.unwrap_or(Level::Medium);
     // Only a label below one that git once held, or a low one, needs the lock: else the label reads as it stands.
     let fell = set.iter().any(|(_, l)| level(*l) > level(now));
@@ -39,12 +55,12 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
         return Ok(now);
     }
     let id = Id::parse(issue).expect("the index holds ids");
-    let Some(lock) = locked(vault, index, &id, text(&header, "under").as_deref())? else { return Ok(now) };
+    let Some(lock) = locked(vault, index, &id, text(header, "under").as_deref())? else { return Ok(now) };
     let mut best = level(now);
     // Newest first: each label set after the lock, then the one in force at the lock. With none set by the lock, the
     // issue held no label there, or did not exist yet: either reads medium.
     let mut at_lock = Level::Medium;
-    for (commit, label) in &set {
+    for (commit, label) in set {
         if *commit != lock && git(&vault.root, &["merge-base", "--is-ancestor", &lock, commit]).is_ok() {
             best = best.max(level(*label));
         } else {
@@ -60,43 +76,70 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
 /// when `None`). Each patch holds the whole file, so the header of each version reads apart from its body (review of
 /// #100, W2).
 fn labels(vault: &Vault, path: &str, until: Option<&str>) -> Result<Vec<(String, Option<Level>)>, Refusal> {
+    // `--follow` follows a copy too, and `-G` skips a copy that changed no `risk` line: the newest copy is found
+    // first, its commit reads as the file's first, and the copied file's history is not read (review of #102, S6).
+    let mut listing = vec!["log", "--follow", "--name-status", "--format=commit: %H"];
+    listing.extend(until);
+    listing.extend(["--", path]);
+    let (mut commit, mut copy) = (None, None);
+    for line in git(&vault.root, &listing)?.lines() {
+        if let Some(c) = line.strip_prefix("commit: ") {
+            commit = Some(c.to_string());
+        } else if let Some(rest) = line.strip_prefix('C').filter(|r| r.starts_with(|c: char| c.is_ascii_digit())) {
+            copy = commit.clone().zip(rest.split('\t').nth(2).map(str::to_string));
+            break;
+        }
+    }
+    let range = copy.as_ref().map(|(c, _)| format!("{c}..{}", until.unwrap_or("HEAD")));
     let mut args = vec!["log", "--follow", "--text", "-p", "-U1000000", "--format=commit: %H", "-G", "risk"];
-    args.extend(until);
+    args.extend(range.as_deref().or(until));
     args.extend(["--", path]);
-    Ok(changes(&git(&vault.root, &args)?, label))
+    let mut out = changes(&git(&vault.root, &args)?, label);
+    if let Some((c, at)) = copy {
+        let text = git(&vault.root, &["show", &format!("{c}:{at}")])?;
+        out.extend(label(&text).map(|l| (c, Some(l))));
+    }
+    Ok(out)
 }
 
-/// The label changes, newest first, of each issue file of the project that the commit adding `issue`'s path deleted:
-/// a move git did not see as one. Each such file's own move is followed too, up to ten moves.
-fn moved(vault: &Vault, issue: &str) -> Result<Vec<(String, Option<Level>)>, Refusal> {
-    let Some(project) = issue.split('/').nth(1) else { return Ok(Vec::new()) };
+/// The highest label of each issue file of the project that the commit adding `issue`'s path deleted: a move git did
+/// not see as one. Each such file's own move is followed too, up to ten moves; past that it reads high, so no chain of
+/// moves lowers a label.
+fn moved(vault: &Vault, issue: &str) -> Result<Option<Level>, Refusal> {
+    const MOVES: usize = 10;
+    let Some(project) = issue.split('/').nth(1) else { return Ok(None) };
     let issues = format!("./projects/{project}/issues");
-    let (mut out, mut path) = (Vec::new(), format!("./{issue}.md"));
-    for _ in 0..10 {
+    let (mut best, mut path) = (None, format!("./{issue}.md"));
+    for _ in 0..MOVES {
         let added = git(&vault.root, &["log", "--format=%H", "--diff-filter=A", "--", &path])?;
-        let Some(commit) = added.lines().last() else { break };
+        let Some(commit) = added.lines().last() else { return Ok(best) };
         let args = ["show", "--format=", "--name-only", "--no-renames", "--diff-filter=D", "--relative", commit];
         let gone = git(&vault.root, &[&args[..], &["--", &issues]].concat())?;
         let gone: Vec<String> =
             gone.lines().filter(|p| p.matches('/').count() == 3).map(|p| format!("./{p}")).collect();
         let parent = format!("{commit}^");
         for g in &gone {
-            out.extend(labels(vault, g, Some(&parent))?);
+            let high = labels(vault, g, Some(&parent))?.into_iter().map(|(_, l)| l.unwrap_or(Level::Medium)).max();
+            best = best.max(high);
         }
         match gone.as_slice() {
             [one] => path.clone_from(one),
-            _ => break,
+            _ => return Ok(best),
         }
     }
-    Ok(out)
+    Ok(Some(Level::High))
 }
 
 /// Each commit of the log `-p` that changed what `read` reads from the file, newest first, and the value it left.
 /// Each patch holds the whole file, so the version before and after each commit reads in full. Each commit heads its
 /// patch as `commit: <sha>`, which no diff line starts with.
+///
+/// `git log --follow` follows a copy as well as a rename, and no option turns that off. A copy made the file new: its
+/// commit reads as the file's first, and the copied file's older commits are not read (review of #102, S6).
 fn changes<T: PartialEq>(log: &str, read: impl Fn(&str) -> T) -> Vec<(String, T)> {
     let mut out: Vec<(String, T)> = Vec::new();
-    let (mut commit, mut hunk, mut old, mut new) = (None::<&str>, false, String::new(), String::new());
+    let (mut commit, mut hunk, mut copy) = (None::<&str>, false, false);
+    let (mut old, mut new) = (String::new(), String::new());
     let mut close = |commit: Option<&str>, old: &str, new: &str| {
         let value = read(new);
         if let Some(c) = commit.filter(|_| value != read(old)) {
@@ -105,12 +148,17 @@ fn changes<T: PartialEq>(log: &str, read: impl Fn(&str) -> T) -> Vec<(String, T)
     };
     for line in log.lines() {
         if let Some(c) = line.strip_prefix("commit: ") {
-            close(commit, &old, &new);
+            close(commit, if copy { "" } else { &old }, &new);
+            if copy {
+                return out;
+            }
             (commit, hunk) = (Some(c), false);
             old.clear();
             new.clear();
         } else if line.starts_with("@@") {
             hunk = true;
+        } else if !hunk && line.starts_with("copy from ") {
+            copy = true;
         } else if hunk {
             // The lines before the first `@@` name the files; in the hunk each line opens with its side.
             let (side, text) = match line.as_bytes().first() {
@@ -125,7 +173,7 @@ fn changes<T: PartialEq>(log: &str, read: impl Fn(&str) -> T) -> Vec<(String, T)
             }
         }
     }
-    close(commit, &old, &new);
+    close(commit, if copy { "" } else { &old }, &new);
     out
 }
 
@@ -215,6 +263,16 @@ mod tests {
                    +```\ncommit: c1\n@@ -0,0 +1,6 @@\n+---\n+kind: issue\n+title: t\n+risk: high\n+---\n+\n+body\n\
                    commit: c0\n@@ -0,0 +1,3 @@\n+body\n+\n+risk: low\n";
         assert_eq!(read(log), set([("c1", Some(Level::High))]));
+    }
+
+    /// A copy `git log --follow` followed is the file's first commit: the copied file's label and history are not
+    /// this file's (review of #102, S6).
+    #[test]
+    fn a_copy_reads_as_the_file_s_first_commit() {
+        let log = "commit: c2\ndiff --git a/a.md b/c.md\nsimilarity index 80%\ncopy from a.md\ncopy to c.md\n--- a/a.md\n\
+                   +++ b/c.md\n@@ -1,4 +1,4 @@\n ---\n kind: issue\n-title: a\n+title: c\n risk: low\n ---\ncommit: c1\n\
+                   @@ -0,0 +1,4 @@\n+---\n+kind: issue\n+title: a\n+risk: high\n+---\n";
+        assert_eq!(read(log), set([("c2", Some(Level::Low))]));
     }
 
     /// A quoted or spaced key is the key the parser reads, as `bp show` shows it (review of #100, X1).
