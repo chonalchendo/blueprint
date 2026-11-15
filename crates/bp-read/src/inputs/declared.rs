@@ -22,14 +22,16 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
     if bp_vault::git::Repo::find(&vault.root).is_none() {
         return Ok(now);
     }
-    let path = format!("./{issue}.md");
-    // Each patch holds the whole file, so the header of each version reads apart from its body (review of #100, W2).
-    let args =
-        ["log", "--follow", "--text", "-p", "-U1000000", "--format=commit: %H", "-G", "risk", "--", path.as_str()];
-    let set = changes(&git(&vault.root, &args)?, label);
+    let mut set = labels(vault, &format!("./{issue}.md"), None)?;
     // The label as the last commit left it: a line in the work tree that no commit holds is no evidence (review of
     // #100, V5), so `bp risk` and the intents agree with `land`, which refuses a vault that is not committed.
     let now = set.first().and_then(|(_, l)| *l);
+    // A hand `git mv` that rewrites the file past git's rename threshold starts a new history, so the labels of each
+    // issue file that the move's commit deleted are this issue's older labels (review of #100, L1). Read only below
+    // high, the one level a move could lower.
+    if now != Some(Level::High) {
+        set.extend(moved(vault, issue)?);
+    }
     let level = |l: Option<Level>| l.unwrap_or(Level::Medium);
     // Only a label below one that git once held, or a low one, needs the lock: else the label reads as it stands.
     let fell = set.iter().any(|(_, l)| level(*l) > level(now));
@@ -52,6 +54,41 @@ pub fn declared(vault: &Vault, index: &Index, issue: &str) -> Result<Option<Leve
     }
     best = best.max(at_lock);
     Ok(if best > level(now) { Some(best) } else { now })
+}
+
+/// The label changes of the file at `path`, newest first, through git's renames, in the history of `until` (`HEAD`
+/// when `None`). Each patch holds the whole file, so the header of each version reads apart from its body (review of
+/// #100, W2).
+fn labels(vault: &Vault, path: &str, until: Option<&str>) -> Result<Vec<(String, Option<Level>)>, Refusal> {
+    let mut args = vec!["log", "--follow", "--text", "-p", "-U1000000", "--format=commit: %H", "-G", "risk"];
+    args.extend(until);
+    args.extend(["--", path]);
+    Ok(changes(&git(&vault.root, &args)?, label))
+}
+
+/// The label changes, newest first, of each issue file of the project that the commit adding `issue`'s path deleted:
+/// a move git did not see as one. Each such file's own move is followed too, up to ten moves.
+fn moved(vault: &Vault, issue: &str) -> Result<Vec<(String, Option<Level>)>, Refusal> {
+    let Some(project) = issue.split('/').nth(1) else { return Ok(Vec::new()) };
+    let issues = format!("./projects/{project}/issues");
+    let (mut out, mut path) = (Vec::new(), format!("./{issue}.md"));
+    for _ in 0..10 {
+        let added = git(&vault.root, &["log", "--format=%H", "--diff-filter=A", "--", &path])?;
+        let Some(commit) = added.lines().last() else { break };
+        let args = ["show", "--format=", "--name-only", "--no-renames", "--diff-filter=D", "--relative", commit];
+        let gone = git(&vault.root, &[&args[..], &["--", &issues]].concat())?;
+        let gone: Vec<String> =
+            gone.lines().filter(|p| p.matches('/').count() == 3).map(|p| format!("./{p}")).collect();
+        let parent = format!("{commit}^");
+        for g in &gone {
+            out.extend(labels(vault, g, Some(&parent))?);
+        }
+        match gone.as_slice() {
+            [one] => path.clone_from(one),
+            _ => break,
+        }
+    }
+    Ok(out)
 }
 
 /// Each commit of the log `-p` that changed what `read` reads from the file, newest first, and the value it left.

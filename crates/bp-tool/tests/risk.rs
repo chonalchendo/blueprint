@@ -757,3 +757,38 @@ fn the_risk_label_is_a_closed_set_and_complex_a_bool() {
     let (_, v) = common::bp(root, &["risk", ISSUE]);
     assert_eq!(pick(&v), json!(["high", "high", null]), "{v}");
 }
+
+/// A hand `git mv` that rewrites the issue past git's rename threshold, with `risk: low`, in one commit after the
+/// milestone's approval, reads the label of the file the commit deleted: still high (review of #100, L1). A second
+/// such move reads it too.
+#[test]
+fn a_hand_move_past_the_rename_threshold_keeps_the_label_it_replaced() {
+    let issue = |risk: &str, body: &str| {
+        format!(
+            "---\nkind: issue\ntitle: A\nstatus: open\nunder: projects/bp/milestones/m\nrisk: {risk}\n---\n\n{body}\n"
+        )
+    };
+    let v = common::vault(&[
+        ("shared/.gitkeep", ""),
+        ("projects/bp/project.md", "---\nkind: project\ntitle: Bp\nstatus: active\n---\n"),
+        ("projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\n## Finish line\n"),
+        (&format!("{ISSUE}.md"), &issue("high", &"The first body, line by line.\n".repeat(20))),
+    ]);
+    let root = v.path();
+    let m = root.join("projects/bp/milestones/m.md");
+    std::fs::write(&m, std::fs::read_to_string(&m).unwrap().replace("planned", "approved")).unwrap();
+    git(root, &["commit", "-qam", "approve m"]);
+    let declared = |id: &str| common::bp(root, &["risk", id]).1["declared"].clone();
+    assert_eq!(declared(ISSUE), "high");
+    let mut from = ISSUE.to_string();
+    for to in ["projects/bp/issues/a2", "projects/bp/issues/a3"] {
+        git(root, &["mv", &format!("{from}.md"), &format!("{to}.md")]);
+        let body = (0..20).map(|n| format!("Line {n} of the body that {to} holds now.")).collect::<Vec<_>>().join("\n");
+        std::fs::write(root.join(format!("{to}.md")), issue("low", &body)).unwrap();
+        git(root, &["commit", "-qam", "a hand move"]);
+        let log = git(root, &["log", "--follow", "--format=%h", "--", &format!("{to}.md")]);
+        assert_eq!(log.lines().count(), 1, "git sees no rename, so the move starts a new history: {log}");
+        assert_eq!(declared(to), "high", "{to}");
+        from = to.to_string();
+    }
+}
