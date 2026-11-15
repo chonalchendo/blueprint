@@ -1,0 +1,24 @@
+# Risk rules for Blueprint (37, design change 1). A change to this file is high.
+# The built-in high paths hold without this file: .bp/, .github/workflows/, .claude/, .codex/, .agents/,
+# .gitmodules and .gitattributes.
+high:
+  # The code that decides who may merge: the level, the rounds, the land gates and the signed acts.
+  - crates/bp-change/src/risk.rs
+  - crates/bp-change/src/rounds.rs
+  - crates/bp-tool/src/land.rs
+  - crates/bp-tool/src/land/
+  - crates/bp-tool/src/gate.rs
+  - crates/bp-tool/src/signed.rs
+  - crates/bp-tool/src/approve.rs
+  - crates/bp-read/src/inputs/declared.rs
+  - deny.toml
+  - rust-toolchain.toml
+  - .cargo/
+low:
+  - README.md
+limits:
+  low_lines: 150
+  high_lines: 800
+  packages: 3
+signer: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICXVTHMJe2ytOz8L0oaUB7wc00C+gNdx1G0Qpo5Iljk9 bp-human
+gate: 7b72a2f2bc49085cf4c413af472aade4c282f384
