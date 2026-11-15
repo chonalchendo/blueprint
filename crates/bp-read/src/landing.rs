@@ -44,6 +44,18 @@ pub fn no_pull_request(id: &Id) -> Refusal {
     )
 }
 
+/// `master_red`: the base branch is red after a land of the project, and this pull request is no exact revert of the
+/// red commit (37, design change 11). `fix` names the act that ends the red in its case.
+pub fn master_red(red: &bp_change::intents::Red, fix: String) -> Refusal {
+    Refusal::new(
+        Code::MasterRed,
+        red.id.as_str(),
+        "while the base branch is red after a land, land merges only the exact revert of the red commit (37, design \
+         change 11)",
+        fix,
+    )
+}
+
 /// The fix of any refusal on a merged pull request: no approval or run can follow a merge, so the human judges a
 /// change that skipped a gate.
 pub fn after_merge(number: u64, id: &Id) -> String {
@@ -51,6 +63,22 @@ pub fn after_merge(number: u64, id: &Id) -> String {
         "pull request {number} is merged, so nothing can meet this now and nothing is recorded; the human reviews the \
          merge, then bp release {id} --reason lost"
     )
+}
+
+/// The refusal of the gate `unmet`, as `land` and the Change page give it. At high's round cap a row with no
+/// disposition, or an error row that holds, goes to the human, as the blocked intent's note says: a worker's fix would
+/// push a head that voids the approval (37, design change 6; review of #100, X3; review of #102, T11).
+pub fn gated(issue: &bp_change::intents::Issue, unmet: &Unmet, id: &Id, pr: &PullRequest) -> Refusal {
+    let mut r = refusal(unmet, id, pr);
+    if matches!(unmet, Unmet::Unanswered(_) | Unmet::Holding(_)) && bp_change::intents::at_cap(issue, &pr.head_ref_oid)
+    {
+        r.fix = format!(
+            "round cap at {}: the human abandons the issue, or accepts the open rows: the human runs bp approve {id} \
+             from a shell; then bp land {id}",
+            pr.head_ref_oid
+        );
+    }
+    r
 }
 
 /// The first unmet part of needs landing as its refusal (26, design change 4; 37, design change 3).

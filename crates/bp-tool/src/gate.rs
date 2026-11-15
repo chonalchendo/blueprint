@@ -56,7 +56,7 @@ pub(crate) fn gate(cwd: &Path, g: &Gate) -> Result<Value, Refusal> {
         }
     }
     for (flag, branch) in [("--base-ref", &g.base_ref), ("--default-ref", &g.default_ref)] {
-        if !is_branch(branch) {
+        if !is_branch(branch)? {
             return Err(Refusal::usage(format!("{flag} {branch:?}"), format!("{flag} takes a branch name")));
         }
     }

@@ -757,3 +757,158 @@ fn the_risk_label_is_a_closed_set_and_complex_a_bool() {
     let (_, v) = common::bp(root, &["risk", ISSUE]);
     assert_eq!(pick(&v), json!(["high", "high", null]), "{v}");
 }
+
+/// A hand `git mv` that rewrites the issue past git's rename threshold, with `risk: low`, in one commit after the
+/// milestone's approval, reads the label of the file the commit deleted: still high (review of #100, L1). A second
+/// such move reads it too.
+#[test]
+fn a_hand_move_past_the_rename_threshold_keeps_the_label_it_replaced() {
+    let issue = |risk: &str, body: &str| {
+        format!(
+            "---\nkind: issue\ntitle: A\nstatus: open\nunder: projects/bp/milestones/m\nrisk: {risk}\n---\n\n{body}\n"
+        )
+    };
+    let v = common::vault(&[
+        ("shared/.gitkeep", ""),
+        ("projects/bp/project.md", "---\nkind: project\ntitle: Bp\nstatus: active\n---\n"),
+        ("projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\n## Finish line\n"),
+        (&format!("{ISSUE}.md"), &issue("high", &"The first body, line by line.\n".repeat(20))),
+    ]);
+    let root = v.path();
+    let m = root.join("projects/bp/milestones/m.md");
+    std::fs::write(&m, std::fs::read_to_string(&m).unwrap().replace("planned", "approved")).unwrap();
+    git(root, &["commit", "-qam", "approve m"]);
+    let declared = |id: &str| common::bp(root, &["risk", id]).1["declared"].clone();
+    assert_eq!(declared(ISSUE), "high");
+    let mut from = ISSUE.to_string();
+    for to in ["projects/bp/issues/a2", "projects/bp/issues/a3"] {
+        git(root, &["mv", &format!("{from}.md"), &format!("{to}.md")]);
+        let body = (0..20).map(|n| format!("Line {n} of the body that {to} holds now.")).collect::<Vec<_>>().join("\n");
+        std::fs::write(root.join(format!("{to}.md")), issue("low", &body)).unwrap();
+        git(root, &["commit", "-qam", "a hand move"]);
+        let log = git(root, &["log", "--follow", "--format=%h", "--", &format!("{to}.md")]);
+        assert_eq!(log.lines().count(), 1, "git sees no rename, so the move starts a new history: {log}");
+        assert_eq!(declared(to), "high", "{to}");
+        from = to.to_string();
+    }
+}
+
+/// The vault of the L1 tests: [`ISSUE`] under the approved milestone `m` at `risk`, with a body of `lines` lines.
+fn moved_vault(risk: &str, under: bool) -> tempfile::TempDir {
+    let v = common::vault(&[
+        ("shared/.gitkeep", ""),
+        ("projects/bp/project.md", "---\nkind: project\ntitle: Bp\nstatus: active\n---\n"),
+        ("projects/bp/milestones/m.md", "---\nkind: milestone\ntitle: M\nstatus: planned\n---\n\n## Finish line\n"),
+        (&format!("{ISSUE}.md"), &moved_issue(risk, "The first body, line by line.", under)),
+    ]);
+    let m = v.path().join("projects/bp/milestones/m.md");
+    std::fs::write(&m, std::fs::read_to_string(&m).unwrap().replace("planned", "approved")).unwrap();
+    git(v.path(), &["commit", "-qam", "approve m"]);
+    v
+}
+
+/// An issue file at `risk` whose 20 body lines all hold `line`, with or without `under: m`.
+fn moved_issue(risk: &str, line: &str, under: bool) -> String {
+    let under = if under { "under: projects/bp/milestones/m\n" } else { "" };
+    let body = (0..20).map(|n| format!("{line} {n}.")).collect::<Vec<_>>().join("\n");
+    format!("---\nkind: issue\ntitle: A\nstatus: open\n{under}risk: {risk}\n---\n\n{body}\n")
+}
+
+/// A hand move's deleted labels only raise (review of #102, S5, F7 and T12). A commit that adds a new low issue and
+/// deletes a low one reads medium, as the new issue alone does: the deleted label is never the one in force at the
+/// lock. A move that drops `under:` keeps the label it replaced. Eleven hand moves read high: past the cap the read
+/// does not lower.
+#[test]
+fn a_hand_move_s_deleted_labels_only_raise() {
+    let v = moved_vault("low", true);
+    let root = v.path();
+    let declared = |id: &str| common::bp(root, &["risk", id]).1["declared"].clone();
+    // The issue was low before the approval, so it stays low; a new issue after the approval reads medium.
+    assert_eq!(declared(ISSUE), "low");
+    write(root, "projects/bp/issues/control.md", &moved_issue("low", "A control body, unlike the first.", true));
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "control"]);
+    assert_eq!(declared("projects/bp/issues/control"), "medium", "written after its milestone's approval");
+    git(root, &["rm", "-q", &format!("{ISSUE}.md")]);
+    write(root, "projects/bp/issues/attack.md", &moved_issue("low", "An attack body, unlike the others.", true));
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "delete a low issue beside the new one"]);
+    assert_eq!(declared("projects/bp/issues/attack"), "medium", "a decoy delete does not lower the new issue");
+
+    let v = moved_vault("high", true);
+    let root = v.path();
+    let declared = |id: &str| common::bp(root, &["risk", id]).1["declared"].clone();
+    git(root, &["mv", &format!("{ISSUE}.md"), "projects/bp/issues/b.md"]);
+    write(root, "projects/bp/issues/b.md", &moved_issue("low", "The body of b, with no milestone.", false));
+    git(root, &["commit", "-qam", "a hand move that drops under"]);
+    assert_eq!(declared("projects/bp/issues/b"), "high", "a dropped under keeps the moved label");
+
+    let v = moved_vault("high", true);
+    let root = v.path();
+    let declared = |id: &str| common::bp(root, &["risk", id]).1["declared"].clone();
+    let mut from = ISSUE.to_string();
+    for n in 0..11 {
+        let to = format!("projects/bp/issues/m{n}");
+        git(root, &["mv", &format!("{from}.md"), &format!("{to}.md")]);
+        write(root, &format!("{to}.md"), &moved_issue("low", &format!("Move {n}, a body all its own"), true));
+        git(root, &["commit", "-qam", "a hand move"]);
+        from = to;
+    }
+    assert_eq!(declared(&from), "high", "eleven moves: past the cap the read is high");
+}
+
+/// A hand move onto a path that an older, deleted issue once held keeps the moved label (review of #102, V5): every
+/// commit that added the path counts, not only the oldest. A move onto a fresh path reads the same.
+#[test]
+fn a_hand_move_onto_a_reused_path_keeps_its_label() {
+    for (to, under) in [("old", true), ("old", false), ("fresh", true)] {
+        let v = moved_vault("high", true);
+        let root = v.path();
+        let path = format!("projects/bp/issues/{to}.md");
+        if to == "old" {
+            write(root, &path, &moved_issue("low", "An old body that a deleted issue held.", true));
+            git(root, &["add", "-A"]);
+            git(root, &["commit", "-qm", "an old issue"]);
+            git(root, &["rm", "-q", &path]);
+            git(root, &["commit", "-qm", "the old issue goes"]);
+        }
+        git(root, &["mv", &format!("{ISSUE}.md"), &path]);
+        write(root, &path, &moved_issue("low", "The moved body, all its own.", under));
+        git(root, &["commit", "-qam", "a hand move onto the path"]);
+        let id = format!("projects/bp/issues/{to}");
+        assert_eq!(common::bp(root, &["risk", &id]).1["declared"], "high", "{to}, under: {under}");
+    }
+}
+
+/// `git log --follow` follows a copy too (review of #102, S6): a new issue close to a low one written before the
+/// approval does not take its history, so it reads medium.
+#[test]
+fn a_copy_of_a_low_issue_does_not_take_its_label() {
+    let v = moved_vault("low", true);
+    let root = v.path();
+    let text = std::fs::read_to_string(root.join(format!("{ISSUE}.md"))).unwrap();
+    write(root, "projects/bp/issues/copy.md", &text.replace("title: A", "title: Copy"));
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "a copy"]);
+    let log = git(root, &["log", "--follow", "--format=%h", "--", "projects/bp/issues/copy.md"]);
+    assert_eq!(log.lines().count(), 2, "git follows the copy into the first file's history: {log}");
+    assert_eq!(common::bp(root, &["risk", "projects/bp/issues/copy"]).1["declared"], "medium");
+}
+
+/// A move away and back reads the label it had (review of #102, W2): the read skips a path it already read, so the
+/// cycle `a → b → a` ends, and the cap counts distinct files only. A low or a medium issue stays as it was.
+#[test]
+fn a_move_away_and_back_reads_the_label_it_had() {
+    for (risk, want) in [("low", "low"), ("medium", "medium")] {
+        let v = moved_vault(risk, true);
+        let root = v.path();
+        let declared = || common::bp(root, &["risk", ISSUE]).1["declared"].clone();
+        assert_eq!(declared(), want, "before the moves");
+        let away = "projects/bp/issues/away.md";
+        git(root, &["mv", &format!("{ISSUE}.md"), away]);
+        git(root, &["commit", "-qm", "a hand move away"]);
+        git(root, &["mv", away, &format!("{ISSUE}.md")]);
+        git(root, &["commit", "-qm", "a hand move back"]);
+        assert_eq!(declared(), want, "{risk}: away and back");
+    }
+}

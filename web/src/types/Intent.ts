@@ -3,4 +3,4 @@
 /**
  * The intents, in predicate order (21).
  */
-export type Intent = "blocked" | "ready" | "waiting" | "working" | "needs-review" | "needs-response" | "needs-approval" | "needs-landing" | "drifted" | "needs-derivation" | "needs-shaping" | "needs-milestone-approval" | "needs-acceptance" | "re-asked";
+export type Intent = "master-red" | "blocked" | "ready" | "waiting" | "working" | "needs-review" | "needs-response" | "needs-approval" | "needs-landing" | "drifted" | "needs-derivation" | "needs-shaping" | "needs-milestone-approval" | "needs-acceptance" | "re-asked";

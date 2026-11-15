@@ -5,7 +5,7 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use bp_change::MilestoneStatus;
-use bp_change::intents::{self, Base, Dependency, IntegrityRun, Issue, Milestone, Verdict};
+use bp_change::intents::{self, Base, Dependency, IntegrityRun, Issue, Milestone, Red, Verdict};
 use bp_design::DesignStatus;
 use bp_reasoning::LearningStatus;
 use bp_vault::{Body, Code, DeltaState, DesignLevel, Filter, Id, Index, Kind, Record, Refusal, Vault};
@@ -22,6 +22,8 @@ pub struct Intents<'a> {
     /// The clock and the forge, read only when an issue is in view.
     pub world: Option<World>,
     integrity: RefCell<BTreeMap<String, Option<IntegrityRun>>>,
+    /// Each project's master-red that holds, read once per project (37, design change 11).
+    red: RefCell<BTreeMap<String, Option<Red>>>,
     /// Each design's latest acceptance, read once per call for `stale`.
     accepted: RefCell<BTreeMap<String, Option<String>>>,
     /// Each learning's creation, read once per call for `stale` with no evidence row. Every learning lives in
@@ -45,6 +47,7 @@ impl<'a> Intents<'a> {
             index,
             world,
             integrity: RefCell::default(),
+            red: RefCell::default(),
             accepted: RefCell::default(),
             created: OnceCell::new(),
             shaping: RefCell::default(),
@@ -69,7 +72,8 @@ impl<'a> Intents<'a> {
                         "a live issue's intent reads the clock and the forge; pass the issue's project to Intents::new",
                     ));
                 };
-                of(self.vault, self.index, world, id, status, self.integrity(id)?)
+                let red = self.red(id)?;
+                of(self.vault, self.index, world, id, status, self.integrity(id)?, red)
             }
             Kind::Milestone => self.milestone(id, status),
             Kind::Design => {
@@ -153,7 +157,18 @@ impl<'a> Intents<'a> {
             _ => {}
         }
         m.status = status.into();
+        if m.status == MilestoneStatus::Approved.as_str() {
+            m.red = self.red(id)?;
+        }
         Ok(intents::milestone(id, &m))
+    }
+
+    /// The master-red that holds for the project of `id`, read once per project (37, design change 11).
+    pub fn red(&self, id: &str) -> Result<Option<Red>, Refusal> {
+        match project(id) {
+            Some(p) => once(&self.red, &p, || crate::inputs::red(self.vault, self.index, &p)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -260,6 +275,7 @@ fn of(
     id: &str,
     status: &str,
     integrity: Option<String>,
+    red: Option<Red>,
 ) -> Result<Verdict, Refusal> {
     let Some(header) = index.header(id)? else {
         return Err(Refusal::new(
@@ -309,6 +325,8 @@ fn of(
     // review path reads, the label from the vault's history included, so a delta the issue caused or an earlier
     // review's `risk` row raises it, and a label lowered by hand does not lower it (37, design changes 1 and 9).
     let reviewed = crate::inputs::reviewed(vault, index, id)?;
+    // The revert issue of a red reads its own intents, as `land` reads its pull request (37, design change 11).
+    let revert = crate::inputs::revert_of(&header, red.as_ref());
     let issue = Issue {
         id: id.to_string(),
         status: status.into(),
@@ -320,6 +338,8 @@ fn of(
         base,
         answered,
         integrity,
+        red,
+        revert,
         ..reviewed
     };
     Ok(intents::issue(&issue, world.now))

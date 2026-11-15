@@ -110,15 +110,10 @@ fn act(
     }
     // A tool that cannot verify refuses here, not as a record or a key that does not verify (review of #100, F3).
     can_verify()?;
-    // At high's round cap the approval names the open rows it accepts, as they stand when it signs (37, design change
-    // 6), and signs them. Rows an earlier record of this head accepted are not named again, so a repeat names none and
-    // finds its record. A row recorded later is in no list.
-    let named: Vec<String> = match kind {
-        Kind::Approval => {
-            let issue = bp_read::inputs::reviewed(&vault, &index, id.as_str())?;
-            bp_change::intents::accepting(&issue, head).iter().map(|(review, n)| format!("{review}#{n}")).collect()
-        }
-        _ => Vec::new(),
+    let named = if kind == Kind::Approval {
+        accepting(&vault, &index, &id, head, &signer, (pr.number, base))?
+    } else {
+        Vec::new()
     };
     let signs =
         |lines: &[(&str, &str)]| Act { verb, node: &id, pull_request: pr.number, base, head, more: lines }.message();
@@ -184,6 +179,28 @@ fn act(
     Ok(Wrote::Changed(v))
 }
 
+/// The rows an approval of `head` accepts now, as `<review id>#<row>`. At high's round cap the approval names the open
+/// rows, as they stand when it signs (37, design change 6), and signs them. Rows an earlier record of this head
+/// accepted are not named again, so a repeat names none and finds its record. A row recorded later is in no list.
+/// Only a record that verifies takes a row out of the list, so an unsigned record that names a row cannot hide it from
+/// the human (review of #100, X2).
+fn accepting(
+    vault: &Vault,
+    index: &Index,
+    id: &Id,
+    head: &str,
+    signer: &str,
+    forge: Forge,
+) -> Result<Vec<String>, Refusal> {
+    let mut issue = bp_read::inputs::reviewed(vault, index, id.as_str())?;
+    issue.approvals = match approved(index, id, head, signer, forge) {
+        Ok(accepts) => vec![bp_change::intents::Approval { head: head.to_string(), accepts }],
+        Err(e) if matches!(e.code, Code::SignatureInvalid | Code::ApprovalMissing) => Vec::new(),
+        Err(e) => return Err(e),
+    };
+    Ok(bp_change::intents::accepting(&issue, head).iter().map(|(review, n)| format!("{review}#{n}")).collect())
+}
+
 /// The head and the base branch the forge names, each a shape a record and a signed line can hold. The head names the
 /// record's file and a line of the signed message, so a slash or a newline from the forge would move the one and add a
 /// field to the other.
@@ -196,7 +213,7 @@ fn forge_shas<'a>(branch: &str, pr: &'a PullRequest) -> Result<(&'a str, &'a str
         ));
     }
     let base = pr.base_ref_name.as_deref().unwrap_or_default();
-    if !is_branch(base) {
+    if !is_branch(base)? {
         return Err(Refusal::failed(
             format!("gh pr list --head {branch}"),
             format!(

@@ -32,9 +32,11 @@ use crate::{Wrote, finish, node_id, subject};
 
 mod level;
 mod merging;
+mod red;
 
 use level::{lander, risen, trusted};
 use merging::{kept, merge, remove, worktree_clean};
+pub(crate) use red::confirmed;
 
 /// How long one `gh` or git call of `land` may run before it refuses `could_not_run` (review of #100, F11).
 const DEADLINE: Duration = Duration::from_secs(120);
@@ -219,8 +221,16 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     vault.committed()?;
     vault.clean([&id, &c.claim])?;
     worktree_clean(&c, &id)?;
+    // A red master comes before every other gate: only its exact revert lands, with no review (37, design change 11).
+    // A new red is recorded first, the dry run aside, so the intents read it with no forge call.
+    let revert = red::gate(&c, &gh, &vault, &index, &id, &pr, l.dry_run)?;
     let blocks = bp_read::inputs::blocks(&vault, id.as_str())?;
-    let mut issue = Issue { base: c.base.clone(), blocks, ..bp_read::inputs::reviewed(&vault, &index, id.as_str())? };
+    let mut issue = Issue {
+        base: c.base.clone(),
+        blocks,
+        revert: revert.clone(),
+        ..bp_read::inputs::reviewed(&vault, &index, id.as_str())?
+    };
     let read = bp_read::inputs::pull_request(&pr);
     let carried = crate::carry::read(&vault, &index, &id, crate::red_first::Based::default())?;
     let level = trusted(&c, &gh, &index, &id, &pr, &mut issue)?;
@@ -231,12 +241,12 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
     let named = carried.named_by(&c.top, &pr.head_ref_oid);
     let gate = match intents::gates(&issue, &read, named.as_ref().ok().copied()).unmet {
         Some(Unmet::Approval) => Err(level.1.unwrap_or_else(|| landing::refusal(&Unmet::Approval, &id, &pr))),
-        Some(unmet) => Err(landing::refusal(&unmet, &id, &pr)),
+        Some(unmet) => Err(landing::gated(&issue, &unmet, &id, &pr)),
         // The base the forge names is read after the gates above it, so a layer whose base has not landed gets
         // `base_unmerged` and not a refusal about a sha its own land replaces (review of #100, V6).
         None => named
             .and_then(|_| level::base(&c, &id, &pr))
-            .and_then(|base| risen(&c, &id, &issue, &pr.head_ref_oid, base))
+            .and_then(|base| if revert.is_some() { Ok(()) } else { risen(&c, &id, &issue, &pr.head_ref_oid, base) })
             .and_then(|()| {
                 // A merged head is behind its base by its own merge.
                 if merged(&pr) { Ok(()) } else { holds_base(&c, &id, &pr.head_ref_oid, true) }
@@ -277,11 +287,12 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         ));
     }
     let to = crate::clock::instant(crate::clock::now().unwrap_or(now));
-    let more = format!("pull_request: {}\n", pr.number);
+    let (more, ended) = red::lines(&vault, &id, &pr, revert.as_deref())?;
     let mut changes = BTreeMap::from([
         (c.claim.clone(), crate::claim::released(&vault.text(&c.claim)?, &to, "landed", &more)),
         (id.clone(), bp_vault::set_field(&vault.text(&id)?, "status", &resolved.into())),
     ]);
+    changes.extend(ended);
     // A stranded layer's step goes on its claim too, so its walk carries it to the next session (34, design change 5).
     changes.extend(noted(&vault, writer.index(), &moved)?);
     writer.trailer(format!("Bp-Claim: {}", c.claim));
@@ -293,6 +304,7 @@ pub(crate) fn land(cwd: &Path, l: &Land) -> Result<Wrote, Refusal> {
         "pull_request": pr.number,
         "head": pr.head_ref_oid,
         "level": level,
+        "reverts": revert,
         "branch_kept": kept,
         "restacked": moved.restacked,
         "stranded": moved.stranded,

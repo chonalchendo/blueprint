@@ -1,6 +1,6 @@
-//! The `Intents` function (21): one intent per live node, the first true predicate in a fixed order. Blocked comes
-//! first, because a blocked issue must never read as ready. Pure: the caller hands in the node's records, its
-//! dependencies' states and the forge's view of its pull request.
+//! The `Intents` function (21): one intent per live node, the first true predicate in a fixed order. Master-red comes
+//! first (37, design change 11), then blocked, because a blocked issue must never read as ready. Pure: the caller
+//! hands in the node's records, its dependencies' states and the forge's view of its pull request.
 //!
 //! The issue predicates live here; the design and milestone predicates, which follow them in the order, live in
 //! [`planning`].
@@ -15,11 +15,13 @@ use crate::rounds::{self, Review};
 
 mod gates;
 mod planning;
+mod red;
 mod review;
 mod route;
 mod stack;
 pub use gates::*;
 pub use planning::*;
+pub use red::*;
 pub use review::*;
 pub use route::*;
 pub use stack::*;
@@ -32,6 +34,7 @@ pub const STALE_AFTER: i64 = 12 * 3600;
 #[serde(rename_all = "kebab-case")]
 #[allow(missing_docs)]
 pub enum Intent {
+    MasterRed,
     Blocked,
     Ready,
     Waiting,
@@ -50,7 +53,8 @@ pub enum Intent {
 
 impl Intent {
     /// Every intent, in predicate order: a reader that places each one (the Moving groups) iterates it.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
+        Self::MasterRed,
         Self::Blocked,
         Self::Ready,
         Self::Waiting,
@@ -220,6 +224,12 @@ pub struct Issue {
     /// The note of the project's counting integrity run, when it failed and names the issue
     /// ([`IntegrityRun::blocks`]).
     pub integrity: Option<String>,
+    /// The project's master-red that holds ([`red_in_force`]) (37, design change 11).
+    pub red: Option<Red>,
+    /// The red commit this issue reverts: for `land`, the one its pull request reverts exactly ([`landable`]); for
+    /// the intents and the view, the red its label `reverts` names. The review gates then hold, since a revert
+    /// restores a tree the base branch held.
+    pub revert: Option<String>,
 }
 
 /// One node's intent and its note.
@@ -271,6 +281,14 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
 }
 
 fn verdict(i: &Issue, now: i64) -> Verdict {
+    // A red master comes first: no pull request of the project lands but its revert (37, design change 11). The
+    // revert issue reads its own intents, routed by its own level, so the session dispatches its build and lands it;
+    // every other issue waits and routes nothing.
+    if let Some(red) = &i.red
+        && i.revert.as_deref() != Some(red.sha.as_str())
+    {
+        return Verdict::of(Intent::MasterRed, red::note(red));
+    }
     let held = i.claims.iter().find(|c| c.released.is_none());
     if let Some(pr) = &i.pr
         && failed_at(&i.runs, &pr.head)
@@ -311,6 +329,10 @@ fn verdict(i: &Issue, now: i64) -> Verdict {
         return Verdict::of(Intent::Working, if stale { "stale" } else { "" });
     };
     let (level, _) = level(i, &pr.head);
+    // The revert of a red master meets no review gate (37, design change 11), so no review intent holds for it.
+    if i.revert.is_some() {
+        return if pr.green { gated(i, pr) } else { Verdict::of(Intent::Working, "checks not green") };
+    }
     let (blocking, capped) = holding(i, &pr.head);
     // At high's cap an error row goes to the human, not to another dispatch, until the human's approval of the head
     // accepts the open rows (37, design change 6).
@@ -355,6 +377,11 @@ fn verdict(i: &Issue, now: i64) -> Verdict {
     if !pr.green {
         return Verdict::of(Intent::Working, "checks not green");
     }
+    gated(i, pr)
+}
+
+/// The intent from `landing`'s first unmet gate, once the review intents and the forge checks hold.
+fn gated(i: &Issue, pr: &PullRequest) -> Verdict {
     // The gates' own order from here, so a stacked layer waits on its base before it asks the human: an approval of
     // the layer signs a head that the land below replaces (21, rule 1).
     match landing(i, pr) {

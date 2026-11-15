@@ -63,8 +63,20 @@ pub fn parents(kind: Kind) -> &'static [Kind] {
 }
 
 /// Every label field of any kind, for the fix that lists one kind's.
-const LABELS: [&str; 11] =
-    ["title", "tags", "applies", "class", "repository", "forge", "cue", "severity", "walkthrough", "risk", "complex"];
+const LABELS: [&str; 12] = [
+    "title",
+    "tags",
+    "applies",
+    "class",
+    "repository",
+    "forge",
+    "cue",
+    "severity",
+    "walkthrough",
+    "risk",
+    "complex",
+    "reverts",
+];
 
 /// What a label holds.
 enum Vocab {
@@ -85,7 +97,11 @@ fn vocab(kind: Kind, field: &str) -> Option<Vocab> {
         Vocab::Closed(all.iter().map(|v| text(*v)).collect())
     }
     Some(match (kind, field) {
-        (_, "title") | (Kind::Project, "repository" | "forge") | (Kind::Learning, "cue") => Vocab::Text,
+        // An issue's `reverts` names the red commit it reverts (37, design change 11): the intents route that issue
+        // alone while red.
+        (_, "title") | (Kind::Project, "repository" | "forge") | (Kind::Learning, "cue") | (Kind::Issue, "reverts") => {
+            Vocab::Text
+        }
         (_, "tags") | (Kind::Convention, "applies") => Vocab::Tags,
         (Kind::Project, "class") => closed(ProjectClass::ALL, ProjectClass::as_str),
         (Kind::Issue, "severity") => closed(Severity::ALL, Severity::as_str),
@@ -107,6 +123,8 @@ pub fn owner(kind: Kind, id: &Id, field: &str) -> Option<String> {
             Kind::BlueprintVersion => "bp stamp <milestone>".into(),
             Kind::Approval => format!("bp approve {parent}"),
             Kind::Lowering => format!("bp lower {parent} <level> --reason <why>"),
+            Kind::MasterRed => "bp land <issue> writes it when the base branch is red".into(),
+            Kind::Clear => format!("bp clear {}", parent.split('/').nth(1).unwrap_or("<project>")),
             _ => format!("bp record {kind} {parent}"),
         };
         return Some(format!("a record is never edited (13, rule 6); a correction is a new one: {verb}"));
@@ -179,6 +197,12 @@ pub fn label(kind: Kind, id: &Id, field: &str, value: &str) -> Result<Value, Ref
         Vocab::Closed(values) if values.contains(&value) => Ok(value.into()),
         Vocab::Closed(values) => Err(outside(&values)),
         Vocab::Text if field == "title" => title(&format!("{id} title"), value).map(|()| value.into()),
+        Vocab::Text if field == "reverts" && !crate::signed::is_sha(value) => Err(Refusal::new(
+            Code::UnknownValue,
+            format!("{field} {value}"),
+            "an issue reverts one red commit, named by its full sha (37, design change 11)",
+            "name the red commit the master-red note gives, all 40 hex digits",
+        )),
         Vocab::Text => Ok(value.into()),
         Vocab::Tags => {
             let mut tags: Vec<&str> = Vec::new();

@@ -48,7 +48,7 @@ fn sha(c: &Claimed, pr: &PullRequest, what: &str, v: Option<&str>) -> Result<Str
 /// them first, since every later git call and gate takes them (review of #100, F4 and F5).
 pub(super) fn shaped(c: &Claimed, pr: &PullRequest) -> Result<(), Refusal> {
     sha(c, pr, "head", Some(&pr.head_ref_oid))?;
-    if !merged(pr) && !pr.base_ref_name.as_deref().is_some_and(is_branch) {
+    if !merged(pr) && !is_branch(pr.base_ref_name.as_deref().unwrap_or_default())? {
         return Err(Refusal::failed(
             format!("gh pr list --head {}", c.branch),
             format!("the forge names no base branch of pull request {}; fix gh, then rerun", pr.number),
@@ -97,7 +97,7 @@ pub(super) fn base(c: &Claimed, id: &Id, pr: &PullRequest) -> Result<String, Ref
 }
 
 /// Puts into `issue` only the signed acts that verify (37, design changes 2 to 4), and returns the level in force with,
-/// for high, the refusal of an approval that does not verify. A lowering counts only when its signature verifies for
+/// for high, the refusal of an approval that does not verify; for the exact revert of a red master, the level alone. A lowering counts only when its signature verifies for
 /// the forge's pull request, its base and its head; an approval the same. The signer is read only when a lowering
 /// record names the head or the level is high, so a low or medium land reads no key. At high's round cap a fault of
 /// `ssh-keygen` or of the signer read refuses at once, with its own code.
@@ -110,6 +110,10 @@ pub(super) fn trusted(
     issue: &mut Issue,
 ) -> Result<(Level, Option<Refusal>), Refusal> {
     let head = pr.head_ref_oid.as_str();
+    // The exact revert of a red master needs no review and no signed act, so it reads no signer (37, design change 11).
+    if issue.revert.is_some() {
+        return Ok((intents::level(issue, head).0, None));
+    }
     let forge = (pr.number, pr.base_ref_name.as_deref().unwrap_or_default());
     let mut key: Option<String> = None;
     let mut signer = || -> Result<String, Refusal> {
@@ -149,12 +153,10 @@ pub(super) fn trusted(
             )),
         ),
         Ok(accepts) => (vec![intents::Approval { head: head.to_string(), accepts }], None),
-        // At the cap the rows the human accepted read open without the approval, so a tool or signer fault there
-        // refuses as itself, before the gates: never `findings_open` and a worker whose fix voids the approval
-        // (review of #100, W3).
-        Err(e) if intents::at_cap(issue, head) && !matches!(e.code, Code::SignatureInvalid | Code::ApprovalMissing) => {
-            return Err(e);
-        }
+        // At the cap the rows the human accepted read open without the approval, so every approval refusal there,
+        // a missing or unverified approval and a tool or signer fault alike, refuses as itself before the gates:
+        // never `findings_open` and a worker whose fix voids the approval (review of #100, W3 and X3).
+        Err(e) if intents::at_cap(issue, head) => return Err(e),
         Err(e) => (Vec::new(), Some(e)),
     };
     issue.approvals = approvals;
@@ -165,7 +167,7 @@ pub(super) fn trusted(
 /// head of the default branch that the forge names (review of #95, row 24). `gh` finds its repository from origin's
 /// url as git rewrites it, so a rewrite onto another repository of the same host passes this compare; `signer`'s
 /// test of the rewritten url refuses it.
-fn forge_signer(c: &Claimed, gh: &Gh) -> Result<String, Refusal> {
+pub(super) fn forge_signer(c: &Claimed, gh: &Gh) -> Result<String, Refusal> {
     let (key, sha) = crate::signed::signer(&c.top)?;
     let (branch, oid) = gh.default_head()?;
     if oid != sha {

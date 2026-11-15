@@ -27,6 +27,8 @@ crate::closed_enum! {
         BlueprintVersion = "blueprint-version",
         Approval = "approval",
         Lowering = "lowering",
+        MasterRed = "master-red",
+        Clear = "clear",
     }
 }
 
@@ -47,6 +49,8 @@ impl Kind {
                 | Self::BlueprintVersion
                 | Self::Approval
                 | Self::Lowering
+                | Self::MasterRed
+                | Self::Clear
         )
     }
 
@@ -74,6 +78,8 @@ impl Kind {
             Self::BlueprintVersion => "versions",
             Self::Approval => "approvals",
             Self::Lowering => "lowerings",
+            Self::MasterRed => "reds",
+            Self::Clear => "clears",
         }
     }
 
@@ -83,8 +89,9 @@ impl Kind {
 
     /// The kinds a record of this kind sits under (13): a claim and a review under an issue, a run under a check's
     /// owner, a delta under a design, a waiver under a milestone, evidence under a learning, a disposition under a
-    /// review, and the human's signed approval and lowering under an issue (37, design change 4). The project's own records sit under the project node; a handoff may also sit in `shared/`. Empty for
-    /// a node.
+    /// review, and the human's signed approval and lowering under an issue (37, design change 4). The project's own records
+    /// sit under the project node, a master-red record and the human's signed clear of it too (37, design change 11); a
+    /// handoff may also sit in `shared/`. Empty for a node.
     pub fn parents(self) -> &'static [Self] {
         match self {
             Self::Claim | Self::Review | Self::Approval | Self::Lowering => &[Self::Issue],
@@ -93,7 +100,9 @@ impl Kind {
             Self::Waiver => &[Self::Milestone],
             Self::Evidence => &[Self::Learning],
             Self::Disposition => &[Self::Review],
-            Self::ConcernAnswer | Self::Handoff | Self::BlueprintVersion => &[Self::Project],
+            Self::ConcernAnswer | Self::Handoff | Self::BlueprintVersion | Self::MasterRed | Self::Clear => {
+                &[Self::Project]
+            }
             _ => &[],
         }
     }
@@ -123,7 +132,13 @@ impl Kind {
     pub fn time_field(self) -> Option<&'static str> {
         match self {
             Self::Claim => Some("from"),
-            Self::Run | Self::Review | Self::Evidence | Self::Approval | Self::Lowering => Some("at"),
+            Self::Run
+            | Self::Review
+            | Self::Evidence
+            | Self::Approval
+            | Self::Lowering
+            | Self::MasterRed
+            | Self::Clear => Some("at"),
             Self::Delta => Some("stamp"),
             Self::ConcernAnswer => Some("decided_at"),
             Self::Handoff => Some("started_at"),
@@ -137,7 +152,7 @@ impl Kind {
     pub fn parent(self, id: &Id) -> Option<Id> {
         let p: Vec<&str> = id.as_str().split('/').collect();
         match self {
-            Self::Handoff | Self::ConcernAnswer | Self::BlueprintVersion => {
+            Self::Handoff | Self::ConcernAnswer | Self::BlueprintVersion | Self::MasterRed | Self::Clear => {
                 (p[0] == "projects").then(|| Id::from_trusted(format!("projects/{}/project", p[1])))
             }
             k if k.is_record() => Some(Id::from_trusted(p[..p.len() - 2].join("/"))),
@@ -160,7 +175,9 @@ impl Kind {
         match self {
             Self::Project => project(3) && p[2] == dir,
             Self::Design => DesignLevel::of(id).is_some(),
-            Self::Issue | Self::Milestone | Self::BlueprintVersion => project(4) && p[2] == dir,
+            Self::Issue | Self::Milestone | Self::BlueprintVersion | Self::MasterRed | Self::Clear => {
+                project(4) && p[2] == dir
+            }
             // One file per state of one concern: `concerns/<concern>/<stamp>` (13, ConcernAnswer).
             Self::ConcernAnswer => project(5) && p[2] == dir,
             Self::Decision | Self::Thread | Self::Inbox | Self::Handoff => {
@@ -253,6 +270,10 @@ mod tests {
                 && fits(Kind::Lowering, "projects/bp/issues/x/lowerings/h")
         );
         assert!(!fits(Kind::Approval, "projects/bp/milestones/m/approvals/h"), "an approval sits under an issue");
+        assert!(fits(Kind::MasterRed, "projects/bp/reds/h") && fits(Kind::Clear, "projects/bp/clears/h"));
+        assert!(!fits(Kind::Clear, "projects/bp/issues/x/clears/h"), "a clear sits under its project");
+        let red = Id::parse("projects/bp/reds/h").unwrap();
+        assert_eq!(Kind::MasterRed.parent(&red).unwrap().as_str(), "projects/bp/project");
         assert!(fits(Kind::Handoff, "projects/bp/handoffs/2026-05-31-7c08a6ac"));
         assert!(fits(Kind::Handoff, "shared/handoffs/2026-05-31-7c08a6ac"));
         assert!(fits(Kind::ConcernAnswer, "projects/bp/concerns/data-retention/2026-10-19T10-00-00Z"));

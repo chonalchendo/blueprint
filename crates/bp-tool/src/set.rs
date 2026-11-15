@@ -208,8 +208,8 @@ pub(crate) fn human(act: String) -> Result<Role, Refusal> {
     Err(Refusal::new(
         Code::RoleForbidden,
         act,
-        "BP_ROLE names an agent role, and the verb is the human's: stamp, approve, lower, or transition to approved or \
-         active",
+        "BP_ROLE names an agent role, and the verb is the human's: stamp, approve, lower, clear, or transition to \
+         approved or active",
         fix,
     ))
 }

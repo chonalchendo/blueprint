@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use bp_vault::Refusal;
 use serde::Deserialize;
 
-use crate::{PullRequest, Snapshot};
+use crate::{Checks, PullRequest, Snapshot};
 
 /// The fields every pull request read asks for, so a list row and a view parse into the same type.
 const FIELDS: &str = "number,url,state,baseRefName,baseRefOid,headRefName,headRefOid,mergeCommit,statusCheckRollup";
@@ -96,16 +96,75 @@ impl Gh {
             body: Option<String>,
         }
         let path = format!("repos/{{owner}}/{{repo}}/issues/{number}/comments");
-        let args = ["api", "--paginate", path.as_str()];
-        let out = self.run(&args)?;
-        let mut bodies = Vec::new();
-        for page in serde_json::Deserializer::from_slice(&out).into_iter::<Vec<Comment>>() {
-            let page = page.map_err(|e| {
-                Refusal::failed(Self::subject(&args), format!("gh printed JSON this tool cannot read: {e}"))
-            })?;
-            bodies.extend(page.into_iter().filter_map(|c| c.body));
+        Ok(self.pages::<Vec<Comment>>(&path)?.into_iter().flatten().filter_map(|c| c.body).collect())
+    }
+
+    /// What the forge shows at the commit `sha` (37, design change 11): the check runs (`check-runs`) and the commit
+    /// statuses (`status`, the older API a CI may post to), each `gh api --paginate`, one JSON object per page. A run
+    /// that ended `failure`, `timed_out` or `startup_failure`, or a status `failure` or `error`, failed. A run not yet
+    /// `completed`, or a status `pending`, is pending. A run cancelled by a newer one, skipped or neutral is neither.
+    /// The combined state of `status` is not read: it reads `pending` for a commit with no status at all. `land` reads
+    /// it at the base branch's head.
+    pub fn checks(&self, sha: &str) -> Result<Checks, Refusal> {
+        #[derive(Deserialize)]
+        struct Runs {
+            check_runs: Vec<Run>,
         }
-        Ok(bodies)
+        #[derive(Deserialize)]
+        struct Run {
+            name: Option<String>,
+            status: Option<String>,
+            conclusion: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Statuses {
+            statuses: Vec<Status>,
+        }
+        #[derive(Deserialize)]
+        struct Status {
+            context: Option<String>,
+            state: Option<String>,
+        }
+        let mut c = Checks::default();
+        for run in self.pages::<Runs>(&format!("repos/{{owner}}/{{repo}}/commits/{sha}/check-runs?per_page=100"))? {
+            for r in run.check_runs {
+                let name = r.name.unwrap_or_default();
+                if matches!(r.conclusion.as_deref(), Some("failure" | "timed_out" | "startup_failure")) {
+                    c.failed.push(name);
+                } else if r.status.as_deref() != Some("completed") && r.conclusion.is_none() {
+                    c.pending.push(name);
+                }
+            }
+        }
+        for page in self.pages::<Statuses>(&format!("repos/{{owner}}/{{repo}}/commits/{sha}/status?per_page=100"))? {
+            for s in page.statuses {
+                let name = s.context.unwrap_or_default();
+                match s.state.as_deref() {
+                    Some("failure" | "error") => c.failed.push(name),
+                    Some("pending") => c.pending.push(name),
+                    _ => {}
+                }
+            }
+        }
+        for names in [&mut c.failed, &mut c.pending] {
+            names.sort();
+            names.dedup();
+        }
+        Ok(c)
+    }
+
+    /// Each page of `gh api --paginate <path>`, which prints one JSON value per page.
+    fn pages<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, Refusal> {
+        let args = ["api", "--paginate", path];
+        let out = self.run(&args)?;
+        serde_json::Deserializer::from_slice(&out)
+            .into_iter::<T>()
+            .map(|page| {
+                page.map_err(|e| {
+                    Refusal::failed(Self::subject(&args), format!("gh printed JSON this tool cannot read: {e}"))
+                })
+            })
+            .collect()
     }
 
     /// Rewrites the snapshot in `dir` (27, design change 9): `gh pr list --state open` into `open-prs.json`, and
@@ -299,6 +358,12 @@ mod tests {
   "api graphql") echo '{"data":{"repository":{"defaultBranchRef":{"name":"master","target":{"oid":"abc"}}}}}' ;;
   "pr list") echo '[{"number":3,"headRefName":"bp/q","headRefOid":"h","baseRefName":"master","author":{"login":"quokka-agent"}}]' ;;
   "pr view") [ "$5" = body ] && { echo '{"body":"b"}'; exit; }; echo '{"number":'$3',"headRefName":"bp/q","headRefOid":"h","state":"OPEN","reviews":[{"state":"APPROVED","author":{"login":"r"},"commit":{"oid":"h"}}]}' ;;
+  "api --paginate") case "$3" in
+    */check-runs*) echo '{"check_runs":[{"name":"a","status":"completed","conclusion":"failure"},{"name":"b","status":"completed","conclusion":"cancelled"}]}'
+      echo '{"check_runs":[{"name":"c","status":"completed","conclusion":"timed_out"},{"name":"d","status":"completed","conclusion":"startup_failure"},{"name":"e","status":"in_progress","conclusion":null},{"name":"f","status":"completed","conclusion":"success"},{"name":"g","status":"completed","conclusion":"skipped"},{"name":"h","status":"completed","conclusion":"action_required"},{"name":"i","status":"completed","conclusion":"neutral"},{"name":"j","status":"completed","conclusion":"stale"}]}' ;;
+    */status*) echo '{"state":"pending","statuses":[{"context":"s1","state":"error"},{"context":"s2","state":"pending"}]}{"state":"failure","statuses":[{"context":"s3","state":"success"},{"context":"s4","state":"failure"}]}' ;;
+    *) echo '[{"body":"one"}][{"body":"two"},{"body":null}]' ;;
+  esac ;;
   "pr create") echo 'https://github.com/o/r/pull/3' ;;
   "pr edit") [ "$*" = "pr edit 3 --base master" ] || [ "$*" = "pr edit 3 --body b" ] || exit 9 ;;
   *) [ "$*" = "pr merge 3 --squash --match-head-commit h" ] || exit 9 ;;
@@ -309,6 +374,13 @@ esac"#,
         assert_eq!(prs[0].base_ref_name.as_deref(), Some("master"));
         assert_eq!(gh.pr(3).unwrap().state.as_deref(), Some("OPEN"));
         assert_eq!(gh.body(3).unwrap(), "b");
+        assert_eq!(gh.comments(3).unwrap(), ["one", "two"], "each page");
+        // Failed: a run's failure, timed_out or startup_failure, a status's error or failure, on either page. Pending:
+        // a run not completed, a status pending. A cancelled, skipped, neutral, stale or action_required run is
+        // neither, and the combined state of the status read is not read (37, design change 11).
+        let names = |n: &[&str]| n.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let c = gh.checks(&"a".repeat(40)).unwrap();
+        assert_eq!((c.failed, c.pending), (names(&["a", "c", "d", "s1", "s4"]), names(&["e", "s2"])));
 
         // The snapshot: the open list, a view per held pull request, and no view left of one no longer held.
         let snap = ok.path().join("snap");

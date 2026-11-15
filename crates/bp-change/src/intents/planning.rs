@@ -32,6 +32,8 @@ pub struct Milestone {
     pub broken: bool,
     /// The blocks of its open waivers ([`reasked`]).
     pub reasked: Vec<String>,
+    /// The project's master-red that holds (37, design change 11).
+    pub red: Option<super::Red>,
 }
 
 /// The intent of the milestone `id`. Blocked comes first, for a milestone not yet done or abandoned.
@@ -41,6 +43,13 @@ pub fn milestone(id: &str, m: &Milestone) -> Verdict {
         && let Some(note) = &m.integrity
     {
         return Verdict::of(Intent::Blocked, note.clone());
+    }
+    // A red master with no live issue to carry it shows on the milestone, so no stamp lands on a red base branch.
+    if matches!(status, Ok(MilestoneStatus::Approved))
+        && let Some(red) = &m.red
+        && !m.issues.iter().any(|s| is_live_issue(s))
+    {
+        return Verdict::of(Intent::MasterRed, super::note(red));
     }
     match status {
         Ok(MilestoneStatus::Planned) => Verdict::of(Intent::NeedsMilestoneApproval, ""),

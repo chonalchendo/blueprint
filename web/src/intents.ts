@@ -4,7 +4,7 @@ import type { Intent } from "./types/Intent";
 export const GROUPS: { group: string; intents: Intent[] }[] = [
   { group: "needs landing", intents: ["needs-landing"] },
   { group: "needs acceptance", intents: ["needs-acceptance", "needs-milestone-approval", "re-asked"] },
-  { group: "blocked", intents: ["blocked", "drifted"] },
+  { group: "blocked", intents: ["master-red", "blocked", "drifted"] },
   { group: "ready", intents: ["ready"] },
   {
     group: "working",
