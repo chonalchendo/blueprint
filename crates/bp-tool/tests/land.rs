@@ -2679,25 +2679,39 @@ fn a_merged_revert_finishes_as_the_revert_and_records_its_red() {
     assert!(out["fix"].as_str().unwrap().contains("pull request 1 is merged"), "{out}");
 }
 
-/// The exact revert of a red lands at high with no signer and no review: it reads no key (review of #102, T9).
+/// The exact revert of a red lands at high with no review and no signed approval: it reads no key, so the forge's
+/// default branch is never asked for the signer (review of #102, T9). A merge the forge names no commit of refuses
+/// `could_not_run` and releases nothing, so no land record leaves a red unread (S8).
 #[test]
 fn a_high_exact_revert_lands_with_no_signer() {
-    let (v, t) = setup();
-    let (v, t) = (v.path(), t.path());
-    let (w, _, red) = red_master(v, t);
-    label(v, "risk: high");
-    landed_at(v, t, &red, None);
-    checks_at(t, &red, Some("failure"));
-    git(&w, &["rm", "-q", "break.txt", "other.txt"]);
-    let exact = commit(&w, &["add", "-A"], "revert");
-    bp(v, t, &[], &["pr", ISSUE]);
-    forge(t, &exact, &["SUCCESS"]);
-    let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
-    assert_eq!(
-        (code, out["level"].as_str(), out["reverts"].as_str()),
-        (Some(0), Some("high"), Some(red.as_str())),
-        "{out}"
-    );
+    for strip in [false, true] {
+        let (v, t) = setup();
+        let (v, t) = (v.path(), t.path());
+        signer(t);
+        let (w, _, red) = red_master(v, t);
+        label(v, "risk: high");
+        landed_at(v, t, &red, None);
+        checks_at(t, &red, Some("failure"));
+        git(&w, &["rm", "-q", "break.txt", "other.txt"]);
+        let exact = commit(&w, &["add", "-A"], "revert");
+        bp(v, t, &[], &["pr", ISSUE]);
+        forge(t, &exact, &["SUCCESS"]);
+        if strip {
+            let f = t.join("prs.json").display().to_string();
+            let script = format!(
+                "sed 's/\"mergeCommit\":{{\"oid\":\"[0-9a-f]*\"}},//' '{f}' > '{f}.tmp' && mv '{f}.tmp' '{f}'\n"
+            );
+            std::fs::write(t.join("on-merge"), script).unwrap();
+            let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+            assert_eq!((code, out["code"].as_str()), (Some(1), Some("could_not_run")), "{out}");
+            assert!(!std::fs::read_to_string(v.join(format!("{ISSUE}.md"))).unwrap().contains("status: resolved"));
+            continue;
+        }
+        let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
+        let got = (code, out["level"].as_str(), out["reverts"].as_str());
+        assert_eq!(got, (Some(0), Some("high"), Some(red.as_str())), "{out}");
+        assert!(!t.join("graphql").exists(), "no signer read");
+    }
 }
 
 /// The view and the session read the red as `land` does (review of #102, T3 and C1). While red, the Change page of a
