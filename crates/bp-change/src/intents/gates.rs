@@ -178,6 +178,13 @@ pub fn gates<'a>(i: &'a Issue, pr: &'a PullRequest, named: Option<bool>) -> Gate
 /// of each row, no error row that holds, and for high an approval record at the head. `head` is the short head.
 fn reviewed<'a>(i: &'a Issue, pr: &PullRequest, head: &str) -> [(Gate, Option<Unmet<'a>>); 4] {
     let gate = |name: &str, state, detail: String| Gate { name: name.into(), state, detail };
+    // The exact revert of a red master restores a tree the base branch held, so no review reads it (37, design change
+    // 11); the forge checks and the runs still hold.
+    if let Some(red) = &i.revert {
+        let detail = format!("the exact revert of {}: no review", &red[..red.len().min(7)]);
+        return ["review", "dispositions", "error rows", "signed approval"]
+            .map(|name| (gate(name, GateState::Pass, detail.clone()), None));
+    }
     let level = level(i, &pr.head).0;
     let (round, missing) = (round(i, &pr.head), missing(i, &pr.head));
     let lenses = if missing.is_empty() {

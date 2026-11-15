@@ -1,5 +1,5 @@
-//! The `Intents` function (21): one intent per live node, the first true predicate in a fixed order. Blocked comes
-//! first, because a blocked issue must never read as ready. Pure: the caller hands in the node's records, its
+//! The `Intents` function (21): one intent per live node, the first true predicate in a fixed order. Master-red comes
+//! first (37, design change 11), then blocked, because a blocked issue must never read as ready. Pure: the caller hands in the node's records, its
 //! dependencies' states and the forge's view of its pull request.
 //!
 //! The issue predicates live here; the design and milestone predicates, which follow them in the order, live in
@@ -15,11 +15,13 @@ use crate::rounds::{self, Review};
 
 mod gates;
 mod planning;
+mod red;
 mod review;
 mod route;
 mod stack;
 pub use gates::*;
 pub use planning::*;
+pub use red::*;
 pub use review::*;
 pub use route::*;
 pub use stack::*;
@@ -32,6 +34,7 @@ pub const STALE_AFTER: i64 = 12 * 3600;
 #[serde(rename_all = "kebab-case")]
 #[allow(missing_docs)]
 pub enum Intent {
+    MasterRed,
     Blocked,
     Ready,
     Waiting,
@@ -50,7 +53,8 @@ pub enum Intent {
 
 impl Intent {
     /// Every intent, in predicate order: a reader that places each one (the Moving groups) iterates it.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
+        Self::MasterRed,
         Self::Blocked,
         Self::Ready,
         Self::Waiting,
@@ -220,6 +224,12 @@ pub struct Issue {
     /// The note of the project's counting integrity run, when it failed and names the issue
     /// ([`IntegrityRun::blocks`]).
     pub integrity: Option<String>,
+    /// The project's master-red that holds ([`red_in_force`]); the intents read the records and verify no clear (37, design
+    /// change 11).
+    pub red: Option<Red>,
+    /// The red commit that this pull request reverts exactly, which only `land` reads ([`landable`]): the review
+    /// gates then hold, since a revert restores a tree the base branch held.
+    pub revert: Option<String>,
 }
 
 /// One node's intent and its note.
@@ -271,6 +281,11 @@ pub fn issue(i: &Issue, now: i64) -> Verdict {
 }
 
 fn verdict(i: &Issue, now: i64) -> Verdict {
+    // A red master comes first: no pull request of the project lands but its revert (37, design change 11). The
+    // revert is a worker's build, mechanical, so it routes as low.
+    if let Some(red) = &i.red {
+        return Verdict::of(Intent::MasterRed, red::note(red)).routed(Task::Build, Level::Low, false);
+    }
     let held = i.claims.iter().find(|c| c.released.is_none());
     if let Some(pr) = &i.pr
         && failed_at(&i.runs, &pr.head)

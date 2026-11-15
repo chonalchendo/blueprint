@@ -60,6 +60,7 @@ crate::closed_enum! {
         FindingsOpen = "findings_open",
         BaseUnconfirmed = "base_unconfirmed",
         ClaimLost = "claim_lost",
+        MasterRed = "master_red",
     }
 }
 

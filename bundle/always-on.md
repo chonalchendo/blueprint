@@ -9,6 +9,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 
 ### Intent to action
 
+- `master-red`: the base branch is red after a land, so no pull request of the project lands but the revert. Its note names the red commit. Create one issue for the revert, with a block that fails at the red commit. Dispatch `bp-worker` with its `complete` template and the intent's `model` and `effort`. Give the human `bp clear <project>` too.
 - A design is missing: run the skill `bp-design`.
 - `needs-shaping`: an active design has an unproven concern, and no milestone is `planned` or `approved`. A concern is unproven when its latest answer is `open`, or `designed` with no milestone stamped after it. Run the skill `bp-shape`.
 - `needs-derivation`: an approved milestone has fewer than three live issues, and a finish-line block that no issue covers. Run the skill `bp-derive`.
@@ -44,9 +45,10 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 
 ### The human's acts
 
-Give the human these commands. Only the human runs `bp approve <issue>` and `bp lower <issue> low --reason <why>`, in a terminal. The signing key never goes into an agent.
+Give the human these commands. Only the human runs `bp approve <issue>`, `bp lower <issue> low --reason <why>` and `bp clear <project>`, in a terminal. The signing key never goes into an agent.
 
 - `needs-approval`: `bp approve <issue>`, in a terminal. It signs the head of a high pull request.
+- `master-red`: `bp clear <project>`, in a terminal, when the human accepts the red base branch. It signs the red commit.
 - `needs-milestone-approval`: `bp transition <milestone> approved --json`.
 - To activate a design draft: `bp transition <design> active --json`.
 - `needs-acceptance`: `bp stamp <milestone> --json`.

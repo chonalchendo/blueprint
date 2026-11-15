@@ -183,7 +183,7 @@ mod tests {
             let verbs = r.verbs();
             assert_eq!(verbs.is_none(), r == Role::Human, "{r}");
             let verbs = verbs.unwrap_or_default();
-            let human = ["stamp", "approve", "lower"];
+            let human = ["stamp", "approve", "lower", "clear"];
             assert!(verbs.iter().all(|v| !human.contains(v) && !READ_VERBS.contains(v)), "{r}");
             assert_eq!(verbs.contains(&"land"), r == Role::Session, "{r}: the session lands (37, design change 3)");
         }

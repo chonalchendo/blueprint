@@ -175,6 +175,8 @@ fn not_recorded(text: &str) -> Refusal {
         Ok(Kind::Lowering) => {
             "only the human's bp lower <issue> <level> --reason <why> writes a lowering, signed".into()
         }
+        Ok(Kind::MasterRed) => "bp land <issue> writes a master-red record when the base branch is red".into(),
+        Ok(Kind::Clear) => "only the human's bp clear <project> writes a clear, signed".into(),
         Ok(k) if !k.is_record() => format!("kind {k} is a node: bp create {k}"),
         _ => "record writes one of: delta, review, disposition, concern-answer, evidence, handoff".into(),
     };

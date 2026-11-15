@@ -31,7 +31,7 @@ const GROUPS: [(&str, &str, &[Intent]); 5] = [
         "needs acceptance",
         &[Intent::NeedsAcceptance, Intent::NeedsMilestoneApproval, Intent::ReAsked],
     ),
-    ("blocked", "blocked", &[Intent::Blocked, Intent::Drifted]),
+    ("blocked", "blocked", &[Intent::MasterRed, Intent::Blocked, Intent::Drifted]),
     ("ready", "ready", &[Intent::Ready]),
     (
         "working",
@@ -257,6 +257,8 @@ pub(crate) fn next(id: &str, intent: Intent, note: &str, f: &Facts) -> Next {
             }
             _ => with("re-asked"),
         }),
+        // A red master waits on its revert or the human's clear; the note names both (37, design change 11).
+        Intent::MasterRed => Next::Wait(with("master red")),
         // An escalation waits on the human's answer, a write to the issue (21, blocked).
         Intent::Blocked if note == "escalated" => Next::Wait(match &f.escalated {
             Some((owner, date)) => format!("escalated by {owner} on {date}: answer in the issue"),
@@ -383,6 +385,12 @@ mod tests {
                 wait("response dispatch: no disposition: findings 2, 3"),
             ),
             (Intent::NeedsApproval, "", &at, cmd("bp approve projects/bp/issues/0411.x")),
+            (
+                Intent::MasterRed,
+                "master red at 1111; or the human runs bp clear bp",
+                &none,
+                wait("master red: master red at 1111; or the human runs bp clear bp"),
+            ),
             (
                 Intent::NeedsDerivation,
                 "a uncovered; bp walk m --for derive",

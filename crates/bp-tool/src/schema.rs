@@ -107,6 +107,8 @@ pub fn owner(kind: Kind, id: &Id, field: &str) -> Option<String> {
             Kind::BlueprintVersion => "bp stamp <milestone>".into(),
             Kind::Approval => format!("bp approve {parent}"),
             Kind::Lowering => format!("bp lower {parent} <level> --reason <why>"),
+            Kind::MasterRed => "bp land <issue> writes it when the base branch is red".into(),
+            Kind::Clear => format!("bp clear {}", parent.split('/').nth(1).unwrap_or("<project>")),
             _ => format!("bp record {kind} {parent}"),
         };
         return Some(format!("a record is never edited (13, rule 6); a correction is a new one: {verb}"));

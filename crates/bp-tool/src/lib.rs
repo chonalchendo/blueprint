@@ -1,4 +1,4 @@
-//! The tool: the 23 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
+//! The tool: the 24 verbs, the write path composition, the envelope. Every verb prints one JSON object on stdout with
 //! `--json`; diagnostics go to stderr.
 
 mod approve;
@@ -6,6 +6,7 @@ mod carry;
 mod chain;
 mod check;
 mod claim;
+mod clear;
 mod create;
 mod delta;
 mod diagram;
@@ -117,6 +118,8 @@ pub enum Verb {
     Approve(approve::Approve),
     /// The human's signed lowering of the issue's risk level at its pull request's head.
     Lower(approve::Lower),
+    /// The human's signed clear of the project's red master: its pull requests land again without a revert.
+    Clear(clear::Clear),
     /// The forge check `bp-gate`, in a plain clone with no vault: the level of the head's diff by the base's
     /// `.bp/risk.yml`, and for high a comment with the human's valid signature of this pull request's head.
     Gate(gate::Gate),
@@ -230,6 +233,7 @@ pub fn run(cli: &Cli, cwd: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Verb::Diagram(d) => diagram::run(cwd, d, cli.json, out),
         Verb::Approve(a) => wrote(approve::approve(cwd, a), cli.json, out),
         Verb::Lower(l) => wrote(approve::lower(cwd, l), cli.json, out),
+        Verb::Clear(c) => wrote(clear::clear(cwd, c), cli.json, out),
         Verb::Gate(g) => finish(gate::gate(cwd, g), cli.json, out),
     }
 }

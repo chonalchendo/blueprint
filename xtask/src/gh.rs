@@ -81,6 +81,9 @@ impl Fake {
                 let target = json!({ "name": name, "target": { "oid": oid } });
                 format!("{}\n", json!({ "data": { "repository": { "defaultBranchRef": target } } }))
             }
+            // `land` reads the check runs at the base branch's head (37, design change 11), from the same files as
+            // the rollup, in REST's lower-case words.
+            ["api", "--paginate", path] if path.contains("/check-runs") => self.check_runs(path)?,
             ["pr", "list", rest @ ..] => {
                 // `--limit` caps rows the fake never has that many of.
                 let f = flags(rest, &["--head", "--state", "--limit", "--json"], &[])?;
@@ -159,12 +162,30 @@ impl Fake {
                 String::new()
             }
             _ => bail!(
-                "unknown command \"{}\": the fake gh answers `api graphql` and `pr list|view|create|edit|merge|review`",
+                "unknown command \"{}\": the fake gh answers `api graphql`, `api --paginate <check-runs>` and \
+                 `pr list|view|create|edit|merge|review`",
                 args.join(" ")
             ),
         };
         self.save(&prs)?;
         Ok(out)
+    }
+
+    /// The check runs of the commit a `commits/<sha>/check-runs` path names, from the same files as the rollup, in
+    /// REST's lower-case words.
+    fn check_runs(&self, path: &str) -> Result<String> {
+        let sha = path.split('/').nth_back(1).context("a check-runs path names its commit")?;
+        let rollup = self.rollup(sha)?;
+        let runs: Vec<Value> = rollup
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| {
+                let lower = |k: &str| c[k].as_str().unwrap_or_default().to_ascii_lowercase();
+                json!({ "name": c["name"], "status": lower("status"), "conclusion": lower("conclusion") })
+            })
+            .collect();
+        Ok(format!("{}\n", json!({ "total_count": runs.len(), "check_runs": runs })))
     }
 
     /// Refreshes every open pull request from the bare copy and its rollup from `checks/<head>.json`, first on each

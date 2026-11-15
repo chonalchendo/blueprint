@@ -26,7 +26,8 @@ const S: &str = "projects/bp/designs/system";
 /// unless `merge-noop` exists, pushes the commit that `squash` names, if any, else the head's tree on master, to
 /// origin's master, as the forge's squash merge does, marks the row `MERGED` with that commit as its merge commit,
 /// then runs `on-merge`, if any. `pr list`
-/// runs `on-list` first, if any. It keeps the body in `body` and prints it as JSON with CRLF line ends, as a forge may
+/// runs `on-list` first, if any. `api --paginate .../commits/<sha>/check-runs` prints `runs-<sha>.json`, else no run,
+/// and logs the sha in `check-runs`. It keeps the body in `body` and prints it as JSON with CRLF line ends, as a forge may
 /// store it, escaping only those: a body holds no quote. The vault holds [`ISSUE`], with one block, under [`M`], with
 /// none, and [`BARE`], with none.
 fn setup() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -85,6 +86,10 @@ case "$1 $2" in
     merged="s/\"state\":\"OPEN\"/\"state\":\"MERGED\"/; s/^\[{{/[{{\"baseRefOid\":\"$before\",\"mergeCommit\":{{\"oid\":\"$m\"}},/"
     sed "$merged" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     [ ! -f '{t}/on-merge' ] || sh '{t}/on-merge' ;;
+  "api --paginate")
+    sha=$(printf '%s' "$3" | sed -n 's|.*/commits/\([0-9a-f]*\)/check-runs.*|\1|p')
+    echo "$sha" >> '{t}/check-runs'
+    if [ -f "{t}/runs-$sha.json" ]; then cat "{t}/runs-$sha.json"; else echo '{{"check_runs":[]}}'; fi ;;
   *) exit 9 ;;
 esac
 "#,
@@ -253,10 +258,11 @@ fn pr_then_land_refuses_in_order_and_lands_at_a_passing_head() {
         assert!(message.lines().any(|l| l == line), "{line} in {message}");
     }
     let released = std::fs::read_to_string(v.join(format!("{claim}.md"))).unwrap();
-    assert!(
-        released.ends_with("## Released\n\nto: 2026-10-19T08:00:00Z\nreason: landed\npull_request: 1\n"),
-        "{released}"
-    );
+    // The land record names the merge commit, which a red at the base reads (37, design change 11).
+    let merge = git(&t.join("origin.git"), &["rev-parse", "master"]);
+    let tail =
+        format!("## Released\n\nto: 2026-10-19T08:00:00Z\nreason: landed\npull_request: 1\nmerged: {}\n", merge.trim());
+    assert!(released.ends_with(&tail), "{released}");
     let (_, issue) = common::bp(v, &["show", ISSUE]);
     assert_eq!(issue["status"], "resolved");
     assert_eq!(bp(v, t, &[], &["land", ISSUE]).0, Some(3), "a resolved issue");
@@ -1767,12 +1773,14 @@ fn land_at_high_s_round_cap_takes_the_human_s_approval_as_the_disposition() {
     std::fs::write(v.join(format!("{ISSUE}/approvals/{h3}.md")), forged).unwrap();
     git(v, &["add", "."]);
     git(v, &["commit", "-qm", "a hand-written approval"]);
+    // At the cap an approval that does not verify refuses as itself, and names the human (review of #100, X3).
     let (code, out) = land(&["--dry-run"]);
     assert_eq!(
         (code, out["code"].as_str()),
-        (Some(2), Some("findings_open")),
+        (Some(2), Some("signature_invalid")),
         "an unsigned record accepts nothing: {out}"
     );
+    assert!(out["fix"].as_str().unwrap().contains(&format!("bp approve {ISSUE}")), "{out}");
     git(v, &["rm", "-q", "-r", "--", &format!("{ISSUE}/approvals")]);
     git(v, &["commit", "-qm", "the hand-written approval goes"]);
     assert_eq!(intent(v), (json!("blocked"), json!(cap)));
@@ -1817,11 +1825,14 @@ fn an_approval_accepts_only_the_rows_the_human_signed() {
     let (code, got) = review(v, t, &h3, &["round=3", "lens=verify", "mode=verify"], &row);
     assert_eq!(code, Some(0), "{got}");
     let fourth = got["id"].as_str().unwrap().to_string();
-    let refused = |why: &str| {
+    // At the cap each refusal names the human, never a worker (review of #100, X3).
+    let refused = |want: &str, why: &str| {
         let (code, out) = dry();
-        assert_eq!((code, out["code"].as_str()), (Some(2), Some("findings_open")), "{why}: {out}");
+        assert_eq!((code, out["code"].as_str()), (Some(2), Some(want)), "{why}: {out}");
+        let fix = out["fix"].as_str().unwrap();
+        assert!(fix.contains(&format!("bp approve {ISSUE}")) && !fix.contains("bp-worker"), "{why}: {fix}");
     };
-    refused("a row recorded after the approval");
+    refused("findings_open", "a row recorded after the approval");
     let dir = v.join(format!("{ISSUE}/approvals"));
     let signed = std::fs::read_to_string(dir.join(format!("{h3}.md"))).unwrap();
     let one = format!("\"{third}#1\"]");
@@ -1829,12 +1840,38 @@ fn an_approval_accepts_only_the_rows_the_human_signed() {
     let longer = signed.replace(&one, &format!("\"{third}#1\", \"{fourth}#1\"]"));
     std::fs::write(dir.join(format!("{h3}.md")), &longer).unwrap();
     git(v, &["commit", "-qam", "the agent adds a name to the list"]);
-    refused("a name added to the record");
+    refused("signature_invalid", "a name added to the record");
     std::fs::write(dir.join(format!("{h3}.md")), &signed).unwrap();
     std::fs::write(dir.join("copy.md"), &longer).unwrap();
     git(v, &["add", "."]);
     git(v, &["commit", "-qm", "the agent copies the record with a longer list"]);
-    refused("a copy of the record with a longer list");
+    refused("findings_open", "a copy of the record with a longer list");
+}
+
+/// At high's round cap a missing approval refuses as itself and names the human, as the blocked intent does (review of
+/// #100, X3). An unsigned record that names the open row takes it out of no list: `bp approve` names it, so the human
+/// signs it, and the land proceeds (X2).
+#[test]
+fn at_the_cap_an_unsigned_record_hides_no_row_from_the_human() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (h3, third, human) = at_cap(v, t);
+    let dry = || bp(v, t, &[("BP_ROLE", "session"), ("SSH_AUTH_SOCK", "")], &["land", ISSUE, "--dry-run"]);
+    let (code, out) = dry();
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("approval_missing")), "{out}");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.contains(&format!("the human runs bp approve {ISSUE}")) && !fix.contains("bp-worker"), "{fix}");
+    let forged = format!(
+        "---\nkind: approval\nunder: {ISSUE}\nhead: {h3}\npull_request: 1\nbase: master\naccepts:\n  - {third}#1\n---\n"
+    );
+    std::fs::create_dir_all(v.join(format!("{ISSUE}/approvals"))).unwrap();
+    std::fs::write(v.join(format!("{ISSUE}/approvals/{h3}.md")), forged).unwrap();
+    git(v, &["add", "."]);
+    git(v, &["commit", "-qm", "an unsigned approval that names the row"]);
+    let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["approve", ISSUE, "--key", &human]);
+    assert_eq!((code, &out["accepts"]), (Some(0), &json!([format!("{third}#1")])), "the human signs the row: {out}");
+    let (code, out) = dry();
+    assert_eq!(code, Some(0), "{out}");
 }
 
 /// Below high's round cap an approval names no row (37, design change 6; review of #100, W1): `bp approve` signs none,
@@ -2214,4 +2251,150 @@ fn a_rebase_merged_head_is_judged_by_its_whole_diff() {
     let (code, out) = bp(v, t, &[("BP_ROLE", "session")], &["land", ISSUE]);
     assert_eq!((code, out["code"].as_str()), (Some(2), Some("evidence_stale")), "{out}");
     assert!(out["fix"].as_str().unwrap().contains("pull request 1 is merged"), "{out}");
+}
+
+/// The red-master scenario (37, design change 11): [`ISSUE`] with a block that fails while `break.txt` exists, origin's
+/// master at `P` (adds `hello.txt`) then `R` (adds `break.txt`), and [`ISSUE`]'s pull request at a head that adds
+/// `other.txt` on `R`, green on the forge with both medium lenses. `R` has no check run yet and no land record. The
+/// worktree, the head and `R`.
+fn red_master(v: &Path, t: &Path) -> (std::path::PathBuf, String, String) {
+    let path = v.join(format!("{ISSUE}.md"));
+    let text = std::fs::read_to_string(&path).unwrap().replace("test -f hello.txt", "test ! -f break.txt");
+    std::fs::write(&path, text).unwrap();
+    git(v, &["commit", "-qam", "block"]);
+    let code = t.join("code");
+    git(&code, &["fetch", "-q", "origin"]);
+    git(&code, &["reset", "-q", "--hard", "origin/master"]);
+    std::fs::write(code.join("hello.txt"), "hi\n").unwrap();
+    commit(&code, &["add", "hello.txt"], "p");
+    std::fs::write(code.join("break.txt"), "x\n").unwrap();
+    let red = commit(&code, &["add", "break.txt"], "r");
+    git(&code, &["push", "-q", "origin", "master"]);
+    let (_, out) = bp(v, t, &[], &["cut", ISSUE]);
+    let w = Path::new(out["worktree"].as_str().unwrap()).to_path_buf();
+    std::fs::write(w.join("other.txt"), "o\n").unwrap();
+    let h = commit(&w, &["add", "other.txt"], "other");
+    bp(v, t, &[], &["pr", ISSUE]);
+    forge(t, &h, &["SUCCESS"]);
+    lenses(v, t, &h, &MEDIUM);
+    (w, h, red)
+}
+
+/// The check runs of the forge at `sha`: one run `ci` with `conclusion`, `None` while it runs.
+fn checks_at(t: &Path, sha: &str, conclusion: Option<&str>) {
+    let status = if conclusion.is_none() { "in_progress" } else { "completed" };
+    let runs = json!({ "check_runs": [{ "name": "ci", "status": status, "conclusion": conclusion }] });
+    std::fs::write(t.join(format!("runs-{sha}.json")), runs.to_string()).unwrap();
+}
+
+/// A land record of [`BARE`] that merged `sha` as pull request 7, as `land` writes one: a claim released `landed`.
+fn landed_at(v: &Path, sha: &str) {
+    let claim = format!(
+        "---\nkind: claim\nunder: {BARE}\nfrom: \"2026-10-18T08:00:00Z\"\nowner: worker\n---\n\n## Released\n\nto: \
+         2026-10-18T09:00:00Z\nreason: landed\npull_request: 7\nmerged: {sha}\n"
+    );
+    std::fs::create_dir_all(v.join(format!("{BARE}/claims"))).unwrap();
+    std::fs::write(v.join(format!("{BARE}/claims/landed.md")), claim).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "land bare"]);
+}
+
+/// The intent and note of `id` as `bp list issue` reads them.
+fn intent_of(v: &Path, id: &str) -> (Value, Value) {
+    let (_, list) = common::bp_env(v, &[("PATH", "/usr/bin:/bin")], &["list", "issue"]);
+    let row = list["rows"].as_array().unwrap().iter().find(|r| r["id"] == id).unwrap().clone();
+    (row["intent"].clone(), row["note"].clone())
+}
+
+/// `land` reads the check runs at the base branch's head (37, design change 11). A failed run there, on a commit that a
+/// land record of the project merged, makes the project red: `land` records it and refuses `master_red`, and every
+/// live issue of the project reads `master-red` first. A pending run is not red, and a red commit with no land record
+/// is no red of this project. Only the exact revert lands, with no review: a tree that differs by one byte refuses.
+/// The landed revert names the red it ends, and the red ends.
+#[test]
+fn master_red_holds_until_its_exact_revert_lands() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (w, _, red) = red_master(v, t);
+    let session = [("BP_ROLE", "session")];
+    let dry = |v: &Path| bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"].clone();
+    // The block fails at the head, so with no red the land refuses on its run.
+    assert_eq!(dry(v), "check_failed", "no check run at the base: no red");
+    assert!(std::fs::read_to_string(t.join("check-runs")).unwrap().contains(&red), "land read the runs at R");
+    checks_at(t, &red, Some("failure"));
+    assert_eq!(dry(v), "check_failed", "a red commit with no land record is no red of this project");
+    landed_at(v, &red);
+    checks_at(t, &red, None);
+    assert_eq!(dry(v), "check_failed", "a pending check is not red");
+    checks_at(t, &red, Some("failure"));
+    let (code, out) = bp(v, t, &session, &["land", ISSUE, "--dry-run"]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("master_red")), "{out}");
+    assert!(!v.join("projects/bp/reds").exists(), "the dry run writes no record");
+    let fix = out["fix"].as_str().unwrap();
+    assert!(fix.contains(&red) && fix.contains("bp clear bp") && fix.contains("ci failed"), "{fix}");
+
+    let (code, out) = bp(v, t, &session, &["land", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("master_red")), "{out}");
+    let (_, record) = common::bp(v, &["show", &format!("projects/bp/reds/{red}"), "--no-body"]);
+    assert_eq!((record["red"].as_str(), record["pull_request"].as_u64()), (Some(red.as_str()), Some(7)), "{record}");
+    assert!(!t.join("merged").exists(), "nothing merged");
+    for id in [ISSUE, BARE] {
+        let (intent, note) = intent_of(v, id);
+        assert_eq!(intent, "master-red", "{id}: {note}");
+        assert!(note.as_str().unwrap().contains(&red), "{note}");
+    }
+
+    // A revert whose tree differs from P's by one byte refuses; the exact one lands with no review at its head.
+    git(&w, &["rm", "-q", "break.txt", "other.txt"]);
+    std::fs::write(w.join("hello.txt"), "hi!\n").unwrap();
+    let near = commit(&w, &["add", "hello.txt"], "near revert");
+    bp(v, t, &[], &["pr", ISSUE]);
+    forge(t, &near, &["SUCCESS"]);
+    let (code, out) = bp(v, t, &session, &["land", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("master_red")), "{out}");
+    assert!(out["fix"].as_str().unwrap().contains("its tree is not the tree of"), "{out}");
+    std::fs::write(w.join("hello.txt"), "hi\n").unwrap();
+    let exact = commit(&w, &["add", "hello.txt"], "revert");
+    bp(v, t, &[], &["pr", ISSUE]);
+    forge(t, &exact, &["SUCCESS"]);
+    let (code, out) = bp(v, t, &session, &["land", ISSUE]);
+    assert_eq!(
+        (code, out["status"].as_str(), out["reverts"].as_str()),
+        (Some(0), Some("resolved"), Some(red.as_str())),
+        "{out}"
+    );
+    let claim = out["claim"].as_str().unwrap();
+    let released = std::fs::read_to_string(v.join(format!("{claim}.md"))).unwrap();
+    assert!(released.contains(&format!("reverts: {red}\n")), "{released}");
+    assert_ne!(intent_of(v, BARE).0, "master-red", "the landed revert ends the red");
+}
+
+/// The human's signed clear ends a red (37, design change 11): a hand-written clear changes nothing for `land`, and an
+/// agent role cannot run `bp clear`. `land` then refuses on its next gate.
+#[test]
+fn a_signed_clear_ends_master_red_and_a_forged_one_does_not() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let human = signer(t);
+    let (_, _, red) = red_master(v, t);
+    landed_at(v, &red);
+    checks_at(t, &red, Some("failure"));
+    let session = [("BP_ROLE", "session")];
+    assert_eq!(bp(v, t, &session, &["land", ISSUE]).1["code"], "master_red");
+    let forged = format!(
+        "---\nkind: clear\nunder: projects/bp/project\nred: {red}\npull_request: 7\nbase: master\nat: \
+         \"2026-10-19T08:00:00Z\"\n---\n\n## Signature\n\n```\n-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQ==\n-----END \
+         SSH SIGNATURE-----\n```\n"
+    );
+    std::fs::create_dir_all(v.join("projects/bp/clears")).unwrap();
+    std::fs::write(v.join(format!("projects/bp/clears/{red}.md")), forged).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "clear by hand"]);
+    assert_eq!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], "master_red", "a forged clear");
+    let (code, out) = bp(v, t, &session, &["clear", "bp", "--key", &human]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("role_forbidden")), "{out}");
+    let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["clear", "bp", "--key", &human]);
+    assert_eq!((code, out["red"].as_str()), (Some(0), Some(red.as_str())), "{out}");
+    assert_eq!(bp(v, t, &[("SSH_AUTH_SOCK", "")], &["clear", "bp", "--key", &human]).0, Some(3), "a repeat");
+    assert_eq!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], "check_failed", "cleared: the next gate");
 }

@@ -108,6 +108,35 @@ impl Gh {
         Ok(bodies)
     }
 
+    /// The names of the check runs at the commit `sha` that ended failed (`gh api --paginate`, one JSON object per
+    /// page): a conclusion of `failure`, `timed_out` or `startup_failure`. A run still pending, or cancelled by a newer
+    /// one, is not failed (37, design change 11). `land` reads it at the base branch's head.
+    pub fn failed_checks(&self, sha: &str) -> Result<Vec<String>, Refusal> {
+        #[derive(Deserialize)]
+        struct Page {
+            check_runs: Vec<Run>,
+        }
+        #[derive(Deserialize)]
+        struct Run {
+            name: Option<String>,
+            conclusion: Option<String>,
+        }
+        let path = format!("repos/{{owner}}/{{repo}}/commits/{sha}/check-runs?per_page=100");
+        let args = ["api", "--paginate", path.as_str()];
+        let out = self.run(&args)?;
+        let mut failed = Vec::new();
+        for page in serde_json::Deserializer::from_slice(&out).into_iter::<Page>() {
+            let page = page.map_err(|e| {
+                Refusal::failed(Self::subject(&args), format!("gh printed JSON this tool cannot read: {e}"))
+            })?;
+            let red = |r: &Run| matches!(r.conclusion.as_deref(), Some("failure" | "timed_out" | "startup_failure"));
+            failed.extend(page.check_runs.iter().filter(|r| red(r)).map(|r| r.name.clone().unwrap_or_default()));
+        }
+        failed.sort();
+        failed.dedup();
+        Ok(failed)
+    }
+
     /// Rewrites the snapshot in `dir` (27, design change 9): `gh pr list --state open` into `open-prs.json`, and
     /// `gh pr view <n>` into `pr-<n>.json` for each pull request whose slug `held` names. The held set is read from the
     /// open list and from the last snapshot, so a pull request merged under a held claim stays in view. Every call

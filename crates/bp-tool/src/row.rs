@@ -32,7 +32,7 @@ pub(crate) fn check(verb: &Verb) -> Result<(), Refusal> {
         Verb::Check(_) => "check",
         Verb::Install(_) => "install",
         Verb::Diagram(_) => "diagram",
-        Verb::Land(_) | Verb::Stamp(_) | Verb::Approve(_) | Verb::Lower(_) => return Ok(()),
+        Verb::Land(_) | Verb::Stamp(_) | Verb::Approve(_) | Verb::Lower(_) | Verb::Clear(_) => return Ok(()),
     };
     if READ_VERBS.contains(&name) {
         return Ok(());

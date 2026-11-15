@@ -5,7 +5,7 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use bp_change::MilestoneStatus;
-use bp_change::intents::{self, Base, Dependency, IntegrityRun, Issue, Milestone, Verdict};
+use bp_change::intents::{self, Base, Dependency, IntegrityRun, Issue, Milestone, Red, Verdict};
 use bp_design::DesignStatus;
 use bp_reasoning::LearningStatus;
 use bp_vault::{Body, Code, DeltaState, DesignLevel, Filter, Id, Index, Kind, Record, Refusal, Vault};
@@ -22,6 +22,8 @@ pub struct Intents<'a> {
     /// The clock and the forge, read only when an issue is in view.
     pub world: Option<World>,
     integrity: RefCell<BTreeMap<String, Option<IntegrityRun>>>,
+    /// Each project's master-red that holds, read once per project (37, design change 11).
+    red: RefCell<BTreeMap<String, Option<Red>>>,
     /// Each design's latest acceptance, read once per call for `stale`.
     accepted: RefCell<BTreeMap<String, Option<String>>>,
     /// Each learning's creation, read once per call for `stale` with no evidence row. Every learning lives in
@@ -45,6 +47,7 @@ impl<'a> Intents<'a> {
             index,
             world,
             integrity: RefCell::default(),
+            red: RefCell::default(),
             accepted: RefCell::default(),
             created: OnceCell::new(),
             shaping: RefCell::default(),
@@ -69,7 +72,11 @@ impl<'a> Intents<'a> {
                         "a live issue's intent reads the clock and the forge; pass the issue's project to Intents::new",
                     ));
                 };
-                of(self.vault, self.index, world, id, status, self.integrity(id)?)
+                let red = match project(id) {
+                    Some(p) => once(&self.red, &p, || crate::inputs::red(self.index, &p))?,
+                    None => None,
+                };
+                of(self.vault, self.index, world, id, status, self.integrity(id)?, red)
             }
             Kind::Milestone => self.milestone(id, status),
             Kind::Design => {
@@ -260,6 +267,7 @@ fn of(
     id: &str,
     status: &str,
     integrity: Option<String>,
+    red: Option<Red>,
 ) -> Result<Verdict, Refusal> {
     let Some(header) = index.header(id)? else {
         return Err(Refusal::new(
@@ -320,6 +328,7 @@ fn of(
         base,
         answered,
         integrity,
+        red,
         ..reviewed
     };
     Ok(intents::issue(&issue, world.now))
