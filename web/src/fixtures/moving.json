@@ -43,6 +43,7 @@
         {
             "group": "blocked",
             "intents": [
+                "master-red",
                 "blocked",
                 "drifted"
             ],
