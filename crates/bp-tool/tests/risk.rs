@@ -894,3 +894,21 @@ fn a_copy_of_a_low_issue_does_not_take_its_label() {
     assert_eq!(log.lines().count(), 2, "git follows the copy into the first file's history: {log}");
     assert_eq!(common::bp(root, &["risk", "projects/bp/issues/copy"]).1["declared"], "medium");
 }
+
+/// A move away and back reads the label it had (review of #102, W2): the read skips a path it already read, so the
+/// cycle `a → b → a` ends, and the cap counts distinct files only. A low or a medium issue stays as it was.
+#[test]
+fn a_move_away_and_back_reads_the_label_it_had() {
+    for (risk, want) in [("low", "low"), ("medium", "medium")] {
+        let v = moved_vault(risk, true);
+        let root = v.path();
+        let declared = || common::bp(root, &["risk", ISSUE]).1["declared"].clone();
+        assert_eq!(declared(), want, "before the moves");
+        let away = "projects/bp/issues/away.md";
+        git(root, &["mv", &format!("{ISSUE}.md"), away]);
+        git(root, &["commit", "-qm", "a hand move away"]);
+        git(root, &["mv", away, &format!("{ISSUE}.md")]);
+        git(root, &["commit", "-qm", "a hand move back"]);
+        assert_eq!(declared(), want, "{risk}: away and back");
+    }
+}

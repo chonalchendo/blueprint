@@ -105,14 +105,21 @@ fn labels(vault: &Vault, path: &str, until: Option<&str>) -> Result<Vec<(String,
 /// The highest label of each issue file of the project that a commit adding `issue`'s path deleted: a move git did
 /// not see as one. Every commit that added the path counts, not only the oldest, so a move onto a path that an older,
 /// deleted issue once held still reads the moved label (review of #102, V5). Each such file's own move is followed
-/// too, up to ten files; past that it reads high, so no chain of moves lowers a label.
+/// too, up to ten distinct files; past that it reads high, so no chain of moves lowers a label. A path already read
+/// is skipped, so a move away and back reads the label it had (W2).
 fn moved(vault: &Vault, issue: &str) -> Result<Option<Level>, Refusal> {
     const MOVES: usize = 10;
     let Some(project) = issue.split('/').nth(1) else { return Ok(None) };
     let issues = format!("./projects/{project}/issues");
-    let (mut best, mut paths) = (None, vec![format!("./{issue}.md")]);
-    for _ in 0..MOVES {
-        let Some(path) = paths.pop() else { return Ok(best) };
+    let (mut best, mut paths, mut read) = (None, vec![format!("./{issue}.md")], std::collections::BTreeSet::new());
+    while let Some(path) = paths.pop() {
+        if read.contains(&path) {
+            continue;
+        }
+        if read.len() == MOVES {
+            return Ok(Some(Level::High));
+        }
+        read.insert(path.clone());
         let added = git(&vault.root, &["log", "--format=%H", "--diff-filter=A", "--", &path])?;
         for commit in added.lines() {
             let args = ["show", "--format=", "--name-only", "--no-renames", "--diff-filter=D", "--relative", commit];
@@ -129,7 +136,7 @@ fn moved(vault: &Vault, issue: &str) -> Result<Option<Level>, Refusal> {
             }
         }
     }
-    Ok(if paths.is_empty() { best } else { Some(Level::High) })
+    Ok(best)
 }
 
 /// Each commit of the log `-p` that changed what `read` reads from the file, newest first, and the value it left.
