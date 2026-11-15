@@ -2567,6 +2567,32 @@ fn the_revert_of_a_revert_takes_no_exemption() {
     assert!(note.as_str().unwrap().contains("only the human runs bp clear bp"), "{note}");
 }
 
+/// An end record never stops a clear (review of #102, V1). A red that no revert can skip review for (the check reran
+/// green) and that a hand-written end record names: `land` refuses `master_red` and names the clear, and `bp clear`
+/// signs it. After the clear, `land` passes its red gate. `land` and `bp clear` judge a red ended alike.
+#[test]
+fn a_hand_end_record_never_stops_the_clear() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let human = signer(t);
+    let (_, _, red) = recorded(v, t);
+    checks_at(t, &red, Some("success"));
+    let end = format!(
+        "---\nkind: master-red\nunder: projects/bp/project\nred: \"{red}\"\nreverted: \"{red}\"\nat: \
+         \"2026-10-19T08:00:00Z\"\n---\n"
+    );
+    std::fs::write(v.join(format!("projects/bp/reds/{red}-end.md")), end).unwrap();
+    git(v, &["add", "-A"]);
+    git(v, &["commit", "-qm", "an end record by hand"]);
+    let session = [("BP_ROLE", "session")];
+    let (_, out) = bp(v, t, &session, &["land", ISSUE, "--dry-run"]);
+    assert_eq!(out["code"], "master_red", "{out}");
+    assert!(out["fix"].as_str().unwrap().contains("only its clear ends it"), "{out}");
+    let (code, out) = bp(v, t, &[("SSH_AUTH_SOCK", "")], &["clear", "bp", "--key", &human]);
+    assert_eq!((code, out["red"].as_str()), (Some(0), Some(red.as_str())), "the clear signs the red: {out}");
+    assert_ne!(bp(v, t, &session, &["land", ISSUE, "--dry-run"]).1["code"], "master_red", "cleared");
+}
+
 /// A red always has a legal exit (review of #102, C3, F2 and T2). After a revert merged outside `land`, `land` reads
 /// the red reverted from git and writes its end record, so the intents end it too; with no `land` run, the human's
 /// `bp clear` signs it. A commit after the red that is no exact revert ends nothing.

@@ -56,17 +56,22 @@ pub(crate) fn clear(cwd: &Path, c: &Clear) -> Result<Wrote, Refusal> {
         ));
     }
     can_verify()?;
-    // The red to clear is the one the intents show: the earliest that no end record and no valid clear ends. One that
-    // git shows reverted outside `land` is cleared too, so a red always has a legal exit.
+    // The red to clear is the earliest that `land` or the intents read as holding. `land` ends a red only on git's
+    // exact revert or a clear that verifies, so an end record, which a hand can write, never stops a clear (review of
+    // #102, V1). A red that git shows reverted and no end record names yet holds for the intents, so it is signed too:
+    // a red always has a legal exit.
     let Reds { reds, ended } = bp_read::inputs::reds(&vault, &index, &c.project)?;
     let mut open = None;
     for r in &reds {
-        if !ended.contains(&r.sha) && !cleared(&index, &node, r, &signer)? {
-            open = Some(r.clone());
+        let tip = crate::risk::at_origin(&top, &r.base)?;
+        let reverted = tip.as_deref().is_some_and(|tip| reverted(&top, r, tip).is_some());
+        let done = reverted && ended.contains(&r.sha);
+        if !done && !cleared(&index, &node, r, &signer)? {
+            open = Some((r.clone(), tip));
             break;
         }
     }
-    let Some(red) = open else {
+    let Some((red, tip)) = open else {
         if let Some(r) = reds.last() {
             return Ok(Wrote::Already(json!({ "project": c.project, "red": r.sha, "id": r.id })));
         }
@@ -87,7 +92,7 @@ pub(crate) fn clear(cwd: &Path, c: &Clear) -> Result<Wrote, Refusal> {
             format!("{} is not a record land wrote; the human clears it by hand: git rm it and commit it", red.id),
         ));
     }
-    let Some(tip) = crate::risk::at_origin(&top, &red.base)? else {
+    let Some(tip) = tip else {
         return Err(Refusal::failed(
             red.base.as_str(),
             format!("origin has no branch {}; git fetch, then rerun", red.base),
