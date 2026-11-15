@@ -102,32 +102,34 @@ fn labels(vault: &Vault, path: &str, until: Option<&str>) -> Result<Vec<(String,
     Ok(out)
 }
 
-/// The highest label of each issue file of the project that the commit adding `issue`'s path deleted: a move git did
-/// not see as one. Each such file's own move is followed too, up to ten moves; past that it reads high, so no chain of
-/// moves lowers a label.
+/// The highest label of each issue file of the project that a commit adding `issue`'s path deleted: a move git did
+/// not see as one. Every commit that added the path counts, not only the oldest, so a move onto a path that an older,
+/// deleted issue once held still reads the moved label (review of #102, V5). Each such file's own move is followed
+/// too, up to ten files; past that it reads high, so no chain of moves lowers a label.
 fn moved(vault: &Vault, issue: &str) -> Result<Option<Level>, Refusal> {
     const MOVES: usize = 10;
     let Some(project) = issue.split('/').nth(1) else { return Ok(None) };
     let issues = format!("./projects/{project}/issues");
-    let (mut best, mut path) = (None, format!("./{issue}.md"));
+    let (mut best, mut paths) = (None, vec![format!("./{issue}.md")]);
     for _ in 0..MOVES {
+        let Some(path) = paths.pop() else { return Ok(best) };
         let added = git(&vault.root, &["log", "--format=%H", "--diff-filter=A", "--", &path])?;
-        let Some(commit) = added.lines().last() else { return Ok(best) };
-        let args = ["show", "--format=", "--name-only", "--no-renames", "--diff-filter=D", "--relative", commit];
-        let gone = git(&vault.root, &[&args[..], &["--", &issues]].concat())?;
-        let gone: Vec<String> =
-            gone.lines().filter(|p| p.matches('/').count() == 3).map(|p| format!("./{p}")).collect();
-        let parent = format!("{commit}^");
-        for g in &gone {
-            let high = labels(vault, g, Some(&parent))?.into_iter().map(|(_, l)| l.unwrap_or(Level::Medium)).max();
-            best = best.max(high);
-        }
-        match gone.as_slice() {
-            [one] => path.clone_from(one),
-            _ => return Ok(best),
+        for commit in added.lines() {
+            let args = ["show", "--format=", "--name-only", "--no-renames", "--diff-filter=D", "--relative", commit];
+            let gone = git(&vault.root, &[&args[..], &["--", &issues]].concat())?;
+            let gone: Vec<String> =
+                gone.lines().filter(|p| p.matches('/').count() == 3).map(|p| format!("./{p}")).collect();
+            let parent = format!("{commit}^");
+            for g in &gone {
+                let high = labels(vault, g, Some(&parent))?.into_iter().map(|(_, l)| l.unwrap_or(Level::Medium)).max();
+                best = best.max(high);
+            }
+            if let [one] = gone.as_slice() {
+                paths.push(one.clone());
+            }
         }
     }
-    Ok(Some(Level::High))
+    Ok(if paths.is_empty() { best } else { Some(Level::High) })
 }
 
 /// Each commit of the log `-p` that changed what `read` reads from the file, newest first, and the value it left.

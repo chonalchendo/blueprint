@@ -857,6 +857,29 @@ fn a_hand_move_s_deleted_labels_only_raise() {
     assert_eq!(declared(&from), "high", "eleven moves: past the cap the read is high");
 }
 
+/// A hand move onto a path that an older, deleted issue once held keeps the moved label (review of #102, V5): every
+/// commit that added the path counts, not only the oldest. A move onto a fresh path reads the same.
+#[test]
+fn a_hand_move_onto_a_reused_path_keeps_its_label() {
+    for (to, under) in [("old", true), ("old", false), ("fresh", true)] {
+        let v = moved_vault("high", true);
+        let root = v.path();
+        let path = format!("projects/bp/issues/{to}.md");
+        if to == "old" {
+            write(root, &path, &moved_issue("low", "An old body that a deleted issue held.", true));
+            git(root, &["add", "-A"]);
+            git(root, &["commit", "-qm", "an old issue"]);
+            git(root, &["rm", "-q", &path]);
+            git(root, &["commit", "-qm", "the old issue goes"]);
+        }
+        git(root, &["mv", &format!("{ISSUE}.md"), &path]);
+        write(root, &path, &moved_issue("low", "The moved body, all its own.", under));
+        git(root, &["commit", "-qam", "a hand move onto the path"]);
+        let id = format!("projects/bp/issues/{to}");
+        assert_eq!(common::bp(root, &["risk", &id]).1["declared"], "high", "{to}, under: {under}");
+    }
+}
+
 /// `git log --follow` follows a copy too (review of #102, S6): a new issue close to a low one written before the
 /// approval does not take its history, so it reads medium.
 #[test]
