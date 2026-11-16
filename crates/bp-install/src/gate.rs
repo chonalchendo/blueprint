@@ -314,7 +314,7 @@ mod tests {
         assert!(runs.iter().any(|r| r.starts_with("gh api --paginate \"repos/$GH_REPO/issues/$BP_PR/comments\"")));
         // This repository runs the same file, for its own project.
         let ours = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github/workflows/bp-gate.yml"));
-        assert_eq!(ours.unwrap(), text, "the committed workflow is the one install writes for project bp");
+        assert_eq!(ours.unwrap(), workflow("blueprint"), "the committed workflow is install's for project blueprint");
         // CI runs the head's code, so its token reads only: else that code writes statuses, checks and runs.
         let ci = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github/workflows/ci.yml"));
         let ci = &YamlLoader::load_from_str(&ci.unwrap()).unwrap()[0];
