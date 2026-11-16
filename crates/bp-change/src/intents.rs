@@ -29,6 +29,12 @@ pub use stack::*;
 /// Twelve hours: a claim older than this with no run since reads `working (stale)`.
 pub const STALE_AFTER: i64 = 12 * 3600;
 
+/// A claim from `at` is stale when it is older than [`STALE_AFTER`] and no run came since: the test `working` and `cut`
+/// share, so a claim that reads stale is one that `cut` takes over. A claim with no time is never stale.
+pub fn is_stale(at: Option<i64>, runs: &[Run], now: i64) -> bool {
+    at.is_some_and(|at| now - at > STALE_AFTER && !runs.iter().any(|r| r.at.is_none_or(|t| t > at)))
+}
+
 /// The intents, in predicate order (21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
@@ -290,11 +296,6 @@ fn verdict(i: &Issue, now: i64) -> Verdict {
         return Verdict::of(Intent::MasterRed, red::note(red));
     }
     let held = i.claims.iter().find(|c| c.released.is_none());
-    if let Some(pr) = &i.pr
-        && failed_at(&i.runs, &pr.head)
-    {
-        return Verdict::of(Intent::Blocked, "run failed at head");
-    }
     // Escalated holds until the issue changes after the release: the human's answer is a write to the issue.
     if latest_claim(&i.claims).is_some_and(|c| c.escalated) && !i.answered {
         return Verdict::of(Intent::Blocked, "escalated");
@@ -308,6 +309,25 @@ fn verdict(i: &Issue, now: i64) -> Verdict {
     }
     if let Some(note) = &i.integrity {
         return Verdict::of(Intent::Blocked, note.clone());
+    }
+    // An open issue with no claim and a pull request of its own is a dead claim's work: a worker resumes it, and the
+    // pull request stands, so the stack test does not apply (21, ready).
+    if i.status == "open" && held.is_none() && i.pr.is_some() {
+        return Verdict::of(Intent::Ready, "resume").routed(Task::Build, level(i, "").0, i.complex);
+    }
+    // The issue's own red head is work for a worker, not a block (21, working). It comes after the three `blocked`
+    // causes the issue keeps (escalated, a missing dependency, integrity) and after resume, so a red head hides none
+    // of them and leaves no dead claim's pull request unrouted. The round cap, a later `blocked` return, comes after
+    // it on purpose: a red head is fixed before a cap stops the rounds.
+    if let Some(pr) = &i.pr {
+        let red = failed_blocks(&i.runs, &pr.head);
+        if !red.is_empty() {
+            return Verdict::of(Intent::Working, format!("failed at head: {}", red.join(", "))).routed(
+                Task::Build,
+                level(i, &pr.head).0,
+                i.complex,
+            );
+        }
     }
     if i.status == "open" && held.is_none() && i.pr.is_none() {
         return match stack(&i.depends) {
@@ -324,9 +344,7 @@ fn verdict(i: &Issue, now: i64) -> Verdict {
     }
     let Some(pr) = &i.pr else {
         let Some(c) = held else { return Verdict::NONE };
-        let stale =
-            c.at.is_some_and(|at| now - at > STALE_AFTER && !i.runs.iter().any(|r| r.at.is_none_or(|t| t > at)));
-        return Verdict::of(Intent::Working, if stale { "stale" } else { "" });
+        return Verdict::of(Intent::Working, if is_stale(c.at, &i.runs, now) { "stale" } else { "" });
     };
     let (level, _) = level(i, &pr.head);
     // The revert of a red master meets no review gate (37, design change 11), so no review intent holds for it.
@@ -408,9 +426,14 @@ pub fn recorded_risk(runs: &[Run], head: &str) -> Option<Level> {
     runs.iter().filter(|r| r.commit == head).filter_map(|r| Some(r.risk?.level)).max()
 }
 
-/// The latest run of an `error` check at `head` failed: blocked's first test, and the view's "red at head".
+/// The latest run of an `error` check at `head` failed: the view's "red at head".
 pub fn failed_at(runs: &[Run], head: &str) -> bool {
-    latest_at(runs, head).values().any(|r| r.failed)
+    !failed_blocks(runs, head).is_empty()
+}
+
+/// The checks whose latest `error` run at `head` failed, by name.
+pub fn failed_blocks<'a>(runs: &'a [Run], head: &str) -> Vec<&'a str> {
+    latest_at(runs, head).values().filter(|r| r.failed).map(|r| r.check.as_str()).collect()
 }
 
 /// The latest run of each `error` check at `head`; `at` is to the second, so attempts order the reruns.
@@ -675,9 +698,58 @@ mod tests {
         assert_eq!(issue(&i, NOW), Verdict::of(Intent::Blocked, "depends on abandoned x"));
         let own = Issue { pr: Some(pr("h", false)), ..open() };
         assert_eq!(
-            issue(&own, NOW).intent,
-            Some(Intent::NeedsReview),
-            "an issue with its own pull request is not ready"
+            issue(&own, NOW),
+            Verdict::of(Intent::Ready, "resume").routed(Task::Build, Level::Medium, false),
+            "an open issue with no claim and a pull request of its own resumes"
+        );
+    }
+
+    #[test]
+    fn own_red_head_is_working() {
+        let held = Issue {
+            status: "in-progress".into(),
+            claims: vec![Claim::default()],
+            pr: Some(pr("h", true)),
+            runs: vec![run("shape", NOW, "h", true), run("other", NOW, "h", false)],
+            ..Issue::default()
+        };
+        assert_eq!(
+            issue(&held, NOW),
+            Verdict::of(Intent::Working, "failed at head: shape").routed(Task::Build, Level::Medium, false),
+            "the note names the block, and a build route sends a worker"
+        );
+        let rerun = Run { attempt: 2, ..run("shape", NOW, "h", false) };
+        let green = Issue { runs: vec![run("shape", NOW, "h", true), rerun], ..held.clone() };
+        assert_ne!(issue(&green, NOW).intent, Some(Intent::Working), "a passing rerun clears it");
+        let lowered = Issue { declared: Some(Level::High), lowerings: vec![("h".into(), Level::Low)], ..held.clone() };
+        assert_eq!(
+            issue(&lowered, NOW),
+            Verdict::of(Intent::Working, "failed at head: shape").routed(Task::Build, Level::Low, false),
+            "the route reads the level at the pull request's head, not the base level"
+        );
+        let warn = Issue { runs: vec![Run { error: false, ..run("w", NOW, "h", true) }], ..held };
+        assert_ne!(issue(&warn, NOW).note, "failed at head: w", "a warn run is no red head");
+    }
+
+    #[test]
+    fn red_head_keeps_blocked_and_resume() {
+        let red = |i: Issue| Issue { pr: Some(pr("h", true)), runs: vec![run("own", NOW, "h", true)], ..i };
+        let escalated =
+            red(Issue { claims: vec![Claim { released: Some(2), escalated: true, ..Claim::default() }], ..open() });
+        assert_eq!(issue(&escalated, NOW), Verdict::of(Intent::Blocked, "escalated"));
+        let integrity = red(Issue {
+            claims: vec![Claim::default()],
+            integrity: Some("integrity: r1; rerun".into()),
+            ..Issue { status: "in-progress".into(), ..Issue::default() }
+        });
+        assert_eq!(issue(&integrity, NOW), Verdict::of(Intent::Blocked, "integrity: r1; rerun"));
+        let depends = red(Issue { depends: vec![Dependency { status: None, ..dep("x", "", false) }], ..open() });
+        assert_eq!(issue(&depends, NOW), Verdict::of(Intent::Blocked, "depends on missing x"));
+        let lost = red(Issue { claims: vec![Claim { released: Some(2), ..Claim::default() }], ..open() });
+        assert_eq!(
+            issue(&lost, NOW),
+            Verdict::of(Intent::Ready, "resume").routed(Task::Build, Level::Medium, false),
+            "a dead claim with a red head resumes"
         );
     }
 
@@ -715,9 +787,12 @@ mod tests {
         let red = Issue { pr: Some(pr("h", false)), ..i.clone() };
         assert_eq!(issue(&red, NOW), Verdict::of(Intent::Working, "checks not green"));
         let failed = Issue { runs: vec![run("a", NOW, "h", true)], ..i.clone() };
-        assert_eq!(issue(&failed, NOW), Verdict::of(Intent::Blocked, "run failed at head"));
+        assert_eq!(
+            issue(&failed, NOW),
+            Verdict::of(Intent::Working, "failed at head: a").routed(Task::Build, Level::Medium, false)
+        );
         let two = Issue { runs: vec![run("a", NOW - 60, "h", true), run("b", NOW, "h", false)], ..i.clone() };
-        assert_eq!(issue(&two, NOW).intent, Some(Intent::Blocked), "the latest run of each check counts");
+        assert_eq!(issue(&two, NOW).intent, Some(Intent::Working), "the latest run of each check counts");
         let again = Run { attempt: 2, ..run("a", NOW, "h", false) };
         let rerun = Issue { runs: vec![run("a", NOW, "h", true), again.clone()], ..i.clone() };
         assert_eq!(issue(&rerun, NOW).intent, Some(Intent::NeedsLanding), "a passing rerun clears its check");

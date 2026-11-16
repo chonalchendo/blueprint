@@ -28,8 +28,9 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - An issue landed, a thread closed, or a run holds evidence: run the skill `bp-distil`.
 - The human parks a thought: run the skill `bp-capture`.
 - `blocked`: do what its note names.
-- `working` with the note `stale`: run `bp release <issue> --reason lost --json`. Then read the intent again and act on it.
-- `working` without `stale`: do nothing; the worker or the cause in its note moves it.
+- `working` with the note `stale`: run `bp cut <issue> --json`. It takes over the stale claim. Then read the intent again and act on it.
+- `working` with a note `failed at head: …`: dispatch `bp-worker` with its `complete` template, by the intent's route. The worker fixes the named blocks.
+- `working` with any other note: do nothing; the worker or the cause in its note moves it.
 - `waiting`: do nothing until the cause in its note clears.
 - `needs-landing`: run `bp land <issue> --json`. A low or medium issue lands with no human act. If `land` refuses, do what its `fix` names.
 - `needs-approval`: a high issue waits for the human's signed approval of its head. Give the human its line below. Then run `bp land <issue> --json` when the intent is `needs-landing`.

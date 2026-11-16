@@ -360,7 +360,7 @@ mod tests {
             (Intent::Blocked, "escalated", &escalated, wait("escalated by worker on 2026-10-20: answer in the issue")),
             (Intent::Blocked, "escalated", &none, wait("blocked: escalated")),
             (Intent::Blocked, "depends on missing x", &none, wait("blocked: depends on missing x")),
-            (Intent::Blocked, "run failed at head", &held, wait("blocked: run failed at head")),
+            (Intent::Working, "failed at head: a", &held, wait("held by worker since 2026-10-13; failed at head: a")),
             (
                 Intent::Drifted,
                 "2 uncited failed runs; bp walk d --for triage-drift",

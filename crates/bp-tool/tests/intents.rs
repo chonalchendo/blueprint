@@ -145,7 +145,10 @@ fn the_forge_snapshot_moves_the_review_path_and_unblocks_dependents() {
         ("needs-landing", ""),
         "a medium head with each lens needs no approval"
     );
-    assert_eq!(intent(&v, "projects/bp/issues/0008.twochecks"), ("blocked", "run failed at head"));
+    assert_eq!(
+        intent(&v, "projects/bp/issues/0008.twochecks"),
+        ("working", "failed at head: projects/bp/issues/0008.twochecks/direct-1")
+    );
     assert_eq!(intent(&v, "projects/bp/issues/0009.lands"), ("needs-review", lenses), "a forge approval is no review");
     assert_eq!(intent(&v, "projects/bp/issues/0010.twin"), ("needs-landing", ""), "land's own predicate");
     // The vault's own snapshot reads the same, with its age; a project with none reads `not read`.

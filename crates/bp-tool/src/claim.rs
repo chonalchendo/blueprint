@@ -52,7 +52,8 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
     // The fetch has no time bound, so it runs with no lock held: every refusal comes before it and holds under the
     // lock too, as `stamp` checks around its blocks (26, design change 2).
     vault.clean([&id])?;
-    let check = |index: &Index| gate(index, &id, &vault.text(&id)?, role.as_str(), session.as_deref(), &branch);
+    let now = crate::clock::now()?;
+    let check = |index: &Index| gate(index, &id, &vault.text(&id)?, role.as_str(), session.as_deref(), &branch, now);
     if let Some(repeat) = check(&index)? {
         return repeated(&top, &branch, repeat);
     }
@@ -83,7 +84,9 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
     let mut writer = vault.writer()?;
     let from = crate::clock::instant(crate::clock::now()?);
     let claim = crate::record::free(&vault.root, &format!("{id}/{}/{}", Kind::Claim.dir(), from.replace(':', "-")));
-    writer.clean([&id, &claim])?;
+    // A stale claim is released `lost` in the commit that writes the new one, so the issue never reads open between.
+    let lost = takeover(&vault, writer.index(), &id, now, &from)?;
+    writer.clean([&id, &claim].into_iter().chain(lost.as_ref().map(|(dead, _)| dead)))?;
     if let Some(repeat) = check(writer.index())? {
         return repeated(&top, &branch, repeat);
     }
@@ -92,7 +95,7 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
     // A kept branch carries its commits: its base is where it left the start, not the start's head.
     let base = if added == Added::Both { start } else { git(&worktree, &["merge-base", "HEAD", &start])? };
     let mut fields = BTreeMap::from([
-        ("from".to_string(), Value::from(from)),
+        ("from".to_string(), Value::from(from.clone())),
         ("owner".into(), role.as_str().into()),
         ("worktree".into(), worktree.display().to_string().into()),
         ("base".into(), base.clone().into()),
@@ -115,10 +118,11 @@ pub(crate) fn cut(cwd: &Path, c: &Cut) -> Result<Wrote, Refusal> {
         unresolved: Vec::new(),
         fields,
     };
-    let changes = BTreeMap::from([
+    let mut changes = BTreeMap::from([
         (claim.clone(), format!("---\n{}---\n", header.emit())),
         (id.clone(), bp_vault::set_field(&text, "status", &"in-progress".into())),
     ]);
+    changes.extend(lost);
     writer.trailer(format!("Bp-Claim: {claim}"));
     let written = writer.commit("cut", role.as_str(), &format!("cut {id}"), &changes).inspect_err(|_| {
         // Nothing of a refused cut stays: what it added goes with the claim. The undo's own failure is not the error
@@ -203,7 +207,26 @@ fn gate(
     role: &str,
     session: Option<&str>,
     branch: &str,
+    now: i64,
 ) -> Result<Option<Value>, Refusal> {
+    let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
+    let status = file.header.as_ref().filter(|h| h.kind == Kind::Issue).and_then(|h| h.status.clone());
+    let illegal = || {
+        Refusal::new(
+            Code::IllegalTransition,
+            format!("{id} in-progress"),
+            "cut moves an issue from open to in-progress (25, design change 3)",
+            unclaimed(id, status.as_deref()),
+        )
+    };
+    // A stale claim is no hold: `cut` takes it over (13, Claim). It never revives an issue that is no longer live
+    // (abandoned or resolved).
+    if !matches!(status.as_deref(), Some("open" | "in-progress")) {
+        return Err(illegal());
+    }
+    if stale(index, id, now)?.is_some() {
+        return Ok(None);
+    }
     if let Some(h) = held(index, id)? {
         let (owner, held_session) = (field(&h, "owner"), field(&h, "session"));
         if owner.as_deref() == Some(role) && held_session.as_deref() == session {
@@ -222,17 +245,26 @@ fn gate(
             format!("{} is held by {by}; bp release {id} --reason <escalated|dropped|lost>, then bp cut {id}", h.id),
         ));
     }
-    let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
-    let status = file.header.as_ref().filter(|h| h.kind == Kind::Issue).and_then(|h| h.status.clone());
     if status.as_deref() != Some("open") {
-        return Err(Refusal::new(
-            Code::IllegalTransition,
-            format!("{id} in-progress"),
-            "cut moves an issue from open to in-progress (25, design change 3)",
-            unclaimed(id, status.as_deref()),
-        ));
+        return Err(illegal());
     }
     Ok(None)
+}
+
+/// The held claim that `working` reads as stale: the one test, so a claim that reads stale is one that `cut` takes over.
+fn stale(index: &Index, id: &Id, now: i64) -> Result<Option<bp_vault::Record>, Refusal> {
+    let Some(h) = held(index, id)? else { return Ok(None) };
+    let runs = bp_read::inputs::runs(index, id.as_str())?;
+    let from = field(&h, "from").and_then(|t| bp_change::intents::timestamp(&t));
+    Ok(bp_change::intents::is_stale(from, &runs, now).then_some(h))
+}
+
+/// The stale claim and its text with the `lost` release at `to`, which the cut that replaces it commits.
+fn takeover(vault: &Vault, index: &Index, id: &Id, now: i64, to: &str) -> Result<Option<(Id, String)>, Refusal> {
+    let Some(h) = stale(index, id, now)? else { return Ok(None) };
+    let dead = Id::parse(&h.id).expect("the index holds ids");
+    let text = released(&vault.text(&dead)?, to, "lost", "");
+    Ok(Some((dead, text)))
 }
 
 /// A repeat `cut` exits 3 with the claim's fields. A worktree a human removed comes back from its branch first.
