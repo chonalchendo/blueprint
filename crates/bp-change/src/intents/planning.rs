@@ -134,19 +134,51 @@ pub fn unproven_concerns(answers: &[ConcernAnswer], last_stamp: Option<i64>) -> 
     latest.into_values().filter(unproven).map(|a| format!("{} {}", a.concern, a.state)).collect()
 }
 
-/// A drift run (21, drifted; 13, Run): a run of a design's check that failed or timed out. An integrity run checks the
-/// vault, not a design, and a run that could not run or was skipped says nothing about the code.
+/// A design check's run, reduced to what drift reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DesignRun {
+    /// The run record's id.
+    pub id: String,
+    /// The block's name.
+    pub check: String,
+    /// The text hash of the block that ran: a pass of an older text says nothing about the text now.
+    pub check_hash: String,
+    /// The block's runner, as `check_kind`.
+    pub check_kind: String,
+    /// The run's verdict.
+    pub verdict: String,
+    /// `at`, Unix seconds.
+    pub at: Option<i64>,
+    /// The attempt, which orders runs that share one second.
+    pub attempt: u64,
+}
+
+/// The drift runs among a design's runs (21, drifted; 13, Run): a run of a design's check that failed or timed out
+/// after an earlier run of the same check text passed, by `(at, attempt)`. A check that never passed is not built yet, not drifted. An
+/// integrity run checks the vault, not a design, and a run that could not run or was skipped says nothing about the
+/// code. A `done` milestone that ships the check (38, design change 2) is not read yet.
+pub fn drift_runs(runs: &[DesignRun]) -> Vec<&DesignRun> {
+    let passed_before = |r: &DesignRun| {
+        let key = |r: &DesignRun| r.at.map(|at| (at, r.attempt));
+        let same = |p: &&DesignRun| p.check == r.check && p.check_hash == r.check_hash && p.verdict == "pass";
+        runs.iter().filter(same).any(|p| key(p).zip(key(r)).is_some_and(|(p, r)| p < r))
+    };
+    runs.iter().filter(|r| is_drift(&r.verdict, &r.check_kind) && passed_before(r)).collect()
+}
+
+/// A failed or timed-out run of a design's check, drift or not yet built; [`drift_runs`] decides which.
 pub fn is_drift(verdict: &str, check_kind: &str) -> bool {
     matches!(verdict, "fail" | "timed-out") && check_kind != "integrity"
 }
 
 /// The intent of the design `id`: drifted, then needs shaping (21). `uncited` holds its failed drift runs that no
-/// delta or thread cites. `unproven` holds the project's [`unproven_concerns`] when `id` is the project's root design
+/// delta or thread cites; the note counts them, so it never grows with the runs. `unproven` holds the project's [`unproven_concerns`] when `id` is the project's root design
 /// and is `active`, else none, so needs shaping is one node per project; `due` says that a milestone of the project is
 /// `planned` or `approved`.
 pub fn design(id: &str, uncited: &[String], unproven: &[String], due: bool) -> Verdict {
     if !uncited.is_empty() {
-        return Verdict::of(Intent::Drifted, format!("{}; bp walk {id} --for triage-drift", uncited.join(", ")));
+        let n = uncited.len();
+        return Verdict::of(Intent::Drifted, format!("{n} uncited failed runs; bp walk {id} --for triage-drift"));
     }
     if !unproven.is_empty() && !due {
         let note = format!("{}; bp walk {id} --for shape", unproven.join(", "));

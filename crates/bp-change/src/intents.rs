@@ -549,7 +549,53 @@ mod tests {
     fn a_design_drifts_while_a_failed_drift_run_is_uncited() {
         assert_eq!(design("d", &[], &[], false), Verdict::NONE);
         let v = design("d", &["d/runs/x-1".to_string()], &["c".to_string()], false);
-        assert_eq!(v, Verdict::of(Intent::Drifted, "d/runs/x-1; bp walk d --for triage-drift"));
+        assert_eq!(v, Verdict::of(Intent::Drifted, "1 uncited failed runs; bp walk d --for triage-drift"));
+    }
+
+    fn design_run(id: &str, check: &str, verdict: &str, at: i64) -> DesignRun {
+        DesignRun {
+            id: id.into(),
+            check: check.into(),
+            check_hash: "h1".into(),
+            check_kind: "shell".into(),
+            verdict: verdict.into(),
+            at: Some(at),
+            attempt: 1,
+        }
+    }
+
+    #[test]
+    fn a_pass_of_another_check_text_does_not_make_a_failure_drift() {
+        let mut rewritten = design_run("c-2", "c", "fail", 20);
+        rewritten.check_hash = "h2".into();
+        let runs = [design_run("c-1", "c", "pass", 10), rewritten];
+        assert!(drift_runs(&runs).is_empty(), "the new text never passed");
+    }
+
+    #[test]
+    fn a_failed_rerun_in_the_same_second_is_ordered_by_attempt() {
+        let pass = design_run("c-1", "c", "pass", 10);
+        let mut rerun = design_run("c-2", "c", "fail", 10);
+        rerun.attempt = 2;
+        let runs = [pass.clone(), rerun];
+        assert_eq!(drift_runs(&runs).len(), 1);
+        let mut earlier = design_run("c-3", "c", "fail", 10);
+        earlier.attempt = 0;
+        assert!(drift_runs(&[pass, earlier]).is_empty(), "an earlier attempt is not after the pass");
+    }
+
+    #[test]
+    fn never_passed_check_is_not_drift() {
+        let runs = [
+            design_run("new-1", "new", "fail", 10),
+            design_run("new-2", "new", "timed-out", 20),
+            design_run("old-1", "old", "pass", 10),
+            design_run("old-2", "old", "fail", 20),
+            design_run("late-1", "late", "fail", 10),
+            design_run("late-2", "late", "pass", 20),
+        ];
+        let ids: Vec<&str> = drift_runs(&runs).into_iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["old-2"], "only a failure after a pass is drift");
     }
 
     #[test]
