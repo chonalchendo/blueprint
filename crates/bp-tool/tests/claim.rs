@@ -452,3 +452,37 @@ fn cut_takes_over_stale_claim() {
     let message = last_message(v);
     assert!(message.lines().any(|l| l == format!("Bp-Claim: {}", out["claim"].as_str().unwrap())), "{message}");
 }
+
+#[test]
+fn a_run_since_the_claim_keeps_it_from_a_takeover() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (code, out) = bp(v, t, &[("BP_SESSION", "s1")], &["cut", ISSUE]);
+    assert_eq!(code, Some(0), "{out}");
+    let run = format!(
+        "---\nkind: run\nunder: {ISSUE}\ncheck: c\ncommit: aaaa\nattempt: 1\nat: 2026-10-19T09:00:00Z\nverdict: pass\n---\n"
+    );
+    std::fs::create_dir_all(v.join(format!("{ISSUE}/runs"))).unwrap();
+    std::fs::write(v.join(format!("{ISSUE}/runs/c-aaaa-1.md")), run).unwrap();
+    git(v, &["add", "."]);
+    git(v, &["commit", "-qm", "run"]);
+    let later = [("BP_SESSION", "s2"), ("BP_ROLE", "worker"), ("BP_NOW", "2026-10-19T21:00:01Z")];
+    let (_, out) = bp(v, t, &later, &["cut", ISSUE]);
+    assert_eq!(out["code"], "already_claimed", "a run since the claim is progress: {out}");
+}
+
+#[test]
+fn a_stale_claim_never_revives_an_abandoned_issue() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (code, out) = bp(v, t, &[("BP_SESSION", "s1")], &["cut", ISSUE]);
+    assert_eq!(code, Some(0), "{out}");
+    let file = v.join(format!("{ISSUE}.md"));
+    let text = std::fs::read_to_string(&file).unwrap().replace("status: in-progress", "status: abandoned");
+    std::fs::write(&file, text).unwrap();
+    git(v, &["commit", "-qam", "abandon"]);
+    let later = [("BP_SESSION", "s2"), ("BP_ROLE", "worker"), ("BP_NOW", "2026-10-19T21:00:01Z")];
+    let (code, out) = bp(v, t, &later, &["cut", ISSUE]);
+    assert_eq!((code, out["code"].as_str()), (Some(2), Some("illegal_transition")), "{out}");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("status: abandoned"));
+}

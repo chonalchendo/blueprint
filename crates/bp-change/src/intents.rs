@@ -296,13 +296,6 @@ fn verdict(i: &Issue, now: i64) -> Verdict {
         return Verdict::of(Intent::MasterRed, red::note(red));
     }
     let held = i.claims.iter().find(|c| c.released.is_none());
-    // The issue's own red head is work for a worker, not a block (21, working).
-    if let Some(pr) = &i.pr {
-        let red = failed_blocks(&i.runs, &pr.head);
-        if !red.is_empty() {
-            return Verdict::of(Intent::Working, format!("failed at head: {}", red.join(", ")));
-        }
-    }
     // Escalated holds until the issue changes after the release: the human's answer is a write to the issue.
     if latest_claim(&i.claims).is_some_and(|c| c.escalated) && !i.answered {
         return Verdict::of(Intent::Blocked, "escalated");
@@ -321,6 +314,14 @@ fn verdict(i: &Issue, now: i64) -> Verdict {
     // pull request stands, so the stack test does not apply (21, ready).
     if i.status == "open" && held.is_none() && i.pr.is_some() {
         return Verdict::of(Intent::Ready, "resume").routed(Task::Build, level(i, "").0, i.complex);
+    }
+    // The issue's own red head is work for a worker, not a block (21, working). It comes after every `blocked` cause
+    // and after resume, so a red head neither hides an escalation nor leaves a dead claim's pull request unrouted.
+    if let Some(pr) = &i.pr {
+        let red = failed_blocks(&i.runs, &pr.head);
+        if !red.is_empty() {
+            return Verdict::of(Intent::Working, format!("failed at head: {}", red.join(", ")));
+        }
     }
     if i.status == "open" && held.is_none() && i.pr.is_none() {
         return match stack(&i.depends) {
@@ -716,6 +717,28 @@ mod tests {
         assert_ne!(issue(&green, NOW).intent, Some(Intent::Working), "a passing rerun clears it");
         let warn = Issue { runs: vec![Run { error: false, ..run("w", NOW, "h", true) }], ..held };
         assert_ne!(issue(&warn, NOW).note, "failed at head: w", "a warn run is no red head");
+    }
+
+    #[test]
+    fn red_head_keeps_blocked_and_resume() {
+        let red = |i: Issue| Issue { pr: Some(pr("h", true)), runs: vec![run("own", NOW, "h", true)], ..i };
+        let escalated =
+            red(Issue { claims: vec![Claim { released: Some(2), escalated: true, ..Claim::default() }], ..open() });
+        assert_eq!(issue(&escalated, NOW), Verdict::of(Intent::Blocked, "escalated"));
+        let integrity = red(Issue {
+            claims: vec![Claim::default()],
+            integrity: Some("integrity: r1; rerun".into()),
+            ..Issue { status: "in-progress".into(), ..Issue::default() }
+        });
+        assert_eq!(issue(&integrity, NOW), Verdict::of(Intent::Blocked, "integrity: r1; rerun"));
+        let depends = red(Issue { depends: vec![Dependency { status: None, ..dep("x", "", false) }], ..open() });
+        assert_eq!(issue(&depends, NOW), Verdict::of(Intent::Blocked, "depends on missing x"));
+        let lost = red(Issue { claims: vec![Claim { released: Some(2), ..Claim::default() }], ..open() });
+        assert_eq!(
+            issue(&lost, NOW),
+            Verdict::of(Intent::Ready, "resume").routed(Task::Build, Level::Medium, false),
+            "a dead claim with a red head resumes"
+        );
     }
 
     #[test]

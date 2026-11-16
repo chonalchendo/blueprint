@@ -209,7 +209,20 @@ fn gate(
     branch: &str,
     now: i64,
 ) -> Result<Option<Value>, Refusal> {
-    // A stale claim is no hold: `cut` takes it over, whatever the issue's status (13, Claim).
+    let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
+    let status = file.header.as_ref().filter(|h| h.kind == Kind::Issue).and_then(|h| h.status.clone());
+    let illegal = || {
+        Refusal::new(
+            Code::IllegalTransition,
+            format!("{id} in-progress"),
+            "cut moves an issue from open to in-progress (25, design change 3)",
+            unclaimed(id, status.as_deref()),
+        )
+    };
+    // A stale claim is no hold: `cut` takes it over (13, Claim). It never revives an abandoned issue.
+    if status.as_deref() == Some("abandoned") {
+        return Err(illegal());
+    }
     if stale(index, id, now)?.is_some() {
         return Ok(None);
     }
@@ -231,15 +244,8 @@ fn gate(
             format!("{} is held by {by}; bp release {id} --reason <escalated|dropped|lost>, then bp cut {id}", h.id),
         ));
     }
-    let file = bp_vault::File::from_bytes(id.clone(), text.as_bytes())?;
-    let status = file.header.as_ref().filter(|h| h.kind == Kind::Issue).and_then(|h| h.status.clone());
     if status.as_deref() != Some("open") {
-        return Err(Refusal::new(
-            Code::IllegalTransition,
-            format!("{id} in-progress"),
-            "cut moves an issue from open to in-progress (25, design change 3)",
-            unclaimed(id, status.as_deref()),
-        ));
+        return Err(illegal());
     }
     Ok(None)
 }
