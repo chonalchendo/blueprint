@@ -141,21 +141,27 @@ pub struct DesignRun {
     pub id: String,
     /// The block's name.
     pub check: String,
+    /// The text hash of the block that ran: a pass of an older text says nothing about the text now.
+    pub check_hash: String,
     /// The block's runner, as `check_kind`.
     pub check_kind: String,
     /// The run's verdict.
     pub verdict: String,
     /// `at`, Unix seconds.
     pub at: Option<i64>,
+    /// The attempt, which orders runs that share one second.
+    pub attempt: u64,
 }
 
 /// The drift runs among a design's runs (21, drifted; 13, Run): a run of a design's check that failed or timed out
-/// after an earlier run of the same check passed. A check that never passed is not built yet, not drifted. An
+/// after an earlier run of the same check text passed, by `(at, attempt)`. A check that never passed is not built yet, not drifted. An
 /// integrity run checks the vault, not a design, and a run that could not run or was skipped says nothing about the
 /// code. A `done` milestone that ships the check (38, design change 2) is not read yet.
 pub fn drift_runs(runs: &[DesignRun]) -> Vec<&DesignRun> {
     let passed_before = |r: &DesignRun| {
-        runs.iter().any(|p| p.check == r.check && p.verdict == "pass" && p.at.zip(r.at).is_some_and(|(p, r)| p < r))
+        let key = |r: &DesignRun| r.at.map(|at| (at, r.attempt));
+        let same = |p: &&DesignRun| p.check == r.check && p.check_hash == r.check_hash && p.verdict == "pass";
+        runs.iter().filter(same).any(|p| key(p).zip(key(r)).is_some_and(|(p, r)| p < r))
     };
     runs.iter().filter(|r| is_drift(&r.verdict, &r.check_kind) && passed_before(r)).collect()
 }

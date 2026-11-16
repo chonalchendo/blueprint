@@ -70,9 +70,11 @@ pub fn drift(index: &Index, design: &str) -> Result<Vec<Record>, Refusal> {
             intents::DesignRun {
                 id: r.id.clone(),
                 check: field("check"),
+                check_hash: field("check_hash"),
                 check_kind: field("check_kind"),
                 verdict: field("verdict"),
                 at: text(&r.header, "at").and_then(|t| intents::timestamp(&t)),
+                attempt: r.header.get("attempt").and_then(serde_json::Value::as_u64).unwrap_or_default(),
             }
         })
         .collect();
