@@ -219,8 +219,9 @@ fn gate(
             unclaimed(id, status.as_deref()),
         )
     };
-    // A stale claim is no hold: `cut` takes it over (13, Claim). It never revives an abandoned issue.
-    if status.as_deref() == Some("abandoned") {
+    // A stale claim is no hold: `cut` takes it over (13, Claim). It never revives an issue that is no longer live
+    // (abandoned or resolved).
+    if !matches!(status.as_deref(), Some("open" | "in-progress")) {
         return Err(illegal());
     }
     if stale(index, id, now)?.is_some() {

@@ -29,7 +29,7 @@ The vault holds this project's designs, milestones, issues and reasoning. `bp` i
 - The human parks a thought: run the skill `bp-capture`.
 - `blocked`: do what its note names.
 - `working` with the note `stale`: run `bp cut <issue> --json`. It takes over the stale claim. Then read the intent again and act on it.
-- `working` with a note `failed at head: …`: send a worker by the issue's route. It fixes the named blocks.
+- `working` with a note `failed at head: …`: a `working` intent with a route sends a worker by that route. It fixes the named blocks.
 - `working` with any other note: do nothing; the worker or the cause in its note moves it.
 - `waiting`: do nothing until the cause in its note clears.
 - `needs-landing`: run `bp land <issue> --json`. A low or medium issue lands with no human act. If `land` refuses, do what its `fix` names.

@@ -472,17 +472,19 @@ fn a_run_since_the_claim_keeps_it_from_a_takeover() {
 }
 
 #[test]
-fn a_stale_claim_never_revives_an_abandoned_issue() {
-    let (v, t) = setup();
-    let (v, t) = (v.path(), t.path());
-    let (code, out) = bp(v, t, &[("BP_SESSION", "s1")], &["cut", ISSUE]);
-    assert_eq!(code, Some(0), "{out}");
-    let file = v.join(format!("{ISSUE}.md"));
-    let text = std::fs::read_to_string(&file).unwrap().replace("status: in-progress", "status: abandoned");
-    std::fs::write(&file, text).unwrap();
-    git(v, &["commit", "-qam", "abandon"]);
-    let later = [("BP_SESSION", "s2"), ("BP_ROLE", "worker"), ("BP_NOW", "2026-10-19T21:00:01Z")];
-    let (code, out) = bp(v, t, &later, &["cut", ISSUE]);
-    assert_eq!((code, out["code"].as_str()), (Some(2), Some("illegal_transition")), "{out}");
-    assert!(std::fs::read_to_string(&file).unwrap().contains("status: abandoned"));
+fn a_stale_claim_never_revives_a_dead_issue() {
+    for status in ["abandoned", "resolved"] {
+        let (v, t) = setup();
+        let (v, t) = (v.path(), t.path());
+        let (code, out) = bp(v, t, &[("BP_SESSION", "s1")], &["cut", ISSUE]);
+        assert_eq!(code, Some(0), "{out}");
+        let file = v.join(format!("{ISSUE}.md"));
+        let text = std::fs::read_to_string(&file).unwrap().replace("status: in-progress", &format!("status: {status}"));
+        std::fs::write(&file, text).unwrap();
+        git(v, &["commit", "-qam", "end"]);
+        let later = [("BP_SESSION", "s2"), ("BP_ROLE", "worker"), ("BP_NOW", "2026-10-19T21:00:01Z")];
+        let (code, out) = bp(v, t, &later, &["cut", ISSUE]);
+        assert_eq!((code, out["code"].as_str()), (Some(2), Some("illegal_transition")), "{status}: {out}");
+        assert!(std::fs::read_to_string(&file).unwrap().contains(&format!("status: {status}")));
+    }
 }
