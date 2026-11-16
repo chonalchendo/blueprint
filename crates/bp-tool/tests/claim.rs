@@ -419,3 +419,36 @@ fn a_read_verb_refreshes_a_stale_snapshot_once_and_names_a_failed_refresh() {
     assert_eq!((code, calls()), (Some(0), 5), "{out}");
     assert!(out["forge_error"].as_str().is_some_and(|s| s == error), "{out}");
 }
+
+#[test]
+fn cut_takes_over_stale_claim() {
+    let (v, t) = setup();
+    let (v, t) = (v.path(), t.path());
+    let (code, first) = bp(v, t, &[("BP_SESSION", "s1")], &["cut", ISSUE]);
+    assert_eq!(code, Some(0), "{first}");
+    let old = first["claim"].as_str().unwrap();
+    // The branch carries a commit, as an open pull request's would.
+    let w = worktree(t);
+    std::fs::write(w.join("f.txt"), "work\n").unwrap();
+    git(&w, &["add", "f.txt"]);
+    git(&w, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "work"]);
+    let head = git(&w, &["rev-parse", "HEAD"]);
+    let soon = [("BP_SESSION", "s2"), ("BP_ROLE", "worker"), ("BP_NOW", "2026-10-19T10:00:00Z")];
+    let (_, out) = bp(v, t, &soon, &["cut", ISSUE]);
+    assert_eq!(out["code"], "already_claimed", "a fresh claim holds: {out}");
+    let later = [("BP_SESSION", "s2"), ("BP_ROLE", "worker"), ("BP_NOW", "2026-10-19T21:00:01Z")];
+    let before = commits(v);
+    let (code, out) = bp(v, t, &later, &["cut", ISSUE]);
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(out["claim"], "projects/bp/issues/a/claims/2026-10-19T21-00-01Z");
+    assert_eq!((out["branch"].as_str(), out["worktree"].as_str()), (Some("bp/a"), w.to_str()), "same branch");
+    assert_eq!(git(&w, &["rev-parse", "HEAD"]), head, "the work stays");
+    assert_eq!(commits(v), (before.parse::<u32>().unwrap() + 1).to_string(), "one call, one commit");
+    let text = std::fs::read_to_string(v.join(format!("{old}.md"))).unwrap();
+    assert!(text.contains("reason: lost") && text.contains("to: 2026-10-19T21:00:01Z"), "{text}");
+    let (_, new) = common::bp(v, &["show", out["claim"].as_str().unwrap()]);
+    assert_eq!((&new["owner"], &new["session"]), (&"worker".into(), &"s2".into()));
+    assert!(std::fs::read_to_string(v.join(format!("{ISSUE}.md"))).unwrap().contains("status: in-progress"));
+    let message = last_message(v);
+    assert!(message.lines().any(|l| l == format!("Bp-Claim: {}", out["claim"].as_str().unwrap())), "{message}");
+}

@@ -155,13 +155,13 @@ mod tests {
         assert_eq!(red_in_force(&reds, |_| true), None);
 
         // While red, every live issue of the project reads master-red first, before blocked and ready: an issue whose
-        // run failed at its head, which reads blocked without the red, reads master-red. It routes nothing: it waits.
+        // run failed at its head, which reads working without the red, reads master-red. It routes nothing: it waits.
         let pr = PullRequest { head: NEXT.into(), base: Some("master".into()), green: true, failed: false };
         let failed = super::super::Run { commit: NEXT.into(), error: true, failed: true, ..Default::default() };
-        let blocked =
+        let working =
             Issue { status: "in-progress".into(), pr: Some(pr.clone()), runs: vec![failed], ..Issue::default() };
-        assert_eq!(issue(&blocked, 0).intent, Some(Intent::Blocked), "no red: blocked");
-        let i = Issue { red: Some(r.clone()), ..blocked.clone() };
+        assert_eq!(issue(&working, 0).intent, Some(Intent::Working), "no red: working");
+        let i = Issue { red: Some(r.clone()), ..working.clone() };
         let v = issue(&i, 0);
         assert_eq!((v.intent, v.route), (Some(Intent::MasterRed), None));
         assert!(v.note.contains(RED) && v.note.contains("bp clear bp"), "{}", v.note);
