@@ -721,6 +721,12 @@ mod tests {
         let rerun = Run { attempt: 2, ..run("shape", NOW, "h", false) };
         let green = Issue { runs: vec![run("shape", NOW, "h", true), rerun], ..held.clone() };
         assert_ne!(issue(&green, NOW).intent, Some(Intent::Working), "a passing rerun clears it");
+        let lowered = Issue { declared: Some(Level::High), lowerings: vec![("h".into(), Level::Low)], ..held.clone() };
+        assert_eq!(
+            issue(&lowered, NOW),
+            Verdict::of(Intent::Working, "failed at head: shape").routed(Task::Build, Level::Low, false),
+            "the route reads the level at the pull request's head, not the base level"
+        );
         let warn = Issue { runs: vec![Run { error: false, ..run("w", NOW, "h", true) }], ..held };
         assert_ne!(issue(&warn, NOW).note, "failed at head: w", "a warn run is no red head");
     }
