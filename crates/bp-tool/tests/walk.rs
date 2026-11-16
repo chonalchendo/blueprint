@@ -334,17 +334,26 @@ fn a_stop_reads_the_vault_snapshot_and_never_calls_gh() {
 fn triage_drift_needs_a_citation_for_each_failed_drift_run() {
     let d = vault();
     let s = "projects/bp/designs/system";
-    let run = |key: &str, kind: &str, verdict: &str| {
-        let id = format!("{s}/runs/{key}-aaaa-1");
+    let at_run = |key: &str, kind: &str, verdict: &str, at: &str, attempt: u32| {
+        let id = format!("{s}/runs/{key}-aaaa-{attempt}");
         let text = format!(
-            "---\nkind: run\nunder: {s}\ncheck: {key}\ncheck_kind: {kind}\ncommit: aaaa\nattempt: 1\nat: 2026-10-01T00:00:00Z\nverdict: {verdict}\n---\n"
+            "---\nkind: run\nunder: {s}\ncheck: {key}\ncheck_kind: {kind}\ncommit: aaaa\nattempt: {attempt}\nat: {at}\nverdict: {verdict}\n---\n"
         );
         write(d.path(), &format!("{id}.md"), &text);
         id
     };
+    // A failed run is drift only after an earlier pass of its check; a never-passed shell check stays unbuilt.
+    let run = |key: &str, kind: &str, verdict: &str| {
+        if verdict == "fail" || verdict == "timed-out" {
+            at_run(key, kind, "pass", "2026-09-01T00:00:00Z", 2);
+        }
+        at_run(key, kind, verdict, "2026-10-01T00:00:00Z", 1)
+    };
     run("vault", "integrity", "fail");
     run("flaky", "shell", "could-not-run");
     assert_eq!(done(d.path(), None, s, "triage-drift"), true, "an integrity run and an unrun block are no drift");
+    at_run("unbuilt", "shell", "fail", "2026-10-01T00:00:00Z", 1);
+    assert_eq!(done(d.path(), None, s, "triage-drift"), true, "a check that never passed is not drift");
     let slow = run("slow", "shell", "timed-out");
     assert_eq!(done(d.path(), None, s, "triage-drift"), false, "a timed-out design check drifts");
     // Forty cited runs: the slice answers only the uncited one, and the design it checked follows the seed.
@@ -385,6 +394,11 @@ fn the_triage_slice_ranks_uncited_runs_under_half_the_budget() {
             n + 1
         );
         write(d.path(), &format!("{s}/runs/d{n}-aaaa-1.md"), &text);
+        // A failed run is drift only after an earlier pass of its check.
+        let pass = format!(
+            "---\nkind: run\nunder: {s}\ncheck: d{n}\ncheck_kind: shell\ncommit: aaaa\nattempt: 2\nat: 2026-09-01T00:00:00Z\nverdict: pass\n---\n"
+        );
+        write(d.path(), &format!("{s}/runs/d{n}-aaaa-2.md"), &pass);
     }
     done(d.path(), None, s, "triage-drift");
     let (_, v) = walk(d.path(), &[s, "--for", "triage-drift"]);

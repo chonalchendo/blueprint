@@ -399,4 +399,12 @@ mod tests {
         let refusal = intents.row(Kind::Issue, "projects/bp/issues/0001.a", Some("open")).unwrap_err();
         assert_eq!(refusal.code, Code::CouldNotRun);
     }
+
+    #[test]
+    fn intent_note_is_count_and_fix() {
+        let uncited: Vec<String> = (0..200).map(|n| format!("projects/bp/designs/d/runs/check-{n}-aaaa-1")).collect();
+        let note = intents::design("projects/bp/designs/d", &uncited, &[], false).note;
+        assert_eq!(note, "200 uncited failed runs; bp walk projects/bp/designs/d --for triage-drift");
+        assert!(!note.contains("/runs/"), "a note holds no run id");
+    }
 }
