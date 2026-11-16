@@ -62,12 +62,26 @@ pub fn rows(body: &str) -> usize {
 ///
 /// Never: the index holds ids.
 pub fn drift(index: &Index, design: &str) -> Result<Vec<Record>, Refusal> {
+    let records = index.records(design, Kind::Run)?;
+    let reduced: Vec<intents::DesignRun> = records
+        .iter()
+        .map(|r| {
+            let field = |k: &str| text(&r.header, k).unwrap_or_default();
+            intents::DesignRun {
+                id: r.id.clone(),
+                check: field("check"),
+                check_hash: field("check_hash"),
+                check_kind: field("check_kind"),
+                verdict: field("verdict"),
+                at: text(&r.header, "at").and_then(|t| intents::timestamp(&t)),
+                attempt: r.header.get("attempt").and_then(serde_json::Value::as_u64).unwrap_or_default(),
+            }
+        })
+        .collect();
+    let drifted: Vec<String> = intents::drift_runs(&reduced).into_iter().map(|r| r.id.clone()).collect();
     let mut out = Vec::new();
-    for r in index.records(design, Kind::Run)? {
-        let field = |k: &str| text(&r.header, k).unwrap_or_default();
-        if intents::is_drift(&field("verdict"), &field("check_kind"))
-            && index.citing(&Id::parse(&r.id).expect("the index holds ids"), &[Kind::Delta, Kind::Thread])?.is_empty()
-        {
+    for r in records.into_iter().filter(|r| drifted.contains(&r.id)) {
+        if index.citing(&Id::parse(&r.id).expect("the index holds ids"), &[Kind::Delta, Kind::Thread])?.is_empty() {
             out.push(r);
         }
     }

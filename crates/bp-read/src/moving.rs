@@ -363,9 +363,9 @@ mod tests {
             (Intent::Blocked, "run failed at head", &held, wait("blocked: run failed at head")),
             (
                 Intent::Drifted,
-                "d/runs/r; bp walk d --for triage-drift",
+                "2 uncited failed runs; bp walk d --for triage-drift",
                 &none,
-                wait("drifted: d/runs/r; bp walk d --for triage-drift"),
+                wait("drifted: 2 uncited failed runs; bp walk d --for triage-drift"),
             ),
             (Intent::Working, "", &held, wait("held by worker since 2026-10-13")),
             (Intent::Working, "checks not green", &held, wait("held by worker since 2026-10-13; checks not green")),
