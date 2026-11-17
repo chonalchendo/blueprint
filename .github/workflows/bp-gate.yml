@@ -29,7 +29,7 @@ jobs:
       group: bp-gate-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     env:
-      BP_PROJECT: "bp"
+      BP_PROJECT: "blueprint"
       BP_SOURCE: https://github.com/chonalchendo/blueprint
       BP_BASE: ${{ github.sha }}
       BP_BASE_REF: ${{ github.event.pull_request.base.ref }}
